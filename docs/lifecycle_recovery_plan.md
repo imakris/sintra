@@ -7,16 +7,30 @@ FreeBSD, macOS, and Windows. Slice 6 remains conditional and cannot open before
 the protected A0 evidence/successor sequence closes.
 
 Sibling-track status, 2026-07-11, is derived from validated repository state:
-Batch 0/1 is **closed** and Batch 2 (or a later custody descendant) is authorized
-if and only if current HEAD's first-parent ancestry contains exactly one valid
-closure commit and the fresh live protection predicate in **Finite Batch 0/1
-Closure And Batch 2 Authorization** also passes. Before that commit, or on any
-missing/multiple/mismatched ancestry or live-state fact, Batch 0/1 is **open**
-and Batch 2/continuation is blocked. This descendant-safe predicate, not an
-earlier prose snapshot or chat verdict, is authoritative. The custody track does
-not change the legacy closed/drop decisions or reorder the protected A0 evidence
--> managed transport successor -> fence successor -> conditional later-slices
-sequence.
+Batch 0/1 is **closed** if and only if current HEAD's first-parent ancestry
+contains exactly one valid closure commit and the fresh live protection
+predicate in **Finite Batch 0/1 Closure And Batch 2 Authorization** also passes.
+Before that commit, or on any missing/multiple/mismatched ancestry or live-state
+fact, Batch 0/1 is **open** and custody continuation is blocked. This descendant-
+safe predicate remains a prerequisite but is not sufficient by itself to start
+Batch 2 after a later material amendment. The custody track does not change the
+legacy closed/drop decisions or reorder the protected A0 evidence -> managed
+transport successor -> fence successor -> conditional later-slices sequence.
+
+Batch 2 status, 2026-07-11: at authoring HEAD `7301c1d...`, the validated Batch
+0/1 closure ancestor and live protections pass, so Batch 0/1 is closed. The
+exact-pair R0 baseline RED atom is closed at
+tree-empty evidence commit `7301c1d1eb866b24f6b953c5d9874c24628b6303`;
+corrected-pair R0 GREEN remains owned by Batch 4A. Remaining Batch 2 behavioral
+work is paused because the prior R5 wording encoded a permitted witness as a
+failure and the prior R8 wording contradicted POSIX terminate/reap behavior. At
+authoring HEAD `7301c1d...`, the Batch 2 architecture-amendment closure commit
+does not yet exist. Thereafter authorization is derived from the unique
+first-parent amendment predicate below: if it and live protections pass, proceed
+to the first incomplete reviewed Batch 2 evidence atom; otherwise all Batch 2
+behavior and Batch 3 production remain blocked. All fourteen anchors, six batch
+boundaries, A0 independence/order, R4's source-only Batch 2 status, and the
+4A/4B/4C framework sequence remain fixed.
 
 ## Relation To Existing Lifecycle Plans
 
@@ -565,6 +579,168 @@ matching commit metadata is the finite repository control-plane closure record;
 no follow-up edit is required to restate its own commit hash. Earlier candidate
 or boundary verdicts cannot substitute for this gate.
 
+### Batch 2 Evidence Architecture Amendment, 2026-07-11
+
+This is a material, evidence-only amendment. Read-only platform/oracle diagnosis
+proved two contradictions in the earlier mechanics:
+
+- R5 cannot fail merely because name absence coexists with a live exact child
+  and unfinished retirement. That conjunction is permitted before and after the
+  fix; the defect is missing/false authority, not the witness itself. Canonical
+  Sintra `c60c104...` exposes no occurrence-qualified release result on which a
+  baseline failing assertion can lawfully operate, and R0 proves the archived
+  framework pair cannot execute.
+- R8's former cross-platform live-child-after-finalize requirement is valid on
+  Windows but false on POSIX. POSIX `Managed_process` destruction terminates and
+  reaps tracked direct children before returning. Exact OS exit still does not
+  prove occurrence-qualified publication retirement.
+
+The amendment changes evidence mechanics and sequencing only. It does not alter
+the fourteen fixed anchors, the six batches, the Batch 0/1 closure, A0 isolation
+or order, R4 source diagnosis in Batch 2, or complete framework 4A custody
+cutover -> 4B R4 RED -> 4C async repair. Batch 2 remains evidence-only; no
+production lifecycle behavior is authorized by this amendment.
+
+#### R0 Baseline RED Closure Record
+
+Commit trailers on tree-empty evidence commit
+`7301c1d1eb866b24f6b953c5d9874c24628b6303` are the durable authority. Its
+single parent/rollback is
+`173970b4422ef69826a5f227932edf55056436cb`; `git diff --name-status` between
+them is empty. The recorded exact pair is Sintra
+`c60c1045dfc2382609eae36afbd637fe274b2871` plus framework
+`3a69bfc8ccb8c0e42584542c96474113beeefbbb`.
+
+- Author `b2_r0_evidence_author` produced **RED-VALID** evidence at
+  `C:/plms/stress_artifacts/sintra_managed_child_custody_b2_r0_author_20260711_033038_047`.
+  Author build-log SHA-256 is
+  `8D8023859428515509BB6DF01158876AE96B74799B36CB88E8284F9525C984F4`;
+  author manifest SHA-256 is
+  `6344F2ECFEA8ED9F0FF41118839DC0645AB4E31C5A5CD598D06F8E0FBD79EF59`;
+  author configure/build exits were `0`/`1`.
+- Independent `b2_r0_verifier` returned **GREEN** with artifact
+  `C:/plms/stress_artifacts/sintra_managed_child_custody_b2_r0_verifier_20260711_033510_868`.
+  Verifier build-log SHA-256 is
+  `5AFA5735DD49F0D66FA10D3D8768606CD747069B5023D78CCE7E54A500E5DA94`;
+  verifier manifest SHA-256 is
+  `6574A50DA192DEE68C3469A0D8171190B0657E07ADC82EA8DDEAC535887A1DD1`;
+  independent configure/build exits were `0`/`1`.
+- Exact Release configure exited `0`; the focused
+  `vnm_remote_ui_runtime_subproject_smoke` build exited `1` while compiling
+  `vnm_remote_runtime.cpp` against the exact Sintra include path. Direct
+  diagnostics named `Force_process_release_result`,
+  `spinlocked_umap::try_scoped`, `Degraded_shutdown_result`, and
+  `Managed_process::force_release_process`; exact source inventory proved
+  framework's fifth reference to
+  `force_release_known_processes_for_degraded_shutdown` and no Sintra match.
+  There was no CMake/toolchain/Qt/timeout/link failure.
+- Review round 1 returned `b2_r0_arch_review` **GREEN**,
+  `b2_r0_oracle_review` **GREEN**, and `b2_r0_governance_review` **RED** only
+  because disposable detached evidence worktrees remained registered. Delegated
+  `b2_r0_worktree_remediator` removed those worktrees cleanly;
+  `b2_r0_remediation_verifier` independently returned **GREEN**.
+- The full fresh reround was unanimously unqualified **GREEN**:
+  `b2_r0_arch_review_r2`, `b2_r0_oracle_review_r2`, and
+  `b2_r0_governance_review_r2`.
+- No CTest or full suite ran. The evidence commit changed no repository tree
+  content. A0 remained the exact seven staged paths, 155101 bytes, SHA-256
+  `CEC127D3C964E27268702EFC5654B8FB4AC9804BCA6938B4F5A3F86DCB54C03C`.
+
+This closes **R0 baseline RED only**. R0 corrected-pair GREEN remains a Batch 4A
+gate and cannot be inferred from this intentionally failing archived pair.
+
+#### Read-Only Scope Findings And Recommended Evidence Order
+
+These findings allocate risks and next ownership; they do not pre-approve test
+mechanics beyond the exact R5/R8 amendment below:
+
+- R2/R3 share real-child failed-readiness facts and are recommended as the first
+  post-amendment evidence atom(s). Freeze exact tests/seams and disjoint ownership
+  before authoring; requested-target publication remains the R3/R5 separator.
+- R1 remains a separate deadline atom after R2/R3. Its known risks are nested
+  synchronous resolution and reader readiness work; do not couple its hold to
+  failed-readiness ownership assertions merely for fixture reuse.
+- R5-W and Batch2-R8F both eventually touch shared test registration and
+  `tests/active_tests.txt`, so their source/registration work is sequential, not
+  concurrent. Each receives independent verification and review.
+- R6 owns recovery occurrence isolation and release-close ordering. Freeze its
+  exact recovery fixture and observation surface in its own reviewed atom; no raw
+  ID/name reconstruction or replacement-satisfies-predecessor oracle is allowed.
+- R7 owns the already named coordinator/reader retirement hold and hard-deadline
+  result. Keep it separate from R5's permitted name-absence witness and from A0
+  communication delivery/processing mechanics.
+- R8 owns finalization overtaking a held accepted-like spawn operation, with the
+  platform ledgers below. It must not borrow R6 replacement state, R7 deadline
+  success, or A0 transport behavior.
+- R4 remains source diagnosis only until the exact 4A migrated pair. Nothing in
+  this amendment opens a Batch 2 framework harness.
+
+Recommended order after amendment closure is R2/R3 first, then R1; R5-W and
+Batch2-R8F run sequentially because of shared roster/registration ownership;
+R6 and R7 remain separately frozen reviewed atoms. Registration/active-roster
+changes occur only in the later sequential atom that explicitly owns them. No
+behavioral evidence starts before this amendment closes.
+
+#### Batch 2 Amendment Verification Chronology
+
+The initial amendment candidate was 38819 bytes with binary patch SHA-256
+`7FA6D91006394ED5CE1AD0E88E04FAC12A57B145DA101867CA7316A2515A7298`;
+its raw staged Git blob was 144131 bytes with SHA-256
+`5B5310AC5C11B165648A2684F05137343F2A913F2FA96CD941E07DA2DC5CFCC7`.
+Independent `b2_plan_amend_verifier` returned overall **RED** solely because R8
+did not require lifeline-disabled launch and exact lifeline-absence evidence.
+The verifier reported every other scope, status, raw-blob/patch identity,
+architecture, R0 chronology, R5 witness/source split, POSIX ledger, ownership,
+stop, A0, and no-build check **GREEN**. This remediation adds the missing common
+and Windows/POSIX lifeline facts and rejects lifeline-enabled or unqualified
+evidence. The original verifier identity and unrun original review identities
+cannot close the amendment; fresh r2 identities below are mandatory. No GREEN or
+closure is claimed by this chronology.
+
+#### Finite Batch 2 Amendment Closure
+
+Amendment status is derived from exactly one valid commit in current HEAD's
+first-parent ancestry with exact subject
+`docs(lifecycle): amend Batch 2 R5/R8 evidence`. Before it exists, Batch 2
+behavior is blocked. Enumerate/parse candidates with the same `git log
+--first-parent`, `git show -s --format=%B`, and `git interpret-trailers --parse`
+algorithm specified for Batch 0/1 closure; zero or multiple valid candidates
+blocks behavior.
+
+The selected amendment commit must be a first-parent ancestor of current HEAD,
+have exactly one parent equal to both expected rollback and trailer value
+`7301c1d1eb866b24f6b953c5d9874c24628b6303`, and carry this exact trailer set:
+
+```text
+Custody-B2-Amendment-Patch-SHA256: <reviewed parent-to-amendment binary patch SHA-256>
+Custody-B2-Amendment-Plan-Blob-SHA256: <reviewed raw committed plan blob SHA-256>
+Custody-B2-Amendment-Verifier: b2_plan_amend_verifier_r2 GREEN
+Custody-B2-Amendment-Reviewer: b2_plan_amend_arch_review_r2 GREEN
+Custody-B2-Amendment-Reviewer: b2_plan_amend_oracle_review_r2 GREEN
+Custody-B2-Amendment-Reviewer: b2_plan_amend_governance_review_r2 GREEN
+Custody-B2-Amendment-A0-Patch-SHA256: CEC127D3C964E27268702EFC5654B8FB4AC9804BCA6938B4F5A3F86DCB54C03C
+Custody-B2-Amendment-Parent: 7301c1d1eb866b24f6b953c5d9874c24628b6303
+Custody-B2-Amendment-Rollback: 7301c1d1eb866b24f6b953c5d9874c24628b6303
+Custody-B2-Amendment-No-Build: doc-only; delegated static verification; no compiler/build/test applicable
+```
+
+Byte-preservingly extract/hash raw object
+`<amendment>:docs/lifecycle_recovery_plan.md` and compare it with the plan-blob
+trailer. Recompute
+`git diff --binary <amendment>^ <amendment> --output=<external-temporary-file>`
+and compare its SHA-256 with the patch trailer. Require the exact verifier and
+three-reviewer GREEN multiset, parent/rollback, A0 hash, and no-build fact. Do
+not embed the candidate's self-hashes in this plan; the verifier freezes them and
+the commit trailers record them after review.
+
+The Batch 0/1 unique-closure and live-protection predicate remains prerequisite
+and is refreshed with this amendment check. If both predicates pass, first-
+parent descendants retain authorization and the next action is the first
+incomplete reviewed Batch 2 evidence atom in the order above. Any absent,
+multiple, mismatched, non-GREEN, non-first-parent, or live-protection failure
+keeps Batch 2 behavior and Batch 3 production blocked. No follow-up self-
+referential plan edit is required after a valid unchanged-byte amendment commit.
+
 ### Batch 0 Isolation Record And Rollback Points
 
 The following state was recorded before this amendment was authored:
@@ -837,11 +1013,13 @@ for that batch; R4 remains source diagnosis until Batch 4B.
   40-character reviewed Sintra commit pin. Default-branch fetching,
   header-existence-only acceptance, or a capability check for an invented or
   forbidden pre-adoption API spelling is invalid.
-- Batch 1 documents this expected RED and creates no framework worktree/edit.
-  Batch 4A owns the first truthful pin/capability/build change and the complete
-  source-breaking consumer call-site migration after Batch 3 has produced the
-  surface actually consumed. A pin with unmigrated scalar/raw/name consumers is
-  still R0 RED, not an intermediate pair.
+- Batch 1 documented the expected result without a framework worktree/edit.
+  Batch 2 executed and closed the baseline at tree-empty evidence commit
+  `7301c1d...`: configure `0`, focused compile `1`, exact named absent surfaces.
+  Batch 4A still owns corrected-pair GREEN, the first truthful pin/capability/
+  build change, and the complete source-breaking consumer call-site migration
+  after Batch 3 produces the actual surface. A pin with unmigrated scalar/raw/
+  name consumers is still R0 RED, not an intermediate pair.
 
 #### R1: hard readiness deadline
 
@@ -883,14 +1061,62 @@ already canonical in 4A. If a lawful R4 RED cannot be produced after 4A without
 shims, fakes, invented APIs, or oracle substitution, return architecture RED and
 stop.
 
-#### R5: name disappears after actual requested publication
+#### R5: name/retirement separation -- composite baseline evidence
 
-Allow the requested target to publish, then causally remove its name before
-later exact publication/departure, communication, or OS retirement completes.
-Baseline RED is name absence being treated as release while the exact native
-child or another required retirement fact remains nonterminal. Corrected GREEN
-keeps release incomplete. Unlike R3, this gate proves actual requested
-publication followed by name removal.
+Batch 2 joins one executable witness with one frozen source diagnosis. It does
+not fabricate a pre-fix release API or fail on a permitted intermediate state.
+
+**R5-W executable witness.** New
+`tests/managed_child_custody_name_retirement_contract_test.cpp` returns `0` only
+after proving the full real-child sequence:
+
+1. a unique requested target actually publishes;
+2. the public spawn call returns scalar success;
+3. the child ledger records launch nonce, exact recovery occurrence, and native
+   identity;
+4. that requested target is causally unpublished and its name becomes absent;
+   and
+5. the same nonce/occurrence/native child, managed-process occurrence
+   publication, and process participation remain live behind causal latches,
+   with later exact publication/departure, communication, and OS-retirement
+   facts still nonterminal.
+
+Use the existing coordinator test-hook infrastructure; if current observation
+cannot distinguish the exact requested-target transition, add only the minimum
+observation-only `SINTRA_ENABLE_TEST_HOOKS` callback immediately in that existing
+unpublish path. The managed-process-only
+`k_stage_unpublish_pre_barrier_collection` seam does not by itself prove target
+unpublish. Name absence alone is neither failure nor sufficient witness.
+Timeout, raw-ID reconstruction, synthetic registry mutation, or child exit is
+invalid.
+Deliberately returning nonzero because the full witness occurred is a false
+oracle: corrected release is also allowed to observe this conjunction and must
+remain incomplete.
+
+**R5-S exact source diagnosis.** Freeze source evidence that Sintra
+`c60c104...` returns only a scalar launch count and provides no opaque
+occurrence-qualified release observation (`runtime.h:934-939,1105-1112,1192`;
+internal `Spawn_result` facts at `managed_process.h:359-375` do not escape that
+surface). Framework `3a69bfc...` has a `void`, no-op-capable
+`terminate_managed_process()` and derives `release_hosted_worker_host()` success
+from empty/absent name state (`vnm_remote_runtime.cpp:1046-1210`). R0 proves that
+pair is unbuildable on the five absent lifecycle surfaces, so R5-S is not a claim
+that the framework path executed.
+
+R5-W plus R5-S is the exact baseline judgment, labeled **R5 RED-WITNESS**. It is
+neither an executed framework failure nor a failing Sintra release assertion.
+No shim, fake, future-API capability probe, invented spelling, historical pair,
+salvage surface, or temporary compatibility build may convert it into one.
+
+Owner scope for the witness atom is the new test source and the minimum existing
+observation seam above. Test registration and `tests/active_tests.txt` are owned
+by a later explicitly frozen shared registration atom, sequential with R8.
+Batch 3 evolves the same witness to **R5-G**: canonical custody release must
+remain incomplete at the held witness until every required exact fact becomes
+terminal. Batch 4A runs framework-consumer R5-G on the exact migrated pair and
+deletes/replaces name-authority assertions in
+`tests/vnm_hosted_worker_host_tests.cpp` and
+`tests/vnm_hosted_worker_host_lifecycle_tests.cpp` in the same cutover.
 
 #### R6: recovery occurrence isolation
 
@@ -930,48 +1156,101 @@ retains responsibility, aborts/terminally resolves affected waiters only when
 communication retirement is authoritative, and later completes without
 residue after the seam is released.
 
-#### R8: finalization with unresolved custody
+#### R8: finalization with unresolved custody -- platform-qualified evidence
 
-Batch 2 adds one minimal semantic test-only runtime seam immediately after the
-admission-guarded `Managed_process::spawn_swarm_process()` returns a successful
-`Spawn_result` and the admission mutex is released, but before the public
-readiness wait begins. This is current-source accepted-like state, not a future
-custody API: the result says `success`/`os_process_created`, contains the exact
-PID/handle, and current managed-process state has the occurrence reader,
-spawn/recovery bookkeeping, and coordinator registry work. The child is
-lifeline-disabled, so this state contains no lifeline entry and claims no
-lifeline-release fact.
+The named Batch 2 substep is **Batch2-R8F**; it is part of Batch 2, not a
+seventh batch. Primary owner is
+`tests/managed_child_custody_finalize_race_contract_test.cpp`. Observation-only
+`SINTRA_ENABLE_TEST_HOOKS` seams are allowed in
+`include/sintra/detail/runtime.h` and
+`include/sintra/detail/process/coordinator_impl.h`; only if exact POSIX reap
+observation cannot otherwise be established may reviewed scope add an
+observation-only seam in
+`include/sintra/detail/process/managed_process_impl.h`. Test registration and
+`tests/active_tests.txt` remain in the later sequential shared registration atom.
 
-At the seam, hold the root spawn caller. The real lifeline-disabled child
-publishes its managed-process occurrence, causally calls the existing
-begin-process-draining path so coordinator finalization need not hang on its
-draining wait, withholds the requested readiness target, and remains alive on a
-native latch. A second root thread invokes current `detail::finalize()`, which
-closes teardown admission. Exact baseline RED is `finalize()` returning `true`,
-deleting/resetting `s_mproc` and restoring lifecycle state to idle while the
-held spawn caller still owns the successful current `Spawn_result` and the
-nonce/occurrence-qualified native child remains alive. After the seam releases,
-the readiness failure reaches current `cleanup_failed_wait()` with `!s_mproc`,
-logs that cleanup cannot run, returns scalar zero, and still has no confirmed
-native exit. Finalization success/state reset while old process-capable work can
-resume is the required false-success/erase/unsafe-progress manifestation.
+**Common causal hold.** Immediately after admission-guarded
+`Managed_process::spawn_swarm_process()` returns a successful `Spawn_result` and
+the admission mutex is released, but before public readiness waiting, hold the
+root spawn caller unresolved. Before launch, the test must set
+`Spawn_options::lifetime.enable_lifeline = false` and record that no lifeline
+entry exists or remains for the exact occurrence. Lifeline absence is an input
+fact, never a successful lifeline-release milestone. This is accepted-like
+current-source state, not a future custody API: the exact PID/handle, nonce,
+occurrence reader, spawn/recovery bookkeeping, and coordinator publication work
+exist while the caller cannot complete cleanup.
 
-A hang in draining/finalization, a generic timeout, a child that never reached
-the spawn seam, synthetic registry mutation, or a child already exited is
-invalid R8 evidence. If the real child cannot make the exact source-supported
-draining/seam choreography executable on `c60c104`, R8 returns architecture RED:
-stop Batch 2, amend this plan, and assign the unresolved finalization proof to a
-named pre-Batch-3 evidence successor before any custody production code; do not
-invent a custody handle or accept a weaker oracle. Corrected behavior closes
-admission and recovery, admits no new occurrence, retains the record, and cannot
-erase it, reset to idle, or report successful finalization until it settles.
+**R8-W Windows.** The real child publishes its exact managed-process occurrence,
+causally enters begin-draining, and remains on a native latch. The launch is
+explicitly lifeline-disabled, and the ledger proves no lifeline entry before or
+through finalization; therefore closing parent runtime state cannot signal child
+exit through a lifeline. The native latch plus lifeline absence—not favorable
+scheduling—keeps the exact child alive. Current `detail::finalize()` closes
+admission, returns `true`, resets/deletes runtime state, and erases its records
+while the held caller remains unfinished and the nonce/occurrence/native child
+remains alive with no confirmed exit. Releasing the caller later reaches failed-
+readiness cleanup without `s_mproc` authority. No step may describe lifeline
+absence as successful lifeline release.
+
+**R8-P Linux/macOS/FreeBSD.** POSIX direct-child PID tracking occurs after spawn
+(`managed_process_impl.h:2054-2058`), and `Managed_process` destruction later
+terminates/waits/reaps tracked children before returning
+(`managed_process_impl.h:1119-1184`). The child must first confirm exact
+self-publication (`managed_process_impl.h:2632`, `coordinator_impl.h:1049`) and
+begin-draining without exact unpublish. As in the common setup, launch is
+lifeline-disabled and no lifeline entry exists or remains. That absence does not
+disable or satisfy the separate POSIX tracked-PID terminate/wait/reap path. At
+the coordinator erase boundary, an
+observation-only hook positively records that this test occurrence's
+managed-process publication entry still exists. The authoritative
+occurrence-unpublish path—which owns registry/group/barrier/reader/lifecycle and
+`instance_unpublished` facts (`coordinator_impl.h:1075-1239`)—has never
+completed. Destruction clears readers and deletes the Coordinator
+(`managed_process_impl.h:1087,1107`); its destructor
+(`coordinator_impl.h:353-375`) does not occurrence-unpublish that remaining
+child entry. Exact native terminate/reap then occurs, and `finalize()`
+returns `true`; the occurrence/publication/cached-spawn record has been erased by
+raw container destruction while the held public spawn caller remains unfinished.
+Exact OS exit/reap does not satisfy publication retirement. Do not claim
+communication retirement is still unresolved if successful teardown made it
+terminal; R8-P's independent missing fact is authoritative exact-occurrence
+publication retirement.
+
+The test ledger may correlate baseline raw `process_iid` only with the launch
+nonce, exact occurrence `0`, and native PID to observe this one causal case. That
+test correlation never becomes production custody identity or release authority.
+
+Raw registry/container destruction is not authoritative exact unpublish.
+Common future **R8-G** requires occurrence-qualified publication retirement,
+communication retirement with affected waiters terminal/aborted, and confirmed
+exact native exit before finalization success/state reset, while the admitted
+caller's ownership is retained throughout.
+
+Invalid R8 evidence includes state reset, name absence, or OS exit alone;
+synthetic registry mutation; a generic timeout/drain hang; disabling POSIX
+terminate/reap to imitate Windows; requiring a POSIX child to survive
+destruction; a lifeline-enabled or unqualified-lifeline launch; failure to prove
+lifeline absence for the exact occurrence; describing absence as successful
+lifeline release; importing A0 mechanics; or a child that never reached the
+exact hold/publication ledger.
+
+If Windows or any supported POSIX lane cannot execute its exact source-supported
+choreography, **Batch2-R8F evidence successor** opens within Batch 2. First
+amend this one plan through the full review loop; then limit evidence ownership
+to the existing R8 test, the shared registration files, and the observation-only
+runtime/coordinator seam plus managed-process reap seam only if diagnosed
+necessary. If no truthful causal oracle exists, architecture RED blocks Batch 3;
+do not weaken the oracle, drop a supported platform, defer proof into
+production, or invent a custody handle. No Batch 3 work begins until Windows,
+Linux, macOS, and FreeBSD R8F lanes close.
 
 Every behavioral gate uses a real child, unique launch nonce, exact occurrence,
 native process identity, causal markers/latches, and native exit observation.
-Timeout is a watchdog only. Name absence, synthetic registry mutation,
-cancellation, generic timeout, crash, clean exit, stopped communication, or
-state reset alone is an invalid oracle. Each run records commands, exit codes,
-causal fields, surviving process audit, and repository state.
+Timeout is a watchdog only. No single fact such as name absence, cancellation,
+generic timeout, crash, clean exit, stopped communication, or state reset is an
+oracle; synthetic registry mutation is always invalid. R5-W is valid only as its
+full permitted causal witness joined with R5-S. Each run records commands, exit
+codes, causal fields, surviving process audit, and repository state.
 
 ### Six Batches
 
@@ -1003,24 +1282,41 @@ file families are boundaries, not permission to touch every listed file.
 - Rollback is exact custody base `c60c104...` until the reviewed narrow plan
   commit exists; the resulting plan commit becomes Batch 2's rollback point.
 
-#### Batch 2: deterministic baseline RED evidence only
+#### Batch 2: deterministic baseline causal evidence only
 
 - Owner families are new custody contract test sources, their test registration
   and runner configuration, and the smallest semantic test-only causal seams
   under `SINTRA_ENABLE_TEST_HOOKS`. The atomic step must enumerate exact files
   before editing.
-- Implement real-child R1, R2, R3, R5, R6, R7, and R8 gates as separable atomic
-  steps where write sets or causal oracles differ. R0 runs as the exact-pair
-  configure-GREEN/compile-RED dependency proof. R4 is source diagnosis only.
-- Expected gate is the exact causal baseline result for each named RED, not a
-  timeout or generic failure. An independent verifier records commands, exit
-  codes, causal markers, survivors, and repository state.
+- R0 baseline configure-GREEN/compile-RED is closed at `7301c1d...`; corrected-
+  pair GREEN remains 4A. Implement real-child R1, R2, R3, R6, and R7 RED gates
+  as separately frozen atoms; implement R5-W plus frozen R5-S as the composite
+  `R5 RED-WITNESS`; implement platform-qualified Batch2-R8F/R8-W/R8-P. R4 is
+  source diagnosis only.
+- Primary R5-W owner is
+  `tests/managed_child_custody_name_retirement_contract_test.cpp` plus a minimal
+  observation-only callback in existing coordinator test-hook infrastructure
+  only if needed. Primary R8F owners are
+  `tests/managed_child_custody_finalize_race_contract_test.cpp` and the
+  observation-only hook files explicitly allowed in R8. Shared test registration
+  and `tests/active_tests.txt` are owned by later sequential registration atoms;
+  R5 and R8 writers never edit them concurrently.
+- Expected gate is the exact causal baseline result for each named RED, the
+  exact successful R5-W witness joined with R5-S, and each exact platform R8
+  ledger—not a timeout or generic failure. An independent verifier records
+  commands, exit codes, causal markers, native identities/exits, survivors, and
+  repository state. Run each new behavioral test on every supported platform to
+  which its gate applies; R5-W and R8F apply to Windows, Linux, macOS, and
+  FreeBSD.
 - Prohibited scope is all production lifecycle semantics, framework behavior,
-  compatibility shims, synthetic registry oracles, and A0 mechanics.
-- Rollback is the reviewed Batch 1 commit; every accepted RED step advances a
-  new recorded reviewed commit. Any gate that cannot produce its intended
-  source-supported RED stops production and requires a reviewed plan amendment
-  or explicit dropped/rescoped gate.
+  compatibility shims, synthetic registry oracles, deliberate R5 witness
+  failure, disabling POSIX reaping, and A0 mechanics.
+- Rollback for this amendment is `7301c1d...`; after its trailer-bearing closure
+  commit, that reviewed amendment becomes the next evidence atom's rollback.
+  Every accepted evidence step advances a new recorded reviewed commit. Any gate
+  that cannot produce its intended source-supported judgment stops production
+  and requires the named reviewed amendment/successor; it is not silently
+  dropped or weakened.
 
 #### Batch 3: Sintra custody implementation and cleanup absorption
 
@@ -1040,17 +1336,25 @@ file families are boundaries, not permission to touch every listed file.
   discarded-cleanup composition, duplicate cleanup authority, and every newly
   orphaned helper/test path in that same commit after call-site proof. Run an
   exact symbol/call-site orphan sweep; do not defer deletion.
-- Expected Sintra GREEN is R1/R2/R3/R5/R6/R7/R8 plus focused existing launch,
+- Expected Sintra GREEN is R1/R2/R3/R5-G/R6/R7/R8-G plus focused existing launch,
   recovery, lifeline, publication/departure, communication, RPC, and
   finalization gates selected from the changed surface in Debug and Release.
-  This establishes the Sintra R3/release contract only; the framework-consumer
-  R3/release cutover and GREEN belong to 4A. R0 remains RED for the archived
-  pair; R4 still awaits the complete runnable 4A pair.
+  R5-G evolves the same R5-W causal witness and requires canonical release to
+  remain incomplete at it. R8-G forbids success/state reset until authoritative
+  occurrence publication retirement, communication retirement/terminal waiters,
+  and exact OS exit are confirmed while the accepted operation remains owned;
+  baseline POSIX forced exit is not sufficient. This establishes Sintra R3/
+  release/R5/R8 only; corresponding framework consumer GREEN belongs to 4A. R0
+  remains RED for the archived pair; R4 still awaits the complete runnable 4A
+  pair.
 - Prohibited scope is framework migration, A0 transport/fence behavior,
   historical salvage primitives, raw-ID/name authority, a public substep
   matrix, or unbounded deadline-facing work.
 - Rollback is the reviewed Batch 2 evidence commit; each accepted implementation
   atom advances only after independent verification and unanimous review.
+- Batch 3 cannot begin until all required Batch 2 evidence atoms, Windows R8-W,
+  Linux/macOS/FreeBSD R8-P (or the reviewed Batch2-R8F successor), and the
+  cumulative Batch 2 boundary round are closed unanimously.
 
 #### Batch 4: framework custody cutover, R4 evidence, async repair, and deletion
 
@@ -1079,6 +1383,11 @@ Never use the canonical framework worktree or protected OBJ.
    - make the framework-consumer form of R3/release GREEN: failed requested
      readiness retains custody, framework cleanup/release targets that custody,
      and no name/raw-ID fact manufactures release;
+   - run framework-consumer R5-G on the exact migrated pair, proving requested-
+     name absence never completes custody release while an exact fact remains
+     nonterminal, and delete/replace the name-authority assertions in
+     `tests/vnm_hosted_worker_host_tests.cpp` and
+     `tests/vnm_hosted_worker_host_lifecycle_tests.cpp` in this same atom;
    - delete every phantom consumer of the five absent salvage surfaces, raw
      Sintra reach-through, raw-ID/name cleanup authority, name-polling success,
      duplicate result matrix, obsolete helper/test/CMake path, and newly
@@ -1096,9 +1405,9 @@ Never use the canonical framework worktree or protected OBJ.
    the condition under which shutdown reports success. There is no temporary
    scalar/raw/name adapter, compatibility bridge, or intermediate unbuildable
    commit. Exact 4A gates are R0 corrected-pair GREEN, migrated framework R3/
-   release GREEN, focused synchronous and async call-site compilation/behavior
-   GREEN, and source/diff proof that the named async lifecycle control flow is
-   unchanged and remains eligible for R4 RED.
+   release/R5-G GREEN, focused synchronous and async call-site compilation/
+   behavior GREEN, and source/diff proof that the named async lifecycle control
+   flow is unchanged and remains eligible for R4 RED.
 
 2. **4B R4 evidence on the exact 4A pair.** Owner families are new focused
    framework real-child test support, registration, and minimal semantic causal
@@ -1124,7 +1433,7 @@ Never use the canonical framework worktree or protected OBJ.
    accepted. Exact 4C gate is R4 GREEN plus focused async shutdown/session and
    survivor/clean-state gates.
 
-Batch 4 cumulative GREEN is 4A's R0 corrected-pair and framework R3/release
+Batch 4 cumulative GREEN is 4A's R0 corrected-pair and framework R3/release/R5-G
 GREEN, 4B's exact R4 RED evidence, 4C's R4 GREEN, and all migrated focused
 framework/package/consumer gates. Each 4A/4B/4C atom has its own rollback pair
 of exact Sintra/framework commits, verifier, frozen diff, and unanimous review:
@@ -1185,6 +1494,15 @@ must be evidence-based; a guessed historical roster is invalid. Every observed
 failure is reported, causally diagnosed, and remediated through the owning
 atomic loop. The final Batch 5 full-suite enablement and closure are mandatory
 even if an intermediate background full-roster run happened to pass.
+
+R5-W and Batch2-R8F are newly introduced tests and therefore belong to that
+selected union whenever their atoms are observed in pre-final blocking CI. Run
+their exact applicable lanes on Windows, Linux, macOS, and FreeBSD; platform-
+qualified R8 assertions remain distinct inside one test contract. Their shared
+registration/`active_tests.txt` edits are sequential and owned by the currently
+frozen atom. This does not change the policy: an intermediate full-roster run is
+background evidence, while the separately reviewed full-suite enablement and
+paired closure remain mandatory only at final Batch 5.
 
 ### Mandatory Atomic-Step And Review Protocol
 
@@ -1318,7 +1636,22 @@ Stop before commit/advance and amend through the full loop if:
   branch, or header-only compatibility;
 - Batch 1 adds runtime behavior/tests/framework edits; Batch 2 adds production;
   or historical salvage is imported rather than used as evidence;
-- R3 permits requested-target publication, R5 omits it, 4A fails to migrate all
+- the unique Batch 2 amendment closure predicate is absent/mismatched/non-GREEN
+  or behavior begins before its unchanged reviewed commit;
+- R5-W deliberately fails on the permitted witness, omits actual requested-
+  target publication, treats name absence alone as failure/authority, claims the
+  archived framework path executed, or uses a shim, fake, future API, historical
+  pair, salvage surface, or temporary compatibility build;
+- R8 requires Windows child-liveness after POSIX destruction, accepts state
+  reset/name absence/OS exit/raw container destruction alone, synthetically
+  mutates registry state, launches with lifeline enabled or without exact
+  lifeline-absence proof, calls lifeline absence a successful release, disables
+  POSIX terminate/reap, conflates exact publication retirement with OS exit, or
+  imports A0 mechanics;
+- Batch 3 begins before R8-W and every supported R8-P lane (or the reviewed
+  Batch2-R8F successor) plus all other required Batch 2 evidence and the
+  cumulative boundary review close unanimously;
+- R3 permits requested-target publication, R5-W omits it, 4A fails to migrate all
   synchronous/asynchronous custody consumers and delete raw/name/salvage
   authority in the same buildable atom, 4A changes async join/detach/reset
   behavior, 4B runs on anything other than the exact migrated 4A pair, 4C
@@ -2043,19 +2376,29 @@ Do not code in the preserved dirty worktree. The accepted and dropped slice
 history above remains unchanged, Slice 5 is closed at `f95cf6e`, and the
 test/CI recovery remediation is closed at `266fa2b`.
 
-For the custody sibling, first evaluate the unique first-parent closure-commit
-identity and fresh live protection predicate in **Finite Batch 0/1 Closure And
-Batch 2 Authorization**. If both pass, Batch 0/1 remains closed even when HEAD
-is a later first-parent descendant, and the next action is to freeze the current
-Batch 2-or-later atom's exact files, causal gate, prohibited scope, verifier,
-rollback, and reviewer lanes before delegation. If either fails, Batch 0/1 is
-open or continuation is blocked: freeze this exact one-file closure-record
-candidate, delegate `b01_closure_verifier_r3`, and run the fresh maximum boundary
-pool `b01_boundary_arch_r4`, `b01_boundary_evidence_r4`, and
-`b01_boundary_governance_r4` on the identical staged patch/raw-blob pair. Any
-edit or non-GREEN restarts that full loop. Only then commit unchanged bytes with
-the exact subject and trailers above. Do not infer closure from chat, an earlier
-candidate round, a second-parent merge, or a partially matching commit.
+For the custody sibling, first revalidate the Batch 0/1 unique closure/live
+protection predicate, then evaluate **Finite Batch 2 Amendment Closure**. If the
+amendment predicate is absent or invalid, no behavioral evidence is authorized:
+freeze this one-file amendment against rollback
+`7301c1d1eb866b24f6b953c5d9874c24628b6303`, delegate static verification,
+freeze its exact binary patch/raw Git blob identities, and run fresh maximum
+review lanes for architecture/platform, oracle/migration, and governance/defer-
+trap. Require unqualified GREEN from `b2_plan_amend_verifier_r2`,
+`b2_plan_amend_arch_review_r2`, `b2_plan_amend_oracle_review_r2`, and
+`b2_plan_amend_governance_review_r2` on identical bytes, then commit those
+unchanged bytes with exact subject/trailers. Any edit or non-GREEN restarts the
+full loop.
+
+If both closure predicates and live protections pass, Batch 0/1 and the Batch 2
+amendment remain closed across first-parent descendants. The recommended next
+atom is the first incomplete R2/R3 evidence scope; R1 follows. R5-W and
+Batch2-R8F are later sequential atoms because they share registration/active-
+roster ownership (R5-W before Batch2-R8F); R6 and R7 remain separately frozen
+reviewed atoms.
+At each step name exact files, causal judgment, prohibited production scope,
+verifier, rollback, and reviewer lanes before delegation. No Batch 3 production
+begins until every required Batch 2 atom, every supported R8 lane or reviewed
+R8F successor, and the cumulative Batch 2 boundary round are unanimously closed.
 
 The protected A0 evidence and its plan edits retain their separate ownership
 and order. Slice 6 remains conditional after A0 evidence, its managed transport
