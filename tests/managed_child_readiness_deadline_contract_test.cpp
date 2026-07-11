@@ -66,7 +66,6 @@ struct Deadline_gate
     bool                                        readiness_started = false;
     bool                                        resolution_entered = false;
     bool                                        released = false;
-    std::chrono::steady_clock::time_point       readiness_started_at;
     std::chrono::steady_clock::time_point       resolution_entered_at;
 };
 
@@ -75,7 +74,9 @@ struct Spawn_call
     std::mutex               mutex;
     std::condition_variable  cv;
     bool                     done = false;
-    size_t                   scalar = std::numeric_limits<size_t>::max();
+    sintra::Managed_child_custody custody;
+    std::chrono::steady_clock::time_point started_at{};
+    std::chrono::steady_clock::time_point completed_at{};
     bool                     threw = false;
 };
 
@@ -186,7 +187,6 @@ void runtime_stage_callback(const char* stage)
 
     std::lock_guard<std::mutex> lock(gate->mutex);
     gate->readiness_started = true;
-    gate->readiness_started_at = std::chrono::steady_clock::now();
     gate->cv.notify_all();
 }
 
@@ -411,8 +411,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     options.lifetime.enable_lifeline = false;
 
     std::thread spawn_thread([&]() {
+        {
+            std::lock_guard<std::mutex> lock(call.mutex);
+            call.started_at = std::chrono::steady_clock::now();
+        }
         try {
-            call.scalar = sintra::spawn_swarm_process(options);
+            call.custody = sintra::spawn_swarm_process(options);
         }
         catch (...) {
             call.threw = true;
@@ -420,17 +424,21 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         {
             std::lock_guard<std::mutex> lock(call.mutex);
             call.done = true;
+            call.completed_at = std::chrono::steady_clock::now();
         }
         call.cv.notify_all();
     });
 
     const bool resolution_entered = wait_for_resolution_entry(gate, k_watchdog_timeout);
-    std::chrono::steady_clock::time_point readiness_started_at;
     std::chrono::steady_clock::time_point resolution_entered_at;
     if (resolution_entered) {
         std::lock_guard<std::mutex> lock(gate.mutex);
-        readiness_started_at = gate.readiness_started_at;
         resolution_entered_at = gate.resolution_entered_at;
+    }
+    std::chrono::steady_clock::time_point call_started_at;
+    {
+        std::lock_guard<std::mutex> lock(call.mutex);
+        call_started_at = call.started_at;
     }
 
     const bool ledger_file_seen = sintra::test::wait_for_file(
@@ -472,34 +480,33 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool native_identity_verified = child_alive_during_hold;
 #endif
 
-    const auto requested_deadline = readiness_started_at + k_requested_wait_timeout;
-    // The production deadline is constructed immediately before the transported
-    // resolve call. Measuring a full timeout plus tolerance from entry into the
-    // handler is therefore a conservative lower bound on its overrun.
-    const auto observation_time =
-        resolution_entered_at + k_requested_wait_timeout + k_scheduling_tolerance;
+    const auto requested_deadline = call_started_at + k_requested_wait_timeout;
+    const auto observation_time = requested_deadline + k_scheduling_tolerance;
     if (resolution_entered && std::chrono::steady_clock::now() < observation_time) {
         std::this_thread::sleep_until(observation_time);
     }
 
     bool caller_done_at_observation = false;
+    std::chrono::steady_clock::time_point caller_completed_at;
     {
         std::lock_guard<std::mutex> lock(call.mutex);
         caller_done_at_observation = call.done;
+        caller_completed_at = call.completed_at;
     }
     const auto observed_at = std::chrono::steady_clock::now();
     const bool resolution_entered_before_deadline =
         resolution_entered && resolution_entered_at < requested_deadline;
     const bool child_alive_at_observation =
         ledger && start_stamp_verified && exact_child_is_live(*ledger);
-    const bool trapped_beyond_deadline =
+    const bool returned_by_deadline =
         resolution_entered &&
-        !caller_done_at_observation &&
+        caller_done_at_observation &&
+        caller_completed_at <= observation_time &&
         observed_at >= observation_time &&
         child_alive_at_observation;
     const auto overrun_ms = resolution_entered
         ? std::chrono::duration_cast<std::chrono::milliseconds>(
-            observed_at - resolution_entered_at - k_requested_wait_timeout).count()
+            observed_at - requested_deadline).count()
         : -1;
 
     release_resolution(gate);
@@ -517,11 +524,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::memory_order_release);
     s_deadline_gate = nullptr;
 
-    bool scalar_zero = false;
+    sintra::Managed_child_custody_observation launch_observation;
     bool call_threw = false;
     {
         std::lock_guard<std::mutex> lock(call.mutex);
-        scalar_zero = call.done && call.scalar == 0;
+        launch_observation = sintra::observe_managed_child(call.custody);
         call_threw = call.threw;
     }
 
@@ -532,6 +539,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         child_finalized_path(shared.path()),
         k_watchdog_timeout,
         std::chrono::milliseconds(10));
+    const auto released_observation = sintra::wait_managed_child(
+        call.custody,
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     bool native_exit_confirmed = false;
     bool native_normal_exit = false;
@@ -605,9 +615,13 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         start_stamp_verified &&
         native_identity_verified &&
         child_alive_during_hold &&
-        trapped_beyond_deadline &&
+        returned_by_deadline &&
         spawn_call_completed &&
-        scalar_zero &&
+        launch_observation.accepted &&
+        launch_observation.created_occurrences == 1 &&
+        !launch_observation.readiness_reached &&
+        launch_observation.release_requested &&
+        released_observation.release_complete &&
         !call_threw &&
         child_release_written &&
         child_finalized &&
@@ -620,9 +634,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     if (baseline_valid) {
         std::printf(
-            "R1_RED_VALID wait_timeout_ms=%lld tolerance_ms=%lld overrun_ms=%lld "
-            "resolve_entered_before_deadline=1 caller_done_at_observation=0 "
-            "native_identity_verified=1 child_alive_during_hold=1 scalar=0 "
+            "R1_GREEN_VALID wait_timeout_ms=%lld tolerance_ms=%lld overrun_ms=%lld "
+            "resolve_entered_before_deadline=1 caller_done_at_observation=1 "
+            "native_identity_verified=1 child_alive_during_hold=1 custody_accepted=1 "
+            "readiness=0 release_requested=1 release_complete=1 "
             "child_finalized=1 native_exit_confirmed=1 normal_status=1 "
             "survivor_absent=1 reap_count=%s\n",
             static_cast<long long>(k_requested_wait_timeout.count()),
@@ -635,13 +650,13 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #endif
             );
         std::fflush(stdout);
-        return 1;
+        return 0;
     }
 
     std::fprintf(
         stderr,
-        "R1_INVALID resolution_entered=%d entered_before_deadline=%d trapped=%d "
-        "caller_done_at_observation=%d overrun_ms=%lld spawn_completed=%d scalar_zero=%d "
+        "R1_INVALID resolution_entered=%d entered_before_deadline=%d returned_by_deadline=%d "
+        "caller_done_at_observation=%d overrun_ms=%lld spawn_completed=%d custody_valid=%d "
         "call_threw=%d ledger=%d ledger_identity=%d start_stamp_verified=%d "
         "native_identity_verified=%d child_alive_during_hold=%d child_alive_at_observation=%d "
         "child_release=%d child_finalized=%d native_exit_confirmed=%d normal_status=%d "
@@ -649,11 +664,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         "child_reap_hook_cleared=%d root_finalized=%d\n",
         resolution_entered ? 1 : 0,
         resolution_entered_before_deadline ? 1 : 0,
-        trapped_beyond_deadline ? 1 : 0,
+        returned_by_deadline ? 1 : 0,
         caller_done_at_observation ? 1 : 0,
         static_cast<long long>(overrun_ms),
         spawn_call_completed ? 1 : 0,
-        scalar_zero ? 1 : 0,
+        (launch_observation.accepted && launch_observation.release_requested &&
+         released_observation.release_complete) ? 1 : 0,
         call_threw ? 1 : 0,
         ledger ? 1 : 0,
         ledger_identity_valid ? 1 : 0,

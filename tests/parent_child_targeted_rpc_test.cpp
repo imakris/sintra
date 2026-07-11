@@ -239,9 +239,11 @@ int run_coordinator(const std::string& binary_path)
     spawn_options.wait_for_instance_name = k_child_service_name;
     spawn_options.wait_timeout           = std::chrono::milliseconds(15000);
 
-    const size_t spawned = sintra::spawn_swarm_process(spawn_options);
+    const auto custody = sintra::spawn_swarm_process(spawn_options);
+    const auto launch = sintra::observe_managed_child(custody);
     if (!sintra::test::assert_true(
-            spawned == 1, "[COORD] ", "spawn_swarm_process should report a single child"))
+            launch.accepted && launch.readiness_reached && launch.created_occurrences == 1,
+            "[COORD] ", "spawn_swarm_process should return ready child custody"))
     {
         return 1;
     }

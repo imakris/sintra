@@ -258,6 +258,56 @@ struct Spawn_options
     Lifetime_policy            lifetime;
 };
 
+struct Managed_child_custody_observation
+{
+    bool        accepted = false;
+    bool        readiness_reached = false;
+    bool        release_requested = false;
+    bool        release_complete = false;
+    std::size_t admitted_occurrences = 0;
+    std::size_t created_occurrences = 0;
+    std::size_t exited_occurrences = 0;
+};
+
+class Managed_child_custody
+{
+public:
+    Managed_child_custody() = default;
+
+    bool accepted() const noexcept { return static_cast<bool>(m_record); }
+    explicit operator bool() const noexcept { return accepted(); }
+
+private:
+    explicit Managed_child_custody(
+        std::shared_ptr<detail::Managed_child_custody_record> record)
+        : m_record(std::move(record))
+    {}
+
+    std::shared_ptr<detail::Managed_child_custody_record> m_record;
+
+    friend Managed_child_custody spawn_swarm_process(const Spawn_options&);
+    friend Managed_child_custody_observation observe_managed_child(
+        const Managed_child_custody&);
+    friend Managed_child_custody_observation wait_managed_child(
+        const Managed_child_custody&, std::chrono::steady_clock::time_point);
+    friend Managed_child_custody_observation release_managed_child(
+        const Managed_child_custody&, std::chrono::steady_clock::time_point);
+    friend Managed_child_custody_observation retry_managed_child_release(
+        const Managed_child_custody&, std::chrono::steady_clock::time_point);
+};
+
+Managed_child_custody_observation observe_managed_child(
+    const Managed_child_custody& custody);
+Managed_child_custody_observation wait_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
+Managed_child_custody_observation release_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
+Managed_child_custody_observation retry_managed_child_release(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline);
+
 struct External_process_invitation_options
 {
     instance_id_type           process_instance_id = invalid_instance_id;
@@ -418,6 +468,28 @@ inline bool finalize_impl()
         return false;
     }
 
+    {
+        std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+        s_teardown_admission_closed.store(true, std::memory_order_release);
+        if (s_shutdown_state.load(std::memory_order_acquire) ==
+            shutdown_protocol_state::idle)
+        {
+            s_shutdown_state.store(
+                shutdown_protocol_state::finalizing,
+                std::memory_order_release);
+        }
+    }
+
+    // Finalization participates in the same custody contract.  It closes
+    // recovery and requests release, but it does not erase runtime state or
+    // report success while an exact occurrence is still unresolved.
+    s_mproc->request_all_child_custody_releases();
+    if (!s_mproc->wait_for_all_child_custodies(
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(250)))
+    {
+        return false;
+    }
+
     const auto prev = s_shutdown_state.exchange(
         shutdown_protocol_state::finalizing, std::memory_order_acq_rel);
     (void)prev;  // Previous state is informational; no assertion needed here.
@@ -535,6 +607,10 @@ inline void close_teardown_admission_and_claim_state(
 {
     std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
     if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
+        if (s_shutdown_state.load(std::memory_order_acquire) == desired_state) {
+            // Retry the same incomplete terminal phase. Admission stays closed.
+            return;
+        }
         throw std::logic_error(
             std::string(api_name) + " called while another lifecycle teardown is already in progress.");
     }
@@ -542,10 +618,16 @@ inline void close_teardown_admission_and_claim_state(
     claim_lifecycle_teardown_state(desired_state, api_name);
 }
 
-inline void close_teardown_admission_for_shutdown(const char* api_name)
+inline bool close_teardown_admission_for_shutdown(const char* api_name)
 {
     std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
     if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
+        const auto state = s_shutdown_state.load(std::memory_order_acquire);
+        if (state == shutdown_protocol_state::collective_shutdown_entered ||
+            state == shutdown_protocol_state::coordinator_hook_completed)
+        {
+            return true;
+        }
         throw std::logic_error(
             std::string(api_name) + " called while another lifecycle teardown is already in progress.");
     }
@@ -556,6 +638,7 @@ inline void close_teardown_admission_for_shutdown(const char* api_name)
             "(state=" + std::to_string(static_cast<int>(state)) + ").");
     }
     s_teardown_admission_closed.store(true, std::memory_order_release);
+    return false;
 }
 
 inline void reset_lifecycle_teardown_to_idle()
@@ -733,11 +816,15 @@ inline bool shutdown()
 
 inline bool shutdown(const shutdown_options& options)
 {
-    detail::close_teardown_admission_for_shutdown("sintra::shutdown()");
+    const bool resume_finalization =
+        detail::close_teardown_admission_for_shutdown("sintra::shutdown()");
 
     if (!s_mproc) {
         detail::reset_lifecycle_teardown_to_idle();
         return false;
+    }
+    if (resume_finalization) {
+        return detail::finalize_impl();
     }
 
     // True single-process runtimes (no coordinator anywhere) have no
@@ -967,109 +1054,91 @@ inline bool cancel_external_process_invitation(const External_process_invitation
         invitation.token);
 }
 
-// Returns the number of processes spawned. When wait_for_instance_name is set in
-// options, this waits for the instance to appear and returns 0 on wait failure,
-// attempting cleanup if a process was created. process_instance_id is not
-// validated for uniqueness; callers must ensure it is unused. Timeout waits use
-// polling with backoff to provide bounded wait durations.
-inline size_t spawn_swarm_process(const Spawn_options& options)
+// Accepts durable logical custody before authorizing OS creation.  Readiness is
+// an observation on the returned opaque custody and never controls ownership.
+inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
 {
     if (options.binary_path.empty()) {
         Log_stream(log_level::error)
             << "spawn_swarm_process: binary path is empty\n";
-        return 0;
+        return {};
     }
 
     const bool       wait_requested = !options.wait_for_instance_name.empty();
     const auto       wait_timeout   = options.wait_timeout;
+    const bool       async_deadline_setup = wait_requested && wait_timeout.count() > 0;
+    const auto       deadline = wait_timeout.count() > 0
+        ? std::chrono::steady_clock::now() + wait_timeout
+        : std::chrono::steady_clock::time_point::max();
     instance_id_type coord_id       = invalid_instance_id;
 
-    size_t spawned = 0;
     const auto piid = (options.process_instance_id != invalid_instance_id)
         ? options.process_instance_id
         : make_process_instance_id();
-    std::optional<Managed_process::Spawn_result> wait_spawn_result;
+    std::shared_ptr<detail::Managed_child_custody_record> custody_record;
+    Managed_process::Spawn_result spawn_result;
     bool os_process_created = false;
-
-#ifdef _WIN32
-    auto close_wait_spawn_process_handle = [&]() {
-        if (!wait_spawn_result ||
-            !wait_spawn_result->os_process_handle_owned ||
-            wait_spawn_result->os_process_handle == 0)
+    auto readiness_observer = [](
+        Managed_process* owner,
+        const std::shared_ptr<detail::Managed_child_custody_record>& record,
+        instance_id_type coordinator_id,
+        const std::string& target,
+        std::chrono::steady_clock::time_point readiness_deadline,
+        bool child_created)
+    {
+        bool readiness_reached = false;
+        bool release_requested = false;
         {
-            return;
+            std::lock_guard<std::mutex> lock(record->mutex);
+            release_requested = record->release_requested;
         }
-
-        CloseHandle(reinterpret_cast<HANDLE>(wait_spawn_result->os_process_handle));
-        wait_spawn_result->os_process_handle       = 0;
-        wait_spawn_result->os_process_handle_owned = false;
-    };
-#endif
-
-    auto cleanup_failed_wait = [&](const char* failure_stage, const std::string& failure_reason) {
-        if (!wait_spawn_result ||
-            !wait_spawn_result->success ||
-            !wait_spawn_result->os_process_created)
+        try {
+            if (child_created && !release_requested &&
+                readiness_deadline == std::chrono::steady_clock::time_point::max())
+            {
+                readiness_reached = Coordinator::rpc_wait_for_instance(
+                    coordinator_id, target) != invalid_instance_id;
+            }
+            else if (child_created && !release_requested) {
+                auto poll_delay = std::chrono::milliseconds(5);
+                while (std::chrono::steady_clock::now() < readiness_deadline) {
+                    {
+                        std::lock_guard<std::mutex> lock(record->mutex);
+                        if (record->release_requested) {
+                            break;
+                        }
+                    }
+                    if (Coordinator::rpc_resolve_instance(coordinator_id, target) !=
+                        invalid_instance_id)
+                    {
+                        readiness_reached = true;
+                        break;
+                    }
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= readiness_deadline) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::min(
+                        poll_delay,
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            readiness_deadline - now)));
+                    poll_delay = std::min(
+                        poll_delay * 2, std::chrono::milliseconds(200));
+                }
+            }
+        }
+        catch (...) {
+        }
         {
-#ifdef _WIN32
-            close_wait_spawn_process_handle();
-#endif
-            return;
+            std::lock_guard<std::mutex> lock(record->mutex);
+            record->readiness_reached =
+                record->readiness_reached || readiness_reached;
+            record->readiness_observer_complete = true;
         }
-
-        if (!s_mproc) {
-            Log_stream(log_level::warning)
-                << "spawn_swarm_process: wait failed but cleanup cannot run because "
-                << "the runtime process is no longer active"
-                << " process_instance_id="
-                << static_cast<unsigned long long>(wait_spawn_result->instance_id)
-                << " wait_target='" << options.wait_for_instance_name << "'"
-                << " failure_stage='" << failure_stage << "'"
-                << " failure_reason='" << failure_reason << "'"
-                << "\n";
-#ifdef _WIN32
-            close_wait_spawn_process_handle();
-#endif
-            return;
+        record->changed.notify_all();
+        if (owner) {
+            owner->retire_child_custody_if_complete(record);
         }
-
-        const auto first_publish_name = wait_spawn_result->os_pid > 0
-            ? std::string("sintra_process_") + std::to_string(wait_spawn_result->os_pid)
-            : std::string();
-
-        Managed_process::Spawn_cleanup_request cleanup_request;
-        cleanup_request.binary_name         = wait_spawn_result->binary_name;
-        cleanup_request.wait_target_name    = options.wait_for_instance_name;
-        cleanup_request.first_publish_name  = first_publish_name;
-        cleanup_request.instance_id         = wait_spawn_result->instance_id;
-        cleanup_request.wait_timeout        = wait_timeout;
-        cleanup_request.os_pid              = wait_spawn_result->os_pid;
-        cleanup_request.lifeline_enabled    = wait_spawn_result->lifeline_enabled;
-        cleanup_request.lifeline_timeout_ms = options.lifetime.hard_exit_timeout_ms;
-        cleanup_request.failure_stage       = failure_stage;
-        cleanup_request.failure_reason      = failure_reason;
-#ifdef _WIN32
-        cleanup_request.os_process_handle       = wait_spawn_result->os_process_handle;
-        cleanup_request.os_process_handle_owned = wait_spawn_result->os_process_handle_owned;
-        wait_spawn_result->os_process_handle       = 0;
-        wait_spawn_result->os_process_handle_owned = false;
-#endif
-
-        Log_stream(log_level::warning)
-            << "spawn_swarm_process: wait failed; initiating startup cleanup"
-            << " process_instance_id="
-            << static_cast<unsigned long long>(cleanup_request.instance_id)
-            << " pid=" << cleanup_request.os_pid
-#ifdef _WIN32
-            << " process_handle=" << cleanup_request.os_process_handle
-#endif
-            << " wait_target='" << cleanup_request.wait_target_name << "'"
-            << " wait_timeout_ms=" << cleanup_request.wait_timeout.count()
-            << " failure_stage='" << cleanup_request.failure_stage << "'"
-            << " failure_reason='" << cleanup_request.failure_reason << "'"
-            << "\n";
-
-        s_mproc->cleanup_failed_spawned_process_startup(cleanup_request);
     };
 
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
@@ -1078,14 +1147,14 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) || !s_mproc) {
             Log_stream(log_level::warning)
                 << "spawn_swarm_process: rejected because lifecycle teardown is in progress\n";
-            return 0;
+            return {};
         }
 
         coord_id = s_coord_id;
         if (wait_requested && coord_id == invalid_instance_id) {
             Log_stream(log_level::error)
                 << "spawn_swarm_process: wait requires a valid coordinator\n";
-            return 0;
+            return {};
         }
 
         if (options.process_instance_id != invalid_instance_id &&
@@ -1096,7 +1165,15 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
                 << "spawn_swarm_process: process instance id "
                 << static_cast<unsigned long long>(piid)
                 << " is reserved by a pending external-process invitation\n";
-            return 0;
+            return {};
+        }
+
+        if (!s_mproc->can_accept_child_custody(piid)) {
+            Log_stream(log_level::warning)
+                << "spawn_swarm_process: rejected because process instance id "
+                << static_cast<unsigned long long>(piid)
+                << " already has unresolved custody\n";
+            return {};
         }
 
         auto args = options.args;
@@ -1130,114 +1207,212 @@ inline size_t spawn_swarm_process(const Spawn_options& options)
         spawn_args.args          = args;
         spawn_args.env_overrides = options.env_overrides;
         spawn_args.lifetime      = options.lifetime;
-#ifdef _WIN32
-        spawn_args.capture_process_handle = wait_requested;
-#endif
-
         spawn_args.piid = piid;
-        auto result = s_mproc->spawn_swarm_process(spawn_args);
-        os_process_created = result.success && result.os_process_created;
-        if (wait_requested) {
-            wait_spawn_result = result;
+        custody_record = s_mproc->accept_child_custody(options.wait_for_instance_name);
+        spawn_args.custody = custody_record;
+        if (async_deadline_setup) {
+            if (!s_mproc->admit_child_custody_occurrence(
+                    custody_record, piid, spawn_args.occurrence))
+            {
+                return {};
+            }
+            spawn_args.custody_occurrence_admitted = true;
+            {
+                std::lock_guard<std::mutex> lock(custody_record->mutex);
+                custody_record->readiness_observer_complete = false;
+            }
+            auto* custody_owner = s_mproc;
+            auto async_setup =
+                [custody_owner, custody_record, spawn_args, coord_id,
+                 target = options.wait_for_instance_name, deadline,
+                readiness_observer]() mutable
+                {
+                    bool created = false;
+                    bool setup_threw = false;
+                    try {
+                        auto result = custody_owner->spawn_swarm_process(spawn_args);
+                        created = result.success && result.os_process_created;
+                        if (created) {
+                            detail::runtime_spawn_success_for_test(
+                                result.instance_id,
+                                result.os_pid,
+                                result.lifeline_enabled,
+                                result.lifeline_write_retained);
+                            detail::runtime_stage_for_test(
+                                detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
+                        }
+                    }
+                    catch (...) {
+                        setup_threw = true;
+                        // The internal setup guard resolves the exact admitted
+                        // occurrence before unwinding. Recover the confirmed
+                        // native fact so cleanup retains ownership when the OS
+                        // child was already created.
+                        std::lock_guard<std::mutex> lock(custody_record->mutex);
+                        for (auto& occurrence : custody_record->occurrences) {
+                            if (occurrence.process_instance_id == spawn_args.piid &&
+                                occurrence.occurrence == spawn_args.occurrence)
+                            {
+                                created = occurrence.os_process_created;
+                                if (occurrence.setup ==
+                                    detail::Managed_child_occurrence_record::setup_state::pending)
+                                {
+                                    occurrence.setup = created
+                                        ? detail::Managed_child_occurrence_record::setup_state::ownership_ready
+                                        : detail::Managed_child_occurrence_record::setup_state::no_child;
+                                }
+                                break;
+                            }
+                        }
+                        custody_record->changed.notify_all();
+                    }
+
+                    if (!created) {
+                        custody_owner->request_child_custody_release(custody_record);
+                    }
+                    else if (setup_threw) {
+                        custody_owner->request_child_custody_release(custody_record, true);
+                    }
+                    readiness_observer(
+                        custody_owner, custody_record, coord_id, target, deadline, created);
+                };
+            try {
+                custody_owner->start_child_custody_worker(std::move(async_setup));
+            }
+            catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(custody_record->mutex);
+                    for (auto& occurrence : custody_record->occurrences) {
+                        if (occurrence.process_instance_id == piid &&
+                            occurrence.occurrence == spawn_args.occurrence &&
+                            occurrence.setup == detail::Managed_child_occurrence_record::setup_state::pending)
+                        {
+                            occurrence.setup =
+                                detail::Managed_child_occurrence_record::setup_state::no_child;
+                            break;
+                        }
+                    }
+                }
+                custody_record->changed.notify_all();
+                custody_owner->request_child_custody_release(custody_record);
+                readiness_observer(
+                    custody_owner, custody_record, coord_id,
+                    options.wait_for_instance_name, deadline, false);
+            }
         }
-        if (result.success) {
-            ++spawned;
+        else {
+            spawn_result = s_mproc->spawn_swarm_process(spawn_args);
+            os_process_created = spawn_result.success && spawn_result.os_process_created;
+            if (!os_process_created) {
+                s_mproc->request_child_custody_release(custody_record);
+            }
         }
     }
-
-    if (os_process_created) {
+    if (!async_deadline_setup && os_process_created) {
         detail::runtime_spawn_success_for_test(
-            wait_spawn_result ? wait_spawn_result->instance_id : piid,
-            wait_spawn_result ? wait_spawn_result->os_pid : -1,
-            wait_spawn_result ? wait_spawn_result->lifeline_enabled : options.lifetime.enable_lifeline,
-            wait_spawn_result ? wait_spawn_result->lifeline_write_retained : false);
+            spawn_result.instance_id,
+            spawn_result.os_pid,
+            spawn_result.lifeline_enabled,
+            spawn_result.lifeline_write_retained);
         detail::runtime_stage_for_test(
             detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
     }
 
-    if (spawned == 0 || !wait_requested) {
-        return spawned;
+    Managed_child_custody custody(custody_record);
+    if (!async_deadline_setup && (!os_process_created || !wait_requested)) {
+        return custody;
+    }
+    auto* custody_owner = s_mproc;
+    if (!async_deadline_setup) {
+        {
+            std::lock_guard<std::mutex> lock(custody_record->mutex);
+            custody_record->readiness_observer_complete = false;
+        }
+        custody_owner->start_child_custody_worker(
+            [custody_owner, custody_record, coord_id,
+             target = options.wait_for_instance_name, deadline, readiness_observer]()
+            {
+                readiness_observer(
+                    custody_owner, custody_record, coord_id, target, deadline, true);
+            });
     }
 
-    bool        wait_succeeded      = false;
-    const char* wait_failure_reason = nullptr;
-    try {
-        if (wait_timeout.count() <= 0) {
-            const auto waited = Coordinator::rpc_wait_for_instance(
-                coord_id,
-                options.wait_for_instance_name);
-            wait_succeeded = waited != invalid_instance_id;
-            if (!wait_succeeded) {
-                wait_failure_reason = "wait returned invalid instance id";
-            }
+    {
+        std::unique_lock<std::mutex> lock(custody_record->mutex);
+        if (deadline == std::chrono::steady_clock::time_point::max()) {
+            custody_record->changed.wait(lock, [&]() {
+                return custody_record->readiness_reached ||
+                    custody_record->release_requested;
+            });
         }
         else {
-            const auto deadline       = std::chrono::steady_clock::now() + wait_timeout;
-            auto       poll_delay     = std::chrono::milliseconds(5);
-            const auto max_poll_delay = std::chrono::milliseconds(200);
-            while (std::chrono::steady_clock::now() < deadline) {
-                const auto resolved = Coordinator::rpc_resolve_instance(
-                    coord_id,
-                    options.wait_for_instance_name);
-                if (resolved != invalid_instance_id) {
-                    wait_succeeded = true;
-                    break;
-                }
-
-                const auto now = std::chrono::steady_clock::now();
-                if (now >= deadline) {
-                    break;
-                }
-
-                auto       sleep_for = poll_delay;
-                const auto remaining = deadline - now;
-                if (sleep_for > remaining) {
-                    sleep_for = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
-                }
-                std::this_thread::sleep_for(sleep_for);
-
-                if (poll_delay < max_poll_delay) {
-                    auto next_delay = poll_delay * 2;
-                    poll_delay = (next_delay < max_poll_delay) ? next_delay : max_poll_delay;
-                }
-            }
-
-            if (!wait_succeeded) {
-                wait_failure_reason = "timeout";
-            }
+            custody_record->changed.wait_until(lock, deadline, [&]() {
+                return custody_record->readiness_reached ||
+                    custody_record->release_requested;
+            });
+        }
+        if (custody_record->readiness_reached) {
+            return custody;
         }
     }
-    catch (const std::exception& ex) {
-        Log_stream(log_level::warning)
-            << "spawn_swarm_process: wait failed (" << ex.what() << ")\n";
-        cleanup_failed_wait("wait_for_instance_name_exception", ex.what());
-        return 0;
-    }
-    catch (...) {
-        Log_stream(log_level::warning)
-            << "spawn_swarm_process: wait failed (unknown exception)\n";
-        cleanup_failed_wait(
-            "wait_for_instance_name_exception",
-            "unknown exception");
-        return 0;
-    }
 
-    if (!wait_succeeded) {
-        if (!wait_failure_reason) {
-            wait_failure_reason = "unknown wait failure";
-        }
-        Log_stream(log_level::warning)
-            << "spawn_swarm_process: wait failed (" << wait_failure_reason
-            << ") for instance '" << options.wait_for_instance_name
-            << "' (spawned=" << spawned << ")\n";
-        cleanup_failed_wait("wait_for_instance_name", wait_failure_reason);
-        return 0;
-    }
+    Log_stream(log_level::warning)
+        << "spawn_swarm_process: readiness incomplete at deadline for instance '"
+        << options.wait_for_instance_name << "'; custody retained\n";
+    custody_owner->request_child_custody_release(custody_record, true);
+    return custody;
+}
 
-#ifdef _WIN32
-    close_wait_spawn_process_handle();
-#endif
-    return spawned;
+inline Managed_child_custody_observation observe_managed_child(
+    const Managed_child_custody& custody)
+{
+    Managed_child_custody_observation observation;
+    if (!custody.m_record) {
+        return observation;
+    }
+    std::lock_guard<std::mutex> lock(custody.m_record->mutex);
+    observation.accepted = custody.m_record->accepted;
+    observation.readiness_reached = custody.m_record->readiness_reached;
+    observation.release_requested = custody.m_record->release_requested;
+    observation.release_complete = custody.m_record->release_complete;
+    observation.admitted_occurrences = custody.m_record->occurrences.size();
+    for (const auto& occurrence : custody.m_record->occurrences) {
+        observation.created_occurrences += occurrence.os_process_created ? 1u : 0u;
+        observation.exited_occurrences += occurrence.os_exit_confirmed ? 1u : 0u;
+    }
+    return observation;
+}
+
+inline Managed_child_custody_observation wait_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline)
+{
+    if (!custody.m_record) {
+        return {};
+    }
+    std::unique_lock<std::mutex> lock(custody.m_record->mutex);
+    custody.m_record->changed.wait_until(lock, deadline, [&]() {
+        return custody.m_record->release_complete;
+    });
+    lock.unlock();
+    return observe_managed_child(custody);
+}
+
+inline Managed_child_custody_observation release_managed_child(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline)
+{
+    if (custody.m_record && s_mproc) {
+        s_mproc->request_child_custody_release(custody.m_record);
+    }
+    return wait_managed_child(custody, deadline);
+}
+
+inline Managed_child_custody_observation retry_managed_child_release(
+    const Managed_child_custody& custody,
+    std::chrono::steady_clock::time_point deadline)
+{
+    return release_managed_child(custody, deadline);
 }
 
 inline instance_id_type join_swarm(

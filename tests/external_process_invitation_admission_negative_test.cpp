@@ -558,9 +558,9 @@ bool run_spawn_collision_keeps_invitation_claimable_case(
     sintra::Spawn_options spawn_options;
     spawn_options.binary_path         = missing_executable_path(dir).string();
     spawn_options.process_instance_id = explicit_iid;
-    const size_t spawned = sintra::spawn_swarm_process(spawn_options);
+    const auto custody = sintra::spawn_swarm_process(spawn_options);
     ok &= sintra::test::assert_true(
-        spawned == 0,
+        !custody,
         k_failure_prefix,
         "spawn with an invited explicit process id and missing executable should fail");
 

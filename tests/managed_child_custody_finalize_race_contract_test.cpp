@@ -407,11 +407,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     options.lifetime.enable_lifeline = false;
 
     std::atomic<bool> spawn_finished{false};
-    size_t scalar = std::numeric_limits<size_t>::max();
+    sintra::Managed_child_custody custody;
     bool spawn_threw = false;
     std::thread spawn_thread([&]() {
         try {
-            scalar = sintra::spawn_swarm_process(options);
+            custody = sintra::spawn_swarm_process(options);
         }
         catch (...) {
             spawn_threw = true;
@@ -493,38 +493,37 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::fprintf(stderr, "managed_child_custody_finalize_race: root finalize failed\n");
     }
 
-    const bool publication_discarded_without_unpublish =
-        s_destroy_publication_count.load(std::memory_order_acquire) == 1 &&
-        exact_process_unpublished.load(std::memory_order_acquire) == 0;
+    const bool runtime_state_retained =
+        sintra::s_mproc != nullptr && sintra::s_coord != nullptr &&
+        s_destroy_publication_count.load(std::memory_order_acquire) == 0;
     const bool caller_still_held_after_finalize =
         !spawn_finished.load(std::memory_order_acquire);
+    const bool finalize_incomplete = !root_finalized && runtime_state_retained;
 
-    bool platform_race_valid = false;
+    bool platform_hold_valid = false;
 #ifndef _WIN32
-    const uint32_t reap_count = s_posix_reap.count.load(std::memory_order_acquire);
-    const int reap_status = s_posix_reap.status.load(std::memory_order_relaxed);
-    const bool native_exit_confirmed = reap_count == 1;
-    const bool terminated_by_parent = native_exit_confirmed && WIFSIGNALED(reap_status);
-    const bool survivor_absent = ledger && native_exit_confirmed &&
-        !exact_posix_child_is_live(ledger->pid, ledger->start_stamp);
-    platform_race_valid =
-        root_finalized && publication_discarded_without_unpublish &&
-        caller_still_held_after_finalize && native_exit_confirmed &&
-        terminated_by_parent && survivor_absent;
+    const bool native_live_after_finalize = ledger &&
+        exact_posix_child_is_live(ledger->pid, ledger->start_stamp) &&
+        s_posix_reap.count.load(std::memory_order_acquire) == 0;
+    platform_hold_valid = finalize_incomplete && caller_still_held_after_finalize &&
+        native_live_after_finalize;
 #else
     const bool native_live_after_finalize = ledger && child_process &&
         WaitForSingleObject(child_process, 0) == WAIT_TIMEOUT &&
         sintra::query_process_start_stamp(static_cast<uint32_t>(ledger->pid)) ==
             std::optional<uint64_t>(ledger->start_stamp);
-    platform_race_valid =
-        root_finalized && publication_discarded_without_unpublish &&
+    platform_hold_valid =
+        finalize_incomplete &&
         caller_still_held_after_finalize && native_live_after_finalize;
 #endif
 
     s_spawn_hold.release.store(true, std::memory_order_release);
     spawn_thread.join();
-    const bool caller_failed_after_release =
-        spawn_finished.load(std::memory_order_acquire) && !spawn_threw && scalar == 0;
+    const auto held_observation = sintra::observe_managed_child(custody);
+    const bool caller_returned_retained_custody =
+        spawn_finished.load(std::memory_order_acquire) && !spawn_threw &&
+        held_observation.accepted && held_observation.created_occurrences == 1 &&
+        held_observation.release_requested && !held_observation.release_complete;
 
     const bool release_written = write_complete_file(
         marker_path(shared.path(), k_release_child_file),
@@ -557,16 +556,36 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         CloseHandle(child_process);
     }
 #else
+    wait_until([&]() {
+        return s_posix_reap.count.load(std::memory_order_acquire) == 1;
+    }, k_watchdog_timeout);
     if (ledger && s_posix_reap.count.load(std::memory_order_acquire) == 0) {
         if (signal_exact_posix_child(ledger->pid, ledger->start_stamp, SIGTERM)) {
             forced_cleanup = true;
         }
     }
-    cleanup_valid = release_written &&
+    const auto posix_reap_status = s_posix_reap.status.load(std::memory_order_relaxed);
+    const bool posix_normal_exit =
         s_posix_reap.count.load(std::memory_order_acquire) == 1 &&
+        WIFEXITED(posix_reap_status) && WEXITSTATUS(posix_reap_status) == 0;
+    cleanup_valid = release_written && posix_normal_exit &&
         ledger && !exact_posix_child_is_live(ledger->pid, ledger->start_stamp) &&
         !forced_cleanup;
 #endif
+
+    const auto released_observation = sintra::wait_managed_child(
+        custody,
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
+    bool final_retry_succeeded = false;
+    if (released_observation.release_complete) {
+        try {
+            final_retry_succeeded = sintra::detail::finalize();
+        }
+        catch (...) {
+        }
+    }
+    cleanup_valid = cleanup_valid && released_observation.release_complete &&
+        final_retry_succeeded && sintra::s_mproc == nullptr;
 
     sintra::detail::test_hooks::s_runtime_spawn_success.store(nullptr, std::memory_order_release);
     sintra::detail::test_hooks::s_coordinator_destroying_publication.store(
@@ -589,36 +608,39 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         ? std::to_string(ledger->start_stamp)
         : "unavailable";
 
-    if (accepted_like_hold && platform_race_valid && caller_failed_after_release && cleanup_valid) {
+    if (accepted_like_hold && platform_hold_valid &&
+        caller_returned_retained_custody && cleanup_valid)
+    {
 #ifdef _WIN32
         std::printf(
-            "R8_W_RED_VALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
+            "R8_W_GREEN_VALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
             "lifeline_enabled=0 lifeline_entry=absent self_published=1 begin_draining=1 "
-            "caller_held=1 finalize_returned=1 publication_discarded_without_unpublish=1 "
-            "native_alive_after_finalize=1 confirmed_exit_before_finalize=0 scalar=0 "
-            "natural_cleanup=1 survivor_absent=1\n",
+            "caller_held=1 finalize_returned_incomplete=1 runtime_state_retained=1 "
+            "native_alive_after_finalize=1 custody_retained=1 release_complete=1 "
+            "finalize_retry_succeeded=1 natural_cleanup=1 survivor_absent=1\n",
             nonce.c_str(), output_piid, output_occurrence, output_pid, output_stamp.c_str());
 #else
         std::printf(
-            "R8_P_RED_VALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
+            "R8_P_GREEN_VALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
             "lifeline_enabled=0 lifeline_entry=absent self_published=1 begin_draining=1 "
-            "caller_held=1 finalize_returned=1 publication_discarded_without_unpublish=1 "
-            "native_terminate_reap=1 reap_count=%u reap_status=%d scalar=0 "
-            "survivor_absent=1\n",
+            "caller_held=1 finalize_returned_incomplete=1 runtime_state_retained=1 "
+            "native_alive_after_finalize=1 custody_retained=1 release_complete=1 "
+            "finalize_retry_succeeded=1 reap_count=%u reap_status=%d survivor_absent=1\n",
             nonce.c_str(), output_piid, output_occurrence, output_pid, output_stamp.c_str(),
-            reap_count, reap_status);
+            s_posix_reap.count.load(std::memory_order_acquire),
+            s_posix_reap.status.load(std::memory_order_relaxed));
 #endif
         std::fflush(stdout);
-        return 1;
+        return 0;
     }
 
     std::fprintf(
         stderr,
         "R8_INVALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
         "spawn_hold=%d ledger_valid=%d start_stamp_verified=%d native_alive_before=%d "
-        "publication_confirmed=%d no_lifeline_entry=%d root_finalized=%d "
+        "publication_confirmed=%d no_lifeline_entry=%d first_finalize_succeeded=%d "
         "destroy_publication_count=%u unpublished_count=%u caller_held=%d "
-        "platform_race_valid=%d scalar=%zu spawn_threw=%d cleanup_valid=%d forced_cleanup=%d\n",
+        "platform_hold_valid=%d custody_accepted=%d spawn_threw=%d cleanup_valid=%d forced_cleanup=%d\n",
         nonce.c_str(), output_piid, output_occurrence, output_pid, output_stamp.c_str(),
         spawn_hold_entered ? 1 : 0,
         ledger_identity_valid ? 1 : 0,
@@ -630,8 +652,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         s_destroy_publication_count.load(std::memory_order_acquire),
         exact_process_unpublished.load(std::memory_order_acquire),
         caller_still_held_after_finalize ? 1 : 0,
-        platform_race_valid ? 1 : 0,
-        scalar,
+        platform_hold_valid ? 1 : 0,
+        held_observation.accepted ? 1 : 0,
         spawn_threw ? 1 : 0,
         cleanup_valid ? 1 : 0,
         forced_cleanup ? 1 : 0);

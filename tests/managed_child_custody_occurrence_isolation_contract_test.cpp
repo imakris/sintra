@@ -485,6 +485,41 @@ int main(int argc, char* argv[])
 #endif
     }
 
+    std::shared_ptr<sintra::detail::Managed_child_custody_record> custody_record;
+    if (ledger_1) {
+        std::lock_guard<std::mutex> lock(sintra::s_mproc->m_child_custody_mutex);
+        auto it = sintra::s_mproc->m_child_custody_by_process.find(ledger_1->process_iid);
+        if (it != sintra::s_mproc->m_child_custody_by_process.end()) {
+            custody_record = it->second.custody.lock();
+        }
+    }
+    bool custody_occurrences_isolated = false;
+    if (custody_record && ledger_0 && ledger_1) {
+        std::lock_guard<std::mutex> lock(custody_record->mutex);
+        if (custody_record->occurrences.size() == 2) {
+            const auto& predecessor = custody_record->occurrences[0];
+            const auto& replacement = custody_record->occurrences[1];
+            custody_occurrences_isolated =
+                predecessor.occurrence == ledger_0->occurrence &&
+                predecessor.setup == sintra::detail::Managed_child_occurrence_record::
+                    setup_state::ownership_ready &&
+                predecessor.os_pid == ledger_0->pid &&
+                predecessor.os_process_start_stamp_available &&
+                predecessor.os_process_start_stamp == ledger_0->start_stamp &&
+                predecessor.publication_retired &&
+                predecessor.communication_retired &&
+                predecessor.os_exit_confirmed &&
+                replacement.occurrence == ledger_1->occurrence &&
+                replacement.setup == sintra::detail::Managed_child_occurrence_record::
+                    setup_state::ownership_ready &&
+                replacement.os_pid == ledger_1->pid &&
+                replacement.os_process_start_stamp_available &&
+                replacement.os_process_start_stamp == ledger_1->start_stamp &&
+                replacement.os_process_created &&
+                !replacement.os_exit_confirmed;
+        }
+    }
+
     const bool predecessor_request_still_held =
         predecessor_request_held && !request_done.load(std::memory_order_acquire);
     s_outbound_hold.release.store(true, std::memory_order_release);
@@ -502,13 +537,13 @@ int main(int argc, char* argv[])
         ledger_0_valid && predecessor_live && predecessor_request_held && crash_requested &&
         recovery_observed && exact_crash && predecessor_retired &&
         ledger_1_valid && replacement_live && predecessor_request_still_held &&
-        replacement_satisfied_predecessor;
+        replacement_satisfied_predecessor && custody_occurrences_isolated;
 
     const bool release_written = write_complete_file(
         marker(shared.path(), k_release_1), "complete=1\n");
     const bool replacement_finalized = sintra::test::wait_for_file(
         marker(shared.path(), k_finalized_1), 10s, 10ms);
-    sintra::detail::finalize();
+    const bool root_finalized = sintra::detail::finalize();
 
     bool predecessor_abnormal_exit = false;
     bool replacement_normal_exit = false;
@@ -558,14 +593,35 @@ int main(int argc, char* argv[])
     watchdog.join();
 
     const bool cleanup_valid = release_written && replacement_finalized &&
-        predecessor_abnormal_exit && replacement_normal_exit && no_survivors && !forced_cleanup;
+        predecessor_abnormal_exit && replacement_normal_exit && no_survivors && !forced_cleanup &&
+        root_finalized;
+    bool custody_release_closed_all_occurrences = false;
+    if (custody_record) {
+        std::lock_guard<std::mutex> lock(custody_record->mutex);
+        custody_release_closed_all_occurrences =
+            !custody_record->recovery_open && custody_record->release_requested &&
+            custody_record->release_complete &&
+            std::all_of(
+                custody_record->occurrences.begin(), custody_record->occurrences.end(),
+                [](const auto& occurrence) {
+                    return occurrence.setup == sintra::detail::Managed_child_occurrence_record::
+                            setup_state::no_child ||
+                        (occurrence.setup == sintra::detail::Managed_child_occurrence_record::
+                            setup_state::ownership_ready &&
+                         occurrence.publication_retired &&
+                         occurrence.communication_retired &&
+                         occurrence.os_exit_confirmed);
+                });
+    }
 
-    if (causal_witness && cleanup_valid) {
+    if (causal_witness && cleanup_valid && custody_release_closed_all_occurrences) {
         std::fprintf(stdout,
-            "R6_RED_VALID nonce=%s occurrence_0=%u pid_0=%d stamp_0=%llu "
+            "R6_GREEN_VALID nonce=%s occurrence_0=%u pid_0=%d stamp_0=%llu "
             "occurrence_1=%u pid_1=%d stamp_1=%llu reused_piid=%llu reused_iid=%llu "
             "name_based_request=1 predecessor_request_held=1 name_retired=1 "
-            "replacement_satisfied=1 predecessor_abnormal=1 "
+            "raw_name_request_retargeted=1 custody_retargeted=0 "
+            "custody_occurrences_isolated=1 recovery_closed_before_release=1 "
+            "all_occurrences_terminal=1 predecessor_abnormal=1 "
             "replacement_normal=1 forced_cleanup=0 survivors=0\n",
             nonce.c_str(), ledger_0->occurrence, ledger_0->pid,
             static_cast<unsigned long long>(ledger_0->start_stamp),
@@ -575,21 +631,23 @@ int main(int argc, char* argv[])
             static_cast<unsigned long long>(ledger_1->witness_iid));
         std::fflush(stdout);
         shared.cleanup();
-        return 1;
+        return 0;
     }
 
     std::fprintf(stderr,
         "R6_INVALID ledger0=%d predecessor_live=%d request_held=%d recovery=%d exact_crash=%d "
-        "retired=%d still_held=%d ledger1=%d replacement_live=%d replacement_satisfied=%d "
+        "retired=%d still_held=%d ledger1=%d replacement_live=%d replacement_satisfied=%d custody_isolated=%d "
         "release=%d finalized=%d predecessor_abnormal=%d replacement_normal=%d "
-        "forced_cleanup=%d survivors_absent=%d\n",
+        "forced_cleanup=%d survivors_absent=%d custody_release_complete=%d\n",
         ledger_0_valid ? 1 : 0, predecessor_live ? 1 : 0, predecessor_request_held ? 1 : 0,
         recovery_observed ? 1 : 0, exact_crash ? 1 : 0, predecessor_retired ? 1 : 0,
         predecessor_request_still_held ? 1 : 0, ledger_1_valid ? 1 : 0,
         replacement_live ? 1 : 0, replacement_satisfied_predecessor ? 1 : 0,
+        custody_occurrences_isolated ? 1 : 0,
         release_written ? 1 : 0, replacement_finalized ? 1 : 0,
         predecessor_abnormal_exit ? 1 : 0, replacement_normal_exit ? 1 : 0,
-        forced_cleanup ? 1 : 0, no_survivors ? 1 : 0);
+        forced_cleanup ? 1 : 0, no_survivors ? 1 : 0,
+        custody_release_closed_all_occurrences ? 1 : 0);
     if (ledger_0 && ledger_1) {
         std::fprintf(stderr,
             "R6_INVALID_IDENTITIES piid0=%llu piid1=%llu iid0=%llu iid1=%llu "

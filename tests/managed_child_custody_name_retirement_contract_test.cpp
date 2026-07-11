@@ -455,10 +455,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     options.wait_timeout = std::chrono::seconds(8);
     options.lifetime.enable_lifeline = false;
 
-    size_t scalar = 0;
+    sintra::Managed_child_custody custody;
     bool spawn_threw = false;
     try {
-        scalar = sintra::spawn_swarm_process(options);
+        custody = sintra::spawn_swarm_process(options);
     }
     catch (...) {
         spawn_threw = true;
@@ -536,8 +536,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         }
     }
 
+    const auto launch_observation = sintra::observe_managed_child(custody);
     const bool pre_retirement_valid =
-        !spawn_threw && scalar == 1 && ledger_identity_valid &&
+        !spawn_threw && launch_observation.accepted &&
+        launch_observation.readiness_reached &&
+        launch_observation.created_occurrences == 1 && ledger_identity_valid &&
         start_stamp_verified && native_alive_before &&
         initial_publications_valid && initial_communication_live;
 
@@ -613,6 +616,14 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         target_absent && same_occurrence_live && communication_still_live &&
         later_facts_nonterminal;
 
+    const auto held_release_observation = sintra::release_managed_child(
+        custody,
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+    const bool release_incomplete_at_witness =
+        held_release_observation.accepted &&
+        held_release_observation.release_requested &&
+        !held_release_observation.release_complete;
+
     const bool release_written = write_complete_file(
         marker_path(shared.path(), k_release_file),
         "release=1\ncomplete=1\n");
@@ -624,6 +635,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         marker_path(shared.path(), k_finalized_file),
         k_watchdog_timeout,
         std::chrono::milliseconds(10));
+    const auto released_observation = sintra::wait_managed_child(
+        custody,
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     bool native_exit_confirmed = false;
     bool native_normal_exit = false;
@@ -718,7 +732,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #endif
 
     const bool cleanup_valid =
-        release_written && release_seen && child_finalized &&
+        release_incomplete_at_witness && release_written && release_seen && child_finalized &&
+        released_observation.release_complete &&
         later_retirements_seen &&
         events.requested_unpublished.load(std::memory_order_acquire) == 1 &&
         events.participation_unpublished.load(std::memory_order_acquire) == 1 &&
@@ -747,10 +762,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     if (witness_valid && cleanup_valid) {
         std::printf(
-            "R5_RED_WITNESS_VALID nonce=%s piid=%llu occurrence=%u pid=%d "
-            "start_stamp=%s scalar=1 target_published=1 exact_name_retirement=1 "
+            "R5_GREEN_VALID nonce=%s piid=%llu occurrence=%u pid=%d "
+            "start_stamp=%s custody_accepted=1 target_published=1 exact_name_retirement=1 "
             "target_name_after=absent same_occurrence_live=1 communication_live=1 "
-            "later_facts_nonterminal=1 native_exit_confirmed=1 survivor_absent=1 %s\n",
+            "later_facts_nonterminal=1 release_incomplete_at_witness=1 "
+            "release_complete=1 native_exit_confirmed=1 survivor_absent=1 %s\n",
             nonce.c_str(),
             output_piid,
             output_occurrence,
@@ -764,7 +780,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     std::fprintf(
         stderr,
         "R5_WITNESS_INVALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
-        "scalar=%zu spawn_threw=%d ledger_valid=%d target_published=%u "
+        "custody_accepted=%d spawn_threw=%d ledger_valid=%d target_published=%u "
         "exact_retirement_count=%u target_absent=%d same_occurrence_live=%d "
         "communication_live=%d later_facts_nonterminal=%d release_seen=%d "
         "child_finalized=%d native_exit_confirmed=%d survivor_absent=%d "
@@ -774,7 +790,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         output_occurrence,
         output_pid,
         output_stamp.c_str(),
-        scalar,
+        launch_observation.accepted ? 1 : 0,
         spawn_threw ? 1 : 0,
         ledger_identity_valid ? 1 : 0,
         events.requested_published.load(std::memory_order_acquire),

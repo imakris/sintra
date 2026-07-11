@@ -148,6 +148,59 @@ inline constexpr const char* k_external_attach_token_arg      = "--external_atta
 inline constexpr const char* k_external_attach_occurrence_arg = "--external_attach_occurrence";
 inline constexpr auto        k_external_attach_claim_timeout  = std::chrono::seconds(5);
 
+struct Managed_child_occurrence_record
+{
+    enum class setup_state {
+        pending,
+        no_child,
+        ownership_ready
+    };
+
+    uint32_t                   occurrence = 0;
+    instance_id_type           process_instance_id = invalid_instance_id;
+    setup_state                setup = setup_state::pending;
+    bool                       os_creation_attempted = false;
+    bool                       os_process_created = false;
+    bool                       publication_retired = false;
+    bool                       communication_retired = false;
+    bool                       os_exit_confirmed = false;
+    int                        os_pid = -1;
+    uint64_t                   os_process_start_stamp = 0;
+    bool                       os_process_start_stamp_available = false;
+#ifdef _WIN32
+    uintptr_t                  os_process_handle = 0;
+    bool                       os_process_handle_owned = false;
+    bool                       os_exit_observer_registered = false;
+#endif
+};
+
+struct Managed_child_custody_record;
+
+struct Managed_child_active_occurrence
+{
+    std::weak_ptr<Managed_child_custody_record> custody;
+    uint32_t                                    occurrence = 0;
+};
+
+// One retained logical custody record.  Subsystems remain authoritative for
+// their own facts; this record only joins their exact-occurrence reports.
+struct Managed_child_custody_record
+{
+    mutable std::mutex                         mutex;
+    std::condition_variable                    changed;
+    uint64_t                                   identity = 0;
+    bool                                       accepted = false;
+    bool                                       readiness_reached = false;
+    bool                                       readiness_observer_complete = true;
+    bool                                       recovery_open = true;
+    bool                                       release_requested = false;
+    bool                                       cleanup_requested = false;
+    bool                                       cleanup_started = false;
+    bool                                       release_complete = false;
+    std::string                                wait_target_name;
+    std::vector<Managed_child_occurrence_record> occurrences;
+};
+
 } // namespace detail
 
 
@@ -351,9 +404,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type           piid;
         uint32_t                   occurrence = 0;
         Lifetime_policy            lifetime;
-#ifdef _WIN32
-        bool                       capture_process_handle = false;
-#endif
+        std::shared_ptr<detail::Managed_child_custody_record> custody;
+        bool                       custody_occurrence_admitted = false;
     };
 
     struct Spawn_result
@@ -374,44 +426,14 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::string                error_message;
     };
 
-    struct Spawn_cleanup_request
-    {
-        std::string                binary_name;
-        std::string                wait_target_name;
-        std::string                first_publish_name;
-        instance_id_type           instance_id = invalid_instance_id;
-        std::chrono::milliseconds  wait_timeout{0};
-        int                        os_pid = -1;
-#ifdef _WIN32
-        uintptr_t                  os_process_handle = 0;
-        bool                       os_process_handle_owned = false;
-#endif
-        bool                       lifeline_enabled = false;
-        int                        lifeline_timeout_ms = 0;
-        std::string                failure_stage;
-        std::string                failure_reason;
-    };
-
-    struct Spawn_cleanup_result
-    {
-        bool                       process_was_registered = false;
-        bool                       normal_unpublish_attempted = false;
-        bool                       normal_unpublish_succeeded = false;
-        bool                       lifeline_release_attempted = false;
-        bool                       lifeline_released = false;
-        bool                       startup_bookkeeping_removed = false;
-        bool                       reader_removed = false;
-        bool                       forced_termination_attempted = false;
-        bool                       forced_termination_signal_sent = false;
-        bool                       forced_termination_confirmed = false;
-#ifdef _WIN32
-        uintptr_t                  os_process_handle_used = 0;
-#endif
-        std::string                forced_termination_error;
-    };
-
 #ifndef _WIN32
-    std::vector<pid_t>                  m_spawned_child_pids;
+    struct Spawned_child_reap_slot
+    {
+        uint64_t reservation_id = 0;
+        pid_t    pid = 0;
+    };
+    std::vector<Spawned_child_reap_slot> m_spawned_child_pids;
+    uint64_t                            m_next_spawned_child_reservation = 1;
     mutable std::mutex                  m_spawned_child_pids_mutex;
 
     void reap_finished_children();
@@ -426,13 +448,51 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool release_lifeline(instance_id_type process_instance_id);
     void release_all_lifelines();
 
-    Spawn_cleanup_result cleanup_failed_spawned_process_startup(
-        const Spawn_cleanup_request& request);
-
     Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args);
+
+    std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody(
+        const std::string& wait_target_name = {});
+    bool can_accept_child_custody(instance_id_type process_instance_id) const;
+    bool admit_child_custody_occurrence(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        instance_id_type process_instance_id,
+        uint32_t occurrence);
+    void request_child_custody_release(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        bool initiate_cleanup = false);
+    void request_all_child_custody_releases();
+    bool wait_for_all_child_custodies(
+        std::chrono::steady_clock::time_point deadline);
+    bool all_child_custodies_released() const;
+    bool child_custody_allows_recovery(instance_id_type process_instance_id) const;
+    void note_child_publication_and_communication_retired(instance_id_type process_instance_id);
+    void note_child_os_exit(int os_pid);
+    void start_child_custody_worker(
+        std::function<void()> worker,
+        const char* failure_stage = nullptr,
+        instance_id_type failure_process_instance_id = invalid_instance_id,
+        uint32_t failure_occurrence = 0);
+    void join_child_custody_workers();
+    void retire_child_custody_if_complete(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody);
 
     map<instance_id_type, Spawn_swarm_process_args>
                                         m_cached_spawns;
+    mutable std::mutex                  m_cached_spawns_mutex;
+
+    mutable std::mutex                  m_child_custody_mutex;
+    uint64_t                            m_next_child_custody_identity = 1;
+    std::map<uint64_t, std::shared_ptr<detail::Managed_child_custody_record>>
+                                        m_child_custodies;
+    std::map<instance_id_type, detail::Managed_child_active_occurrence>
+                                        m_child_custody_by_process;
+    mutable std::mutex                  m_child_custody_workers_mutex;
+    struct Child_custody_worker
+    {
+        std::thread                         thread;
+        std::shared_ptr<std::atomic<bool>>  complete;
+    };
+    std::vector<Child_custody_worker>   m_child_custody_workers;
 };
 
 

@@ -337,6 +337,16 @@ public:
     // Helpers (not exported for RPC).
     // ================================================
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    instance_id_type publish_transceiver_for_test(
+        type_id_type tid,
+        instance_id_type iid,
+        const string& assigned_name)
+    {
+        return publish_transceiver(tid, iid, assigned_name);
+    }
+#endif
+
     // Lifecycle/recovery hooks run during crash/unpublish handling and recovery
     // scheduling. See docs/process_lifecycle_notes.md for timing, threading, and
     // usage patterns (non-coordinator calls are no-ops).

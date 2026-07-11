@@ -305,7 +305,13 @@ sintra::Spawn_options options;
 options.binary_path = binary_path;
 options.lifetime.hard_exit_code = 99;
 options.lifetime.hard_exit_timeout_ms = 100;
-sintra::spawn_swarm_process(options);
+auto custody = sintra::spawn_swarm_process(options);
+if (!custody) {
+    throw std::runtime_error("managed-child request rejected");
+}
+
+auto launch = sintra::observe_managed_child(custody);
+// `launch.readiness_reached` is independent from accepted custody.
 ```
 
 Note: spawned processes require a lifeline by default. To launch a process

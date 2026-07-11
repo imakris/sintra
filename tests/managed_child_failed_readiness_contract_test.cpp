@@ -78,7 +78,7 @@ struct Spawn_call
     std::mutex               mutex;
     std::condition_variable  cv;
     bool                     done = false;
-    size_t                   scalar = std::numeric_limits<size_t>::max();
+    sintra::Managed_child_custody custody;
     bool                     threw = false;
 };
 
@@ -523,7 +523,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     std::thread spawn_thread([&]() {
         try {
-            call.scalar = sintra::spawn_swarm_process(options);
+            call.custody = sintra::spawn_swarm_process(options);
         }
         catch (...) {
             call.threw = true;
@@ -640,7 +640,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool spawn_result_invalid = false;
     if (spawn_call_completed) {
         std::lock_guard<std::mutex> lock(call.mutex);
-        spawn_result_invalid = call.threw || call.scalar != 0;
+        const auto observation = sintra::observe_managed_child(call.custody);
+        spawn_result_invalid = call.threw || !observation.accepted ||
+            observation.created_occurrences != 1 || observation.readiness_reached ||
+            !observation.release_requested;
     }
     if (!setup_valid || !spawn_call_completed || spawn_result_invalid) {
         child_release_written = write_complete_file(
@@ -653,7 +656,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     sintra::detail::test_hooks::s_runtime_stage.store(nullptr, std::memory_order_release);
     s_spawn_gate = nullptr;
 
-    const bool scalar_zero = spawn_call_completed && !call.threw && call.scalar == 0;
+    const auto launch_observation = sintra::observe_managed_child(call.custody);
+    const bool custody_retained = spawn_call_completed && !call.threw &&
+        launch_observation.accepted && launch_observation.created_occurrences == 1 &&
+        !launch_observation.readiness_reached && launch_observation.release_requested &&
+        !launch_observation.release_complete;
     bool managed_name_absent_after = false;
     bool requested_target_absent_after = false;
     bool native_alive_after = false;
@@ -718,6 +725,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         child_finalized_path(shared.path()),
         std::chrono::seconds(1),
         std::chrono::milliseconds(10));
+    const auto released_observation = sintra::wait_managed_child(
+        call.custody,
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
 
 #ifdef _WIN32
     if (ledger && !native_exit_confirmed) {
@@ -789,12 +799,13 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         native_alive_before_release &&
         managed_name_seen &&
         requested_target_never_seen &&
-        scalar_zero &&
+        custody_retained &&
         managed_name_absent_after &&
         native_alive_after &&
         child_release_written &&
         release_seen &&
         child_finalized &&
+        released_observation.release_complete &&
         native_exit_confirmed &&
         native_normal_exit &&
         survivor_absent &&
@@ -821,10 +832,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     if (baseline_valid) {
         std::printf(
-            "R2_RED_VALID R3_RED_VALID nonce=%s piid=%llu occurrence=%u pid=%d "
+            "R2_GREEN_VALID R3_GREEN_VALID nonce=%s piid=%llu occurrence=%u pid=%d "
             "start_stamp=%s start_stamp_verified=%d native_identity_verified=1 "
             "spawn_success_stage=1 "
-            "managed_name_seen=1 requested_target_seen=0 scalar=0 "
+            "managed_name_seen=1 requested_target_seen=0 custody_accepted=1 "
+            "readiness=0 release_requested=1 release_complete=1 "
             "managed_name_after=absent native_alive_after=1 native_exit_confirmed=1 "
             "survivor_absent=1 %s\n",
             nonce.c_str(),
@@ -835,14 +847,14 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             start_stamp_verified ? 1 : 0,
             reap_record.c_str());
         std::fflush(stdout);
-        return 1;
+        return 0;
     }
 
     std::fprintf(
         stderr,
         "R2_R3_INVALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
         "start_stamp_verified=%d native_identity_verified=%d spawn_success_stage=%d "
-        "managed_name_seen=%d requested_target_seen=%d scalar=%zu "
+        "managed_name_seen=%d requested_target_seen=%d custody_retained=%d "
         "managed_name_after=%s native_alive_after=%d native_exit_confirmed=%d "
         "survivor_absent=%d forced_cleanup=%d root_finalized=%d "
         "child_reap_hook_cleared=%d %s\n",
@@ -856,7 +868,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         spawn_success_stage ? 1 : 0,
         managed_name_seen ? 1 : 0,
         requested_target_seen.load(std::memory_order_acquire) ? 1 : 0,
-        call.scalar,
+        custody_retained ? 1 : 0,
         managed_name_absent_after ? "absent" : "present_or_unknown",
         native_alive_after ? 1 : 0,
         native_exit_confirmed ? 1 : 0,

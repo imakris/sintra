@@ -89,6 +89,8 @@ inline constexpr const char* k_stage_make_process_group_groups_locked =
     "make_process_group/groups_locked";
 inline constexpr const char* k_stage_reserve_external_invitation_entered =
     "reserve_external_process_invitation/entered";
+inline constexpr const char* k_stage_publish_transceiver_locked =
+    "publish_transceiver/publish_locked";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 // Coordinator lock-stage hook: tests running in the coordinator process may
@@ -516,8 +518,11 @@ inline bool Coordinator::process_id_is_known_for_external_invitation(
             }
         }
     }
-    if (s_mproc && s_mproc->m_cached_spawns.count(process_iid) != 0) {
-        return true;
+    if (s_mproc) {
+        std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+        if (s_mproc->m_cached_spawns.count(process_iid) != 0) {
+            return true;
+        }
     }
 
     {
@@ -889,8 +894,11 @@ inline bool Coordinator::claim_external_process_invitation(
                 return false;
             }
         }
-        if (s_mproc && s_mproc->m_cached_spawns.count(process_iid) != 0) {
-            return false;
+        if (s_mproc) {
+            std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+            if (s_mproc->m_cached_spawns.count(process_iid) != 0) {
+                return false;
+            }
         }
         m_transceiver_registry[process_iid];
         m_external_attached_processes.insert(process_iid);
@@ -1033,6 +1041,8 @@ instance_id_type Coordinator::publish_transceiver(
     const string&      assigned_name)
 {
     std::lock_guard lock(m_publish_mutex);
+    coordinator_lock_stage_for_test(
+        detail::test_hooks::k_stage_publish_transceiver_locked);
 
     // empty strings are not valid names
     if (assigned_name.empty()) {
@@ -1261,6 +1271,12 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         }
 
         note_draining_state_change();
+        if (s_mproc) {
+            // Registry/group retirement and reader stop are authoritative here;
+            // report them to the exact active custody occurrence before any
+            // recovery can admit its immutable successor.
+            s_mproc->note_child_publication_and_communication_retired(process_iid);
+        }
         {
             std::lock_guard<mutex> crash_lock(m_crash_mutex);
             auto crash_it = m_recent_crash_status.find(process_iid);
@@ -1792,6 +1808,10 @@ void Coordinator::recover_if_required(const Crash_info& info)
         return;
     }
 
+    if (!s_mproc || !s_mproc->child_custody_allows_recovery(info.process_iid)) {
+        return;
+    }
+
     Recovery_policy policy;
     Recovery_runner runner;
     {
@@ -1834,18 +1854,26 @@ void Coordinator::recover_if_required(const Crash_info& info)
         if (should_cancel()) {
             return;
         }
+        if (!s_mproc || !s_mproc->child_custody_allows_recovery(info.process_iid)) {
+            return;
+        }
         if (spawned->exchange(true)) {
             return;
         }
-        auto spawn_it = s_mproc->m_cached_spawns.find(info.process_iid);
-        if (spawn_it == s_mproc->m_cached_spawns.end()) {
-            Log_stream(log_level::warning)
-                << "Recovery skipped for process "
-                << static_cast<unsigned long long>(info.process_iid)
-                << " because no recovery launch command is available.\n";
-            return;
+        Managed_process::Spawn_swarm_process_args spawn_args;
+        {
+            std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+            auto spawn_it = s_mproc->m_cached_spawns.find(info.process_iid);
+            if (spawn_it == s_mproc->m_cached_spawns.end()) {
+                Log_stream(log_level::warning)
+                    << "Recovery skipped for process "
+                    << static_cast<unsigned long long>(info.process_iid)
+                    << " because no recovery launch command is available.\n";
+                return;
+            }
+            spawn_args = spawn_it->second;
         }
-        s_mproc->spawn_swarm_process(spawn_it->second);
+        s_mproc->spawn_swarm_process(spawn_args);
     };
 
     if (!runner) {

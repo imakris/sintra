@@ -6,8 +6,8 @@
 //
 // The test verifies:
 // - spawn_swarm_process with wait_for_instance_name blocks until the instance appears
-// - spawn_swarm_process returns the spawned count on success
-// - spawn_swarm_process with wait_timeout returns 0 on timeout
+// - spawn_swarm_process returns opaque accepted custody and readiness facts
+// - spawn_swarm_process with wait_timeout returns retained incomplete custody
 // - The exponential backoff polling path is exercised (via short timeout)
 // - The timeout case proves child launched and is cleaned up even though it never publishes the waited name
 //
@@ -172,21 +172,21 @@ bool run_preinit_spawn_swarm_validation()
     {
         sintra::Spawn_options options;
         options.binary_path = "";
-        const size_t spawned = sintra::spawn_swarm_process(options);
-        ok &= sintra::test::assert_true(spawned == 0,
+        const auto custody = sintra::spawn_swarm_process(options);
+        ok &= sintra::test::assert_true(!custody,
             "[PREINIT] ",
-            "spawn_swarm_process should return 0 when binary_path is empty");
+            "spawn_swarm_process should reject when binary_path is empty");
     }
 
     {
         sintra::Spawn_options options;
         options.binary_path = "dummy_binary";
         options.wait_for_instance_name = "dummy_instance";
-        const size_t spawned = sintra::spawn_swarm_process(options);
+        const auto custody = sintra::spawn_swarm_process(options);
         ok &= sintra::test::assert_true(
-            spawned == 0,
+            !custody,
             "[PREINIT] ",
-            "spawn_swarm_process should return 0 when wait requires a coordinator before init");
+            "spawn_swarm_process should reject when wait requires a coordinator before init");
     }
 
     return ok;
@@ -277,23 +277,23 @@ int run_coordinator(const std::string& binary_path)
         spawn_options.wait_for_instance_name = k_nonexistent_instance_name;
         spawn_options.wait_timeout           = std::chrono::milliseconds(1500);
 
-        const size_t spawned = sintra::spawn_swarm_process(spawn_options);
+        const auto custody = sintra::spawn_swarm_process(spawn_options);
+        const auto launch = sintra::observe_managed_child(custody);
 
         const auto elapsed    = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
-        std::fprintf(stderr, "[COORDINATOR] Test 1: spawn returned %zu after %lldms\n",
-            spawned, (long long)elapsed_ms);
+        std::fprintf(stderr, "[COORDINATOR] Test 1: custody ready=%d after %lldms\n",
+            launch.readiness_reached ? 1 : 0, (long long)elapsed_ms);
 
-        // The spawn itself may succeed (process started) but wait should fail and return 0
-        // because the instance name never appears.
-        if (spawned != 0) {
-            // The function returns 0 when wait fails, even if spawn succeeded.
-            std::fprintf(stderr, "[COORDINATOR] Test 1: Expected return 0 on timeout, got %zu\n", spawned);
+        if (!launch.accepted || launch.created_occurrences != 1 ||
+            launch.readiness_reached || !launch.release_requested)
+        {
+            std::fprintf(stderr, "[COORDINATOR] Test 1: Invalid incomplete custody snapshot\n");
             record_failure(
                 all_tests_passed,
                 failure_reason,
-                "Test 1: spawn_swarm_process should return 0 on wait timeout");
+                "Test 1: timeout should return retained incomplete custody");
         }
 
         // Verify the timeout was respected (should not return immediately).
@@ -366,16 +366,17 @@ int run_coordinator(const std::string& binary_path)
         spawn_options.wait_for_instance_name = k_worker_instance_name;
         spawn_options.wait_timeout           = std::chrono::milliseconds(10000);
 
-        const size_t spawned = sintra::spawn_swarm_process(spawn_options);
+        const auto custody = sintra::spawn_swarm_process(spawn_options);
+        const auto launch = sintra::observe_managed_child(custody);
 
         const auto elapsed    = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
-        std::fprintf(stderr, "[COORDINATOR] Test 2: spawn returned %zu after %lldms\n",
-            spawned, (long long)elapsed_ms);
+        std::fprintf(stderr, "[COORDINATOR] Test 2: custody ready=%d after %lldms\n",
+            launch.readiness_reached ? 1 : 0, (long long)elapsed_ms);
 
-        if (spawned != 1) {
-            std::fprintf(stderr, "[COORDINATOR] Test 2: Expected return 1 on success, got %zu\n", spawned);
+        if (!launch.accepted || !launch.readiness_reached || launch.created_occurrences != 1) {
+            std::fprintf(stderr, "[COORDINATOR] Test 2: Expected ready child custody\n");
             record_failure(
                 all_tests_passed,
                 failure_reason,
