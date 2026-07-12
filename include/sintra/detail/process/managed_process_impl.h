@@ -142,6 +142,8 @@ inline constexpr const char* k_managed_child_cleanup_lifeline_released =
     "managed_child_cleanup_lifeline_released";
 inline constexpr const char* k_managed_child_cleanup_retirement_confirmed =
     "managed_child_cleanup_retirement_confirmed";
+inline constexpr const char* k_managed_child_cleanup_before_native_convergence =
+    "managed_child_cleanup_before_native_convergence";
 inline constexpr const char* k_managed_child_cleanup_soft_termination =
     "managed_child_cleanup_soft_termination";
 inline constexpr const char* k_managed_child_fail_native_hard_termination =
@@ -2663,6 +2665,18 @@ inline void Managed_process::request_child_custody_release(
                 if (!release_attempt_active()) {
                     converge_native();
                     return false;
+                }
+                if (release_mode == detail::Release_mode::cleanup && s_coord) {
+                    // Observation-only test seam. The coordinator publication
+                    // transaction has retired the process name and transport
+                    // retirement has been started for the exact occurrence;
+                    // native convergence has not started yet. The callback must
+                    // not re-enter custody APIs.
+                    detail::managed_child_cleanup_for_test(
+                        detail::test_hooks::
+                            k_managed_child_cleanup_before_native_convergence,
+                        process_iid,
+                        occurrence);
                 }
                 if (release_mode == detail::Release_mode::cleanup &&
                     !converge_native())

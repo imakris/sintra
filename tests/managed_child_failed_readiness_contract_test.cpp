@@ -52,6 +52,7 @@ constexpr std::string_view k_child_release_seen_file = "child_release_seen.compl
 constexpr std::string_view k_child_finalized_file = "child_finalized.complete";
 constexpr auto k_requested_wait_timeout = std::chrono::milliseconds(350);
 constexpr auto k_watchdog_timeout = std::chrono::seconds(10);
+constexpr auto k_cleanup_gate_timeout = std::chrono::seconds(25);
 constexpr sintra::instance_id_type k_child_process_iid = sintra::compose_instance(29u, 1ull);
 
 struct Child_ledger
@@ -82,7 +83,26 @@ struct Spawn_call
     bool                     threw = false;
 };
 
+struct Publication_observation
+{
+    std::mutex               mutex;
+    std::condition_variable  cv;
+    bool                     child_seen = false;
+    sintra::type_id_type     child_type = sintra::invalid_type_id;
+    std::string              child_name;
+};
+
+struct Cleanup_gate
+{
+    std::mutex               mutex;
+    std::condition_variable  cv;
+    bool                     entered = false;
+    bool                     released = false;
+    bool                     watchdog_expired = false;
+};
+
 Spawn_gate* s_spawn_gate = nullptr;
+Cleanup_gate s_cleanup_gate;
 
 fs::path child_ledger_path(const fs::path& dir)
 {
@@ -230,6 +250,65 @@ void release_spawn_stage(Spawn_gate& gate)
     std::lock_guard<std::mutex> lock(gate.mutex);
     gate.released = true;
     gate.cv.notify_all();
+}
+
+void cleanup_stage_callback(
+    const char* stage,
+    sintra::instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+    if (!stage ||
+        std::strcmp(
+            stage,
+            sintra::detail::test_hooks::
+                k_managed_child_cleanup_before_native_convergence) != 0 ||
+        process_instance_id != k_child_process_iid ||
+        occurrence != 0)
+    {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(s_cleanup_gate.mutex);
+    s_cleanup_gate.entered = true;
+    s_cleanup_gate.cv.notify_all();
+    if (!s_cleanup_gate.cv.wait_for(lock, k_cleanup_gate_timeout, [&]() {
+            return s_cleanup_gate.released;
+        }))
+    {
+        s_cleanup_gate.watchdog_expired = true;
+        s_cleanup_gate.cv.notify_all();
+    }
+}
+
+bool wait_for_cleanup_stage(Cleanup_gate& gate, std::chrono::milliseconds timeout)
+{
+    std::unique_lock<std::mutex> lock(gate.mutex);
+    return gate.cv.wait_for(lock, timeout, [&]() {
+        return gate.entered;
+    });
+}
+
+void release_cleanup_stage(Cleanup_gate& gate)
+{
+    std::lock_guard<std::mutex> lock(gate.mutex);
+    gate.released = true;
+    gate.cv.notify_all();
+}
+
+bool cleanup_gate_watchdog_expired(Cleanup_gate& gate)
+{
+    std::lock_guard<std::mutex> lock(gate.mutex);
+    return gate.watchdog_expired;
+}
+
+bool wait_for_child_publication(
+    Publication_observation& observation,
+    std::chrono::milliseconds timeout)
+{
+    std::unique_lock<std::mutex> lock(observation.mutex);
+    return observation.cv.wait_for(lock, timeout, [&]() {
+        return observation.child_seen;
+    });
 }
 
 bool wait_for_spawn_call(Spawn_call& call, std::chrono::milliseconds timeout)
@@ -479,15 +558,25 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::to_string(sintra::test::get_pid());
     const std::string requested_target = "managed_child_requested_" + nonce;
 
+    const auto managed_process_type = sintra::get_type_id<sintra::Managed_process>();
+    Publication_observation child_publication;
     std::atomic<bool> requested_target_seen{false};
     auto publication_handler = [
             &requested_target,
-            &requested_target_seen
+            &requested_target_seen,
+            &child_publication
         ](const sintra::Coordinator::instance_published& message)
     {
         const std::string name = static_cast<std::string>(message.assigned_name);
         if (name == requested_target) {
             requested_target_seen.store(true, std::memory_order_release);
+        }
+        if (message.instance_id == k_child_process_iid) {
+            std::lock_guard<std::mutex> lock(child_publication.mutex);
+            child_publication.child_seen = true;
+            child_publication.child_type = message.type_id;
+            child_publication.child_name = name;
+            child_publication.cv.notify_all();
         }
     };
     sintra::activate_slot(
@@ -497,8 +586,17 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     Spawn_gate gate;
     Spawn_call call;
     s_spawn_gate = &gate;
+    {
+        std::lock_guard<std::mutex> lock(s_cleanup_gate.mutex);
+        s_cleanup_gate.entered = false;
+        s_cleanup_gate.released = false;
+        s_cleanup_gate.watchdog_expired = false;
+    }
     sintra::detail::test_hooks::s_runtime_stage.store(
         &spawn_stage_callback,
+        std::memory_order_release);
+    sintra::detail::test_hooks::s_managed_child_cleanup.store(
+        &cleanup_stage_callback,
         std::memory_order_release);
 #ifndef _WIN32
     s_posix_reap.expected_pid.store(-1, std::memory_order_relaxed);
@@ -560,6 +658,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool native_identity_verified = false;
     bool native_alive_before_release = false;
     bool managed_name_seen = false;
+    bool managed_name_resolved_diagnostic = false;
     bool requested_target_absent_before = false;
 
 #ifdef _WIN32
@@ -612,10 +711,20 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         native_alive_before_release = native_identity_verified;
 #endif
 
-        managed_name_seen = wait_for_public_resolution(
-            ledger->managed_name,
-            k_child_process_iid,
-            std::chrono::seconds(3));
+        const bool child_publication_seen = wait_for_child_publication(
+            child_publication,
+            k_watchdog_timeout);
+        if (child_publication_seen) {
+            std::lock_guard<std::mutex> lock(child_publication.mutex);
+            managed_name_seen =
+                child_publication.child_type == managed_process_type &&
+                child_publication.child_name == ledger->managed_name;
+        }
+        const auto managed_name_resolution =
+            resolve_with_public_rpc(ledger->managed_name);
+        managed_name_resolved_diagnostic =
+            managed_name_resolution &&
+            *managed_name_resolution == k_child_process_iid;
         const auto requested_before = resolve_with_public_rpc(requested_target);
         requested_target_absent_before =
             requested_before && *requested_before == sintra::invalid_instance_id;
@@ -627,15 +736,22 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             std::fprintf(stderr, "managed_child_failed_readiness: pre-release causal facts incomplete\n");
             setup_valid = false;
         }
+        if (!managed_name_resolved_diagnostic) {
+            std::fprintf(
+                stderr,
+                "managed_child_failed_readiness: diagnostic name resolution missed exact child publication\n");
+        }
     }
 
     release_spawn_stage(gate);
 
     bool spawn_call_completed = wait_for_spawn_call(call, k_watchdog_timeout);
-    bool child_release_written = false;
     if (!spawn_call_completed) {
         std::fprintf(stderr, "managed_child_failed_readiness: spawn call did not complete after hook release\n");
         setup_valid = false;
+        // Never leave an asynchronously arriving cleanup worker held when the
+        // caller-side watchdog has already failed.
+        release_cleanup_stage(s_cleanup_gate);
     }
 
     bool spawn_result_invalid = false;
@@ -646,16 +762,22 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             observation.created_occurrences != 1 || observation.readiness_reached ||
             !observation.release_requested;
     }
-    if (!setup_valid || !spawn_call_completed || spawn_result_invalid) {
-        child_release_written = write_complete_file(
-            child_release_path(shared.path()),
-            "release=1\ncomplete=1\n");
+    if (spawn_result_invalid) {
+        std::fprintf(stderr, "managed_child_failed_readiness: spawn result contract invalid\n");
+        setup_valid = false;
     }
 
     spawn_thread.join();
     spawn_call_completed = call.done;
     sintra::detail::test_hooks::s_runtime_stage.store(nullptr, std::memory_order_release);
     s_spawn_gate = nullptr;
+
+    const bool cleanup_stage_seen = spawn_call_completed &&
+        wait_for_cleanup_stage(s_cleanup_gate, k_watchdog_timeout);
+    if (!cleanup_stage_seen) {
+        std::fprintf(stderr, "managed_child_failed_readiness: pre-native cleanup stage not reached\n");
+        setup_valid = false;
+    }
 
     const auto launch_observation = call.custody.status();
     const bool custody_retained = spawn_call_completed && !call.threw &&
@@ -688,11 +810,24 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         requested_target_absent_after &&
         !requested_target_seen.load(std::memory_order_acquire);
 
-    if (!child_release_written) {
-        child_release_written = write_complete_file(
-            child_release_path(shared.path()),
-            "release=1\ncomplete=1\n");
+    const bool pre_native_cleanup_witness =
+        cleanup_stage_seen &&
+        !cleanup_gate_watchdog_expired(s_cleanup_gate) &&
+        custody_retained &&
+        managed_name_absent_after &&
+        requested_target_never_seen &&
+        native_alive_after;
+    if (!pre_native_cleanup_witness) {
+        std::fprintf(stderr, "managed_child_failed_readiness: pre-native cleanup witness incomplete\n");
+        setup_valid = false;
     }
+
+    // This is also the bounded invalid-path cleanup latch: even if a causal
+    // witness above failed, the child is told to finalize before the cleanup
+    // gate is unblocked.
+    const bool child_release_written = write_complete_file(
+        child_release_path(shared.path()),
+        "release=1\ncomplete=1\n");
 
     bool native_exit_confirmed = false;
     bool native_normal_exit = false;
@@ -705,29 +840,59 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #else
     const bool child_reap_hook_cleared = true;
 #endif
-    if (ledger && child_release_written) {
+
+    const bool release_seen = child_release_written && sintra::test::wait_for_file(
+        child_release_seen_path(shared.path()),
+        k_watchdog_timeout,
+        std::chrono::milliseconds(10));
+    const bool child_finalized = release_seen && sintra::test::wait_for_file(
+        child_finalized_path(shared.path()),
+        k_watchdog_timeout,
+        std::chrono::milliseconds(10));
+
+    if (ledger && child_finalized) {
 #ifdef _WIN32
         if (child_process && WaitForSingleObject(child_process, 10000) == WAIT_OBJECT_0) {
             DWORD exit_code = STILL_ACTIVE;
             native_exit_confirmed = GetExitCodeProcess(child_process, &exit_code) != 0;
             native_normal_exit = native_exit_confirmed && exit_code == 0;
+            survivor_absent = native_exit_confirmed;
         }
 #else
         wait_for_posix_reap(k_watchdog_timeout);
+        const auto observed_reap_count =
+            s_posix_reap.count.load(std::memory_order_acquire);
+        const auto observed_reap_status =
+            s_posix_reap.status.load(std::memory_order_relaxed);
+        native_exit_confirmed = observed_reap_count == 1;
+        native_normal_exit =
+            native_exit_confirmed &&
+            WIFEXITED(observed_reap_status) &&
+            WEXITSTATUS(observed_reap_status) == 0;
+        survivor_absent =
+            native_exit_confirmed &&
+            !exact_posix_child_is_live(ledger->pid, ledger->start_stamp);
 #endif
-        survivor_absent = native_exit_confirmed;
     }
 
-    const bool release_seen = sintra::test::wait_for_file(
-        child_release_seen_path(shared.path()),
-        std::chrono::seconds(1),
-        std::chrono::milliseconds(10));
-    const bool child_finalized = sintra::test::wait_for_file(
-        child_finalized_path(shared.path()),
-        std::chrono::seconds(1),
-        std::chrono::milliseconds(10));
+    const bool natural_exit_before_cleanup_release =
+        release_seen &&
+        child_finalized &&
+        native_exit_confirmed &&
+        native_normal_exit &&
+        survivor_absent;
+
+    // Native cleanup is unblocked only after the exact child has either
+    // finalized and exited normally or a bounded watchdog has made this test
+    // invalid. The framework remains responsible for any invalid-path child.
+    release_cleanup_stage(s_cleanup_gate);
+    const bool cleanup_gate_watchdog_clear =
+        !cleanup_gate_watchdog_expired(s_cleanup_gate);
     const auto released_observation = call.custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
+    sintra::detail::test_hooks::s_managed_child_cleanup.store(
+        nullptr,
+        std::memory_order_release);
 
 #ifdef _WIN32
     if (ledger && !native_exit_confirmed) {
@@ -799,12 +964,15 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         native_alive_before_release &&
         managed_name_seen &&
         requested_target_never_seen &&
+        cleanup_stage_seen &&
+        cleanup_gate_watchdog_clear &&
         custody_retained &&
         managed_name_absent_after &&
         native_alive_after &&
         child_release_written &&
         release_seen &&
         child_finalized &&
+        natural_exit_before_cleanup_release &&
         released_observation.release_complete &&
         native_exit_confirmed &&
         native_normal_exit &&
@@ -835,9 +1003,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             "R2_GREEN_VALID R3_GREEN_VALID nonce=%s piid=%llu occurrence=%u pid=%d "
             "start_stamp=%s start_stamp_verified=%d native_identity_verified=1 "
             "spawn_success_stage=1 "
-            "managed_name_seen=1 requested_target_seen=0 custody_accepted=1 "
+            "managed_name_seen=1 resolver_diagnostic=%d requested_target_seen=0 "
+            "cleanup_stage_seen=1 cleanup_gate_watchdog=0 custody_accepted=1 "
             "readiness=0 release_requested=1 release_complete=1 "
-            "managed_name_after=absent native_alive_after=1 native_exit_confirmed=1 "
+            "managed_name_after=absent native_alive_after=1 "
+            "natural_exit_before_cleanup_release=1 native_exit_confirmed=1 "
             "survivor_absent=1 %s\n",
             nonce.c_str(),
             output_piid,
@@ -845,6 +1015,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             output_pid,
             output_start_stamp.c_str(),
             start_stamp_verified ? 1 : 0,
+            managed_name_resolved_diagnostic ? 1 : 0,
             reap_record.c_str());
         std::fflush(stdout);
         return 0;
@@ -854,8 +1025,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         stderr,
         "R2_R3_INVALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
         "start_stamp_verified=%d native_identity_verified=%d spawn_success_stage=%d "
-        "managed_name_seen=%d requested_target_seen=%d custody_retained=%d "
+        "managed_name_seen=%d resolver_diagnostic=%d requested_target_seen=%d "
+        "cleanup_stage_seen=%d cleanup_gate_watchdog=%d custody_retained=%d "
         "managed_name_after=%s native_alive_after=%d native_exit_confirmed=%d "
+        "natural_exit_before_cleanup_release=%d "
         "survivor_absent=%d forced_cleanup=%d root_finalized=%d "
         "child_reap_hook_cleared=%d %s\n",
         nonce.c_str(),
@@ -867,11 +1040,15 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         native_identity_verified ? 1 : 0,
         spawn_success_stage ? 1 : 0,
         managed_name_seen ? 1 : 0,
+        managed_name_resolved_diagnostic ? 1 : 0,
         requested_target_seen.load(std::memory_order_acquire) ? 1 : 0,
+        cleanup_stage_seen ? 1 : 0,
+        cleanup_gate_watchdog_clear ? 0 : 1,
         custody_retained ? 1 : 0,
         managed_name_absent_after ? "absent" : "present_or_unknown",
         native_alive_after ? 1 : 0,
         native_exit_confirmed ? 1 : 0,
+        natural_exit_before_cleanup_release ? 1 : 0,
         survivor_absent ? 1 : 0,
         forced_cleanup ? 1 : 0,
         root_finalized ? 1 : 0,
