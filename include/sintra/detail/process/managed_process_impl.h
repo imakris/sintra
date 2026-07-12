@@ -2235,6 +2235,52 @@ inline void Managed_process::note_child_custody_failure(
     custody->changed.notify_all();
 }
 
+inline void Managed_process::fail_release_attempt(
+    const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+    uint64_t release_attempt_generation,
+    Managed_child_failure failure,
+    instance_id_type process_instance_id)
+{
+    if (!custody || failure.kind == Managed_child_failure_kind::none) {
+        return;
+    }
+
+    uint64_t custody_identity = 0;
+    bool failed = false;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        if (custody->phase != detail::Custody_phase::released &&
+            custody->release_attempt_generation == release_attempt_generation &&
+            (custody->release_attempt_phase ==
+                 detail::Release_attempt_phase::running ||
+             custody->release_attempt_phase ==
+                 detail::Release_attempt_phase::failing))
+        {
+            custody_identity = custody->identity;
+            // This is the failure of the current release-attempt generation.
+            // Do not apply setup failure's occurrence-number precedence: an
+            // exact predecessor can fail after a newer occurrence was admitted.
+            custody->last_failure = failure;
+            custody->release_attempt_phase =
+                detail::Release_attempt_phase::retryable;
+            failed = true;
+        }
+    }
+    if (!failed) {
+        return;
+    }
+
+    custody->changed.notify_all();
+    Log_stream(log_level::warning)
+        << "Managed-child release attempt failed: custody=" << custody_identity
+        << " generation=" << release_attempt_generation
+        << " process_instance_id=" << process_instance_id
+        << " occurrence=" << failure.occurrence
+        << " kind=" << static_cast<int>(failure.kind)
+        << " native_error=" << failure.native_error
+        << " message='" << failure.message << "'\n";
+}
+
 inline void Managed_process::start_child_custody_worker(
     std::function<void()> worker,
     const char* failure_stage,
@@ -2915,24 +2961,25 @@ inline void Managed_process::request_child_custody_release(
         custody->changed.notify_all();
         retire_child_custody_if_complete(custody);
         }
+        catch (const std::exception& exception) {
+            fail_release_attempt(
+                custody,
+                release_attempt_generation,
+                {Managed_child_failure_kind::release_worker_execution,
+                 failure_occurrence,
+                 0,
+                 exception.what()},
+                failure_iid);
+        }
         catch (...) {
-            // No retirement fact is inferred from a failed cleanup attempt.
-            // Re-open only the worker-attempt latch so the same retained
-            // custody can be retried without reconstructing authority.
-            {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                if (custody->phase != detail::Custody_phase::released &&
-                    custody->release_attempt_generation ==
-                        release_attempt_generation)
-                {
-                    custody->release_attempt_phase =
-                        custody->release_attempt_phase ==
-                            detail::Release_attempt_phase::failing
-                        ? detail::Release_attempt_phase::retryable
-                        : detail::Release_attempt_phase::idle;
-                }
-            }
-            custody->changed.notify_all();
+            fail_release_attempt(
+                custody,
+                release_attempt_generation,
+                {Managed_child_failure_kind::release_worker_execution,
+                 failure_occurrence,
+                 0,
+                 "Unknown exception in managed-child release worker"},
+                failure_iid);
         }
     };
 
@@ -2943,21 +2990,25 @@ inline void Managed_process::request_child_custody_release(
             failure_iid,
             failure_occurrence);
     }
+    catch (const std::exception& exception) {
+        fail_release_attempt(
+            custody,
+            release_attempt_generation,
+            {Managed_child_failure_kind::release_worker_start,
+             failure_occurrence,
+             0,
+             exception.what()},
+            failure_iid);
+    }
     catch (...) {
-        {
-            std::lock_guard<std::mutex> lock(custody->mutex);
-            if (custody->phase != detail::Custody_phase::released &&
-                custody->release_attempt_generation ==
-                    release_attempt_generation)
-            {
-                custody->release_attempt_phase =
-                    custody->release_attempt_phase ==
-                        detail::Release_attempt_phase::failing
-                    ? detail::Release_attempt_phase::retryable
-                    : detail::Release_attempt_phase::idle;
-            }
-        }
-        custody->changed.notify_all();
+        fail_release_attempt(
+            custody,
+            release_attempt_generation,
+            {Managed_child_failure_kind::release_worker_start,
+             failure_occurrence,
+             0,
+             "Unknown exception while starting managed-child release worker"},
+            failure_iid);
     }
 }
 

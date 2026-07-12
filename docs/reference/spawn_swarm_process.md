@@ -42,7 +42,9 @@ enum class Managed_child_failure_kind
     native_identity,
     setup_exception,
     setup_worker_start,
-    readiness_observation
+    readiness_observation,
+    release_worker_start,
+    release_worker_execution
 };
 
 struct Managed_child_failure
@@ -174,6 +176,10 @@ Failures:
   state. Its `occurrence` identifies the recovery occurrence to which `kind`,
   `native_error`, and `message` apply. Later successful progress, including
   complete release, does not erase an earlier report.
+- Failure to start a release worker is reported as `release_worker_start`; an
+  exception escaping its lifecycle work is reported as
+  `release_worker_execution`. Both retain custody and permit a later release or
+  termination call to retry with the same authority.
 - `Managed_child_failure_kind::none` means no managed-child failure report has
   been recorded. It is not an independent success result; use the other status
   fields to decide whether the requested milestone is confirmed.

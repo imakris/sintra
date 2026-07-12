@@ -143,7 +143,9 @@ enum class Managed_child_failure_kind
     native_identity,
     setup_exception,
     setup_worker_start,
-    readiness_observation
+    readiness_observation,
+    release_worker_start,
+    release_worker_execution
 };
 
 struct Managed_child_failure
@@ -529,6 +531,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void note_child_custody_failure(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         Managed_child_failure failure);
+    void fail_release_attempt(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        uint64_t release_attempt_generation,
+        Managed_child_failure failure,
+        instance_id_type process_instance_id);
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         detail::Release_mode release_mode = detail::Release_mode::passive);

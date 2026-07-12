@@ -1035,7 +1035,8 @@ Release_worker_retry_result run_release_worker_retry(
     char* argv[],
     const std::string& binary_path,
     const char* phase,
-    const char* failure_stage)
+    const char* failure_stage,
+    sintra::Managed_child_failure_kind expected_failure_kind)
 {
     sintra::init(argc, argv);
     const auto marker = unique_marker(phase);
@@ -1098,7 +1099,7 @@ Release_worker_retry_result run_release_worker_retry(
         survivor_absent && reap_normal && finalized;
 
     const bool first_failure_is_typed =
-        first.last_failure.kind != sintra::Managed_child_failure_kind::none &&
+        first.last_failure.kind == expected_failure_kind &&
         first.last_failure.occurrence == 0 &&
         first.last_failure.native_error == 0 &&
         first.last_failure.message.find(failure_stage) != std::string::npos;
@@ -2403,7 +2404,8 @@ int main(int argc, char* argv[])
         argv,
         binary_path,
         "release_worker_retry",
-        sintra::detail::test_hooks::k_managed_child_fail_release_worker);
+        sintra::detail::test_hooks::k_managed_child_fail_release_worker,
+        sintra::Managed_child_failure_kind::release_worker_execution);
     if (!s_teardown_settled) {
         return 2;
     }
@@ -2412,7 +2414,8 @@ int main(int argc, char* argv[])
         argv,
         binary_path,
         "release_worker_start_retry",
-        sintra::detail::test_hooks::k_managed_child_fail_release_worker_start);
+        sintra::detail::test_hooks::k_managed_child_fail_release_worker_start,
+        sintra::Managed_child_failure_kind::release_worker_start);
     if (!s_teardown_settled) {
         return 2;
     }
