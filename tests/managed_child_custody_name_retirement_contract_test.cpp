@@ -536,7 +536,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         }
     }
 
-    const auto launch_observation = sintra::observe_managed_child(custody);
+    const auto launch_observation = custody.status();
     const bool pre_retirement_valid =
         !spawn_threw && launch_observation.accepted &&
         launch_observation.readiness_reached &&
@@ -616,8 +616,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         target_absent && same_occurrence_live && communication_still_live &&
         later_facts_nonterminal;
 
-    const auto held_release_observation = sintra::release_managed_child(
-        custody,
+    const auto held_release_observation = custody.release_until(
         std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
     const bool release_incomplete_at_witness =
         held_release_observation.accepted &&
@@ -635,8 +634,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         marker_path(shared.path(), k_finalized_file),
         k_watchdog_timeout,
         std::chrono::milliseconds(10));
-    const auto released_observation = sintra::wait_managed_child(
-        custody,
+    const auto released_observation = custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     bool native_exit_confirmed = false;

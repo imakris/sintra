@@ -319,9 +319,9 @@ OS creation. This operation is available only in the process hosting the local
 coordinator; worker calls and malformed explicit process ids are rejected
 before acceptance. Use `Spawn_options` to select
 the binary, arguments, optional expected instance name, wait timeout, and
-lifeline policy. The opaque handle supports compact observation and bounded
-`release_managed_child`, `cleanup_managed_child`, and `wait_managed_child`
-operations. Test handle validity through its explicit boolean conversion.
+lifeline policy. The opaque handle supports compact `status()` observation and
+bounded `release_until()` and `terminate_until()` operations. Test handle
+validity through its explicit boolean conversion.
 Graceful release is idempotent, so another call waits on the same retained
 custody through a new absolute deadline. It remains passive; explicit cleanup
 monotonically escalates the retained custody owner to lifeline release and

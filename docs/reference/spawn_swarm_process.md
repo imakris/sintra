@@ -30,17 +30,15 @@ struct Spawn_options
 
 Managed_child_custody spawn_swarm_process(const Spawn_options& options);
 
-Managed_child_custody_observation observe_managed_child(
-    const Managed_child_custody& custody);
-Managed_child_custody_observation release_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline);
-Managed_child_custody_observation cleanup_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline);
-Managed_child_custody_observation wait_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline);
+class Managed_child_custody
+{
+public:
+    Managed_child_status status() const;
+    Managed_child_status release_until(
+        std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_status terminate_until(
+        std::chrono::steady_clock::time_point deadline) const;
+};
 ```
 
 Use when:
@@ -69,7 +67,7 @@ Contract:
 - `lifetime` controls the lifeline policy applied to the child (see
   `Lifetime_policy`).
 - A return handle that converts to `true` means Sintra accepted durable logical
-  custody before OS creation authority. `observe_managed_child()` separately
+  custody before OS creation authority. `Managed_child_custody::status()` separately
   reports confirmed readiness, admitted/created/exited occurrence counts, and
   release state. OS-create failure remains an accepted no-child record rather
   than a fabricated native identity.
@@ -91,19 +89,19 @@ Threading and lifecycle:
   the participant having published its name.
 - `readiness_reached` means the coordinator observed the requested name; it
   does not imply release or any later retirement fact.
-- `release_managed_child()` closes recovery before requesting retirement and
+- `Managed_child_custody::release_until()` closes recovery before requesting retirement and
   waits for graceful/natural retirement, returning only confirmed facts by its
   absolute deadline. It does not release the child's lifeline or initiate
   adverse cleanup. The operation is idempotent: another call requests the same
   graceful release and waits on the same retained custody through its new
   absolute deadline.
-- `cleanup_managed_child()` is the explicit adverse-path escalation. It closes
+- `Managed_child_custody::terminate_until()` is the explicit adverse-path escalation. It closes
   recovery and monotonically asks Sintra's retained custody owner to drain the
   exact admitted occurrences, release their lifelines, retire publication and
   communication authoritatively, and confirm OS exit. The deadline bounds only
   the caller's wait; an incomplete return retains ownership and cleanup keeps
   running.
-- Repeated release and wait calls operate on the same opaque record; they do not
+- Repeated release and termination calls operate on the same opaque record; they do not
   reconstruct authority from a process id or name. A cleanup escalation cannot
   be downgraded by a later graceful release request.
 - Complete release joins authoritative exact-occurrence publication and

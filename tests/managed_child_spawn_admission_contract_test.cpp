@@ -98,7 +98,7 @@ void reset_failure_hook()
 }
 
 bool observed_setup_exception(
-    const sintra::Managed_child_custody_observation& observation,
+    const sintra::Managed_child_status& observation,
     const char* stage)
 {
     return observation.last_failure.kind ==
@@ -220,8 +220,8 @@ bool run_pre_create_exception(
         threw = true;
     }
     reset_failure_hook();
-    const auto released = sintra::wait_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     return
         !threw                                              &&
         released.accepted                                   &&
@@ -264,8 +264,8 @@ bool run_post_native_exception(
     }
     reset_failure_hook();
     const auto identity = read_child_identity(marker);
-    const auto released = sintra::wait_managed_child(
-        custody, std::chrono::steady_clock::now() + 15s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 15s);
     const bool survivor_absent = identity && wait_for_exact_child_absence(*identity, 2s);
     return
         !threw                                              &&
@@ -288,8 +288,8 @@ bool run_native_spawn_failure(const std::filesystem::path& missing_binary)
     options.lifetime.enable_lifeline = false;
 
     const auto custody = sintra::spawn_swarm_process(options);
-    const auto released = sintra::wait_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     return released.accepted && released.admitted_occurrences == 1 &&
         released.created_occurrences == 0 && released.release_requested &&
         released.release_complete && released.last_failure.kind ==
@@ -317,11 +317,10 @@ bool run_worker_rejection(
         std::ifstream in(outcome, std::ios::binary);
         in >> nested_accepted >> worker_finalized;
     }
-    const auto released = sintra::release_managed_child(
-        custody, std::chrono::steady_clock::now() + 15s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 15s);
     if (!released.release_complete) {
-        sintra::cleanup_managed_child(
-            custody, std::chrono::steady_clock::now() + 15s);
+        custody.terminate_until(std::chrono::steady_clock::now() + 15s);
     }
     return
         custody                           &&

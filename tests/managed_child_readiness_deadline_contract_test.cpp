@@ -524,11 +524,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::memory_order_release);
     s_deadline_gate = nullptr;
 
-    sintra::Managed_child_custody_observation launch_observation;
+    sintra::Managed_child_status launch_observation;
     bool call_threw = false;
     {
         std::lock_guard<std::mutex> lock(call.mutex);
-        launch_observation = sintra::observe_managed_child(call.custody);
+        launch_observation = call.custody.status();
         call_threw = call.threw;
     }
 
@@ -539,8 +539,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         child_finalized_path(shared.path()),
         k_watchdog_timeout,
         std::chrono::milliseconds(10));
-    const auto released_observation = sintra::wait_managed_child(
-        call.custody,
+    const auto released_observation = call.custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     bool native_exit_confirmed = false;

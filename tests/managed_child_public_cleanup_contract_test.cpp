@@ -429,7 +429,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #endif
     }
 
-    const auto launch = sintra::observe_managed_child(custody);
+    const auto launch = custody.status();
     const bool identity_valid = ledger && ledger->nonce == nonce &&
         ledger->process_iid == k_child_process_iid && ledger->occurrence == 0 &&
         ledger->ready_name == ready_name &&
@@ -447,12 +447,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
 
     // Start graceful release on a separate caller. The observation seam proves
-    // its one retained worker evaluated cleanup_requested=false and entered its
+    // its one retained worker evaluated passive release mode and entered its
     // passive wait before the public cleanup escalation occurs.
-    sintra::Managed_child_custody_observation passive;
+    sintra::Managed_child_status passive;
     std::thread passive_caller([&]() {
-        passive = sintra::release_managed_child(
-            custody, std::chrono::steady_clock::now() + k_watchdog_timeout);
+        passive = custody.release_until(
+            std::chrono::steady_clock::now() + k_watchdog_timeout);
     });
     bool passive_wait_seen = false;
     {
@@ -466,8 +466,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     // action. Custody and the child must remain retained, and the deadline
     // facing caller must still return bounded-incomplete.
     const auto failed_begin = std::chrono::steady_clock::now();
-    const auto failed_cleanup = sintra::cleanup_managed_child(
-        custody, failed_begin + 120ms);
+    const auto failed_cleanup = custody.terminate_until(failed_begin + 120ms);
     const auto failed_elapsed = std::chrono::steady_clock::now() - failed_begin;
     const bool failure_seen = failure_hits(failure_plan) == 1;
     const bool retained_after_failure = ledger && exact_child_is_live(*ledger) &&
@@ -487,8 +486,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     // Re-drive the same opaque custody. The successful worker is held before
     // its first cleanup action to prove a second bounded-incomplete return.
     const auto cleanup_begin = std::chrono::steady_clock::now();
-    const auto held = sintra::cleanup_managed_child(
-        custody, cleanup_begin + 120ms);
+    const auto held = custody.terminate_until(cleanup_begin + 120ms);
     const auto cleanup_elapsed = std::chrono::steady_clock::now() - cleanup_begin;
     bool cleanup_entered = false;
     {
@@ -507,8 +505,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         process_unpublished.load(std::memory_order_acquire) == 0;
 
     const bool first_finalize_succeeded = sintra::detail::finalize();
-    const auto retry = sintra::release_managed_child(
-        custody, std::chrono::steady_clock::now() + 80ms);
+    const auto retry = custody.release_until(
+        std::chrono::steady_clock::now() + 80ms);
     const bool retained_across_finalize = !first_finalize_succeeded && retry.accepted &&
         retry.release_requested && !retry.release_complete && ledger &&
         exact_child_is_live(*ledger);
@@ -519,8 +517,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         gate.changed.notify_all();
     }
 
-    const auto complete = sintra::cleanup_managed_child(
-        custody, std::chrono::steady_clock::now() + k_watchdog_timeout);
+    const auto complete = custody.terminate_until(
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
     if (passive_caller.joinable()) {
         passive_caller.join();
     }

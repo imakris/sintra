@@ -297,7 +297,7 @@ struct Spawn_options
     Lifetime_policy            lifetime;
 };
 
-struct Managed_child_custody_observation
+struct Managed_child_status
 {
     bool        accepted = false;
     bool        readiness_reached = false;
@@ -316,6 +316,12 @@ public:
 
     explicit operator bool() const noexcept { return static_cast<bool>(m_record); }
 
+    Managed_child_status status() const;
+    Managed_child_status release_until(
+        std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_status terminate_until(
+        std::chrono::steady_clock::time_point deadline) const;
+
 private:
     explicit Managed_child_custody(
         std::shared_ptr<detail::Managed_child_custody_record> record)
@@ -324,28 +330,11 @@ private:
 
     std::shared_ptr<detail::Managed_child_custody_record> m_record;
 
-    friend Managed_child_custody spawn_swarm_process(const Spawn_options&);
-    friend Managed_child_custody_observation observe_managed_child(
-        const Managed_child_custody&);
-    friend Managed_child_custody_observation wait_managed_child(
-        const Managed_child_custody&, std::chrono::steady_clock::time_point);
-    friend Managed_child_custody_observation release_managed_child(
-        const Managed_child_custody&, std::chrono::steady_clock::time_point);
-    friend Managed_child_custody_observation cleanup_managed_child(
-        const Managed_child_custody&, std::chrono::steady_clock::time_point);
-};
+    Managed_child_status wait_until_released(
+        std::chrono::steady_clock::time_point deadline) const;
 
-Managed_child_custody_observation observe_managed_child(
-    const Managed_child_custody& custody);
-Managed_child_custody_observation wait_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline);
-Managed_child_custody_observation release_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline);
-Managed_child_custody_observation cleanup_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline);
+    friend Managed_child_custody spawn_swarm_process(const Spawn_options&);
+};
 
 struct External_process_invitation_options
 {
@@ -1580,63 +1569,59 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     return custody;
 }
 
-inline Managed_child_custody_observation observe_managed_child(
-    const Managed_child_custody& custody)
+inline Managed_child_status Managed_child_custody::status() const
 {
-    Managed_child_custody_observation observation;
-    if (!custody.m_record) {
-        return observation;
+    Managed_child_status result;
+    if (!m_record) {
+        return result;
     }
-    observation.accepted = true;
-    std::lock_guard<std::mutex> lock(custody.m_record->mutex);
-    observation.readiness_reached = custody.m_record->readiness_reached;
-    observation.release_requested =
-        custody.m_record->phase != detail::Custody_phase::open;
-    observation.release_complete =
-        custody.m_record->phase == detail::Custody_phase::released;
-    observation.last_failure = custody.m_record->last_failure;
-    observation.admitted_occurrences = custody.m_record->occurrences.size();
-    for (const auto& occurrence : custody.m_record->occurrences) {
-        observation.created_occurrences += occurrence.os_process_created ? 1u : 0u;
-        observation.exited_occurrences += occurrence.os_exit_confirmed ? 1u : 0u;
+    result.accepted = true;
+    std::lock_guard<std::mutex> lock(m_record->mutex);
+    result.readiness_reached = m_record->readiness_reached;
+    result.release_requested =
+        m_record->phase != detail::Custody_phase::open;
+    result.release_complete =
+        m_record->phase == detail::Custody_phase::released;
+    result.last_failure = m_record->last_failure;
+    result.admitted_occurrences = m_record->occurrences.size();
+    for (const auto& occurrence : m_record->occurrences) {
+        result.created_occurrences += occurrence.os_process_created ? 1u : 0u;
+        result.exited_occurrences += occurrence.os_exit_confirmed ? 1u : 0u;
     }
-    return observation;
+    return result;
 }
 
-inline Managed_child_custody_observation wait_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline)
+inline Managed_child_status Managed_child_custody::wait_until_released(
+    std::chrono::steady_clock::time_point deadline) const
 {
-    if (!custody.m_record) {
+    if (!m_record) {
         return {};
     }
-    std::unique_lock<std::mutex> lock(custody.m_record->mutex);
-    custody.m_record->changed.wait_until(lock, deadline, [&]() {
-        return custody.m_record->phase == detail::Custody_phase::released;
+    std::unique_lock<std::mutex> lock(m_record->mutex);
+    m_record->changed.wait_until(lock, deadline, [&]() {
+        return m_record->phase == detail::Custody_phase::released;
     });
     lock.unlock();
-    return observe_managed_child(custody);
+    return status();
 }
 
-inline Managed_child_custody_observation release_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline)
+inline Managed_child_status Managed_child_custody::release_until(
+    std::chrono::steady_clock::time_point deadline) const
 {
-    if (custody.m_record && s_mproc) {
-        s_mproc->request_child_custody_release(custody.m_record);
+    if (m_record && s_mproc) {
+        s_mproc->request_child_custody_release(m_record);
     }
-    return wait_managed_child(custody, deadline);
+    return wait_until_released(deadline);
 }
 
-inline Managed_child_custody_observation cleanup_managed_child(
-    const Managed_child_custody& custody,
-    std::chrono::steady_clock::time_point deadline)
+inline Managed_child_status Managed_child_custody::terminate_until(
+    std::chrono::steady_clock::time_point deadline) const
 {
-    if (custody.m_record && s_mproc) {
+    if (m_record && s_mproc) {
         s_mproc->request_child_custody_release(
-            custody.m_record, detail::Release_mode::cleanup);
+            m_record, detail::Release_mode::cleanup);
     }
-    return wait_managed_child(custody, deadline);
+    return wait_until_released(deadline);
 }
 
 inline instance_id_type join_swarm(

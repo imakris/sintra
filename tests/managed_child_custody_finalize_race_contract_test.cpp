@@ -519,7 +519,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     s_spawn_hold.release.store(true, std::memory_order_release);
     spawn_thread.join();
-    const auto held_observation = sintra::observe_managed_child(custody);
+    const auto held_observation = custody.status();
     const bool caller_returned_retained_custody =
         spawn_finished.load(std::memory_order_acquire) && !spawn_threw &&
         held_observation.accepted && held_observation.created_occurrences == 1 &&
@@ -573,8 +573,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         !forced_cleanup;
 #endif
 
-    const auto released_observation = sintra::wait_managed_child(
-        custody,
+    const auto released_observation = custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
     bool final_retry_succeeded = false;
     if (released_observation.release_complete) {

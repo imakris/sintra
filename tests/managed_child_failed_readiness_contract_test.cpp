@@ -640,7 +640,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool spawn_result_invalid = false;
     if (spawn_call_completed) {
         std::lock_guard<std::mutex> lock(call.mutex);
-        const auto observation = sintra::observe_managed_child(call.custody);
+        const auto observation = call.custody.status();
         spawn_result_invalid = call.threw || !observation.accepted ||
             observation.created_occurrences != 1 || observation.readiness_reached ||
             !observation.release_requested;
@@ -656,7 +656,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     sintra::detail::test_hooks::s_runtime_stage.store(nullptr, std::memory_order_release);
     s_spawn_gate = nullptr;
 
-    const auto launch_observation = sintra::observe_managed_child(call.custody);
+    const auto launch_observation = call.custody.status();
     const bool custody_retained = spawn_call_completed && !call.threw &&
         launch_observation.accepted && launch_observation.created_occurrences == 1 &&
         !launch_observation.readiness_reached && launch_observation.release_requested &&
@@ -725,8 +725,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         child_finalized_path(shared.path()),
         std::chrono::seconds(1),
         std::chrono::milliseconds(10));
-    const auto released_observation = sintra::wait_managed_child(
-        call.custody,
+    const auto released_observation = call.custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
 
 #ifdef _WIN32

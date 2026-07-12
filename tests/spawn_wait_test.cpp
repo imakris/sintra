@@ -278,7 +278,7 @@ int run_coordinator(const std::string& binary_path)
         spawn_options.wait_timeout           = std::chrono::milliseconds(1500);
 
         const auto custody = sintra::spawn_swarm_process(spawn_options);
-        const auto launch = sintra::observe_managed_child(custody);
+        const auto launch = custody.status();
 
         const auto elapsed    = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
@@ -367,7 +367,7 @@ int run_coordinator(const std::string& binary_path)
         spawn_options.wait_timeout           = std::chrono::milliseconds(10000);
 
         const auto custody = sintra::spawn_swarm_process(spawn_options);
-        const auto launch = sintra::observe_managed_child(custody);
+        const auto launch = custody.status();
 
         const auto elapsed    = std::chrono::steady_clock::now() - start;
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();

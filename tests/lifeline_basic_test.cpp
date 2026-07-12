@@ -665,7 +665,7 @@ int run_owner(
     }
 
     const auto custody = sintra::spawn_swarm_process(spawn_options);
-    const auto launch = sintra::observe_managed_child(custody);
+    const auto launch = custody.status();
     if (test_case == k_case_wait_timeout) {
         if (!launch.accepted || launch.created_occurrences != 1 ||
             launch.readiness_reached || !launch.release_requested)
@@ -761,7 +761,7 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
         };
 
         const auto custody = sintra::spawn_swarm_process(spawn_options);
-        const auto launch = sintra::observe_managed_child(custody);
+        const auto launch = custody.status();
         if (!launch.accepted || launch.created_occurrences != 1) {
             std::fprintf(stderr, "[leak_owner] failed to spawn child %d\n", i);
             std::_Exit(1);
@@ -874,7 +874,7 @@ int run_respawn_owner(const std::filesystem::path& dir, int argc, char* argv[])
     };
 
     const auto custody = sintra::spawn_swarm_process(spawn_options);
-    const auto launch = sintra::observe_managed_child(custody);
+    const auto launch = custody.status();
     if (!launch.accepted || launch.created_occurrences != 1) {
         std::fprintf(stderr, "[respawn_owner] failed to spawn child\n");
         std::_Exit(2);

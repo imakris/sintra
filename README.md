@@ -310,7 +310,7 @@ if (!custody) {
     throw std::runtime_error("managed-child request rejected");
 }
 
-auto launch = sintra::observe_managed_child(custody);
+auto launch = custody.status();
 // `launch.readiness_reached` is independent from accepted custody.
 ```
 
