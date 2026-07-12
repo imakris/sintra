@@ -6,6 +6,7 @@
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/runtime.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -39,6 +40,8 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::exact_process_is_live;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_nonce_env = "SINTRA_R6_NONCE";
 constexpr std::string_view k_ledger_0 = "occurrence_0.complete";
@@ -134,29 +137,6 @@ Reap_observation s_reaps;
 fs::path marker(const fs::path& dir, std::string_view name)
 {
     return dir / std::string(name);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& body)
-{
-    const fs::path temporary = path.string() + ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return false;
-        }
-        out << body;
-        out.flush();
-        if (!out) {
-            return false;
-        }
-    }
-    std::error_code error;
-    fs::rename(temporary, path, error);
-    if (error) {
-        fs::remove(temporary, error);
-        return false;
-    }
-    return true;
 }
 
 std::optional<Occurrence_ledger> read_ledger(const fs::path& path)
@@ -262,15 +242,6 @@ void observe_reap(pid_t pid, int status) noexcept
         s_reaps.status_1.store(status, std::memory_order_relaxed);
         s_reaps.count_1.fetch_add(1, std::memory_order_release);
     }
-}
-
-bool exact_process_is_live(int pid, uint64_t start_stamp)
-{
-    if (pid <= 0 || !sintra::is_process_alive(static_cast<uint32_t>(pid))) {
-        return false;
-    }
-    const auto observed = sintra::query_process_start_stamp(static_cast<uint32_t>(pid));
-    return observed && *observed == start_stamp;
 }
 
 bool signal_exact_process(int pid, uint64_t start_stamp, int signal_number)
@@ -412,7 +383,9 @@ int main(int argc, char* argv[])
     }
 
 #ifndef _WIN32
-    sintra::detail::test_hooks::s_child_reaped.store(&observe_reap, std::memory_order_release);
+    sintra::test::managed_child::Scoped_test_hook child_reaped_hook(
+        sintra::detail::test_hooks::s_child_reaped,
+        &observe_reap);
 #endif
 
     std::mutex recovery_mutex;
@@ -441,8 +414,9 @@ int main(int argc, char* argv[])
         std::memory_order_release);
     s_outbound_hold.entered.store(false, std::memory_order_relaxed);
     s_outbound_hold.release.store(false, std::memory_order_relaxed);
-    sintra::detail::test_hooks::s_rpc_outbound_request.store(
-        &hold_predecessor_request, std::memory_order_release);
+    sintra::test::managed_child::Scoped_test_hook outbound_request_hook(
+        sintra::detail::test_hooks::s_rpc_outbound_request,
+        &hold_predecessor_request);
 
     constexpr uint32_t request_token = 0x5a31u;
     std::atomic<bool> request_done{false};
@@ -698,10 +672,10 @@ int main(int argc, char* argv[])
     if (!no_survivors && ledger_1 && signal_exact_process(ledger_1->pid, ledger_1->start_stamp, SIGTERM)) {
         forced_cleanup = true;
     }
-    sintra::detail::test_hooks::s_child_reaped.store(nullptr, std::memory_order_release);
+    child_reaped_hook.restore();
 #endif
 
-    sintra::detail::test_hooks::s_rpc_outbound_request.store(nullptr, std::memory_order_release);
+    outbound_request_hook.restore();
     s_outbound_hold.expected.store(sintra::invalid_instance_id, std::memory_order_release);
     watchdog_done.store(true, std::memory_order_release);
     watchdog.join();
@@ -713,8 +687,7 @@ int main(int argc, char* argv[])
     if (custody_record) {
         std::lock_guard<std::mutex> lock(custody_record->mutex);
         custody_release_closed_all_occurrences =
-            !custody_record->recovery_open && custody_record->release_requested &&
-            custody_record->release_complete &&
+            custody_record->phase == sintra::detail::Custody_phase::released &&
             std::all_of(
                 custody_record->occurrences.begin(), custody_record->occurrences.end(),
                 [](const auto& occurrence) {

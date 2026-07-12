@@ -303,6 +303,8 @@ You can configure the policy per spawn:
 ```cpp
 sintra::Spawn_options options;
 options.binary_path = binary_path;
+options.env_overrides = {"WORKER_MODE=active"};
+options.readiness_instance_name = "worker_service";
 options.lifetime.hard_exit_code = 99;
 options.lifetime.hard_exit_timeout_ms = 100;
 auto custody = sintra::spawn_swarm_process(options);
@@ -310,9 +312,19 @@ if (!custody) {
     throw std::runtime_error("managed-child request rejected");
 }
 
-auto launch = sintra::observe_managed_child(custody);
-// `launch.readiness_reached` is independent from accepted custody.
+auto launch = custody.wait_ready_until(
+    std::chrono::steady_clock::now() + std::chrono::seconds(5));
+// An incomplete deadline result retains custody and reports confirmed facts only.
 ```
+
+Environment overrides merge with the inherited environment in order; a later
+duplicate wins. Variable names are case-insensitive on Windows and
+case-sensitive on POSIX, and recovery occurrences reuse the same overrides.
+Entries are not syntax-validated, so provide `NAME=VALUE` strings. Custody
+status also retains occurrence-qualified `last_failure` diagnostics. Deadline
+expiry does not itself create a failure, and
+`last_failure.kind == Managed_child_failure_kind::none` means only that no
+failure report has been recorded—not that readiness or release succeeded.
 
 Note: spawned processes require a lifeline by default. To launch a process
 manually into an existing swarm, create an external process invitation in the

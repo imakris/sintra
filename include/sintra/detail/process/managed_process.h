@@ -131,6 +131,29 @@ struct Lifetime_policy
     int                hard_exit_timeout_ms = 100;
 };
 
+enum class Managed_child_failure_kind
+{
+    none,
+    custody_not_accepted,
+    custody_closed,
+    occurrence_admission,
+    reader_setup,
+    lifeline_setup,
+    native_spawn,
+    native_identity,
+    setup_exception,
+    setup_worker_start,
+    readiness_observation
+};
+
+struct Managed_child_failure
+{
+    Managed_child_failure_kind kind = Managed_child_failure_kind::none;
+    uint32_t                   occurrence = 0;
+    int                        native_error = 0;
+    std::string                message;
+};
+
 
 // Branch indices have the following meaning:
 // -1: No branching has taken place - this variable is not relevant
@@ -194,6 +217,35 @@ struct Managed_child_occurrence_token
     explicit operator bool() const noexcept { return !custody.expired(); }
 };
 
+enum class Custody_phase
+{
+    open,
+    releasing,
+    released
+};
+
+enum class Readiness_phase
+{
+    not_requested,
+    pending,
+    reached,
+    stopped
+};
+
+enum class Release_mode
+{
+    passive,
+    cleanup
+};
+
+enum class Release_attempt_phase
+{
+    idle,
+    running,
+    failing,
+    retryable
+};
+
 // One retained logical custody record.  Subsystems remain authoritative for
 // their own facts; this record only joins their exact-occurrence reports.
 struct Managed_child_custody_record
@@ -201,17 +253,14 @@ struct Managed_child_custody_record
     mutable std::mutex                         mutex;
     std::condition_variable                    changed;
     uint64_t                                   identity = 0;
-    bool                                       accepted = false;
-    bool                                       readiness_reached = false;
-    bool                                       readiness_observer_complete = true;
-    bool                                       recovery_open = true;
-    bool                                       release_requested = false;
+    Readiness_phase                            readiness = Readiness_phase::not_requested;
+    Custody_phase                              phase = Custody_phase::open;
     std::atomic<bool>                          readiness_cancelled{false};
-    bool                                       cleanup_requested = false;
-    bool                                       cleanup_started = false;
-    uint64_t                                   cleanup_attempt = 0;
-    bool                                       cleanup_attempt_failed = false;
-    bool                                       release_complete = false;
+    Release_mode                               release_mode = Release_mode::passive;
+    Release_attempt_phase                      release_attempt_phase =
+        Release_attempt_phase::idle;
+    uint64_t                                   release_attempt_generation = 0;
+    Managed_child_failure                      last_failure;
     std::vector<Managed_child_occurrence_record> occurrences;
 };
 
@@ -438,9 +487,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uintptr_t                  os_process_handle = 0;
         bool                       os_process_handle_owned = false;
 #endif
-        int                        errno_value = 0;
-        std::string                failure_stage;
-        std::string                error_message;
+        Managed_child_failure      failure;
     };
 
 #ifndef _WIN32
@@ -467,7 +514,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool release_lifeline(instance_id_type process_instance_id);
     void release_all_lifelines();
 
-    Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args);
+    Spawn_result spawn_swarm_process(const Spawn_swarm_process_args& ssp_args);
+    Spawn_result spawn_swarm_process_impl(const Spawn_swarm_process_args& ssp_args);
 
     std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
@@ -475,9 +523,12 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         instance_id_type process_instance_id,
         uint32_t occurrence);
+    void note_child_custody_failure(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        Managed_child_failure failure);
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
-        bool initiate_cleanup = false);
+        detail::Release_mode release_mode = detail::Release_mode::passive);
     void request_all_child_custody_releases();
     bool wait_for_all_child_custodies(
         std::chrono::steady_clock::time_point deadline);
@@ -493,11 +544,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const detail::Managed_child_occurrence_token& token);
     bool begin_child_communication_retirement(
         const detail::Managed_child_occurrence_token& token,
-        uint64_t expected_cleanup_attempt,
-        uint64_t& claimed_cleanup_attempt);
+        uint64_t expected_release_attempt_generation,
+        uint64_t& claimed_release_attempt_generation);
     void reset_child_communication_retirement(
         const detail::Managed_child_occurrence_token& token,
-        uint64_t cleanup_attempt);
+        uint64_t release_attempt_generation);
     bool join_child_communication(
         const detail::Managed_child_occurrence_token& token,
         const std::shared_ptr<Process_message_reader>& reader);

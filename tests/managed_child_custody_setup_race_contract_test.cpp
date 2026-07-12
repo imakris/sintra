@@ -365,7 +365,8 @@ bool wait_for_release(
 {
     std::unique_lock<std::mutex> lock(record->mutex);
     return record->changed.wait_for(lock, 5s, [&]() {
-        return record->release_complete && record->readiness_observer_complete;
+        return record->phase == sintra::detail::Custody_phase::released &&
+            record->readiness != sintra::detail::Readiness_phase::pending;
     });
 }
 
@@ -570,10 +571,16 @@ std::optional<std::array<bool, 4>> occurrence_release_attempt_facts(
         return std::nullopt;
     }
     return std::array{
-        custody->cleanup_started,
-        custody->cleanup_attempt_failed,
+        custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::running ||
+            custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::failing,
+        custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::failing ||
+            custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::retryable,
         occurrence->communication_retirement_started,
-        custody->release_complete};
+        custody->phase == sintra::detail::Custody_phase::released};
 }
 
 void reset_failure_hook()
@@ -581,6 +588,17 @@ void reset_failure_hook()
     sintra::detail::test_hooks::s_managed_child_failure.store(
         nullptr, std::memory_order_release);
     s_failure_plan = nullptr;
+}
+
+bool observed_setup_exception(
+    const sintra::Managed_child_status& observation,
+    const char* stage)
+{
+    return observation.last_failure.kind ==
+            sintra::Managed_child_failure_kind::setup_exception &&
+        observation.last_failure.occurrence == 0 &&
+        observation.last_failure.native_error == 0 &&
+        observation.last_failure.message.find(stage) != std::string::npos;
 }
 
 #ifndef _WIN32
@@ -726,13 +744,14 @@ bool run_recovery_create_release_race(
                 sintra::detail::Managed_child_occurrence_record::setup_state::pending;
     }
 
-    sintra::s_mproc->request_child_custody_release(custody, true);
+    sintra::s_mproc->request_child_custody_release(
+        custody, sintra::detail::Release_mode::cleanup);
     std::this_thread::sleep_for(100ms);
     bool incomplete_while_held = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        incomplete_while_held = custody->release_requested &&
-            !custody->release_complete &&
+        incomplete_while_held =
+            custody->phase == sintra::detail::Custody_phase::releasing &&
             custody->occurrences.front().setup ==
                 sintra::detail::Managed_child_occurrence_record::setup_state::pending;
     }
@@ -786,19 +805,20 @@ bool run_deadline_setup_shutdown_retry(
     options.binary_path = binary_path;
     options.args = {k_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = "managed_child_setup_race_never_published";
-    options.wait_timeout = 200ms;
+    options.readiness_instance_name = "managed_child_setup_race_never_published";
     options.lifetime.enable_lifeline = false;
 
     const auto started = std::chrono::steady_clock::now();
     auto custody = sintra::spawn_swarm_process(options);
+    const auto observation = custody.wait_ready_until(started + 200ms);
     const auto elapsed = std::chrono::steady_clock::now() - started;
-    const auto observation = sintra::observe_managed_child(custody);
     const bool setup_held = wait_for_gate(gate);
     const bool caller_bounded =
         elapsed >= 150ms && elapsed <= 1000ms && observation.accepted &&
         observation.admitted_occurrences == 1 &&
         observation.created_occurrences == 0 &&
+        observation.last_failure.kind ==
+            sintra::Managed_child_failure_kind::none &&
         observation.release_requested && !observation.release_complete;
 
     bool first_shutdown = true;
@@ -816,8 +836,8 @@ bool run_deadline_setup_shutdown_retry(
         sintra::s_mproc != nullptr && marker_absent(marker);
 
     release_gate(gate);
-    const auto released = sintra::wait_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     sintra::detail::test_hooks::s_managed_child_reader_setup.store(
         nullptr, std::memory_order_release);
     s_gate = nullptr;
@@ -857,8 +877,7 @@ bool run_pre_create_exception(
     options.binary_path = binary_path;
     options.args = {k_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = "managed_child_pre_create_never_published";
-    options.wait_timeout = 300ms;
+    options.readiness_instance_name = "managed_child_pre_create_never_published";
     options.lifetime.enable_lifeline = false;
 
     bool threw = false;
@@ -866,13 +885,14 @@ bool run_pre_create_exception(
     const auto started = std::chrono::steady_clock::now();
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(started + 300ms);
     }
     catch (...) {
         threw = true;
     }
     const auto elapsed = std::chrono::steady_clock::now() - started;
-    const auto released = sintra::wait_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     const auto hits = failure_hits(plan);
     reset_failure_hook();
     const bool finalized = settle_detail_finalize("pre_create_exception");
@@ -882,7 +902,8 @@ bool run_pre_create_exception(
     return !threw && elapsed < 1s && released.accepted &&
         released.admitted_occurrences == 1 &&
         released.created_occurrences == 0 && released.release_requested &&
-        released.release_complete && hits == 1 && marker_missing && finalized;
+        released.release_complete && observed_setup_exception(released, plan.stage) &&
+        hits == 1 && marker_missing && finalized;
 }
 
 bool run_owned_native_exception(
@@ -913,9 +934,8 @@ bool run_owned_native_exception(
     options.binary_path = binary_path;
     options.args = {k_native_bound_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name =
+    options.readiness_instance_name =
         std::string("managed_child_") + phase + "_never_published";
-    options.wait_timeout = 500ms;
     options.lifetime.enable_lifeline = false;
 
     const std::string unrelated_name =
@@ -935,6 +955,7 @@ bool run_owned_native_exception(
     sintra::Managed_child_custody custody;
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(std::chrono::steady_clock::now() + 500ms);
     }
     catch (...) {
         threw = true;
@@ -949,8 +970,8 @@ bool run_owned_native_exception(
     }
 #endif
     const bool release_written = write_release_marker(marker);
-    const auto released = sintra::wait_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     const bool initialization_retired = initialization_tracking_absent(piid);
     bool unrelated_delivered = false;
     {
@@ -983,6 +1004,7 @@ bool run_owned_native_exception(
         released.accepted && released.admitted_occurrences == 1 &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         released.release_requested && released.release_complete &&
+        observed_setup_exception(released, failure_stage) &&
         initialization_retired && unrelated_delivered && survivor_absent &&
         reap_normal && finalized;
 }
@@ -1026,12 +1048,12 @@ bool run_release_worker_retry(
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &inject_managed_child_failure, std::memory_order_release);
 
-    const auto first = sintra::release_managed_child(
-        custody, std::chrono::steady_clock::now() + 250ms);
+    const auto first = custody.release_until(
+        std::chrono::steady_clock::now() + 250ms);
     const auto hits_after_first = failure_hits(plan);
     const bool release_written = write_release_marker(marker);
-    const auto second = sintra::retry_managed_child_release(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto second = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
     reset_failure_hook();
 #ifndef _WIN32
@@ -1077,17 +1099,17 @@ bool run_prepublication_exit_convergence(
         arm_posix_reap(*identity);
     }
 #endif
-    auto exited = sintra::observe_managed_child(custody);
+    auto exited = custody.status();
     const auto exit_deadline = std::chrono::steady_clock::now() + 5s;
     while (exited.exited_occurrences != 1 &&
         std::chrono::steady_clock::now() < exit_deadline)
     {
         std::this_thread::sleep_for(10ms);
-        exited = sintra::observe_managed_child(custody);
+        exited = custody.status();
     }
 
-    const auto released = sintra::release_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     const bool initialization_retired = initialization_tracking_absent(piid);
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
@@ -1160,10 +1182,10 @@ bool run_split_transport_retirement(
     }
 #endif
 
-    sintra::Managed_child_custody_observation first_release;
+    sintra::Managed_child_status first_release;
     std::thread first_release_caller([&]() {
-        first_release = sintra::release_managed_child(
-            custody, std::chrono::steady_clock::now() + 2500ms);
+        first_release = custody.release_until(
+            std::chrono::steady_clock::now() + 2500ms);
     });
     const bool release_written = write_release_marker(marker);
     bool join_incomplete = false;
@@ -1201,8 +1223,8 @@ bool run_split_transport_retirement(
             gate.reader->set_running_for_test(false, false);
         }
     }
-    const auto released = sintra::release_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     bool after_join = false;
     {
         std::unique_lock<std::mutex> lock(gate.mutex);
@@ -1251,10 +1273,10 @@ bool run_split_transport_retirement(
         arm_posix_reap(*retry_identity);
     }
 #endif
-    sintra::Managed_child_custody_observation retry_first_release;
+    sintra::Managed_child_status retry_first_release;
     std::thread retry_first_caller([&]() {
-        retry_first_release = sintra::release_managed_child(
-            retry_custody, std::chrono::steady_clock::now() + 2s);
+        retry_first_release = retry_custody.release_until(
+            std::chrono::steady_clock::now() + 2s);
     });
     const bool retry_release_written = write_release_marker(retry_marker);
     if (retry_first_caller.joinable()) {
@@ -1280,8 +1302,8 @@ bool run_split_transport_retirement(
         (*retry_held_facts)[1] && !(*retry_held_facts)[2] &&
         !retry_first_release.release_complete;
     reset_failure_hook();
-    const auto retried = sintra::release_managed_child(
-        retry_custody, std::chrono::steady_clock::now() + 5s);
+    const auto retried = retry_custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
 #ifndef _WIN32
     const bool retry_reap_normal = retry_identity && posix_reap_normal();
     clear_posix_reap();
@@ -1363,10 +1385,10 @@ bool run_prepublication_publish_race(
     options.binary_path = binary_path;
     options.args = {k_native_bound_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = "managed_child_prepublication_never_published";
-    options.wait_timeout = 500ms;
+    options.readiness_instance_name = "managed_child_prepublication_never_published";
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
+    custody.wait_ready_until(std::chrono::steady_clock::now() + 500ms);
 
     bool first_miss = false;
     {
@@ -1391,7 +1413,7 @@ bool run_prepublication_publish_race(
         });
         publish_held = gate.publish_locked && !gate.release_publish;
     }
-    const auto held_observation = sintra::observe_managed_child(custody);
+    const auto held_observation = custody.status();
 
     const bool identity_written = wait_for_file(marker, 5s);
     const auto identity = identity_written
@@ -1410,8 +1432,8 @@ bool run_prepublication_publish_race(
     }
     publisher.join();
 
-    const auto released = sintra::wait_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
     const bool canonical_absence =
         assigned_name_absent(published_name) && process_registry_absent(piid);
@@ -1526,7 +1548,7 @@ bool run_unrelated_readiness_rejection(
     bool release_written = false;
     bool survivor_absent = false;
     bool reap_normal = false;
-    sintra::Managed_child_custody_observation released;
+    sintra::Managed_child_status released;
     {
         Unrelated_publication_target unrelated;
         unrelated_assigned = unrelated.assign_name(target_name);
@@ -1552,7 +1574,7 @@ bool run_unrelated_readiness_rejection(
         expected_spawn_iid.store(
             sintra::invalid_instance_id, std::memory_order_release);
 
-        const auto observed = sintra::observe_managed_child(custody);
+        const auto observed = custody.status();
         const auto identity = wait_for_file(marker, 5s)
             ? read_child_identity(marker)
             : std::nullopt;
@@ -1592,8 +1614,8 @@ bool run_unrelated_readiness_rejection(
         }
 #endif
         release_written = write_release_marker(marker);
-        released = sintra::release_managed_child(
-            custody, std::chrono::steady_clock::now() + 5s);
+        released = custody.release_until(
+            std::chrono::steady_clock::now() + 5s);
         survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
         reap_normal = identity && posix_reap_normal();
@@ -1658,11 +1680,12 @@ bool run_exact_readiness_acceptance(
         marker.string(),
         target_name};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = target_name;
+    options.readiness_instance_name = target_name;
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
 
-    const auto observed = sintra::observe_managed_child(custody);
+    const auto observed = custody.wait_ready_until(
+        std::chrono::steady_clock::now() + 5s);
     const auto resolved = sintra::Coordinator::rpc_resolve_instance(
         sintra::s_coord_id, target_name);
     const bool exact_publication = resolved != sintra::invalid_instance_id &&
@@ -1676,8 +1699,8 @@ bool run_exact_readiness_acceptance(
     }
 #endif
     const bool release_written = write_release_marker(marker);
-    const auto released = sintra::release_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
     const bool reap_normal = identity && posix_reap_normal();
@@ -1728,16 +1751,19 @@ bool run_unbounded_readiness_cancellation(
     const auto piid = sintra::make_process_instance_id();
     sintra::Managed_child_custody custody;
     std::atomic<bool> spawn_returned{false};
+    std::atomic<bool> readiness_wait_returned{false};
     std::thread spawn_caller([&]() {
         sintra::Spawn_options options;
         options.binary_path = binary_path;
         options.args = {k_readiness_cancellation_child_flag, marker.string()};
         options.process_instance_id = piid;
-        options.wait_for_instance_name =
+        options.readiness_instance_name =
             "managed_child_readiness_cancel_never_" + std::to_string(piid);
         options.lifetime.enable_lifeline = false;
         custody = sintra::spawn_swarm_process(options);
         spawn_returned.store(true, std::memory_order_release);
+        custody.wait_ready_until(std::chrono::steady_clock::time_point::max());
+        readiness_wait_returned.store(true, std::memory_order_release);
     });
 
     const auto identity = wait_for_file(marker, 5s)
@@ -1749,7 +1775,8 @@ bool run_unbounded_readiness_cancellation(
     }
 #endif
     const bool blocked_before_finalize = identity &&
-        !spawn_returned.load(std::memory_order_acquire);
+        spawn_returned.load(std::memory_order_acquire) &&
+        !readiness_wait_returned.load(std::memory_order_acquire);
     std::atomic<bool> finalize_done{false};
     std::thread cancellation_watchdog([&]() {
         const auto deadline = std::chrono::steady_clock::now() + 8s;
@@ -1763,8 +1790,8 @@ bool run_unbounded_readiness_cancellation(
         }
         const bool caller_returned = spawn_returned.load(std::memory_order_acquire);
         const auto observed = caller_returned
-            ? sintra::observe_managed_child(custody)
-            : sintra::Managed_child_custody_observation{};
+            ? custody.status()
+            : sintra::Managed_child_status{};
         const bool all_custodies_released = sintra::s_mproc &&
             sintra::s_mproc->all_child_custodies_released();
         const bool coordinator_sole = sintra::s_coord &&
@@ -1795,7 +1822,7 @@ bool run_unbounded_readiness_cancellation(
     cancellation_watchdog.join();
     spawn_caller.join();
 
-    const auto released = sintra::observe_managed_child(custody);
+    const auto released = custody.status();
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
     const bool reap_normal = identity && posix_reap_normal();
@@ -2031,7 +2058,7 @@ bool run_immediate_reaped_classification(
     options.process_instance_id = sintra::make_process_instance_id();
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
-    const auto observed = sintra::observe_managed_child(custody);
+    const auto observed = custody.status();
     const pid_t child_pid = s_immediate_exit_pid.load(std::memory_order_acquire);
 
     bool roster_unchanged = false;
@@ -2047,8 +2074,8 @@ bool run_immediate_reaped_classification(
                     return slot.pid == child_pid;
                 });
     }
-    const auto released = sintra::release_managed_child(
-        custody, std::chrono::steady_clock::now() + 5s);
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
     const bool reap_normal = posix_reap_normal();
     const bool survivor_absent = child_pid > 0 &&
         !sintra::is_process_alive(static_cast<uint32_t>(child_pid));
@@ -2113,9 +2140,8 @@ bool run_concurrent_posix_roster_reservations(
             options.binary_path = binary_path;
             options.args = {k_native_bound_child_flag, markers[i].string()};
             options.process_instance_id = piids[i];
-            options.wait_for_instance_name =
+            options.readiness_instance_name =
                 "managed_child_posix_roster_never_" + std::to_string(i);
-            options.wait_timeout = 2s;
             options.lifetime.enable_lifeline = false;
             custodies[i] = sintra::spawn_swarm_process(options);
         });
@@ -2174,7 +2200,7 @@ bool run_concurrent_posix_roster_reservations(
     const bool releases_written =
         write_release_marker(markers[0]) && write_release_marker(markers[1]);
 
-    std::array<sintra::Managed_child_custody_observation, 2> released;
+    std::array<sintra::Managed_child_status, 2> released;
     const auto release_deadline = std::chrono::steady_clock::now() + 5s;
     std::array<std::thread, 2> release_callers;
     for (size_t i = 0; i < 2; ++i) {
@@ -2183,8 +2209,7 @@ bool run_concurrent_posix_roster_reservations(
                 const auto attempt_deadline = std::min(
                     release_deadline,
                     std::chrono::steady_clock::now() + 250ms);
-                released[i] = sintra::release_managed_child(
-                    custodies[i], attempt_deadline);
+                released[i] = custodies[i].release_until(attempt_deadline);
             }
             while (!released[i].release_complete &&
                 std::chrono::steady_clock::now() < release_deadline);

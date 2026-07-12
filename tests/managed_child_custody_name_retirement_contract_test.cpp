@@ -6,6 +6,7 @@
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/runtime.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -37,6 +38,7 @@
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_custody_name_retirement_child";
 constexpr std::string_view k_nonce_flag = "--managed_child_custody_name_retirement_nonce";
@@ -93,30 +95,6 @@ std::atomic<sintra::instance_id_type> s_exact_retirement_iid{sintra::invalid_ins
 fs::path marker_path(const fs::path& dir, std::string_view name)
 {
     return dir / std::string(name);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& contents)
-{
-    const fs::path temporary = path.string() + ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return false;
-        }
-        out << contents;
-        out.flush();
-        if (!out) {
-            return false;
-        }
-    }
-
-    std::error_code error;
-    fs::rename(temporary, path, error);
-    if (error) {
-        fs::remove(temporary, error);
-        return false;
-    }
-    return true;
 }
 
 std::optional<Child_ledger> read_ledger(const fs::path& path)
@@ -451,14 +429,15 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         nonce,
     };
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = requested_name;
-    options.wait_timeout = std::chrono::seconds(8);
+    options.readiness_instance_name = requested_name;
     options.lifetime.enable_lifeline = false;
 
     sintra::Managed_child_custody custody;
     bool spawn_threw = false;
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(
+            std::chrono::steady_clock::now() + std::chrono::seconds(8));
     }
     catch (...) {
         spawn_threw = true;
@@ -536,7 +515,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         }
     }
 
-    const auto launch_observation = sintra::observe_managed_child(custody);
+    const auto launch_observation = custody.status();
     const bool pre_retirement_valid =
         !spawn_threw && launch_observation.accepted &&
         launch_observation.readiness_reached &&
@@ -616,8 +595,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         target_absent && same_occurrence_live && communication_still_live &&
         later_facts_nonterminal;
 
-    const auto held_release_observation = sintra::release_managed_child(
-        custody,
+    const auto held_release_observation = custody.release_until(
         std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
     const bool release_incomplete_at_witness =
         held_release_observation.accepted &&
@@ -635,8 +613,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         marker_path(shared.path(), k_finalized_file),
         k_watchdog_timeout,
         std::chrono::milliseconds(10));
-    const auto released_observation = sintra::wait_managed_child(
-        custody,
+    const auto released_observation = custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     bool native_exit_confirmed = false;

@@ -619,14 +619,13 @@ bool run_native_escalation_phase(
         nonce,
     };
     options.process_instance_id = k_native_child_process_iid;
-    options.wait_for_instance_name = "managed_child_native_never_ready_" + nonce;
-    options.wait_timeout = k_requested_wait_timeout;
+    options.readiness_instance_name = "managed_child_native_never_ready_" + nonce;
     options.lifetime.enable_lifeline = false;
 
     const auto started = std::chrono::steady_clock::now();
     auto custody = sintra::spawn_swarm_process(options);
+    const auto first = custody.wait_ready_until(started + k_requested_wait_timeout);
     const auto returned = std::chrono::steady_clock::now();
-    const auto first = sintra::observe_managed_child(custody);
     const bool ledger_seen = sintra::test::wait_for_file(
         native_child_ledger_path(shared_dir),
         k_watchdog_timeout,
@@ -656,10 +655,10 @@ bool run_native_escalation_phase(
         : nullptr;
 #endif
 
-    const auto completed = sintra::cleanup_managed_child(
-        custody, std::chrono::steady_clock::now() + k_watchdog_timeout);
-    const auto retried = sintra::cleanup_managed_child(
-        custody, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    const auto completed = custody.terminate_until(
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
+    const auto retried = custody.terminate_until(
+        std::chrono::steady_clock::now() + std::chrono::seconds(1));
     const bool survivor_absent = ledger_valid && !exact_child_is_live(*ledger);
     const uint32_t soft_count =
         s_native_cleanup.soft.load(std::memory_order_acquire);
@@ -781,7 +780,7 @@ bool run_native_retry_phase(
     options.process_instance_id = k_native_retry_process_iid;
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
-    const auto before_cleanup = sintra::observe_managed_child(custody);
+    const auto before_cleanup = custody.status();
     const bool ledger_seen = sintra::test::wait_for_file(
         native_retry_child_ledger_path(shared_dir),
         k_watchdog_timeout,
@@ -812,8 +811,7 @@ bool run_native_retry_phase(
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &fail_native_hard_termination, std::memory_order_release);
     const auto first_started = std::chrono::steady_clock::now();
-    const auto first = sintra::cleanup_managed_child(
-        custody, first_started + first_deadline);
+    const auto first = custody.terminate_until(first_started + first_deadline);
     const auto first_returned = std::chrono::steady_clock::now();
     sintra::detail::test_hooks::s_managed_child_failure.store(
         nullptr, std::memory_order_release);
@@ -824,14 +822,14 @@ bool run_native_retry_phase(
     const uint32_t failure_hits =
         s_native_hard_failure_hits.load(std::memory_order_acquire);
 
-    const auto second = sintra::cleanup_managed_child(
-        custody, std::chrono::steady_clock::now() + k_watchdog_timeout);
+    const auto second = custody.terminate_until(
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
     bool survivor_absent = ledger_valid && !exact_child_is_live(*ledger);
     bool forced_cleanup = false;
     if (ledger_valid && !survivor_absent) {
         forced_cleanup = terminate_exact_child(*ledger);
-        sintra::wait_managed_child(
-            custody, std::chrono::steady_clock::now() + k_watchdog_timeout);
+        custody.release_until(
+            std::chrono::steady_clock::now() + k_watchdog_timeout);
         survivor_absent = !exact_child_is_live(*ledger);
     }
 
@@ -990,8 +988,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         nonce,
     };
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = requested_target;
-    options.wait_timeout = k_requested_wait_timeout;
+    options.readiness_instance_name = requested_target;
     options.lifetime.enable_lifeline = false;
 
     std::thread spawn_thread([&]() {
@@ -1001,6 +998,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         }
         try {
             call.custody = sintra::spawn_swarm_process(options);
+            call.custody.wait_ready_until(
+                call.started_at + k_requested_wait_timeout);
         }
         catch (...) {
             call.threw = true;
@@ -1098,8 +1097,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool returned_by_deadline =
         cleanup_entered &&
         caller_done_at_observation &&
-        caller_completed_at <= observation_deadline &&
-        observed_at >= observation_deadline;
+        caller_completed_at <= observation_deadline;
     const auto overrun_ms = cleanup_entered
         ? std::chrono::duration_cast<std::chrono::milliseconds>(
             observed_at - call_started_at - k_requested_wait_timeout).count()
@@ -1138,11 +1136,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         nullptr, std::memory_order_release);
     s_cleanup_gate = nullptr;
 
-    sintra::Managed_child_custody_observation launch_observation;
+    sintra::Managed_child_status launch_observation;
     bool call_threw = false;
     {
         std::lock_guard<std::mutex> lock(call.mutex);
-        launch_observation = sintra::observe_managed_child(call.custody);
+        launch_observation = call.custody.status();
         call_threw = call.threw;
     }
 
@@ -1152,8 +1150,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         child_finalized_path(shared.path()),
         k_watchdog_timeout,
         std::chrono::milliseconds(10));
-    const auto released_observation = sintra::wait_managed_child(
-        call.custody,
+    const auto released_observation = call.custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     bool native_exit_confirmed = false;

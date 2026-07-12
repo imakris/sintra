@@ -8,6 +8,7 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/ipc/process_utils.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -40,6 +41,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_public_cleanup_child";
 constexpr std::string_view k_nonce_flag = "--managed_child_public_cleanup_nonce";
@@ -67,29 +69,6 @@ struct Child_ledger
 fs::path marker_path(const fs::path& directory, std::string_view name)
 {
     return directory / std::string(name);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& contents)
-{
-    const fs::path temporary = path.string() + ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return false;
-        }
-        out << contents;
-        out.flush();
-        if (!out) {
-            return false;
-        }
-    }
-    std::error_code error;
-    fs::rename(temporary, path, error);
-    if (error) {
-        fs::remove(temporary, error);
-        return false;
-    }
-    return true;
 }
 
 std::optional<Child_ledger> read_ledger(const fs::path& path)
@@ -399,8 +378,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     options.binary_path = binary_path;
     options.args = {std::string(k_child_flag), std::string(k_nonce_flag), nonce};
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = ready_name;
-    options.wait_timeout = 8s;
+    options.readiness_instance_name = ready_name;
     options.lifetime.enable_lifeline = true;
     options.lifetime.hard_exit_timeout_ms = 100;
 
@@ -408,6 +386,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool spawn_threw = false;
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(std::chrono::steady_clock::now() + 8s);
     }
     catch (...) {
         spawn_threw = true;
@@ -429,7 +408,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #endif
     }
 
-    const auto launch = sintra::observe_managed_child(custody);
+    const auto launch = custody.status();
     const bool identity_valid = ledger && ledger->nonce == nonce &&
         ledger->process_iid == k_child_process_iid && ledger->occurrence == 0 &&
         ledger->ready_name == ready_name &&
@@ -447,12 +426,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
 
     // Start graceful release on a separate caller. The observation seam proves
-    // its one retained worker evaluated cleanup_requested=false and entered its
+    // its one retained worker evaluated passive release mode and entered its
     // passive wait before the public cleanup escalation occurs.
-    sintra::Managed_child_custody_observation passive;
+    sintra::Managed_child_status passive;
     std::thread passive_caller([&]() {
-        passive = sintra::release_managed_child(
-            custody, std::chrono::steady_clock::now() + k_watchdog_timeout);
+        passive = custody.release_until(
+            std::chrono::steady_clock::now() + k_watchdog_timeout);
     });
     bool passive_wait_seen = false;
     {
@@ -466,8 +445,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     // action. Custody and the child must remain retained, and the deadline
     // facing caller must still return bounded-incomplete.
     const auto failed_begin = std::chrono::steady_clock::now();
-    const auto failed_cleanup = sintra::cleanup_managed_child(
-        custody, failed_begin + 120ms);
+    const auto failed_cleanup = custody.terminate_until(failed_begin + 120ms);
     const auto failed_elapsed = std::chrono::steady_clock::now() - failed_begin;
     const bool failure_seen = failure_hits(failure_plan) == 1;
     const bool retained_after_failure = ledger && exact_child_is_live(*ledger) &&
@@ -487,8 +465,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     // Re-drive the same opaque custody. The successful worker is held before
     // its first cleanup action to prove a second bounded-incomplete return.
     const auto cleanup_begin = std::chrono::steady_clock::now();
-    const auto held = sintra::cleanup_managed_child(
-        custody, cleanup_begin + 120ms);
+    const auto held = custody.terminate_until(cleanup_begin + 120ms);
     const auto cleanup_elapsed = std::chrono::steady_clock::now() - cleanup_begin;
     bool cleanup_entered = false;
     {
@@ -507,8 +484,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         process_unpublished.load(std::memory_order_acquire) == 0;
 
     const bool first_finalize_succeeded = sintra::detail::finalize();
-    const auto retry = sintra::retry_managed_child_release(
-        custody, std::chrono::steady_clock::now() + 80ms);
+    const auto retry = custody.release_until(
+        std::chrono::steady_clock::now() + 80ms);
     const bool retained_across_finalize = !first_finalize_succeeded && retry.accepted &&
         retry.release_requested && !retry.release_complete && ledger &&
         exact_child_is_live(*ledger);
@@ -519,8 +496,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         gate.changed.notify_all();
     }
 
-    const auto complete = sintra::cleanup_managed_child(
-        custody, std::chrono::steady_clock::now() + k_watchdog_timeout);
+    const auto complete = custody.terminate_until(
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
     if (passive_caller.joinable()) {
         passive_caller.join();
     }

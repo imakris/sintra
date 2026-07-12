@@ -1889,7 +1889,8 @@ instance_id_type Coordinator::join_swarm(
         result = s_mproc->spawn_swarm_process(spawn_args);
     }
     catch (...) {
-        s_mproc->request_child_custody_release(spawn_args.custody, true);
+        s_mproc->request_child_custody_release(
+            spawn_args.custody, detail::Release_mode::cleanup);
         throw;
     }
 

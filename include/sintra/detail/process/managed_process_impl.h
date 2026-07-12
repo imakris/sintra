@@ -2127,7 +2127,6 @@ Managed_process::accept_child_custody()
     {
         std::lock_guard<std::mutex> lock(m_child_custody_mutex);
         custody->identity = m_next_child_custody_identity++;
-        custody->accepted = true;
         m_child_custodies.emplace(custody->identity, custody);
     }
     return custody;
@@ -2149,7 +2148,7 @@ inline bool Managed_process::can_accept_child_custody(
         return true;
     }
     std::lock_guard<std::mutex> lock(existing->mutex);
-    return existing->release_complete;
+    return existing->phase == detail::Custody_phase::released;
 }
 
 inline bool Managed_process::admit_child_custody_occurrence(
@@ -2162,7 +2161,7 @@ inline bool Managed_process::admit_child_custody_occurrence(
     }
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        if (!custody->recovery_open || custody->release_requested) {
+        if (custody->phase != detail::Custody_phase::open) {
             return false;
         }
         detail::Managed_child_occurrence_record admitted;
@@ -2176,6 +2175,24 @@ inline bool Managed_process::admit_child_custody_occurrence(
     }
     custody->changed.notify_all();
     return true;
+}
+
+inline void Managed_process::note_child_custody_failure(
+    const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+    Managed_child_failure failure)
+{
+    if (!custody || failure.kind == Managed_child_failure_kind::none) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        if (custody->last_failure.kind == Managed_child_failure_kind::none ||
+            failure.occurrence >= custody->last_failure.occurrence)
+        {
+            custody->last_failure = std::move(failure);
+        }
+    }
+    custody->changed.notify_all();
 }
 
 inline void Managed_process::start_child_custody_worker(
@@ -2248,7 +2265,9 @@ inline void Managed_process::retire_child_custody_if_complete(
     }
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        if (!custody->release_complete || !custody->readiness_observer_complete) {
+        if (custody->phase != detail::Custody_phase::released ||
+            custody->readiness == detail::Readiness_phase::pending)
+        {
             return;
         }
     }
@@ -2271,46 +2290,53 @@ inline void Managed_process::retire_child_custody_if_complete(
 
 inline void Managed_process::request_child_custody_release(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
-    bool initiate_cleanup)
+    detail::Release_mode release_mode)
 {
     if (!custody) {
         return;
     }
 
-    uint64_t cleanup_attempt = 0;
+    uint64_t release_attempt_generation = 0;
     bool readiness_cancelled = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        custody->recovery_open = false;
-        custody->release_requested = true;
+        if (custody->phase == detail::Custody_phase::open) {
+            custody->phase = detail::Custody_phase::releasing;
+        }
         readiness_cancelled = !custody->readiness_cancelled.exchange(
             true, std::memory_order_release);
-        custody->cleanup_requested = custody->cleanup_requested || initiate_cleanup;
-        if (custody->release_complete) {
-            custody->changed.notify_all();
-            cleanup_attempt = 0;
+        if (release_mode == detail::Release_mode::cleanup) {
+            custody->release_mode = detail::Release_mode::cleanup;
         }
-        else if (custody->cleanup_started) {
+        if (custody->phase == detail::Custody_phase::released) {
             custody->changed.notify_all();
-            cleanup_attempt = 0;
+            release_attempt_generation = 0;
+        }
+        else if (custody->release_attempt_phase ==
+                    detail::Release_attempt_phase::running ||
+                 custody->release_attempt_phase ==
+                    detail::Release_attempt_phase::failing)
+        {
+            custody->changed.notify_all();
+            release_attempt_generation = 0;
         }
         else {
-            custody->cleanup_started = true;
-            cleanup_attempt = ++custody->cleanup_attempt;
-            if (cleanup_attempt == 0) {
-                cleanup_attempt = ++custody->cleanup_attempt;
+            custody->release_attempt_phase =
+                detail::Release_attempt_phase::running;
+            release_attempt_generation = ++custody->release_attempt_generation;
+            if (release_attempt_generation == 0) {
+                release_attempt_generation = ++custody->release_attempt_generation;
             }
-            custody->cleanup_attempt_failed = false;
         }
     }
     if (readiness_cancelled && s_coord) {
         s_coord->notify_managed_child_readiness_cancelled();
     }
-    if (cleanup_attempt == 0) {
+    if (release_attempt_generation == 0) {
         return;
     }
 
-    auto cleanup_worker = [this, custody, cleanup_attempt]() {
+    auto cleanup_worker = [this, custody, release_attempt_generation]() {
         try {
             instance_id_type failure_iid = invalid_instance_id;
             uint32_t failure_occurrence = 0;
@@ -2380,17 +2406,19 @@ inline void Managed_process::request_child_custody_release(
 
         auto release_attempt_active = [&]() {
             std::lock_guard<std::mutex> lock(custody->mutex);
-            return custody->cleanup_started &&
-                custody->cleanup_attempt == cleanup_attempt &&
-                !custody->cleanup_attempt_failed;
+            return custody->release_attempt_phase ==
+                    detail::Release_attempt_phase::running &&
+                custody->release_attempt_generation == release_attempt_generation;
         };
 
-        auto retire_transport = [this, &custody, cleanup_attempt,
+        auto retire_transport = [this, &custody, release_attempt_generation,
                                  &release_attempt_active](
             const std::vector<std::pair<uint32_t, instance_id_type>>& targets,
-            bool initiate_cleanup) -> bool
+            detail::Release_mode release_mode) -> bool
         {
-            if (initiate_cleanup && !targets.empty()) {
+            if (release_mode == detail::Release_mode::cleanup &&
+                !targets.empty())
+            {
                 detail::managed_child_failure_for_test(
                     detail::test_hooks::k_managed_child_fail_cleanup_actions,
                     targets.front().second,
@@ -2405,21 +2433,26 @@ inline void Managed_process::request_child_custody_release(
                     process_iid,
                     occurrence};
                 auto converge_native = [&]() -> bool {
-                    if (!initiate_cleanup || cleanup_child_native(token)) {
+                    if (release_mode == detail::Release_mode::passive ||
+                        cleanup_child_native(token))
+                    {
                         return true;
                     }
                     {
                         std::lock_guard<std::mutex> lock(custody->mutex);
-                        if (custody->cleanup_started &&
-                            custody->cleanup_attempt == cleanup_attempt)
+                        if (custody->release_attempt_phase ==
+                                detail::Release_attempt_phase::running &&
+                            custody->release_attempt_generation ==
+                                release_attempt_generation)
                         {
-                            custody->cleanup_attempt_failed = true;
+                            custody->release_attempt_phase =
+                                detail::Release_attempt_phase::failing;
                         }
                     }
                     custody->changed.notify_all();
                     return false;
                 };
-                if (initiate_cleanup) {
+                if (release_mode == detail::Release_mode::cleanup) {
                     detail::managed_child_cleanup_for_test(
                         detail::test_hooks::k_managed_child_cleanup_before_actions,
                         process_iid,
@@ -2428,7 +2461,7 @@ inline void Managed_process::request_child_custody_release(
                 if (s_coord && s_coord->set_draining_state(process_iid, 1)) {
                     s_coord->note_draining_state_change();
                 }
-                if (initiate_cleanup) {
+                if (release_mode == detail::Release_mode::cleanup) {
                     release_lifeline(process_iid);
                     detail::managed_child_cleanup_for_test(
                         detail::test_hooks::k_managed_child_cleanup_lifeline_released,
@@ -2436,12 +2469,12 @@ inline void Managed_process::request_child_custody_release(
                         occurrence);
                 }
                 if (s_coord && !s_coord->unpublish_transceiver(process_iid)) {
-                    uint64_t claimed_cleanup_attempt = 0;
+                    uint64_t claimed_release_attempt_generation = 0;
                     const bool communication_claimed =
                         begin_child_communication_retirement(
                             token,
-                            cleanup_attempt,
-                            claimed_cleanup_attempt);
+                            release_attempt_generation,
+                            claimed_release_attempt_generation);
                     if (!communication_claimed) {
                         if (!release_attempt_active()) {
                             converge_native();
@@ -2470,14 +2503,14 @@ inline void Managed_process::request_child_custody_release(
                     try {
                         if (!join_child_communication(token, retiring_reader)) {
                             reset_child_communication_retirement(
-                                token, claimed_cleanup_attempt);
+                                token, claimed_release_attempt_generation);
                             converge_native();
                             return false;
                         }
                     }
                     catch (...) {
                         reset_child_communication_retirement(
-                            token, claimed_cleanup_attempt);
+                            token, claimed_release_attempt_generation);
                         converge_native();
                         throw;
                     }
@@ -2496,10 +2529,12 @@ inline void Managed_process::request_child_custody_release(
                     converge_native();
                     return false;
                 }
-                if (initiate_cleanup && !converge_native()) {
+                if (release_mode == detail::Release_mode::cleanup &&
+                    !converge_native())
+                {
                     return false;
                 }
-                if (initiate_cleanup && s_coord) {
+                if (release_mode == detail::Release_mode::cleanup && s_coord) {
                     // The coordinator path above either reported the exact
                     // occurrence's publication/communication retirement, or
                     // the canonical second miss confirmed both after its
@@ -2561,28 +2596,38 @@ inline void Managed_process::request_child_custody_release(
 #endif
             {
                 std::unique_lock<std::mutex> lock(custody->mutex);
-                if (!custody->cleanup_started ||
-                    custody->cleanup_attempt != cleanup_attempt ||
-                    custody->cleanup_attempt_failed)
+                if (custody->release_attempt_phase !=
+                        detail::Release_attempt_phase::running ||
+                    custody->release_attempt_generation !=
+                        release_attempt_generation)
                 {
-                    if (custody->cleanup_started &&
-                        custody->cleanup_attempt == cleanup_attempt)
+                    if (custody->release_attempt_phase ==
+                            detail::Release_attempt_phase::failing &&
+                        custody->release_attempt_generation ==
+                            release_attempt_generation)
                     {
-                        custody->cleanup_started = false;
+                        custody->release_attempt_phase =
+                            detail::Release_attempt_phase::retryable;
                     }
                     lock.unlock();
                     custody->changed.notify_all();
                     return;
                 }
                 if (all_terminal_locked()) {
-                    custody->release_complete = true;
+                    custody->phase = detail::Custody_phase::released;
+                    custody->release_attempt_phase =
+                        detail::Release_attempt_phase::idle;
                     break;
                 }
-                should_cleanup = custody->cleanup_requested && !cleanup_applied;
+                should_cleanup =
+                    custody->release_mode == detail::Release_mode::cleanup &&
+                    !cleanup_applied;
                 if (!should_cleanup) {
                     passive_targets = passive_targets_locked();
                 }
-                if (!custody->cleanup_requested && !passive_wait_reported) {
+                if (custody->release_mode == detail::Release_mode::passive &&
+                    !passive_wait_reported)
+                {
                     // Observation-only test seam: at this point the single
                     // retained worker has evaluated the monotone cleanup flag
                     // as false and is about to wait (or poll a fallback native
@@ -2618,11 +2663,14 @@ inline void Managed_process::request_child_custody_release(
                     )
                 {
                     custody->changed.wait(lock, [&]() {
-                        return !custody->cleanup_started ||
-                            custody->cleanup_attempt != cleanup_attempt ||
-                            custody->cleanup_attempt_failed ||
+                        return custody->release_attempt_phase !=
+                                detail::Release_attempt_phase::running ||
+                            custody->release_attempt_generation !=
+                                release_attempt_generation ||
                             all_terminal_locked() ||
-                            (custody->cleanup_requested && !cleanup_applied) ||
+                            (custody->release_mode ==
+                                detail::Release_mode::cleanup &&
+                             !cleanup_applied) ||
                             !passive_targets_locked().empty();
                     });
                     continue;
@@ -2630,7 +2678,7 @@ inline void Managed_process::request_child_custody_release(
             }
 
             if (should_cleanup) {
-                if (!retire_transport(active, true)) {
+                if (!retire_transport(active, detail::Release_mode::cleanup)) {
                     continue;
                 }
                 cleanup_applied = true;
@@ -2638,7 +2686,9 @@ inline void Managed_process::request_child_custody_release(
             }
 
             if (!passive_targets.empty()) {
-                if (!retire_transport(passive_targets, false)) {
+                if (!retire_transport(
+                        passive_targets, detail::Release_mode::passive))
+                {
                     continue;
                 }
                 continue;
@@ -2646,7 +2696,7 @@ inline void Managed_process::request_child_custody_release(
 
 #ifdef _WIN32
             // A retained fallback handle must not hide a later cleanup upgrade.
-            // Poll briefly in this owned worker, then re-check the custody flag;
+            // Poll briefly in this owned worker, then re-check the release mode;
             // public deadline callers continue to wait only on custody->changed.
             const auto wait_result = WaitForSingleObject(fallback_handle, 20);
             {
@@ -2682,10 +2732,15 @@ inline void Managed_process::request_child_custody_release(
             // custody can be retried without reconstructing authority.
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
-                if (!custody->release_complete &&
-                    custody->cleanup_attempt == cleanup_attempt)
+                if (custody->phase != detail::Custody_phase::released &&
+                    custody->release_attempt_generation ==
+                        release_attempt_generation)
                 {
-                    custody->cleanup_started = false;
+                    custody->release_attempt_phase =
+                        custody->release_attempt_phase ==
+                            detail::Release_attempt_phase::failing
+                        ? detail::Release_attempt_phase::retryable
+                        : detail::Release_attempt_phase::idle;
                 }
             }
             custody->changed.notify_all();
@@ -2698,10 +2753,15 @@ inline void Managed_process::request_child_custody_release(
     catch (...) {
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
-            if (!custody->release_complete &&
-                custody->cleanup_attempt == cleanup_attempt)
+            if (custody->phase != detail::Custody_phase::released &&
+                custody->release_attempt_generation ==
+                    release_attempt_generation)
             {
-                custody->cleanup_started = false;
+                custody->release_attempt_phase =
+                    custody->release_attempt_phase ==
+                        detail::Release_attempt_phase::failing
+                    ? detail::Release_attempt_phase::retryable
+                    : detail::Release_attempt_phase::idle;
             }
         }
         custody->changed.notify_all();
@@ -2733,7 +2793,9 @@ inline bool Managed_process::all_child_custodies_released() const
     }
     for (const auto& custody : custodies) {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        if (!custody->release_complete || !custody->readiness_observer_complete) {
+        if (custody->phase != detail::Custody_phase::released ||
+            custody->readiness == detail::Readiness_phase::pending)
+        {
             return false;
         }
     }
@@ -2768,7 +2830,7 @@ inline bool Managed_process::child_custody_allows_recovery(
         return false;
     }
     std::lock_guard<std::mutex> lock(custody->mutex);
-    return custody->recovery_open && !custody->release_requested;
+    return custody->phase == detail::Custody_phase::open;
 }
 
 inline detail::Managed_child_occurrence_token
@@ -2849,24 +2911,30 @@ inline void Managed_process::note_child_communication_retired(
 
 inline bool Managed_process::begin_child_communication_retirement(
     const detail::Managed_child_occurrence_token& token,
-    uint64_t expected_cleanup_attempt,
-    uint64_t& claimed_cleanup_attempt)
+    uint64_t expected_release_attempt_generation,
+    uint64_t& claimed_release_attempt_generation)
 {
-    claimed_cleanup_attempt = 0;
+    claimed_release_attempt_generation = 0;
     auto custody = token.custody.lock();
     if (!custody) {
         return false;
     }
     std::lock_guard<std::mutex> lock(custody->mutex);
-    if (expected_cleanup_attempt != 0 &&
-        (!custody->cleanup_started ||
-         custody->cleanup_attempt != expected_cleanup_attempt))
+    if (expected_release_attempt_generation != 0 &&
+        (custody->release_attempt_phase !=
+            detail::Release_attempt_phase::running ||
+         custody->release_attempt_generation !=
+            expected_release_attempt_generation))
     {
         return false;
     }
     // A failed release pass is reopened only by the next explicit custody
     // release/cleanup/finalization call, which clears this attempt latch.
-    if (custody->cleanup_attempt_failed) {
+    if (custody->release_attempt_phase ==
+            detail::Release_attempt_phase::failing ||
+        custody->release_attempt_phase ==
+            detail::Release_attempt_phase::retryable)
+    {
         return false;
     }
     for (auto& occurrence : custody->occurrences) {
@@ -2879,8 +2947,11 @@ inline bool Managed_process::begin_child_communication_retirement(
                 return false;
             }
             occurrence.communication_retirement_started = true;
-            if (custody->cleanup_started) {
-                claimed_cleanup_attempt = custody->cleanup_attempt;
+            if (custody->release_attempt_phase ==
+                detail::Release_attempt_phase::running)
+            {
+                claimed_release_attempt_generation =
+                    custody->release_attempt_generation;
             }
             return true;
         }
@@ -2890,7 +2961,7 @@ inline bool Managed_process::begin_child_communication_retirement(
 
 inline void Managed_process::reset_child_communication_retirement(
     const detail::Managed_child_occurrence_token& token,
-    uint64_t cleanup_attempt)
+    uint64_t release_attempt_generation)
 {
     auto custody = token.custody.lock();
     if (!custody) {
@@ -2903,10 +2974,14 @@ inline void Managed_process::reset_child_communication_retirement(
             !occurrence.communication_retired)
         {
             occurrence.communication_retirement_started = false;
-            if (cleanup_attempt != 0 && custody->cleanup_started &&
-                custody->cleanup_attempt == cleanup_attempt)
+            if (release_attempt_generation != 0 &&
+                custody->release_attempt_phase ==
+                    detail::Release_attempt_phase::running &&
+                custody->release_attempt_generation ==
+                    release_attempt_generation)
             {
-                custody->cleanup_attempt_failed = true;
+                custody->release_attempt_phase =
+                    detail::Release_attempt_phase::failing;
             }
             custody->changed.notify_all();
             return;
@@ -2949,23 +3024,25 @@ inline void Managed_process::retire_child_communication(
     const detail::Managed_child_occurrence_token& token,
     std::shared_ptr<Process_message_reader> reader)
 {
-    uint64_t cleanup_attempt = 0;
+    uint64_t release_attempt_generation = 0;
     if (!token || !begin_child_communication_retirement(
-            token, 0, cleanup_attempt))
+            token, 0, release_attempt_generation))
     {
         return;
     }
     try {
         start_child_custody_worker(
-            [this, token, cleanup_attempt, reader = std::move(reader)]() mutable {
+            [this, token, release_attempt_generation,
+             reader = std::move(reader)]() mutable {
             try {
                 if (!join_child_communication(token, reader)) {
                     reset_child_communication_retirement(
-                        token, cleanup_attempt);
+                        token, release_attempt_generation);
                 }
             }
             catch (...) {
-                reset_child_communication_retirement(token, cleanup_attempt);
+                reset_child_communication_retirement(
+                    token, release_attempt_generation);
                 throw;
             }
         },
@@ -2977,7 +3054,8 @@ inline void Managed_process::retire_child_communication(
         // Publication retirement remains authoritative. Without a terminal
         // reader join, communication stays nonterminal and custody cannot
         // report completion.
-        reset_child_communication_retirement(token, cleanup_attempt);
+        reset_child_communication_retirement(
+            token, release_attempt_generation);
     }
 }
 
@@ -3280,6 +3358,63 @@ inline bool Managed_process::cleanup_child_native(
 inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     const Spawn_swarm_process_args& s)
 {
+    auto admitted_failure_occurrence = [&]() {
+        if (!s.custody) {
+            return uint32_t{0};
+        }
+        std::lock_guard<std::mutex> lock(s.custody->mutex);
+        const auto admitted = std::find_if(
+            s.custody->occurrences.begin(),
+            s.custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& occurrence) {
+                return occurrence.process_instance_id == s.piid &&
+                    occurrence.occurrence == s.occurrence;
+            });
+        return admitted == s.custody->occurrences.end()
+            ? uint32_t{0}
+            : s.occurrence;
+    };
+    Spawn_result result;
+    try {
+        result = spawn_swarm_process_impl(s);
+    }
+    catch (const std::exception& exception) {
+        try {
+            note_child_custody_failure(
+                s.custody,
+                {Managed_child_failure_kind::setup_exception,
+                 admitted_failure_occurrence(),
+                 0,
+                 exception.what()});
+        }
+        catch (...) {
+        }
+        throw;
+    }
+    catch (...) {
+        try {
+            note_child_custody_failure(
+                s.custody,
+                {Managed_child_failure_kind::setup_exception,
+                 admitted_failure_occurrence(),
+                 0,
+                 "Managed child setup threw an unknown exception"});
+        }
+        catch (...) {
+        }
+        throw;
+    }
+    if (!result.success &&
+        result.failure.kind != Managed_child_failure_kind::none)
+    {
+        note_child_custody_failure(s.custody, result.failure);
+    }
+    return result;
+}
+
+inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
+    const Spawn_swarm_process_args& s)
+{
     assert(s_coord);
     Spawn_result result;
     result.binary_name      = s.binary_name;
@@ -3287,8 +3422,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     result.lifeline_enabled = s.lifetime.enable_lifeline;
 
     if (!s.custody) {
-        result.failure_stage = "custody_not_accepted";
-        result.error_message = "Managed child launch requires accepted custody";
+        result.failure.kind = Managed_child_failure_kind::custody_not_accepted;
+        result.failure.message = "Managed child launch requires accepted custody";
         return result;
     }
     auto custody = s.custody;
@@ -3296,10 +3431,11 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     if (!s.custody_occurrence_admitted &&
         !admit_child_custody_occurrence(custody, s.piid, s.occurrence))
     {
-        result.failure_stage = "custody_closed";
-        result.error_message = "Managed child custody is closed";
+        result.failure.kind = Managed_child_failure_kind::custody_closed;
+        result.failure.message = "Managed child custody is closed";
         return result;
     }
+    result.failure.occurrence = s.occurrence;
 
     bool setup_resolved = false;
     bool reader_prepared = false;
@@ -3375,9 +3511,9 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        if (custody->release_requested) {
-            result.failure_stage = "custody_closed";
-            result.error_message = "Managed child custody closed before setup";
+        if (custody->phase != detail::Custody_phase::open) {
+            result.failure.kind = Managed_child_failure_kind::custody_closed;
+            result.failure.message = "Managed child custody closed before setup";
             return result;
         }
     }
@@ -3389,8 +3525,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     // reading threads are up and running.
     if (!prepare_process_reader(s.piid, s.occurrence, true)) {
         result.success       = false;
-        result.failure_stage = "prepare_process_reader";
-        result.error_message = "Failed to prepare process reader";
+        result.failure.kind = Managed_child_failure_kind::reader_setup;
+        result.failure.message = "Failed to prepare process reader";
         return result;
     }
     reader_prepared = true;
@@ -3398,11 +3534,12 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     bool custody_closed_during_reader_setup = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        custody_closed_during_reader_setup = custody->release_requested;
+        custody_closed_during_reader_setup =
+            custody->phase != detail::Custody_phase::open;
     }
     if (custody_closed_during_reader_setup) {
-        result.failure_stage = "custody_closed";
-        result.error_message = "Managed child custody closed during reader setup";
+        result.failure.kind = Managed_child_failure_kind::custody_closed;
+        result.failure.message = "Managed child custody closed during reader setup";
         remove_process_reader(s.piid, 1.0);
         reader_prepared = false;
         return result;
@@ -3432,9 +3569,9 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        if (custody->release_requested) {
-            result.failure_stage = "custody_closed";
-            result.error_message =
+        if (custody->phase != detail::Custody_phase::open) {
+            result.failure.kind = Managed_child_failure_kind::custody_closed;
+            result.failure.message =
                 "Managed child custody closed before OS creation";
             return result;
         }
@@ -3468,7 +3605,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         if (!create_lifeline_pipe(lifeline_read_handle, lifeline_write_handle_win, &spawn_error)) {
             spawn_ready = false;
             spawn_error_message = "Failed to create lifeline pipe";
-            result.failure_stage = "lifeline_pipe";
+            result.failure.kind = Managed_child_failure_kind::lifeline_setup;
         }
         else {
             lifeline_write_handle = static_cast<Managed_process::lifeline_handle_type>(
@@ -3489,7 +3626,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         if (!create_lifeline_pipe(lifeline_read_fd, lifeline_write_fd, &spawn_error)) {
             spawn_ready = false;
             spawn_error_message = "Failed to create lifeline pipe";
-            result.failure_stage = "lifeline_pipe";
+            result.failure.kind = Managed_child_failure_kind::lifeline_setup;
         }
         else {
             lifeline_write_handle =
@@ -3561,8 +3698,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             );
         if (result.success && !result.os_process_created) {
             result.success = false;
-            result.failure_stage = "native_identity";
-            result.error_message =
+            result.failure.kind = Managed_child_failure_kind::native_identity;
+            result.failure.message =
                 "OS process creation returned without a bindable native identity";
         }
 
@@ -3593,14 +3730,14 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     }
     else {
         result.success = false;
-        result.errno_value = spawn_error;
+        result.failure.native_error = spawn_error;
         std::ostringstream error_msg;
         error_msg << spawn_error_message;
         if (spawn_error != 0) {
             std::error_code ec(spawn_error, std::system_category());
             error_msg << " (errno " << spawn_error << ": " << ec.message() << ')';
         }
-        result.error_message = error_msg.str();
+        result.failure.message = error_msg.str();
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
@@ -3800,19 +3937,21 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         }
         int saved_errno = 0;
 #ifdef _WIN32
-        if (result.errno_value != 0 || !result.error_message.empty()) {
-            saved_errno = result.errno_value;
+        if (result.failure.native_error != 0 || !result.failure.message.empty()) {
+            saved_errno = result.failure.native_error;
         }
         else {
             _get_errno(&saved_errno);
         }
 #else
-        saved_errno = result.errno_value != 0 ? result.errno_value : errno;
+        saved_errno = result.failure.native_error != 0
+            ? result.failure.native_error
+            : errno;
 #endif
-        if (result.error_message.empty()) {
-            result.errno_value = saved_errno;
-            if (result.failure_stage.empty()) {
-                result.failure_stage = "os_spawn";
+        if (result.failure.message.empty()) {
+            result.failure.native_error = saved_errno;
+            if (result.failure.kind == Managed_child_failure_kind::none) {
+                result.failure.kind = Managed_child_failure_kind::native_spawn;
             }
             std::ostringstream error_msg;
             error_msg << "Failed to spawn process";
@@ -3820,7 +3959,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
                 std::error_code ec(saved_errno, std::system_category());
                 error_msg << " (errno " << saved_errno << ": " << ec.message() << ')';
             }
-            result.error_message = error_msg.str();
+            result.failure.message = error_msg.str();
         }
 
         {
@@ -3834,15 +3973,17 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         }
 
         // Log spawn failures to stderr
-        if (!spawn_ready && !result.error_message.empty()) {
-            Log_stream(log_level::error) << result.error_message << "\n";
+        if (!spawn_ready && !result.failure.message.empty()) {
+            Log_stream(log_level::error) << result.failure.message << "\n";
         }
         else
-        if (result.errno_value != 0) {
-            std::error_code ec(result.errno_value, std::system_category());
+        if (result.failure.native_error != 0) {
+            std::error_code ec(
+                result.failure.native_error, std::system_category());
             Log_stream(log_level::error)
                 << "failed to launch " << s.binary_name
-                << " (errno " << result.errno_value << ": " << ec.message() << ")\n";
+                << " (errno " << result.failure.native_error << ": "
+                << ec.message() << ")\n";
         }
         else {
             Log_stream(log_level::error)
@@ -3948,7 +4089,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                 result = spawn_swarm_process(spawn_args);
             }
             catch (...) {
-                request_child_custody_release(spawn_args.custody, true);
+                request_child_custody_release(
+                    spawn_args.custody, detail::Release_mode::cleanup);
                 throw;
             }
             if (result.success) {
@@ -3960,8 +4102,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                     result.binary_name,
                     result.instance_id,
                     init_error::cause::spawn_failed,
-                    result.errno_value,
-                    result.error_message
+                    result.failure.native_error,
+                    result.failure.message
                 );
             }
         }

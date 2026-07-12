@@ -280,15 +280,19 @@ struct Spawn_options
 {
     std::string binary_path;
     std::vector<std::string> args;
+    std::vector<std::string> env_overrides;
     instance_id_type process_instance_id = invalid_instance_id;
-    std::string wait_for_instance_name;
-    std::chrono::milliseconds wait_timeout{0};
+    std::string readiness_instance_name;
     Lifetime_policy lifetime;
 };
 ```
 
 `Spawn_options` configures dynamic process spawning through
-`spawn_swarm_process`.
+`spawn_swarm_process`. `env_overrides` is merged with the inherited environment
+in order, with the later duplicate winning. Environment names are matched
+case-insensitively on Windows and case-sensitively on POSIX. Recovery
+occurrences reuse the same overrides. Entries are not syntax-validated, so
+provide them in `NAME=VALUE` form and do not rely on malformed input.
 
 ### `sintra::Lifetime_policy`
 
@@ -312,21 +316,59 @@ Signature:
 
 ```cpp
 Managed_child_custody spawn_swarm_process(const Spawn_options& options);
+
+struct Managed_child_status
+{
+    bool accepted = false;
+    bool readiness_reached = false;
+    bool release_requested = false;
+    bool release_complete = false;
+    std::size_t admitted_occurrences = 0;
+    std::size_t created_occurrences = 0;
+    std::size_t exited_occurrences = 0;
+    Managed_child_failure last_failure;
+};
+
+class Managed_child_custody
+{
+public:
+    explicit operator bool() const noexcept;
+    Managed_child_status status() const;
+    Managed_child_status wait_ready_until(
+        std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_status release_until(
+        std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_status terminate_until(
+        std::chrono::steady_clock::time_point deadline) const;
+};
 ```
 
 Accepts durable custody for one additional managed process before authorizing
 OS creation. This operation is available only in the process hosting the local
 coordinator; worker calls and malformed explicit process ids are rejected
-before acceptance. Use `Spawn_options` to select
-the binary, arguments, optional expected instance name, wait timeout, and
-lifeline policy. The opaque handle supports compact observation and bounded
-`release_managed_child`, `cleanup_managed_child`,
-`retry_managed_child_release`, and `wait_managed_child` operations. Graceful
-release remains passive; explicit cleanup monotonically escalates the retained
-custody owner to lifeline release and authoritative retirement. Readiness or
-cleanup timeout never discards custody. A synchronous setup failure after
-acceptance returns the retained handle and settles a no-child occurrence or
-continues active cleanup for an already-created child.
+before acceptance. Use `Spawn_options` to select the binary, arguments,
+environment overrides, optional readiness instance name, and lifeline policy.
+A readiness-configured spawn returns its accepted handle immediately; call
+`wait_ready_until()` with an absolute steady-clock deadline to observe that
+exact occurrence. The opaque handle also supports compact `status()`
+observation and bounded `release_until()` and `terminate_until()` operations.
+Test handle validity through its explicit boolean conversion.
+Graceful release is idempotent, so another call waits on the same retained
+custody through a new absolute deadline. It remains passive; explicit cleanup
+monotonically escalates the retained custody owner to lifeline release and
+authoritative retirement. Readiness, release, or termination deadline expiry
+never discards custody.
+A synchronous setup failure after acceptance returns the retained handle and
+settles a no-child occurrence or continues active cleanup for an already-created
+child.
+
+Every operation returns a compact status snapshot containing only confirmed
+facts. Deadline expiry may leave readiness, release, or termination incomplete;
+it does not itself record a managed-child failure. `last_failure` is retained
+historical diagnostics qualified by `last_failure.occurrence`, and it may remain
+set after later progress or complete release. A `last_failure.kind` of `none`
+means no failure report has been recorded, not that the requested milestone
+succeeded.
 
 Compiled examples/tests:
 - [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp)
