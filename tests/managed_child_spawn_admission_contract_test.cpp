@@ -1,6 +1,7 @@
 #define SINTRA_ENABLE_TEST_HOOKS 1
 #include <sintra/sintra.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #include <array>
@@ -18,6 +19,8 @@
 using namespace std::chrono_literals;
 
 namespace {
+
+using sintra::test::managed_child::exact_process_is_live;
 
 constexpr const char* k_worker_flag           = "--atom3-worker";
 constexpr const char* k_unexpected_child_flag = "--atom3-unexpected-child";
@@ -147,12 +150,7 @@ std::optional<child_identity_t> read_child_identity(
 
 bool exact_child_absent(const child_identity_t& identity)
 {
-    if (!sintra::is_process_alive(static_cast<uint32_t>(identity.pid))) {
-        return true;
-    }
-    const auto observed = sintra::query_process_start_stamp(
-        static_cast<uint32_t>(identity.pid));
-    return !observed || *observed != identity.start_stamp;
+    return !exact_process_is_live(identity.pid, identity.start_stamp);
 }
 
 bool wait_for_exact_child_absence(

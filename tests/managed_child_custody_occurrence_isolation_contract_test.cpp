@@ -40,6 +40,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_nonce_env = "SINTRA_R6_NONCE";
@@ -241,15 +242,6 @@ void observe_reap(pid_t pid, int status) noexcept
         s_reaps.status_1.store(status, std::memory_order_relaxed);
         s_reaps.count_1.fetch_add(1, std::memory_order_release);
     }
-}
-
-bool exact_process_is_live(int pid, uint64_t start_stamp)
-{
-    if (pid <= 0 || !sintra::is_process_alive(static_cast<uint32_t>(pid))) {
-        return false;
-    }
-    const auto observed = sintra::query_process_start_stamp(static_cast<uint32_t>(pid));
-    return observed && *observed == start_stamp;
 }
 
 bool signal_exact_process(int pid, uint64_t start_stamp, int signal_number)

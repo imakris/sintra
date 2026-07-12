@@ -1,11 +1,24 @@
 #pragma once
 
+#include <sintra/detail/ipc/process_utils.h>
+
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <system_error>
 
 namespace sintra::test::managed_child {
+
+inline bool exact_process_is_live(int pid, std::uint64_t start_stamp)
+{
+    if (pid <= 0 || !sintra::is_process_alive(static_cast<std::uint32_t>(pid))) {
+        return false;
+    }
+    const auto observed =
+        sintra::query_process_start_stamp(static_cast<std::uint32_t>(pid));
+    return observed && *observed == start_stamp;
+}
 
 inline bool write_complete_file(
     const std::filesystem::path& path,
