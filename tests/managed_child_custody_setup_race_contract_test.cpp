@@ -1490,12 +1490,29 @@ bool run_concurrent_posix_roster_reservations(
         write_release_marker(markers[0]) && write_release_marker(markers[1]);
 
     std::array<sintra::Managed_child_custody_observation, 2> released;
-    bool survivors_absent = true;
+    const auto release_deadline = std::chrono::steady_clock::now() + 5s;
+    bool releases_terminal = false;
+    do {
+        releases_terminal = true;
+        for (size_t i = 0; i < 2; ++i) {
+            if (!released[i].release_complete) {
+                const auto attempt_deadline = std::min(
+                    release_deadline,
+                    std::chrono::steady_clock::now() + 250ms);
+                released[i] = sintra::release_managed_child(
+                    custodies[i], attempt_deadline);
+            }
+            releases_terminal =
+                releases_terminal && released[i].release_complete;
+        }
+    }
+    while (!releases_terminal &&
+        std::chrono::steady_clock::now() < release_deadline);
+
+    bool survivors_absent = releases_terminal;
     for (size_t i = 0; i < 2; ++i) {
-        released[i] = sintra::wait_managed_child(
-            custodies[i], std::chrono::steady_clock::now() + 5s);
         survivors_absent = survivors_absent && identities[i] &&
-            wait_for_child_absent(*identities[i], 5s);
+            exact_child_absent(*identities[i]);
     }
     const bool reaps_normal = identities[0] && identities[1] &&
         concurrent_posix_reaps_normal();
