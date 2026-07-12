@@ -117,7 +117,8 @@ struct Process_message_reader
     inline
     Process_message_reader(instance_id_type process_instance_id,
         Delivery_progress_ptr delivery_progress,
-        uint32_t occurrence = 0);
+        uint32_t occurrence = 0,
+        uint64_t managed_child_custody_identity = 0);
 
     inline
     ~Process_message_reader();
@@ -230,6 +231,8 @@ private:
     atomic<State>                       m_reader_state              = READER_NORMAL;
 
     instance_id_type                    m_process_instance_id;
+    uint32_t                            m_occurrence                       = 0;
+    uint64_t                            m_managed_child_custody_identity   = 0;
 
     std::shared_ptr<Message_ring_R>     m_in_req_c;
     std::shared_ptr<Message_ring_R>     m_in_rep_c;

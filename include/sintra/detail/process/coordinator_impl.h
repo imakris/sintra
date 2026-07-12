@@ -91,6 +91,8 @@ inline constexpr const char* k_stage_reserve_external_invitation_entered =
     "reserve_external_process_invitation/entered";
 inline constexpr const char* k_stage_publish_transceiver_locked =
     "publish_transceiver/publish_locked";
+inline constexpr const char* k_stage_managed_child_publication_identity_captured =
+    "publish_transceiver/managed_child_identity_captured";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 // Coordinator lock-stage hook: tests running in the coordinator process may
@@ -1032,6 +1034,83 @@ instance_id_type Coordinator::wait_for_instance(const string& assigned_name)
 }
 
 
+inline instance_id_type Coordinator::resolve_managed_child_instance_locked(
+    const string& assigned_name,
+    uint64_t custody_identity,
+    instance_id_type process_iid,
+    uint32_t occurrence,
+    const std::atomic<bool>& cancelled)
+{
+    if (cancelled.load(std::memory_order_acquire)) {
+        return invalid_instance_id;
+    }
+    auto names = s_mproc->m_instance_id_of_assigned_name.scoped();
+    const auto resolved = names.get().find(assigned_name);
+    const auto iid = resolved != names.get().end()
+        ? resolved->second
+        : invalid_instance_id;
+    if (iid == invalid_instance_id || process_of(iid) != process_iid) {
+        return invalid_instance_id;
+    }
+    const auto identity = m_managed_child_publication_identities.find(iid);
+    if (identity == m_managed_child_publication_identities.end() ||
+        !identity->second.matches(custody_identity, process_iid, occurrence))
+    {
+        return invalid_instance_id;
+    }
+    return iid;
+}
+
+
+inline instance_id_type Coordinator::resolve_managed_child_instance(
+    const string& assigned_name,
+    uint64_t custody_identity,
+    instance_id_type process_iid,
+    uint32_t occurrence,
+    const std::atomic<bool>& cancelled)
+{
+    coordinator_resolve_instance_for_test(assigned_name);
+    std::lock_guard publish_lock(m_publish_mutex);
+    return resolve_managed_child_instance_locked(
+        assigned_name,
+        custody_identity,
+        process_iid,
+        occurrence,
+        cancelled);
+}
+
+
+inline instance_id_type Coordinator::wait_for_managed_child_instance(
+    const string& assigned_name,
+    uint64_t custody_identity,
+    instance_id_type process_iid,
+    uint32_t occurrence,
+    const std::atomic<bool>& cancelled)
+{
+    coordinator_resolve_instance_for_test(assigned_name);
+    std::unique_lock publish_lock(m_publish_mutex);
+    instance_id_type resolved = invalid_instance_id;
+    m_managed_child_publication_changed.wait(publish_lock, [&]() {
+        resolved = resolve_managed_child_instance_locked(
+            assigned_name,
+            custody_identity,
+            process_iid,
+            occurrence,
+            cancelled);
+        return resolved != invalid_instance_id ||
+            cancelled.load(std::memory_order_acquire);
+    });
+    return resolved;
+}
+
+
+inline void Coordinator::notify_managed_child_readiness_cancelled()
+{
+    std::lock_guard publish_lock(m_publish_mutex);
+    m_managed_child_publication_changed.notify_all();
+}
+
+
 
 // EXPORTED EXCLUSIVELY FOR RPC
 inline
@@ -1040,6 +1119,36 @@ instance_id_type Coordinator::publish_transceiver(
     instance_id_type   iid,
     const string&      assigned_name)
 {
+    const auto process_iid = process_of(iid);
+    Managed_child_publication_identity managed_child_identity;
+    if (s_tl_current_message &&
+        process_of(s_tl_current_message->sender_instance_id) == process_iid &&
+        s_tl_current_message->managed_child_custody_identity != 0)
+    {
+        managed_child_identity.custody_identity =
+            s_tl_current_message->managed_child_custody_identity;
+        managed_child_identity.process_iid = process_iid;
+        managed_child_identity.occurrence =
+            s_tl_current_message->managed_child_occurrence;
+    }
+    return publish_transceiver_with_managed_child_identity(
+        tid,
+        iid,
+        assigned_name,
+        managed_child_identity);
+}
+
+
+inline instance_id_type Coordinator::publish_transceiver_with_managed_child_identity(
+    type_id_type                              tid,
+    instance_id_type                          iid,
+    const string&                             assigned_name,
+    const Managed_child_publication_identity& managed_child_identity)
+{
+    coordinator_lock_stage_for_test(
+        detail::test_hooks::k_stage_managed_child_publication_identity_captured);
+    const auto process_iid = process_of(iid);
+
     std::lock_guard lock(m_publish_mutex);
     coordinator_lock_stage_for_test(
         detail::test_hooks::k_stage_publish_transceiver_locked);
@@ -1049,9 +1158,19 @@ instance_id_type Coordinator::publish_transceiver(
         return invalid_instance_id;
     }
 
-    auto process_iid = process_of(iid);
     auto pr_it       = m_transceiver_registry.find(process_iid);
     auto entry       = Tn_type{ tid, assigned_name };
+
+    auto commit_managed_child_identity = [&]() {
+        if (managed_child_identity) {
+            m_managed_child_publication_identities.insert_or_assign(
+                iid, managed_child_identity);
+        }
+        else {
+            m_managed_child_publication_identities.erase(iid);
+        }
+        m_managed_child_publication_changed.notify_all();
+    };
 
     auto true_sequence = [&](bool allow_notification_delay) {
         bool queued_notification = false;
@@ -1113,6 +1232,7 @@ instance_id_type Coordinator::publish_transceiver(
 
         s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         pr[iid] = entry;
+        commit_managed_child_identity();
 
         // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
         // not when publishing a regular transceiver. Resetting here could interfere with shutdown.
@@ -1129,6 +1249,7 @@ instance_id_type Coordinator::publish_transceiver(
 
         s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         m_transceiver_registry[iid][iid] = entry;
+        commit_managed_child_identity();
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
         // This handles recovery/restart scenarios where the process slot might still be marked as draining.
@@ -1193,6 +1314,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 
     // keep a copy of the assigned name before deleting it
     auto tn = it->second;
+    m_managed_child_publication_identities.erase(iid);
 
     coordinator_name_retired_for_test(iid, tn.name);
 
@@ -1239,6 +1361,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         }
 
         // remove the unpublished process's registry entry
+        for (const auto& [published_iid, published] : pr) {
+            (void)published;
+            m_managed_child_publication_identities.erase(published_iid);
+        }
         m_transceiver_registry.erase(pr_it);
         m_external_attached_processes.erase(process_iid);
         if (s_mproc) {

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 // Ring reading policy
 // ===================
@@ -49,6 +50,15 @@ namespace sintra {
     // should not cause cache invalidations (false sharing). This setting is architecture specific,
     // but it's not really that different among different x86 CPUs.
     constexpr size_t    assumed_cache_line_size             = 0x40;
+}
+
+namespace sintra::detail {
+
+// Bump this version whenever Sintra's shared ring layout, control protocol, or
+// on-the-wire message framing changes incompatibly. It is consumed both by the
+// ring fingerprint and by the process ABI marker contract.
+inline constexpr std::uint64_t k_sintra_ring_abi_version = 7;
+
 }
 
 

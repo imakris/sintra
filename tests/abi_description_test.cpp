@@ -2,12 +2,18 @@
 
 #include "test_utils.h"
 
+#include <format>
 #include <iostream>
 #include <string>
 
 namespace {
 
 constexpr std::string_view k_failure_prefix = "abi_description_test: ";
+
+std::string ring_abi_token_component()
+{
+    return std::format("ring_abi={}", sintra::detail::k_sintra_ring_abi_version);
+}
 
 void test_abi_description()
 {
@@ -25,6 +31,10 @@ void test_abi_description()
     sintra::test::require_true(desc.find("architecture") != std::string::npos,
         k_failure_prefix,
         "abi_description should contain 'architecture'");
+    sintra::test::require_true(desc.ends_with(std::format(
+            ", ring ABI {}", sintra::detail::k_sintra_ring_abi_version)),
+        k_failure_prefix,
+        "abi_description should end with the shared ring ABI version");
 }
 
 void test_describe_token_component()
@@ -43,6 +53,11 @@ void test_describe_token_component()
     sintra::test::require_true(describe_token_component("arch=x64") == "architecture x64",
         k_failure_prefix,
         "describe_token_component should format arch");
+    sintra::test::require_true(
+        describe_token_component(ring_abi_token_component()) == std::format(
+            "ring ABI {}", sintra::detail::k_sintra_ring_abi_version),
+        k_failure_prefix,
+        "describe_token_component should format ring ABI");
     sintra::test::require_true(describe_token_component("unknown=value") == "unknown value",
         k_failure_prefix,
         "describe_token_component should handle unknown keys");
@@ -59,13 +74,18 @@ void test_describe_abi_token()
         k_failure_prefix,
         "describe_abi_token should handle empty token");
 
-    auto result = describe_abi_token("compiler=test-1;stdlib=test-2");
+    auto result = describe_abi_token(
+        "compiler=test-1;stdlib=test-2;" + ring_abi_token_component());
     sintra::test::require_true(result.find("compiler test-1") != std::string::npos,
         k_failure_prefix,
         "describe_abi_token should include compiler");
     sintra::test::require_true(result.find("standard library test-2") != std::string::npos,
         k_failure_prefix,
         "describe_abi_token should include stdlib");
+    sintra::test::require_true(result.ends_with(std::format(
+            "ring ABI {}", sintra::detail::k_sintra_ring_abi_version)),
+        k_failure_prefix,
+        "describe_abi_token should include ring ABI");
 }
 
 void test_abi_token()
@@ -84,6 +104,10 @@ void test_abi_token()
     sintra::test::require_true(token.find("arch=") != std::string::npos,
         k_failure_prefix,
         "abi_token should contain 'arch='");
+    sintra::test::require_true(token.ends_with(std::format(
+            ";ring_abi={}", sintra::detail::k_sintra_ring_abi_version)),
+        k_failure_prefix,
+        "abi_token should end with the shared ring ABI version");
 }
 
 } // namespace

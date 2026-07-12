@@ -535,9 +535,12 @@ inline
 Process_message_reader::Process_message_reader(
     instance_id_type process_instance_id,
     Delivery_progress_ptr delivery_progress,
-    uint32_t occurrence):
+    uint32_t occurrence,
+    uint64_t managed_child_custody_identity):
     m_reader_state(READER_NORMAL),
     m_process_instance_id(process_instance_id),
+    m_occurrence(occurrence),
+    m_managed_child_custody_identity(managed_child_custody_identity),
     m_delivery_progress(std::move(delivery_progress))
 {
     if (!m_delivery_progress) {
@@ -832,7 +835,10 @@ void Process_message_reader::request_reader_function()
                 if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) &&
                     is_service_instance(m->receiver_instance_id))
                 {
-                    s_mproc->m_out_req_c->relay(*m);
+                    s_mproc->m_out_req_c->relay(
+                        *m,
+                        m_managed_child_custody_identity,
+                        m_occurrence);
                     publish_request_progress(m_in_req_c->get_message_reading_sequence());
                     continue;
                 }

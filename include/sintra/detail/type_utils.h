@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "config.h"
+
 #include <cstdlib>
 #include <format>
 #include <string>
@@ -157,6 +159,7 @@ inline std::string describe_token_component(const std::string& component)
     if (name == "stdlib")   { return "standard library " + value; }
     if (name == "platform") { return "platform " + value;         }
     if (name == "arch")     { return "architecture " + value;     }
+    if (name == "ring_abi") { return "ring ABI " + value;          }
 
     return name + ' ' + value;
 }
@@ -172,20 +175,22 @@ inline std::string type_name()
 
 inline std::string abi_token()
 {
-    return std::format("compiler={};stdlib={};platform={};arch={}",
+    return std::format("compiler={};stdlib={};platform={};arch={};ring_abi={}",
         detail_type_utils::compiler_identity(),
         detail_type_utils::stdlib_identity(),
         detail_type_utils::platform_identity(),
-        detail_type_utils::architecture_identity());
+        detail_type_utils::architecture_identity(),
+        k_sintra_ring_abi_version);
 }
 
 inline std::string abi_description()
 {
-    return std::format("compiler {}, standard library {}, platform {}, architecture {}",
+    return std::format("compiler {}, standard library {}, platform {}, architecture {}, ring ABI {}",
         detail_type_utils::compiler_identity(),
         detail_type_utils::stdlib_identity(),
         detail_type_utils::platform_identity(),
-        detail_type_utils::architecture_identity());
+        detail_type_utils::architecture_identity(),
+        k_sintra_ring_abi_version);
 }
 
 inline std::string describe_abi_token(const std::string& token)

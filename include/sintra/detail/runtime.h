@@ -103,6 +103,45 @@ inline void runtime_spawn_success_for_test(
 #endif
 }
 
+struct Managed_child_readiness_access
+{
+    static instance_id_type resolve(
+        Coordinator*       coordinator,
+        const std::string& assigned_name,
+        uint64_t           custody_identity,
+        instance_id_type   process_iid,
+        uint32_t           occurrence,
+        const std::atomic<bool>& cancelled)
+    {
+        return coordinator
+            ? coordinator->resolve_managed_child_instance(
+                  assigned_name,
+                  custody_identity,
+                  process_iid,
+                  occurrence,
+                  cancelled)
+            : invalid_instance_id;
+    }
+
+    static instance_id_type wait(
+        Coordinator*       coordinator,
+        const std::string& assigned_name,
+        uint64_t           custody_identity,
+        instance_id_type   process_iid,
+        uint32_t           occurrence,
+        const std::atomic<bool>& cancelled)
+    {
+        return coordinator
+            ? coordinator->wait_for_managed_child_instance(
+                  assigned_name,
+                  custody_identity,
+                  process_iid,
+                  occurrence,
+                  cancelled)
+            : invalid_instance_id;
+    }
+};
+
 inline void append_branch(
     std::vector<Process_descriptor>&   branches,
     const Process_descriptor&          descriptor,
@@ -1088,6 +1127,9 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         ? std::chrono::steady_clock::now() + wait_timeout
         : std::chrono::steady_clock::time_point::max();
     instance_id_type coord_id       = invalid_instance_id;
+    Coordinator*     readiness_coordinator = nullptr;
+    uint64_t         custody_identity = 0;
+    uint32_t         readiness_occurrence = 0;
 
     const auto piid = (options.process_instance_id != invalid_instance_id)
         ? options.process_instance_id
@@ -1102,11 +1144,14 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     bool os_process_created = false;
     auto readiness_observer = [](
         Managed_process* owner,
+        Coordinator* coordinator,
         const std::shared_ptr<detail::Managed_child_custody_record>& record,
-        instance_id_type coordinator_id,
         const std::string& target,
         std::chrono::steady_clock::time_point readiness_deadline,
-        bool child_created)
+        bool child_created,
+        uint64_t custody_identity,
+        instance_id_type process_iid,
+        uint32_t occurrence)
     {
         bool readiness_reached = false;
         bool release_requested = false;
@@ -1118,8 +1163,13 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             if (child_created && !release_requested &&
                 readiness_deadline == std::chrono::steady_clock::time_point::max())
             {
-                readiness_reached = Coordinator::rpc_wait_for_instance(
-                    coordinator_id, target) != invalid_instance_id;
+                readiness_reached = detail::Managed_child_readiness_access::wait(
+                    coordinator,
+                    target,
+                    custody_identity,
+                    process_iid,
+                    occurrence,
+                    record->readiness_cancelled) != invalid_instance_id;
             }
             else if (child_created && !release_requested) {
                 auto poll_delay = std::chrono::milliseconds(5);
@@ -1130,8 +1180,13 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                             break;
                         }
                     }
-                    if (Coordinator::rpc_resolve_instance(coordinator_id, target) !=
-                        invalid_instance_id)
+                    if (detail::Managed_child_readiness_access::resolve(
+                            coordinator,
+                            target,
+                            custody_identity,
+                            process_iid,
+                            occurrence,
+                            record->readiness_cancelled) != invalid_instance_id)
                     {
                         readiness_reached = true;
                         break;
@@ -1264,8 +1319,11 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         spawn_args.env_overrides = options.env_overrides;
         spawn_args.lifetime      = options.lifetime;
         spawn_args.piid = piid;
-        custody_record = s_mproc->accept_child_custody(options.wait_for_instance_name);
+        custody_record = s_mproc->accept_child_custody();
         spawn_args.custody = custody_record;
+        readiness_coordinator = s_coord;
+        custody_identity = custody_record->identity;
+        readiness_occurrence = spawn_args.occurrence;
         if (async_deadline_setup) {
             bool admitted = false;
             try {
@@ -1288,7 +1346,8 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             }
             auto* custody_owner = s_mproc;
             auto async_setup =
-                [custody_owner, custody_record, spawn_args, coord_id,
+                [custody_owner, readiness_coordinator, custody_record, spawn_args,
+                 custody_identity,
                  target = options.wait_for_instance_name, deadline,
                  readiness_observer, settle_setup_exception]() mutable
                 {
@@ -1320,7 +1379,15 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                         custody_owner->request_child_custody_release(custody_record);
                     }
                     readiness_observer(
-                        custody_owner, custody_record, coord_id, target, deadline, created);
+                        custody_owner,
+                        readiness_coordinator,
+                        custody_record,
+                        target,
+                        deadline,
+                        created,
+                        custody_identity,
+                        spawn_args.piid,
+                        spawn_args.occurrence);
                 };
             try {
                 custody_owner->start_child_custody_worker(std::move(async_setup));
@@ -1342,8 +1409,15 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 custody_record->changed.notify_all();
                 custody_owner->request_child_custody_release(custody_record);
                 readiness_observer(
-                    custody_owner, custody_record, coord_id,
-                    options.wait_for_instance_name, deadline, false);
+                    custody_owner,
+                    readiness_coordinator,
+                    custody_record,
+                    options.wait_for_instance_name,
+                    deadline,
+                    false,
+                    custody_identity,
+                    spawn_args.piid,
+                    spawn_args.occurrence);
             }
         }
         else {
@@ -1383,11 +1457,21 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         }
         try {
             custody_owner->start_child_custody_worker(
-                [custody_owner, custody_record, coord_id,
-                 target = options.wait_for_instance_name, deadline, readiness_observer]()
+                [custody_owner, readiness_coordinator, custody_record,
+                 custody_identity, piid, readiness_occurrence,
+                 target = options.wait_for_instance_name, deadline,
+                 readiness_observer]()
                 {
                     readiness_observer(
-                        custody_owner, custody_record, coord_id, target, deadline, true);
+                        custody_owner,
+                        readiness_coordinator,
+                        custody_record,
+                        target,
+                        deadline,
+                        true,
+                        custody_identity,
+                        piid,
+                        readiness_occurrence);
                 });
         }
         catch (...) {

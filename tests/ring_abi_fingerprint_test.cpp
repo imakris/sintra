@@ -7,8 +7,10 @@
 // constructed against the same name must throw ring_abi_mismatch_exception.
 
 #include "sintra/detail/ipc/rings.h"
+#include "sintra/detail/messaging/message.h"
 #include "test_utils.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -21,6 +23,38 @@
 namespace {
 
 constexpr std::string_view k_failure_prefix = "ring_abi_fingerprint_test: ";
+
+void test_message_prefix_ring_abi()
+{
+    sintra::test::require_true(
+        sintra::detail::k_sintra_ring_abi_version == 7,
+        k_failure_prefix,
+        "message-prefix layout requires ring ABI version 7");
+    sintra::test::require_true(
+        sintra::detail::k_ring_lifecycle_anchor_abi_version == 3,
+        k_failure_prefix,
+        "message-prefix layout must not change lifecycle-anchor ABI");
+    sintra::test::require_true(
+        sizeof(sintra::Message_prefix) == 64,
+        k_failure_prefix,
+        "supported message-prefix size must be 64 bytes");
+    sintra::test::require_true(
+        alignof(sintra::Message_prefix) == 8,
+        k_failure_prefix,
+        "supported message-prefix alignment must be 8 bytes");
+    sintra::test::require_true(
+        offsetof(sintra::Message_prefix, managed_child_custody_identity) == 48 &&
+            offsetof(sintra::Message_prefix, managed_child_occurrence) == 56,
+        k_failure_prefix,
+        "managed-child metadata offsets must remain part of the versioned framing");
+
+    const sintra::Message_prefix ordinary_prefix{};
+    sintra::test::require_true(
+        ordinary_prefix.managed_child_custody_identity == 0 &&
+            ordinary_prefix.managed_child_occurrence == 0,
+        k_failure_prefix,
+        "ordinary message-prefix custody metadata must default to zero");
+}
 
 void poke_fingerprint(const std::filesystem::path& control_file, std::uint64_t value)
 {
@@ -197,6 +231,7 @@ void test_attach_rejects_mismatched_lifecycle_anchor()
 int main()
 {
     try {
+        test_message_prefix_ring_abi();
         test_attach_rejects_mismatched_fingerprint();
         test_attach_rejects_mismatched_lifecycle_anchor();
     }

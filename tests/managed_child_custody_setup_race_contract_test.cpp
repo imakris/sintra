@@ -32,6 +32,10 @@ constexpr const char* k_prepublication_exit_child_flag =
     "--managed-child-prepublication-exit-child";
 constexpr const char* k_immediate_exit_child_flag =
     "--managed-child-immediate-exit-child";
+constexpr const char* k_readiness_identity_child_flag =
+    "--managed-child-readiness-identity-child";
+constexpr const char* k_readiness_cancellation_child_flag =
+    "--managed-child-readiness-cancellation-child";
 
 struct Unrelated_publication_target :
     sintra::Derived_transceiver<Unrelated_publication_target>
@@ -75,6 +79,20 @@ struct Prepublication_gate
 };
 
 Prepublication_gate* s_prepublication_gate = nullptr;
+
+struct Publication_identity_gate
+{
+    std::mutex              mutex;
+    std::condition_variable changed;
+    std::string             predecessor_name;
+    std::string             replacement_name;
+    bool                    predecessor_captured = false;
+    bool                    release_predecessor = false;
+    bool                    predecessor_retired = false;
+    bool                    replacement_retired = false;
+};
+
+Publication_identity_gate* s_publication_identity_gate = nullptr;
 
 struct Transport_retirement_gate
 {
@@ -1432,6 +1450,503 @@ bool run_prepublication_publish_race(
     return valid;
 }
 
+void hold_predecessor_publication_identity(const char* stage)
+{
+    auto* gate = s_publication_identity_gate;
+    if (!gate || !stage || std::string_view(stage) !=
+        sintra::detail::test_hooks::k_stage_managed_child_publication_identity_captured)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    if (gate->predecessor_captured) {
+        return;
+    }
+    gate->predecessor_captured = true;
+    gate->changed.notify_all();
+    gate->changed.wait(lock, [&]() { return gate->release_predecessor; });
+}
+
+void observe_occurrence_publication_retirement(
+    sintra::instance_id_type,
+    const std::string& assigned_name)
+{
+    auto* gate = s_publication_identity_gate;
+    if (!gate) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    if (assigned_name == gate->predecessor_name) {
+        gate->predecessor_retired = true;
+    }
+    if (assigned_name == gate->replacement_name) {
+        gate->replacement_retired = true;
+    }
+}
+
+bool run_unrelated_readiness_rejection(
+    int argc,
+    char* argv[],
+    const std::string& binary_path)
+{
+    sintra::init(argc, argv);
+    const auto marker = unique_marker("readiness_unrelated");
+    const auto release = release_marker(marker);
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+    std::filesystem::remove(release, ec);
+
+    const auto piid = sintra::make_process_instance_id();
+    const std::string target_name =
+        "managed_child_readiness_unrelated_" + std::to_string(piid);
+
+    bool unrelated_assigned = false;
+    bool unrelated_resolved = false;
+    bool readiness_rejected = false;
+    bool deadline_observed = false;
+    bool identity_written = false;
+    bool release_written = false;
+    bool survivor_absent = false;
+    bool reap_normal = false;
+    sintra::Managed_child_custody_observation released;
+    {
+        Unrelated_publication_target unrelated;
+        unrelated_assigned = unrelated.assign_name(target_name);
+        const auto unrelated_iid = sintra::Coordinator::rpc_resolve_instance(
+            sintra::s_coord_id, target_name);
+        unrelated_resolved = unrelated_iid != sintra::invalid_instance_id &&
+            sintra::process_of(unrelated_iid) == sintra::s_mproc_id;
+
+        sintra::Spawn_options options;
+        options.binary_path = binary_path;
+        options.args = {k_native_bound_child_flag, marker.string()};
+        options.process_instance_id = piid;
+        options.wait_for_instance_name = target_name;
+        options.wait_timeout = 500ms;
+        options.lifetime.enable_lifeline = false;
+
+        const auto started = std::chrono::steady_clock::now();
+        auto custody = sintra::spawn_swarm_process(options);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        const auto observed = sintra::observe_managed_child(custody);
+        readiness_rejected = observed.accepted &&
+            observed.created_occurrences == 1 &&
+            !observed.readiness_reached;
+        deadline_observed = elapsed >= 350ms && elapsed < 3s;
+
+        const auto identity = wait_for_file(marker, 5s)
+            ? read_child_identity(marker)
+            : std::nullopt;
+        identity_written = identity.has_value();
+#ifndef _WIN32
+        if (identity) {
+            arm_posix_reap(*identity);
+        }
+#endif
+        release_written = write_release_marker(marker);
+        released = sintra::release_managed_child(
+            custody, std::chrono::steady_clock::now() + 5s);
+        survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+#ifndef _WIN32
+        reap_normal = identity && posix_reap_normal();
+        clear_posix_reap();
+#else
+        reap_normal = true;
+#endif
+    }
+
+    const bool finalized = settle_detail_finalize("readiness_unrelated");
+    std::filesystem::remove(marker, ec);
+    std::filesystem::remove(release, ec);
+
+    const bool valid = unrelated_assigned && unrelated_resolved &&
+        readiness_rejected && deadline_observed && identity_written &&
+        release_written && released.release_complete &&
+        released.created_occurrences == 1 && released.exited_occurrences == 1 &&
+        survivor_absent && reap_normal && finalized;
+    if (!valid) {
+        std::fprintf(stderr,
+            "READINESS_UNRELATED_INVALID assigned=%d resolved=%d rejected=%d "
+            "deadline=%d identity=%d release_written=%d release_complete=%d "
+            "created=%zu exited=%zu survivor_absent=%d reap_normal=%d finalized=%d\n",
+            unrelated_assigned ? 1 : 0,
+            unrelated_resolved ? 1 : 0,
+            readiness_rejected ? 1 : 0,
+            deadline_observed ? 1 : 0,
+            identity_written ? 1 : 0,
+            release_written ? 1 : 0,
+            released.release_complete ? 1 : 0,
+            released.created_occurrences,
+            released.exited_occurrences,
+            survivor_absent ? 1 : 0,
+            reap_normal ? 1 : 0,
+            finalized ? 1 : 0);
+    }
+    return valid;
+}
+
+bool run_exact_readiness_acceptance(
+    int argc,
+    char* argv[],
+    const std::string& binary_path)
+{
+    sintra::init(argc, argv);
+    const auto marker = unique_marker("readiness_exact");
+    const auto release = release_marker(marker);
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+    std::filesystem::remove(release, ec);
+
+    const auto piid = sintra::make_process_instance_id();
+    const std::string target_name =
+        "managed_child_readiness_exact_" + std::to_string(piid);
+
+    sintra::Spawn_options options;
+    options.binary_path = binary_path;
+    options.args = {
+        k_readiness_identity_child_flag,
+        marker.string(),
+        target_name};
+    options.process_instance_id = piid;
+    options.wait_for_instance_name = target_name;
+    options.lifetime.enable_lifeline = false;
+    auto custody = sintra::spawn_swarm_process(options);
+
+    const auto observed = sintra::observe_managed_child(custody);
+    const auto resolved = sintra::Coordinator::rpc_resolve_instance(
+        sintra::s_coord_id, target_name);
+    const bool exact_publication = resolved != sintra::invalid_instance_id &&
+        sintra::process_of(resolved) == piid;
+    const auto identity = wait_for_file(marker, 5s)
+        ? read_child_identity(marker)
+        : std::nullopt;
+#ifndef _WIN32
+    if (identity) {
+        arm_posix_reap(*identity);
+    }
+#endif
+    const bool release_written = write_release_marker(marker);
+    const auto released = sintra::release_managed_child(
+        custody, std::chrono::steady_clock::now() + 5s);
+    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+#ifndef _WIN32
+    const bool reap_normal = identity && posix_reap_normal();
+    clear_posix_reap();
+#else
+    const bool reap_normal = true;
+#endif
+    const bool finalized = settle_detail_finalize("readiness_exact");
+    std::filesystem::remove(marker, ec);
+    std::filesystem::remove(release, ec);
+
+    const bool valid = observed.accepted && observed.readiness_reached &&
+        observed.created_occurrences == 1 && exact_publication && identity &&
+        release_written && released.release_complete &&
+        released.created_occurrences == 1 && released.exited_occurrences == 1 &&
+        survivor_absent && reap_normal && finalized;
+    if (!valid) {
+        std::fprintf(stderr,
+            "READINESS_EXACT_INVALID accepted=%d readiness=%d created=%zu "
+            "exact_publication=%d identity=%d release_written=%d "
+            "release_complete=%d exited=%zu survivor_absent=%d reap_normal=%d "
+            "finalized=%d\n",
+            observed.accepted ? 1 : 0,
+            observed.readiness_reached ? 1 : 0,
+            observed.created_occurrences,
+            exact_publication ? 1 : 0,
+            identity ? 1 : 0,
+            release_written ? 1 : 0,
+            released.release_complete ? 1 : 0,
+            released.exited_occurrences,
+            survivor_absent ? 1 : 0,
+            reap_normal ? 1 : 0,
+            finalized ? 1 : 0);
+    }
+    return valid;
+}
+
+bool run_unbounded_readiness_cancellation(
+    int argc,
+    char* argv[],
+    const std::string& binary_path)
+{
+    sintra::init(argc, argv);
+    const auto marker = unique_marker("readiness_cancellation");
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+
+    const auto piid = sintra::make_process_instance_id();
+    sintra::Managed_child_custody custody;
+    std::atomic<bool> spawn_returned{false};
+    std::thread spawn_caller([&]() {
+        sintra::Spawn_options options;
+        options.binary_path = binary_path;
+        options.args = {k_readiness_cancellation_child_flag, marker.string()};
+        options.process_instance_id = piid;
+        options.wait_for_instance_name =
+            "managed_child_readiness_cancel_never_" + std::to_string(piid);
+        options.lifetime.enable_lifeline = false;
+        custody = sintra::spawn_swarm_process(options);
+        spawn_returned.store(true, std::memory_order_release);
+    });
+
+    const auto identity = wait_for_file(marker, 5s)
+        ? read_child_identity(marker)
+        : std::nullopt;
+#ifndef _WIN32
+    if (identity) {
+        arm_posix_reap(*identity);
+    }
+#endif
+    const bool blocked_before_finalize = identity &&
+        !spawn_returned.load(std::memory_order_acquire);
+    std::atomic<bool> finalize_done{false};
+    std::thread cancellation_watchdog([&]() {
+        const auto deadline = std::chrono::steady_clock::now() + 8s;
+        while (!finalize_done.load(std::memory_order_acquire) &&
+            std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(20ms);
+        }
+        if (finalize_done.load(std::memory_order_acquire)) {
+            return;
+        }
+        const bool caller_returned = spawn_returned.load(std::memory_order_acquire);
+        const auto observed = caller_returned
+            ? sintra::observe_managed_child(custody)
+            : sintra::Managed_child_custody_observation{};
+        const bool all_custodies_released = sintra::s_mproc &&
+            sintra::s_mproc->all_child_custodies_released();
+        const bool coordinator_sole = sintra::s_coord &&
+            sintra::s_coord->is_sole_known_process(sintra::s_mproc_id);
+        std::fprintf(stderr,
+            "READINESS_CANCELLATION_STUCK spawn_returned=%d accepted=%d "
+            "readiness=%d release_requested=%d release_complete=%d "
+            "created=%zu exited=%zu all_custodies_released=%d "
+            "coordinator_sole=%d runtime_present=%d coordinator_present=%d\n",
+            caller_returned ? 1 : 0,
+            observed.accepted ? 1 : 0,
+            observed.readiness_reached ? 1 : 0,
+            observed.release_requested ? 1 : 0,
+            observed.release_complete ? 1 : 0,
+            observed.created_occurrences,
+            observed.exited_occurrences,
+            all_custodies_released ? 1 : 0,
+            coordinator_sole ? 1 : 0,
+            sintra::s_mproc ? 1 : 0,
+            sintra::s_coord ? 1 : 0);
+        std::fflush(stderr);
+        std::_Exit(2);
+    });
+    const auto finalize_started = std::chrono::steady_clock::now();
+    const bool finalized = settle_detail_finalize("readiness_cancellation");
+    const auto finalize_elapsed = std::chrono::steady_clock::now() - finalize_started;
+    finalize_done.store(true, std::memory_order_release);
+    cancellation_watchdog.join();
+    spawn_caller.join();
+
+    const auto released = sintra::observe_managed_child(custody);
+    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+#ifndef _WIN32
+    const bool reap_normal = identity && posix_reap_normal();
+    clear_posix_reap();
+#else
+    const bool reap_normal = true;
+#endif
+    std::filesystem::remove(marker, ec);
+
+    const bool valid = blocked_before_finalize && finalized &&
+        finalize_elapsed < 5s && spawn_returned.load(std::memory_order_acquire) &&
+        released.accepted && !released.readiness_reached &&
+        released.release_requested && released.release_complete &&
+        released.created_occurrences == 1 && released.exited_occurrences == 1 &&
+        survivor_absent && reap_normal && sintra::s_mproc == nullptr;
+    if (!valid) {
+        std::fprintf(stderr,
+            "READINESS_CANCELLATION_INVALID blocked=%d finalized=%d bounded=%d "
+            "spawn_returned=%d accepted=%d readiness=%d release_requested=%d "
+            "release_complete=%d created=%zu exited=%zu survivor_absent=%d "
+            "reap_normal=%d runtime_gone=%d\n",
+            blocked_before_finalize ? 1 : 0,
+            finalized ? 1 : 0,
+            finalize_elapsed < 5s ? 1 : 0,
+            spawn_returned.load(std::memory_order_acquire) ? 1 : 0,
+            released.accepted ? 1 : 0,
+            released.readiness_reached ? 1 : 0,
+            released.release_requested ? 1 : 0,
+            released.release_complete ? 1 : 0,
+            released.created_occurrences,
+            released.exited_occurrences,
+            survivor_absent ? 1 : 0,
+            reap_normal ? 1 : 0,
+            sintra::s_mproc == nullptr ? 1 : 0);
+    }
+    return valid;
+}
+
+bool run_publication_occurrence_identity_race(int argc, char* argv[])
+{
+    sintra::init(argc, argv);
+    constexpr uint64_t custody_identity = 0x4a71u;
+    constexpr uint32_t predecessor_occurrence = 7;
+    constexpr uint32_t replacement_occurrence = 8;
+    const auto process_iid = sintra::s_mproc_id;
+    const auto process_index = sintra::get_process_index(process_iid);
+    const auto predecessor_iid = sintra::compose_instance(process_index, 0x6a41u);
+    const auto replacement_iid = sintra::compose_instance(process_index, 0x6a42u);
+    const std::string predecessor_name =
+        "managed_child_publication_predecessor_" + std::to_string(process_iid);
+    const std::string replacement_name =
+        "managed_child_publication_replacement_" + std::to_string(process_iid);
+
+    Publication_identity_gate gate;
+    gate.predecessor_name = predecessor_name;
+    gate.replacement_name = replacement_name;
+    s_publication_identity_gate = &gate;
+    sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+        &hold_predecessor_publication_identity, std::memory_order_release);
+
+    sintra::instance_id_type predecessor_result = sintra::invalid_instance_id;
+    std::thread predecessor([&]() {
+        predecessor_result =
+            sintra::s_coord->publish_managed_child_transceiver_for_test(
+                sintra::make_user_type_id(1002),
+                predecessor_iid,
+                predecessor_name,
+                custody_identity,
+                process_iid,
+                predecessor_occurrence);
+    });
+    bool predecessor_captured = false;
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        predecessor_captured = gate.changed.wait_for(lock, 5s, [&]() {
+            return gate.predecessor_captured;
+        });
+    }
+
+    const auto replacement_result =
+        sintra::s_coord->publish_managed_child_transceiver_for_test(
+            sintra::make_user_type_id(1002),
+            replacement_iid,
+            replacement_name,
+            custody_identity,
+            process_iid,
+            replacement_occurrence);
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        gate.release_predecessor = true;
+        gate.changed.notify_all();
+    }
+    predecessor.join();
+
+    std::atomic<bool> cancelled{false};
+    const auto predecessor_exact = sintra::detail::Managed_child_readiness_access::resolve(
+        sintra::s_coord,
+        predecessor_name,
+        custody_identity,
+        process_iid,
+        predecessor_occurrence,
+        cancelled);
+    const auto predecessor_as_replacement =
+        sintra::detail::Managed_child_readiness_access::resolve(
+            sintra::s_coord,
+            predecessor_name,
+            custody_identity,
+            process_iid,
+            replacement_occurrence,
+            cancelled);
+    const auto replacement_exact = sintra::detail::Managed_child_readiness_access::resolve(
+        sintra::s_coord,
+        replacement_name,
+        custody_identity,
+        process_iid,
+        replacement_occurrence,
+        cancelled);
+    const auto replacement_as_predecessor =
+        sintra::detail::Managed_child_readiness_access::resolve(
+            sintra::s_coord,
+            replacement_name,
+            custody_identity,
+            process_iid,
+            predecessor_occurrence,
+            cancelled);
+
+    sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+        nullptr, std::memory_order_release);
+    sintra::detail::test_hooks::s_coordinator_name_retired.store(
+        &observe_occurrence_publication_retirement, std::memory_order_release);
+    const bool predecessor_unpublished =
+        sintra::Coordinator::rpc_unpublish_transceiver(
+            sintra::s_coord_id, predecessor_iid);
+    const bool replacement_unpublished =
+        sintra::Coordinator::rpc_unpublish_transceiver(
+            sintra::s_coord_id, replacement_iid);
+    const bool predecessor_resolution_retired =
+        sintra::detail::Managed_child_readiness_access::resolve(
+            sintra::s_coord,
+            predecessor_name,
+            custody_identity,
+            process_iid,
+            predecessor_occurrence,
+            cancelled) == sintra::invalid_instance_id;
+    const bool replacement_resolution_retired =
+        sintra::detail::Managed_child_readiness_access::resolve(
+            sintra::s_coord,
+            replacement_name,
+            custody_identity,
+            process_iid,
+            replacement_occurrence,
+            cancelled) == sintra::invalid_instance_id;
+    const bool finalized = settle_detail_finalize("publication_occurrence_identity");
+    bool predecessor_retired = false;
+    bool replacement_retired = false;
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        predecessor_retired = gate.predecessor_retired;
+        replacement_retired = gate.replacement_retired;
+    }
+    sintra::detail::test_hooks::s_coordinator_name_retired.store(
+        nullptr, std::memory_order_release);
+    s_publication_identity_gate = nullptr;
+
+    const bool valid = predecessor_captured &&
+        predecessor_result == predecessor_iid &&
+        replacement_result == replacement_iid &&
+        predecessor_exact == predecessor_iid &&
+        predecessor_as_replacement == sintra::invalid_instance_id &&
+        replacement_exact == replacement_iid &&
+        replacement_as_predecessor == sintra::invalid_instance_id &&
+        predecessor_unpublished && replacement_unpublished &&
+        predecessor_resolution_retired && replacement_resolution_retired &&
+        predecessor_retired && replacement_retired &&
+        finalized;
+    if (!valid) {
+        std::fprintf(stderr,
+            "PUBLICATION_OCCURRENCE_INVALID captured=%d predecessor_commit=%d "
+            "replacement_commit=%d predecessor_exact=%d predecessor_cross=%d "
+            "replacement_exact=%d replacement_cross=%d predecessor_unpublished=%d "
+            "replacement_unpublished=%d predecessor_resolution_retired=%d "
+            "replacement_resolution_retired=%d predecessor_retired=%d "
+            "replacement_retired=%d finalized=%d\n",
+            predecessor_captured ? 1 : 0,
+            predecessor_result == predecessor_iid ? 1 : 0,
+            replacement_result == replacement_iid ? 1 : 0,
+            predecessor_exact == predecessor_iid ? 1 : 0,
+            predecessor_as_replacement == sintra::invalid_instance_id ? 1 : 0,
+            replacement_exact == replacement_iid ? 1 : 0,
+            replacement_as_predecessor == sintra::invalid_instance_id ? 1 : 0,
+            predecessor_unpublished ? 1 : 0,
+            replacement_unpublished ? 1 : 0,
+            predecessor_resolution_retired ? 1 : 0,
+            replacement_resolution_retired ? 1 : 0,
+            predecessor_retired ? 1 : 0,
+            replacement_retired ? 1 : 0,
+            finalized ? 1 : 0);
+    }
+    return valid;
+}
+
 bool run_immediate_reaped_classification(
     int argc,
     char* argv[],
@@ -1703,6 +2218,30 @@ int main(int argc, char* argv[])
         if (std::string(argv[i]) == k_immediate_exit_child_flag) {
             return 0;
         }
+        if (std::string(argv[i]) == k_readiness_identity_child_flag &&
+            i + 2 < argc)
+        {
+            const std::filesystem::path marker = argv[i + 1];
+            const std::string target_name = argv[i + 2];
+            sintra::init(argc, argv);
+            bool assigned = false;
+            bool identity_written = false;
+            bool released = false;
+            {
+                Unrelated_publication_target target;
+                assigned = target.assign_name(target_name);
+                identity_written = write_child_identity(marker);
+                released = wait_for_file(release_marker(marker), 10s);
+            }
+            const bool finalized = settle_detail_finalize("readiness_identity_child");
+            return assigned && identity_written && released && finalized ? 0 : 3;
+        }
+        if (std::string(argv[i]) == k_readiness_cancellation_child_flag) {
+            const std::filesystem::path marker = argv[i + 1];
+            const bool identity_written = write_child_identity(marker);
+            std::this_thread::sleep_for(1s);
+            return identity_written ? 0 : 3;
+        }
     }
 
     const std::string binary_path = std::filesystem::absolute(argv[0]).string();
@@ -1755,6 +2294,26 @@ int main(int argc, char* argv[])
     if (!s_teardown_settled) {
         return 2;
     }
+    const bool unrelated_readiness_rejection = run_unrelated_readiness_rejection(
+        argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
+    const bool exact_readiness_acceptance = run_exact_readiness_acceptance(
+        argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
+    const bool unbounded_readiness_cancellation = run_unbounded_readiness_cancellation(
+        argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
+    const bool publication_occurrence_identity =
+        run_publication_occurrence_identity_race(argc, argv);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool immediate_reaped_classification =
         run_immediate_reaped_classification(argc, argv, binary_path);
     if (!s_teardown_settled) {
@@ -1769,7 +2328,10 @@ int main(int argc, char* argv[])
     if (recovery_race && deadline_race && pre_create_exception &&
         post_native_exception && observer_start_failure && release_worker_retry &&
         prepublication_exit && split_transport_retirement &&
-        prepublication_publish_race && immediate_reaped_classification &&
+        prepublication_publish_race && unrelated_readiness_rejection &&
+        exact_readiness_acceptance && unbounded_readiness_cancellation &&
+        publication_occurrence_identity &&
+        immediate_reaped_classification &&
         concurrent_posix_roster)
     {
         std::printf(
@@ -1782,6 +2344,9 @@ int main(int argc, char* argv[])
             "split_transport_join_false=1 total_stop_deadline_bounded=1 "
             "distinct_release_retry=1 communication_worker_retry=1 "
             "inflight_publish_canonically_retired=1 "
+            "readiness_unrelated_rejected=1 readiness_exact_occurrence=1 "
+            "readiness_release_cancelled=1 "
+            "publication_occurrence_atomic=1 "
             "immediate_created_reaped=%s immediate_reap_count=%s "
             "posix_concurrent_roster=%s reap_count_per_owned_phase=%s survivors=0\n",
 #ifdef _WIN32
@@ -1804,15 +2369,20 @@ int main(int argc, char* argv[])
         "pre_create_exception=%d post_native_exception=%d "
         "observer_start_failure=%d release_worker_retry=%d "
         "prepublication_exit=%d split_transport_retirement=%d "
-        "prepublication_publish_race=%d immediate_reaped=%d "
-        "concurrent_posix_roster=%d\n",
+        "prepublication_publish_race=%d readiness_unrelated=%d "
+        "readiness_exact=%d readiness_cancelled=%d immediate_reaped=%d "
+        "publication_occurrence=%d concurrent_posix_roster=%d\n",
         recovery_race ? 1 : 0, deadline_race ? 1 : 0,
         pre_create_exception ? 1 : 0, post_native_exception ? 1 : 0,
         observer_start_failure ? 1 : 0, release_worker_retry ? 1 : 0,
         prepublication_exit ? 1 : 0,
         split_transport_retirement ? 1 : 0,
         prepublication_publish_race ? 1 : 0,
+        unrelated_readiness_rejection ? 1 : 0,
+        exact_readiness_acceptance ? 1 : 0,
+        unbounded_readiness_cancellation ? 1 : 0,
         immediate_reaped_classification ? 1 : 0,
+        publication_occurrence_identity ? 1 : 0,
         concurrent_posix_roster ? 1 : 0);
     return 2;
 }

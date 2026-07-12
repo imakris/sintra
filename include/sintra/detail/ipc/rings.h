@@ -470,14 +470,8 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
     return hash;
 }
 
-// Bump SINTRA_RING_ABI_VERSION whenever Control's layout, sentinel values,
-// control-file creation protocol, or the on-the-wire framing change in a way
-// that would make two builds incompatible at the ring level. The version is one
-// input among several to the fingerprint below.
-inline constexpr uint64_t k_ring_abi_version = 6;
-
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
-    k_ring_abi_version,
+    k_sintra_ring_abi_version,
     static_cast<uint64_t>(num_process_index_bits),
     static_cast<uint64_t>(max_process_index),
     static_cast<uint64_t>(max_message_length),
