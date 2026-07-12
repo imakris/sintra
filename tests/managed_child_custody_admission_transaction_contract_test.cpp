@@ -9,6 +9,7 @@
 #include "managed_child_test_support.h"
 #include "test_utils.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -323,6 +324,22 @@ int main(int argc, char* argv[])
             custody_record = active->second.custody.lock();
         }
     }
+    bool predecessor_exit_fact_seen = false;
+    if (predecessor_absent && custody_record) {
+        std::unique_lock<std::mutex> lock(custody_record->mutex);
+        predecessor_exit_fact_seen = custody_record->changed.wait_for(
+            lock, 5s, [&]() {
+                const auto predecessor = std::find_if(
+                    custody_record->occurrences.begin(),
+                    custody_record->occurrences.end(),
+                    [&](const auto& occurrence) {
+                        return occurrence.process_instance_id == process_iid &&
+                            occurrence.occurrence == 0;
+                    });
+                return predecessor != custody_record->occurrences.end() &&
+                    predecessor->os_exit_confirmed;
+            });
+    }
     const auto facts = observe_admission_facts(process_iid, custody_record);
 
     const auto terminate_started = std::chrono::steady_clock::now();
@@ -389,6 +406,7 @@ int main(int argc, char* argv[])
         "F05_ADMISSION_TRANSACTION_INVALID hook_hits=%u accepted=%d admitted=%zu "
         "ledger=%d crash_requested=%d recovery_seen=%d recovery_finished=%d "
         "exact_crash=%d record=%d one=%d two=%d predecessor_owned=%d predecessor_exited=%d "
+        "exit_fact_seen=%d "
         "pending_1=%d no_child_1=%d active_0=%d predecessor_absent=%d marker_1_absent=%d "
         "release_requested=%d release_complete=%d terminate_bounded=%d finalized=%d "
         "finalize_bounded=%d\n",
@@ -405,6 +423,7 @@ int main(int argc, char* argv[])
         facts.exact_two_occurrences ? 1 : 0,
         facts.predecessor_owned ? 1 : 0,
         facts.predecessor_exited ? 1 : 0,
+        predecessor_exit_fact_seen ? 1 : 0,
         facts.failed_occurrence_pending ? 1 : 0,
         facts.failed_occurrence_no_child ? 1 : 0,
         facts.active_map_predecessor ? 1 : 0,
