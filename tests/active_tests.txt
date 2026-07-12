@@ -66,6 +66,7 @@ managed_child_failed_readiness_contract_test             1
 managed_child_public_cleanup_contract_test               1
 managed_child_readiness_deadline_contract_test           1
 managed_child_spawn_admission_contract_test               1
+managed_child_stale_unpublish_contract_test               1
 managed_process_publish_test                             1
 message_args_traits_test                                 5
 parent_child_targeted_rpc_test                          10
