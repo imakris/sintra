@@ -21,6 +21,10 @@ TEST_TIMEOUT_OVERRIDES = {
     "crash_capture_self_test_release": 120.0,
     "crash_capture_child_test_debug": 120.0,
     "crash_capture_child_test_release": 120.0,
+    # R7 serializes three 6.25s grace/soft passes, two 5s hard waits,
+    # two 0.55s readiness bounds, and three 5s finalization-drain bounds.
+    "managed_child_adverse_cleanup_contract_test_debug": 60.0,
+    "managed_child_adverse_cleanup_contract_test_release": 60.0,
 }
 
 

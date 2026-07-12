@@ -392,14 +392,40 @@ bool write_release_marker(const std::filesystem::path& marker)
 bool write_child_identity(const std::filesystem::path& marker)
 {
     const auto stamp = sintra::current_process_start_stamp();
-    std::ofstream out(marker, std::ios::binary | std::ios::trunc);
-    if (!out || !stamp) {
+    if (!stamp) {
+        return false;
+    }
+
+    const auto publishing = std::filesystem::path(
+        marker.string() + ".publishing." +
+        std::to_string(sintra::detail::get_current_process_id()));
+    std::error_code ec;
+    std::filesystem::remove(publishing, ec);
+    ec.clear();
+
+    std::ofstream out(publishing, std::ios::binary | std::ios::trunc);
+    if (!out) {
         return false;
     }
     out << "pid=" << sintra::detail::get_current_process_id() << '\n'
         << "start_stamp=" << *stamp << '\n'
         << "complete=1\n";
-    return static_cast<bool>(out);
+    out.flush();
+    bool complete = static_cast<bool>(out);
+    out.close();
+    complete = complete && !out.fail();
+    if (!complete) {
+        std::filesystem::remove(publishing, ec);
+        return false;
+    }
+
+    std::filesystem::rename(publishing, marker, ec);
+    if (ec) {
+        std::error_code cleanup_ec;
+        std::filesystem::remove(publishing, cleanup_ec);
+        return false;
+    }
+    return true;
 }
 
 std::optional<Child_identity> read_child_identity(const std::filesystem::path& marker)
@@ -1585,23 +1611,25 @@ bool run_concurrent_posix_roster_reservations(
 
     std::array<sintra::Managed_child_custody_observation, 2> released;
     const auto release_deadline = std::chrono::steady_clock::now() + 5s;
-    bool releases_terminal = false;
-    do {
-        releases_terminal = true;
-        for (size_t i = 0; i < 2; ++i) {
-            if (!released[i].release_complete) {
+    std::array<std::thread, 2> release_callers;
+    for (size_t i = 0; i < 2; ++i) {
+        release_callers[i] = std::thread([&, i]() {
+            do {
                 const auto attempt_deadline = std::min(
                     release_deadline,
                     std::chrono::steady_clock::now() + 250ms);
                 released[i] = sintra::release_managed_child(
                     custodies[i], attempt_deadline);
             }
-            releases_terminal =
-                releases_terminal && released[i].release_complete;
-        }
+            while (!released[i].release_complete &&
+                std::chrono::steady_clock::now() < release_deadline);
+        });
     }
-    while (!releases_terminal &&
-        std::chrono::steady_clock::now() < release_deadline);
+    for (auto& caller : release_callers) {
+        caller.join();
+    }
+    const bool releases_terminal =
+        released[0].release_complete && released[1].release_complete;
 
     bool survivors_absent = releases_terminal;
     for (size_t i = 0; i < 2; ++i) {
