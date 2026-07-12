@@ -3271,8 +3271,17 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     const Spawn_swarm_process_args& s)
 {
     assert(s_coord);
-    auto custody = s.custody ? s.custody : accept_child_custody();
     Spawn_result result;
+    result.binary_name      = s.binary_name;
+    result.instance_id      = s.piid;
+    result.lifeline_enabled = s.lifetime.enable_lifeline;
+
+    if (!s.custody) {
+        result.failure_stage = "custody_not_accepted";
+        result.error_message = "Managed child launch requires accepted custody";
+        return result;
+    }
+    auto custody = s.custody;
 
     if (!s.custody_occurrence_admitted &&
         !admit_child_custody_occurrence(custody, s.piid, s.occurrence))
@@ -3343,9 +3352,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         note_child_initialization_complete(occurrence_token);
         initialization_reservation_acquired = false;
     }));
-    result.binary_name = s.binary_name;
-    result.instance_id = s.piid;
-    result.lifeline_enabled = s.lifetime.enable_lifeline;
     auto exact_occurrence_locked = [&]() -> detail::Managed_child_occurrence_record& {
         auto it = std::find_if(
             custody->occurrences.begin(), custody->occurrences.end(),
@@ -3925,12 +3931,21 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
             spawn_args.binary_name = it->entry.m_binary_name;
             spawn_args.args        = std::move(all_args);
             spawn_args.piid        = it->assigned_instance_id;
+            spawn_args.custody     = accept_child_custody();
 
-            auto result = spawn_swarm_process(spawn_args);
+            Spawn_result result;
+            try {
+                result = spawn_swarm_process(spawn_args);
+            }
+            catch (...) {
+                request_child_custody_release(spawn_args.custody, true);
+                throw;
+            }
             if (result.success) {
                 successfully_spawned.insert(it->assigned_instance_id);
             }
             else {
+                request_child_custody_release(spawn_args.custody);
                 spawn_failures.emplace_back(
                     result.binary_name,
                     result.instance_id,

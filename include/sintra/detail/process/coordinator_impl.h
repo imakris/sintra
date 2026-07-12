@@ -1757,9 +1757,18 @@ instance_id_type Coordinator::join_swarm(
         "--instance_id",    std::to_string(new_instance_id),
         "--coordinator_id", std::to_string(s_coord_id)
     };
-    auto result = s_mproc->spawn_swarm_process(spawn_args);
+    spawn_args.custody = s_mproc->accept_child_custody();
+    Managed_process::Spawn_result result;
+    try {
+        result = s_mproc->spawn_swarm_process(spawn_args);
+    }
+    catch (...) {
+        s_mproc->request_child_custody_release(spawn_args.custody, true);
+        throw;
+    }
 
     if (!result.success) {
+        s_mproc->request_child_custody_release(spawn_args.custody);
         // Roll back group insertion on spawn failure.
         std::lock_guard groups_lock(m_groups_mutex);
         auto remove_from_group = [&](const string& name) {

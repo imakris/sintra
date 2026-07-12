@@ -1092,6 +1092,11 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     const auto piid = (options.process_instance_id != invalid_instance_id)
         ? options.process_instance_id
         : make_process_instance_id();
+    if (!detail::is_valid_process_instance_id(piid)) {
+        Log_stream(log_level::error)
+            << "spawn_swarm_process: process_instance_id must identify a process\n";
+        return {};
+    }
     std::shared_ptr<detail::Managed_child_custody_record> custody_record;
     Managed_process::Spawn_result spawn_result;
     bool os_process_created = false;
@@ -1157,6 +1162,35 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             owner->retire_child_custody_if_complete(record);
         }
     };
+    auto settle_setup_exception = [](
+        Managed_process* owner,
+        const std::shared_ptr<detail::Managed_child_custody_record>& record,
+        instance_id_type process_id,
+        uint32_t occurrence_number)
+    {
+        bool child_created = false;
+        {
+            std::lock_guard<std::mutex> lock(record->mutex);
+            for (auto& occurrence : record->occurrences) {
+                if (occurrence.process_instance_id == process_id &&
+                    occurrence.occurrence == occurrence_number)
+                {
+                    child_created = occurrence.os_process_created;
+                    if (occurrence.setup ==
+                        detail::Managed_child_occurrence_record::setup_state::pending)
+                    {
+                        occurrence.setup = child_created
+                            ? detail::Managed_child_occurrence_record::setup_state::ownership_ready
+                            : detail::Managed_child_occurrence_record::setup_state::no_child;
+                    }
+                    break;
+                }
+            }
+        }
+        record->changed.notify_all();
+        owner->request_child_custody_release(record, child_created);
+        return child_created;
+    };
 
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
     {
@@ -1164,6 +1198,12 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) || !s_mproc) {
             Log_stream(log_level::warning)
                 << "spawn_swarm_process: rejected because lifecycle teardown is in progress\n";
+            return {};
+        }
+        if (!s_coord) {
+            Log_stream(log_level::warning)
+                << "spawn_swarm_process: rejected because only the coordinator process "
+                   "may launch a managed child\n";
             return {};
         }
 
@@ -1175,7 +1215,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         }
 
         if (options.process_instance_id != invalid_instance_id &&
-            s_coord &&
             s_coord->external_process_invitation_exists(piid))
         {
             Log_stream(log_level::warning)
@@ -1228,10 +1267,19 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         custody_record = s_mproc->accept_child_custody(options.wait_for_instance_name);
         spawn_args.custody = custody_record;
         if (async_deadline_setup) {
-            if (!s_mproc->admit_child_custody_occurrence(
-                    custody_record, piid, spawn_args.occurrence))
-            {
-                return {};
+            bool admitted = false;
+            try {
+                admitted = s_mproc->admit_child_custody_occurrence(
+                    custody_record, piid, spawn_args.occurrence);
+            }
+            catch (...) {
+                settle_setup_exception(
+                    s_mproc, custody_record, piid, spawn_args.occurrence);
+                return Managed_child_custody(custody_record);
+            }
+            if (!admitted) {
+                s_mproc->request_child_custody_release(custody_record);
+                return Managed_child_custody(custody_record);
             }
             spawn_args.custody_occurrence_admitted = true;
             {
@@ -1242,7 +1290,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             auto async_setup =
                 [custody_owner, custody_record, spawn_args, coord_id,
                  target = options.wait_for_instance_name, deadline,
-                readiness_observer]() mutable
+                 readiness_observer, settle_setup_exception]() mutable
                 {
                     bool created = false;
                     bool setup_threw = false;
@@ -1261,34 +1309,15 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     }
                     catch (...) {
                         setup_threw = true;
-                        // The internal setup guard resolves the exact admitted
-                        // occurrence before unwinding. Recover the confirmed
-                        // native fact so cleanup retains ownership when the OS
-                        // child was already created.
-                        std::lock_guard<std::mutex> lock(custody_record->mutex);
-                        for (auto& occurrence : custody_record->occurrences) {
-                            if (occurrence.process_instance_id == spawn_args.piid &&
-                                occurrence.occurrence == spawn_args.occurrence)
-                            {
-                                created = occurrence.os_process_created;
-                                if (occurrence.setup ==
-                                    detail::Managed_child_occurrence_record::setup_state::pending)
-                                {
-                                    occurrence.setup = created
-                                        ? detail::Managed_child_occurrence_record::setup_state::ownership_ready
-                                        : detail::Managed_child_occurrence_record::setup_state::no_child;
-                                }
-                                break;
-                            }
-                        }
-                        custody_record->changed.notify_all();
+                        created = settle_setup_exception(
+                            custody_owner,
+                            custody_record,
+                            spawn_args.piid,
+                            spawn_args.occurrence);
                     }
 
-                    if (!created) {
+                    if (!created && !setup_threw) {
                         custody_owner->request_child_custody_release(custody_record);
-                    }
-                    else if (setup_threw) {
-                        custody_owner->request_child_custody_release(custody_record, true);
                     }
                     readiness_observer(
                         custody_owner, custody_record, coord_id, target, deadline, created);
@@ -1318,7 +1347,14 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             }
         }
         else {
-            spawn_result = s_mproc->spawn_swarm_process(spawn_args);
+            try {
+                spawn_result = s_mproc->spawn_swarm_process(spawn_args);
+            }
+            catch (...) {
+                os_process_created = settle_setup_exception(
+                    s_mproc, custody_record, piid, spawn_args.occurrence);
+                return Managed_child_custody(custody_record);
+            }
             os_process_created = spawn_result.success && spawn_result.os_process_created;
             if (!os_process_created) {
                 s_mproc->request_child_custody_release(custody_record);
@@ -1345,13 +1381,24 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             std::lock_guard<std::mutex> lock(custody_record->mutex);
             custody_record->readiness_observer_complete = false;
         }
-        custody_owner->start_child_custody_worker(
-            [custody_owner, custody_record, coord_id,
-             target = options.wait_for_instance_name, deadline, readiness_observer]()
+        try {
+            custody_owner->start_child_custody_worker(
+                [custody_owner, custody_record, coord_id,
+                 target = options.wait_for_instance_name, deadline, readiness_observer]()
+                {
+                    readiness_observer(
+                        custody_owner, custody_record, coord_id, target, deadline, true);
+                });
+        }
+        catch (...) {
             {
-                readiness_observer(
-                    custody_owner, custody_record, coord_id, target, deadline, true);
-            });
+                std::lock_guard<std::mutex> lock(custody_record->mutex);
+                custody_record->readiness_observer_complete = true;
+            }
+            custody_record->changed.notify_all();
+            custody_owner->request_child_custody_release(custody_record, true);
+            return custody;
+        }
     }
 
     {
