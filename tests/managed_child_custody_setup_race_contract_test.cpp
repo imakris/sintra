@@ -799,7 +799,7 @@ bool run_recovery_create_release_race(
         resolved_no_child = custody->occurrences.size() == 1 &&
             custody->occurrences.front().setup ==
                 sintra::detail::Managed_child_occurrence_record::setup_state::no_child &&
-            !custody->occurrences.front().os_process_created;
+            !custody->occurrences.front().native.created();
     }
 
     sintra::detail::test_hooks::s_managed_child_reader_setup.store(

@@ -268,6 +268,160 @@ private:
     std::shared_ptr<Process_message_reader> m_reader;
 };
 
+class Managed_child_native_authority
+{
+public:
+    bool confirm_absent() const noexcept
+    {
+        return m_phase == Phase::ABSENT && m_pid < 0 &&
+            !m_start_stamp_available && m_start_stamp == 0 &&
+            !m_wait_status_available && m_wait_status == 0
+#ifdef _WIN32
+            && !m_process_handle_owned && m_process_handle == 0 &&
+            !m_exit_observer_registered
+#endif
+            ;
+    }
+
+    bool commit_created(
+        int pid,
+        bool start_stamp_available,
+        uint64_t start_stamp,
+        bool already_exited,
+        bool wait_status_available,
+        int wait_status
+#ifdef _WIN32
+        , uintptr_t process_handle,
+        bool process_handle_owned
+#endif
+        ) noexcept
+    {
+        if (!confirm_absent() ||
+            (pid <= 0
+#ifdef _WIN32
+             && process_handle == 0
+#endif
+            ) ||
+            (!already_exited && wait_status_available)
+#ifdef _WIN32
+            || process_handle_owned != (process_handle != 0)
+#endif
+            )
+        {
+            return false;
+        }
+        m_phase = already_exited ? Phase::EXITED : Phase::RUNNING;
+        m_pid = pid;
+        m_start_stamp_available = start_stamp_available;
+        m_start_stamp = start_stamp;
+        m_wait_status_available = wait_status_available;
+        m_wait_status = wait_status;
+#ifdef _WIN32
+        m_process_handle = process_handle;
+        m_process_handle_owned = process_handle_owned;
+#endif
+        return true;
+    }
+
+    bool note_exit(int wait_status, bool wait_status_available) noexcept
+    {
+        if (m_phase == Phase::ABSENT) {
+            return false;
+        }
+        if (m_phase == Phase::EXITED) {
+            return m_wait_status_available == wait_status_available &&
+                (!wait_status_available || m_wait_status == wait_status);
+        }
+        m_phase = Phase::EXITED;
+        m_wait_status_available = wait_status_available;
+        m_wait_status = wait_status;
+        return true;
+    }
+
+    bool created() const noexcept { return m_phase != Phase::ABSENT; }
+    bool running() const noexcept { return m_phase == Phase::RUNNING; }
+    bool exited() const noexcept { return m_phase == Phase::EXITED; }
+    int pid() const noexcept { return m_pid; }
+    bool start_stamp_available() const noexcept
+    {
+        return m_start_stamp_available;
+    }
+    uint64_t start_stamp() const noexcept { return m_start_stamp; }
+    bool wait_status_available() const noexcept
+    {
+        return m_wait_status_available;
+    }
+    int wait_status() const noexcept { return m_wait_status; }
+
+#ifdef _WIN32
+    bool register_exit_observer() noexcept
+    {
+        if (!running() || !m_process_handle_owned ||
+            m_process_handle == 0)
+        {
+            return false;
+        }
+        m_exit_observer_registered = true;
+        return true;
+    }
+
+    void cancel_exit_observer() noexcept
+    {
+        m_exit_observer_registered = false;
+    }
+
+    bool take_owned_process_handle(
+        uintptr_t expected_handle,
+        uintptr_t& released_handle) noexcept
+    {
+        if (!m_process_handle_owned || m_process_handle == 0 ||
+            m_process_handle != expected_handle)
+        {
+            return false;
+        }
+        released_handle = m_process_handle;
+        m_process_handle = 0;
+        m_process_handle_owned = false;
+        return true;
+    }
+
+    bool process_handle_owned() const noexcept
+    {
+        return m_process_handle_owned;
+    }
+    uintptr_t process_handle() const noexcept { return m_process_handle; }
+    bool exit_observer_registered() const noexcept
+    {
+        return m_exit_observer_registered;
+    }
+    bool fallback_wait_available() const noexcept
+    {
+        return running() && !m_exit_observer_registered &&
+            m_process_handle_owned && m_process_handle != 0;
+    }
+#endif
+
+private:
+    enum class Phase
+    {
+        ABSENT,
+        RUNNING,
+        EXITED
+    };
+
+    Phase    m_phase = Phase::ABSENT;
+    int      m_pid = -1;
+    uint64_t m_start_stamp = 0;
+    bool     m_start_stamp_available = false;
+    int      m_wait_status = 0;
+    bool     m_wait_status_available = false;
+#ifdef _WIN32
+    uintptr_t m_process_handle = 0;
+    bool      m_process_handle_owned = false;
+    bool      m_exit_observer_registered = false;
+#endif
+};
+
 struct Managed_child_occurrence_record
 {
     enum class setup_state {
@@ -279,21 +433,11 @@ struct Managed_child_occurrence_record
     uint32_t                   occurrence = 0;
     instance_id_type           process_instance_id = invalid_instance_id;
     setup_state                setup = setup_state::pending;
-    bool                       os_process_created = false;
     bool                       initialization_reservation_active = false;
     Managed_child_transport_retirement
                                transport;
-    bool                       os_exit_confirmed = false;
-    bool                       os_wait_status_available = false;
-    int                        os_wait_status = 0;
-    int                        os_pid = -1;
-    uint64_t                   os_process_start_stamp = 0;
-    bool                       os_process_start_stamp_available = false;
-#ifdef _WIN32
-    uintptr_t                  os_process_handle = 0;
-    bool                       os_process_handle_owned = false;
-    bool                       os_exit_observer_registered = false;
-#endif
+    Managed_child_native_authority
+                               native;
 };
 
 struct Managed_child_custody_record;

@@ -2237,7 +2237,7 @@ inline bool Managed_process::admit_child_custody_occurrence(
                         candidate.occurrence == occurrence &&
                         candidate.setup == detail::Managed_child_occurrence_record::
                             setup_state::pending &&
-                        !candidate.os_process_created;
+                        candidate.native.confirm_absent();
                 });
             if (admitted != custody->occurrences.end()) {
                 custody->occurrences.erase(admitted);
@@ -2725,7 +2725,7 @@ inline void Managed_process::request_child_custody_release(
                     if (occurrence == custody->occurrences.end()) {
                         return false;
                     }
-                    native_terminal = occurrence->os_exit_confirmed;
+                    native_terminal = occurrence->native.exited();
                     communication_eligible =
                         occurrence->transport.ready_to_retire();
                 }
@@ -2780,7 +2780,7 @@ inline void Managed_process::request_child_custody_release(
                         (occurrence.setup ==
                             detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
                          occurrence.transport.fully_retired() &&
-                         occurrence.os_exit_confirmed));
+                         occurrence.native.exited()));
                 });
         };
 
@@ -2797,7 +2797,7 @@ inline void Managed_process::request_child_custody_release(
                             candidate.process_instance_id == process_iid;
                     });
                 if (occurrence != custody->occurrences.end() &&
-                    (cleanup_applied || occurrence->os_exit_confirmed) &&
+                    (cleanup_applied || occurrence->native.exited()) &&
                     !occurrence->transport.retirement_started() &&
                     (occurrence->initialization_reservation_active ||
                      !occurrence->transport.publication_retired() ||
@@ -2826,7 +2826,7 @@ inline void Managed_process::request_child_custody_release(
                         });
                     current_successor_live =
                         successor != custody->occurrences.end() &&
-                        !successor->os_exit_confirmed;
+                        !successor->native.exited();
                     break;
                 }
                 if (occurrence.setup == detail::Managed_child_occurrence_record::
@@ -2898,13 +2898,10 @@ inline void Managed_process::request_child_custody_release(
                     for (const auto& occurrence : custody->occurrences) {
                         if (occurrence.setup ==
                                 detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
-                            !occurrence.os_exit_confirmed &&
-                            !occurrence.os_exit_observer_registered &&
-                            occurrence.os_process_handle_owned &&
-                            occurrence.os_process_handle != 0)
+                            occurrence.native.fallback_wait_available())
                         {
                             fallback_handle = reinterpret_cast<HANDLE>(
-                                occurrence.os_process_handle);
+                                occurrence.native.process_handle());
                             fallback_occurrence = occurrence.occurrence;
                             break;
                         }
@@ -2970,27 +2967,38 @@ inline void Managed_process::request_child_custody_release(
             // Poll briefly in this owned worker, then re-check the release mode;
             // public deadline callers continue to wait only on custody->changed.
             const auto wait_result = WaitForSingleObject(fallback_handle, 20);
+            uintptr_t released_fallback_handle = 0;
+            bool fallback_transition_valid = wait_result != WAIT_OBJECT_0;
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 for (auto& occurrence : custody->occurrences) {
                     if (occurrence.occurrence == fallback_occurrence &&
-                        occurrence.os_process_handle ==
+                        occurrence.native.process_handle() ==
                             reinterpret_cast<uintptr_t>(fallback_handle))
                     {
                         if (wait_result == WAIT_OBJECT_0) {
-                            occurrence.os_exit_confirmed = true;
-                            CloseHandle(fallback_handle);
-                            occurrence.os_process_handle_owned = false;
-                            occurrence.os_process_handle = 0;
+                            fallback_transition_valid =
+                                occurrence.native.note_exit(0, false) &&
+                                occurrence.native.take_owned_process_handle(
+                                    reinterpret_cast<uintptr_t>(fallback_handle),
+                                    released_fallback_handle);
                         }
                         break;
                     }
                 }
                 custody->changed.notify_all();
             }
+            if (released_fallback_handle != 0) {
+                CloseHandle(reinterpret_cast<HANDLE>(
+                    released_fallback_handle));
+            }
             if (wait_result == WAIT_FAILED) {
                 throw std::runtime_error(
                     "Managed-child fallback native-exit wait failed");
+            }
+            if (!fallback_transition_valid) {
+                throw std::runtime_error(
+                    "Managed-child fallback native-exit transition failed");
             }
 #endif
         }
@@ -3479,10 +3487,12 @@ inline void Managed_process::note_child_os_exit(
         if (occurrence.process_instance_id == token.process_instance_id &&
             occurrence.occurrence == token.occurrence)
         {
-            if (!occurrence.os_exit_confirmed) {
-                occurrence.os_exit_confirmed = true;
-                occurrence.os_wait_status = wait_status;
-                occurrence.os_wait_status_available = wait_status_available;
+            if (!occurrence.native.note_exit(
+                    wait_status, wait_status_available))
+            {
+                Log_stream(log_level::error)
+                    << "Managed-child exact native-exit fact conflicted with "
+                       "retained authority.\n";
             }
             custody->changed.notify_all();
             return;
@@ -3552,7 +3562,7 @@ inline bool Managed_process::wait_for_child_native_exit(
             });
         return
             occurrence != custody->occurrences.end() &&
-            occurrence->os_exit_confirmed;
+            occurrence->native.exited();
     };
     custody->changed.wait_until(lock, deadline, exited);
     return exited();
@@ -3585,6 +3595,7 @@ inline bool Managed_process::cleanup_child_native(
 #ifdef _WIN32
     HANDLE process = nullptr;
     DWORD pid = 0;
+    uintptr_t retained_handle_value = 0;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         auto occurrence = std::find_if(
@@ -3598,16 +3609,17 @@ inline bool Managed_process::cleanup_child_native(
         if (occurrence == custody->occurrences.end()) {
             return false;
         }
-        if (occurrence->os_exit_confirmed) {
+        if (occurrence->native.exited()) {
             return true;
         }
-        if (!occurrence->os_process_handle_owned ||
-            occurrence->os_process_handle == 0)
+        if (!occurrence->native.process_handle_owned() ||
+            occurrence->native.process_handle() == 0)
         {
             return false;
         }
-        pid = static_cast<DWORD>(occurrence->os_pid);
-        HANDLE retained = reinterpret_cast<HANDLE>(occurrence->os_process_handle);
+        pid = static_cast<DWORD>(occurrence->native.pid());
+        retained_handle_value = occurrence->native.process_handle();
+        HANDLE retained = reinterpret_cast<HANDLE>(retained_handle_value);
         if (!DuplicateHandle(
                 GetCurrentProcess(),
                 retained,
@@ -3631,27 +3643,33 @@ inline bool Managed_process::cleanup_child_native(
         if (GetExitCodeProcess(process, &exit_code) == 0) {
             return false;
         }
-        std::lock_guard<std::mutex> lock(custody->mutex);
-        for (auto& occurrence : custody->occurrences) {
-            if (occurrence.process_instance_id == token.process_instance_id &&
-                occurrence.occurrence == token.occurrence)
-            {
-                occurrence.os_exit_confirmed = true;
-                occurrence.os_wait_status_available = true;
-                occurrence.os_wait_status = static_cast<int>(exit_code);
-                if (!occurrence.os_exit_observer_registered &&
-                    occurrence.os_process_handle_owned)
+        uintptr_t released_handle = 0;
+        bool transition_valid = false;
+        {
+            std::lock_guard<std::mutex> lock(custody->mutex);
+            for (auto& occurrence : custody->occurrences) {
+                if (occurrence.process_instance_id == token.process_instance_id &&
+                    occurrence.occurrence == token.occurrence)
                 {
-                    CloseHandle(reinterpret_cast<HANDLE>(
-                        occurrence.os_process_handle));
-                    occurrence.os_process_handle_owned = false;
-                    occurrence.os_process_handle = 0;
+                    transition_valid = occurrence.native.note_exit(
+                        static_cast<int>(exit_code), true);
+                    if (transition_valid &&
+                        !occurrence.native.exit_observer_registered() &&
+                        occurrence.native.process_handle_owned())
+                    {
+                        transition_valid =
+                            occurrence.native.take_owned_process_handle(
+                                retained_handle_value, released_handle);
+                    }
+                    custody->changed.notify_all();
+                    break;
                 }
-                custody->changed.notify_all();
-                return true;
             }
         }
-        return false;
+        if (released_handle != 0) {
+            CloseHandle(reinterpret_cast<HANDLE>(released_handle));
+        }
+        return transition_valid;
     };
     const auto grace_ms = static_cast<DWORD>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3860,7 +3878,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                 occurrence.setup ==
                     detail::Managed_child_occurrence_record::setup_state::pending)
             {
-                child_created = occurrence.os_process_created;
+                child_created = occurrence.native.created();
                 occurrence.setup = child_created
                     ? detail::Managed_child_occurrence_record::setup_state::ownership_ready
                     : detail::Managed_child_occurrence_record::setup_state::no_child;
@@ -4158,24 +4176,38 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
-            occurrence.os_process_created = result.os_process_created;
-            occurrence.os_pid = result.os_pid;
-            occurrence.os_exit_confirmed = result.os_process_already_reaped;
-            occurrence.os_wait_status_available =
-                result.os_wait_status_available;
-            occurrence.os_wait_status = result.os_wait_status;
+            bool start_stamp_available = false;
+            uint64_t start_stamp = 0;
             if (result.os_process_created && result.os_pid > 0) {
                 if (auto stamp = query_process_start_stamp(
                         static_cast<uint32_t>(result.os_pid)))
                 {
-                    occurrence.os_process_start_stamp = *stamp;
-                    occurrence.os_process_start_stamp_available = true;
+                    start_stamp = *stamp;
+                    start_stamp_available = true;
                 }
             }
+            const bool native_committed = result.os_process_created
+                ? occurrence.native.commit_created(
+                    result.os_pid,
+                    start_stamp_available,
+                    start_stamp,
+                    result.os_process_already_reaped,
+                    result.os_wait_status_available,
+                    result.os_wait_status
 #ifdef _WIN32
-            occurrence.os_process_handle = result.os_process_handle;
-            occurrence.os_process_handle_owned = result.os_process_handle_owned;
-            result.os_process_handle_owned = false;
+                    , result.os_process_handle,
+                    result.os_process_handle_owned
+#endif
+                    )
+                : occurrence.native.confirm_absent();
+            if (!native_committed) {
+                throw std::runtime_error(
+                    "Managed-child native authority commit failed");
+            }
+#ifdef _WIN32
+            if (result.os_process_created) {
+                result.os_process_handle_owned = false;
+            }
 #endif
             custody->changed.notify_all();
         }
@@ -4193,7 +4225,11 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
-            occurrence.os_process_created = false;
+            if (!occurrence.native.confirm_absent()) {
+                throw std::runtime_error(
+                    "Managed-child native authority was not absent after "
+                    "spawn preparation failure");
+            }
             custody->changed.notify_all();
         }
     }
@@ -4237,9 +4273,9 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 const auto& occurrence = exact_occurrence_locked();
-                spawned_start_stamp = occurrence.os_process_start_stamp;
+                spawned_start_stamp = occurrence.native.start_stamp();
                 spawned_start_stamp_available =
-                    occurrence.os_process_start_stamp_available;
+                    occurrence.native.start_stamp_available();
             }
             {
                 const bool forced_reservation_lookup_failure =
@@ -4323,44 +4359,71 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
 
 #ifdef _WIN32
         if (result.os_process_created && spawned_process_handle) {
+            const auto process_instance_id = s.piid;
             const auto occurrence_number = s.occurrence;
             start_child_custody_worker(
-                [custody, occurrence_number, spawned_process_handle]() {
+                [custody, process_instance_id, occurrence_number,
+                 spawned_process_handle]() {
                     const auto wait_result =
                         WaitForSingleObject(spawned_process_handle, INFINITE);
-                    std::lock_guard<std::mutex> lock(custody->mutex);
-                    for (auto& occurrence : custody->occurrences) {
-                        if (occurrence.occurrence == occurrence_number) {
-                            if (wait_result == WAIT_OBJECT_0) {
-                                DWORD exit_code = 0;
-                                occurrence.os_exit_confirmed = true;
-                                occurrence.os_wait_status_available =
-                                    GetExitCodeProcess(
-                                        spawned_process_handle,
-                                        &exit_code) != 0;
-                                occurrence.os_wait_status =
-                                    static_cast<int>(exit_code);
-                                if (occurrence.os_process_handle_owned) {
-                                    CloseHandle(spawned_process_handle);
-                                    occurrence.os_process_handle_owned = false;
-                                    occurrence.os_process_handle = 0;
+                    uintptr_t released_handle = 0;
+                    bool transition_valid = false;
+                    {
+                        std::lock_guard<std::mutex> lock(custody->mutex);
+                        for (auto& occurrence : custody->occurrences) {
+                            if (occurrence.process_instance_id ==
+                                    process_instance_id &&
+                                occurrence.occurrence == occurrence_number)
+                            {
+                                if (wait_result == WAIT_OBJECT_0) {
+                                    DWORD exit_code = 0;
+                                    const bool exit_code_available =
+                                        GetExitCodeProcess(
+                                            spawned_process_handle,
+                                            &exit_code) != 0;
+                                    transition_valid =
+                                        occurrence.native.note_exit(
+                                            static_cast<int>(exit_code),
+                                            exit_code_available);
+                                    if (transition_valid &&
+                                        occurrence.native.process_handle_owned())
+                                    {
+                                        transition_valid =
+                                            occurrence.native.
+                                                take_owned_process_handle(
+                                                    reinterpret_cast<uintptr_t>(
+                                                        spawned_process_handle),
+                                                    released_handle);
+                                    }
                                 }
+                                else {
+                                    occurrence.native.cancel_exit_observer();
+                                    transition_valid = true;
+                                }
+                                break;
                             }
-                            else {
-                                occurrence.os_exit_observer_registered = false;
-                            }
-                            break;
                         }
+                        custody->changed.notify_all();
                     }
-                    custody->changed.notify_all();
+                    if (released_handle != 0) {
+                        CloseHandle(reinterpret_cast<HANDLE>(released_handle));
+                    }
+                    if (!transition_valid) {
+                        Log_stream(log_level::error)
+                            << "Managed-child native observer transition "
+                               "failed.\n";
+                    }
                 },
                 detail::test_hooks::k_managed_child_fail_native_observer_start,
                 s.piid,
                 s.occurrence);
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
-            if (!occurrence.os_exit_confirmed) {
-                occurrence.os_exit_observer_registered = true;
+            if (occurrence.native.running() &&
+                !occurrence.native.register_exit_observer())
+            {
+                throw std::runtime_error(
+                    "Managed-child native observer registration failed");
             }
         }
 #else
@@ -4416,9 +4479,10 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 auto& occurrence = exact_occurrence_locked();
-                if (!occurrence.os_process_created) {
-                    occurrence.os_process_handle = 0;
-                    occurrence.os_process_handle_owned = false;
+                if (!occurrence.native.confirm_absent()) {
+                    throw std::runtime_error(
+                        "Managed-child native authority was not absent after "
+                        "spawn failure");
                 }
             }
             CloseHandle(spawned_process_handle);
@@ -4458,7 +4522,11 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
-            occurrence.os_process_created = false;
+            if (!occurrence.native.confirm_absent()) {
+                throw std::runtime_error(
+                    "Managed-child native authority was not absent while "
+                    "settling spawn failure");
+            }
             occurrence.setup =
                 detail::Managed_child_occurrence_record::setup_state::no_child;
             setup_resolved = true;

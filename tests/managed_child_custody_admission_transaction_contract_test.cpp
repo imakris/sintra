@@ -176,8 +176,8 @@ Admission_facts observe_admission_facts(
         predecessor.occurrence == 0 &&
         predecessor.setup ==
             sintra::detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
-        predecessor.os_process_created;
-    facts.predecessor_exited = predecessor.os_exit_confirmed;
+        predecessor.native.created();
+    facts.predecessor_exited = predecessor.native.exited();
     if (!facts.exact_two_occurrences) {
         return facts;
     }
@@ -188,7 +188,7 @@ Admission_facts observe_admission_facts(
         failed.setup ==
             sintra::detail::Managed_child_occurrence_record::setup_state::pending;
     facts.failed_occurrence_no_child =
-        !failed.os_process_created && failed.os_pid < 0;
+        failed.native.confirm_absent();
     return facts;
 }
 
@@ -337,7 +337,7 @@ int main(int argc, char* argv[])
                             occurrence.occurrence == 0;
                     });
                 return predecessor != custody_record->occurrences.end() &&
-                    predecessor->os_exit_confirmed;
+                    predecessor->native.exited();
             });
     }
     const auto facts = observe_admission_facts(process_iid, custody_record);

@@ -1198,7 +1198,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 if (occurrence.process_instance_id == process_id &&
                     occurrence.occurrence == occurrence_number)
                 {
-                    child_created = occurrence.os_process_created;
+                    child_created = occurrence.native.created();
                     if (occurrence.setup ==
                         detail::Managed_child_occurrence_record::setup_state::pending)
                     {
@@ -1489,8 +1489,8 @@ inline Managed_child_status Managed_child_custody::status() const
     result.last_failure = m_record->last_failure;
     result.admitted_occurrences = m_record->occurrences.size();
     for (const auto& occurrence : m_record->occurrences) {
-        result.created_occurrences += occurrence.os_process_created ? 1u : 0u;
-        result.exited_occurrences += occurrence.os_exit_confirmed ? 1u : 0u;
+        result.created_occurrences += occurrence.native.created() ? 1u : 0u;
+        result.exited_occurrences += occurrence.native.exited() ? 1u : 0u;
     }
     return result;
 }

@@ -527,28 +527,28 @@ int main(int argc, char* argv[])
         facts.predecessor_setup =
             predecessor.setup == sintra::detail::Managed_child_occurrence_record::
                 setup_state::ownership_ready;
-        facts.predecessor_pid = predecessor.os_pid == ledger_0->pid;
+        facts.predecessor_pid = predecessor.native.pid() == ledger_0->pid;
         facts.predecessor_stamp_available =
-            predecessor.os_process_start_stamp_available;
+            predecessor.native.start_stamp_available();
         facts.predecessor_stamp =
-            predecessor.os_process_start_stamp == ledger_0->start_stamp;
+            predecessor.native.start_stamp() == ledger_0->start_stamp;
         facts.predecessor_publication_retired =
             predecessor.transport.publication_retired();
         facts.predecessor_communication_retired =
             predecessor.transport.retirement_terminal();
-        facts.predecessor_exit_confirmed = predecessor.os_exit_confirmed;
+        facts.predecessor_exit_confirmed = predecessor.native.exited();
         facts.replacement_occurrence =
             replacement.occurrence == ledger_1->occurrence;
         facts.replacement_setup =
             replacement.setup == sintra::detail::Managed_child_occurrence_record::
                 setup_state::ownership_ready;
-        facts.replacement_pid = replacement.os_pid == ledger_1->pid;
+        facts.replacement_pid = replacement.native.pid() == ledger_1->pid;
         facts.replacement_stamp_available =
-            replacement.os_process_start_stamp_available;
+            replacement.native.start_stamp_available();
         facts.replacement_stamp =
-            replacement.os_process_start_stamp == ledger_1->start_stamp;
-        facts.replacement_created = replacement.os_process_created;
-        facts.replacement_not_exited = !replacement.os_exit_confirmed;
+            replacement.native.start_stamp() == ledger_1->start_stamp;
+        facts.replacement_created = replacement.native.created();
+        facts.replacement_not_exited = !replacement.native.exited();
         return facts;
     };
 
@@ -698,7 +698,7 @@ int main(int argc, char* argv[])
                         (occurrence.setup == sintra::detail::Managed_child_occurrence_record::
                             setup_state::ownership_ready &&
                          occurrence.transport.fully_retired() &&
-                         occurrence.os_exit_confirmed);
+                         occurrence.native.exited());
                 });
     }
 
@@ -765,9 +765,9 @@ int main(int argc, char* argv[])
             typed_outcome.predecessor_communication_retired =
                 custody_record->occurrences[0].transport.retirement_terminal();
             typed_outcome.predecessor_native_exit_observer_registered =
-                custody_record->occurrences[0].os_exit_observer_registered;
+                custody_record->occurrences[0].native.exit_observer_registered();
             typed_outcome.replacement_native_exit_observer_registered =
-                custody_record->occurrences[1].os_exit_observer_registered;
+                custody_record->occurrences[1].native.exit_observer_registered();
         }
     }
 #else

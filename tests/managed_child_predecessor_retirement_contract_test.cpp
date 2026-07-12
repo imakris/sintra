@@ -423,32 +423,35 @@ Exact_facts exact_facts(const Outcome& outcome)
         facts.process_iid = predecessor.process_instance_id;
         facts.predecessor_occurrence = predecessor.occurrence;
         facts.replacement_occurrence = replacement.occurrence;
-        facts.predecessor_pid = predecessor.os_pid;
-        facts.replacement_pid = replacement.os_pid;
-        facts.predecessor_status = predecessor.os_wait_status;
-        facts.replacement_status = replacement.os_wait_status;
+        facts.predecessor_pid = predecessor.native.pid();
+        facts.replacement_pid = replacement.native.pid();
+        facts.predecessor_status = predecessor.native.wait_status();
+        facts.replacement_status = replacement.native.wait_status();
         facts.identities = predecessor.process_instance_id ==
                 replacement.process_instance_id &&
             predecessor.occurrence == 0 && replacement.occurrence == 1 &&
-            predecessor.os_pid > 0 && replacement.os_pid > 0 &&
-            predecessor.os_pid != replacement.os_pid &&
-            predecessor.os_process_start_stamp_available &&
-            replacement.os_process_start_stamp_available &&
-            predecessor.os_process_start_stamp != replacement.os_process_start_stamp;
+            predecessor.native.pid() > 0 && replacement.native.pid() > 0 &&
+            predecessor.native.pid() != replacement.native.pid() &&
+            predecessor.native.start_stamp_available() &&
+            replacement.native.start_stamp_available() &&
+            predecessor.native.start_stamp() !=
+                replacement.native.start_stamp();
         facts.records_match_outcome =
             outcome.predecessor.process_iid == predecessor.process_instance_id &&
             outcome.replacement.process_iid == replacement.process_instance_id &&
             outcome.predecessor.occurrence == predecessor.occurrence &&
             outcome.replacement.occurrence == replacement.occurrence &&
-            outcome.predecessor.pid == predecessor.os_pid &&
-            outcome.replacement.pid == replacement.os_pid &&
-            outcome.predecessor.start_stamp == predecessor.os_process_start_stamp &&
-            outcome.replacement.start_stamp == replacement.os_process_start_stamp;
+            outcome.predecessor.pid == predecessor.native.pid() &&
+            outcome.replacement.pid == replacement.native.pid() &&
+            outcome.predecessor.start_stamp ==
+                predecessor.native.start_stamp() &&
+            outcome.replacement.start_stamp ==
+                replacement.native.start_stamp();
         facts.setup = predecessor.setup == sintra::detail::
                 Managed_child_occurrence_record::setup_state::ownership_ready &&
             replacement.setup == sintra::detail::
                 Managed_child_occurrence_record::setup_state::ownership_ready &&
-            predecessor.os_process_created && replacement.os_process_created &&
+            predecessor.native.created() && replacement.native.created() &&
             !predecessor.initialization_reservation_active &&
             !replacement.initialization_reservation_active;
         facts.publication_retired =
@@ -457,37 +460,46 @@ Exact_facts exact_facts(const Outcome& outcome)
             predecessor.transport.retirement_started();
         facts.communication_retired =
             predecessor.transport.retirement_terminal();
-        facts.predecessor_exit = predecessor.os_exit_confirmed;
+        facts.predecessor_exit = predecessor.native.exited();
         facts.replacement_terminal = replacement.transport.fully_retired() &&
-            replacement.os_exit_confirmed;
+            replacement.native.exited();
         facts.release_complete = custody->phase == sintra::detail::Custody_phase::released;
         facts.survivors_absent = facts.identities &&
             !sintra::test::managed_child::exact_process_is_live(
-                predecessor.os_pid, predecessor.os_process_start_stamp) &&
+                predecessor.native.pid(),
+                predecessor.native.start_stamp()) &&
             !sintra::test::managed_child::exact_process_is_live(
-                replacement.os_pid, replacement.os_process_start_stamp);
+                replacement.native.pid(),
+                replacement.native.start_stamp());
 #ifdef _WIN32
-        facts.predecessor_abnormal = predecessor.os_wait_status_available &&
-            predecessor.os_wait_status != 0;
-        facts.replacement_normal = replacement.os_wait_status_available &&
-            replacement.os_wait_status == 0;
-        facts.native_authority = !predecessor.os_process_handle_owned &&
-            !replacement.os_process_handle_owned &&
-            predecessor.os_process_handle == 0 && replacement.os_process_handle == 0;
-        facts.observer_registered = predecessor.os_exit_observer_registered &&
-            replacement.os_exit_observer_registered;
-#else
-        facts.predecessor_abnormal = predecessor.os_wait_status_available &&
-            WIFSIGNALED(predecessor.os_wait_status);
-        facts.replacement_normal = replacement.os_wait_status_available &&
-            WIFEXITED(replacement.os_wait_status) &&
-            WEXITSTATUS(replacement.os_wait_status) == 0;
+        facts.predecessor_abnormal =
+            predecessor.native.wait_status_available() &&
+            predecessor.native.wait_status() != 0;
+        facts.replacement_normal =
+            replacement.native.wait_status_available() &&
+            replacement.native.wait_status() == 0;
         facts.native_authority =
-            s_reaps.pid_0.load() == predecessor.os_pid &&
-            s_reaps.pid_1.load() == replacement.os_pid &&
+            !predecessor.native.process_handle_owned() &&
+            !replacement.native.process_handle_owned() &&
+            predecessor.native.process_handle() == 0 &&
+            replacement.native.process_handle() == 0;
+        facts.observer_registered =
+            predecessor.native.exit_observer_registered() &&
+            replacement.native.exit_observer_registered();
+#else
+        facts.predecessor_abnormal =
+            predecessor.native.wait_status_available() &&
+            WIFSIGNALED(predecessor.native.wait_status());
+        facts.replacement_normal =
+            replacement.native.wait_status_available() &&
+            WIFEXITED(replacement.native.wait_status()) &&
+            WEXITSTATUS(replacement.native.wait_status()) == 0;
+        facts.native_authority =
+            s_reaps.pid_0.load() == predecessor.native.pid() &&
+            s_reaps.pid_1.load() == replacement.native.pid() &&
             s_reaps.count_0.load() == 1 && s_reaps.count_1.load() == 1 &&
-            s_reaps.status_0.load() == predecessor.os_wait_status &&
-            s_reaps.status_1.load() == replacement.os_wait_status;
+            s_reaps.status_0.load() == predecessor.native.wait_status() &&
+            s_reaps.status_1.load() == replacement.native.wait_status();
         facts.observer_registered = true;
 #endif
     }
