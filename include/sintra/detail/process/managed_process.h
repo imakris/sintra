@@ -194,6 +194,13 @@ struct Managed_child_occurrence_token
     explicit operator bool() const noexcept { return !custody.expired(); }
 };
 
+enum class Custody_phase
+{
+    open,
+    releasing,
+    released
+};
+
 // One retained logical custody record.  Subsystems remain authoritative for
 // their own facts; this record only joins their exact-occurrence reports.
 struct Managed_child_custody_record
@@ -203,14 +210,12 @@ struct Managed_child_custody_record
     uint64_t                                   identity = 0;
     bool                                       readiness_reached = false;
     bool                                       readiness_observer_complete = true;
-    bool                                       recovery_open = true;
-    bool                                       release_requested = false;
+    Custody_phase                              phase = Custody_phase::open;
     std::atomic<bool>                          readiness_cancelled{false};
     bool                                       cleanup_requested = false;
     bool                                       cleanup_started = false;
     uint64_t                                   cleanup_attempt = 0;
     bool                                       cleanup_attempt_failed = false;
-    bool                                       release_complete = false;
     std::vector<Managed_child_occurrence_record> occurrences;
 };
 

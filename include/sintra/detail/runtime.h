@@ -1151,7 +1151,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         bool release_requested = false;
         {
             std::lock_guard<std::mutex> lock(record->mutex);
-            release_requested = record->release_requested;
+            release_requested = record->phase != detail::Custody_phase::open;
         }
         try {
             if (child_created && !release_requested &&
@@ -1170,7 +1170,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 while (std::chrono::steady_clock::now() < readiness_deadline) {
                     {
                         std::lock_guard<std::mutex> lock(record->mutex);
-                        if (record->release_requested) {
+                        if (record->phase != detail::Custody_phase::open) {
                             break;
                         }
                     }
@@ -1484,13 +1484,13 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         if (deadline == std::chrono::steady_clock::time_point::max()) {
             custody_record->changed.wait(lock, [&]() {
                 return custody_record->readiness_reached ||
-                    custody_record->release_requested;
+                    custody_record->phase != detail::Custody_phase::open;
             });
         }
         else {
             custody_record->changed.wait_until(lock, deadline, [&]() {
                 return custody_record->readiness_reached ||
-                    custody_record->release_requested;
+                    custody_record->phase != detail::Custody_phase::open;
             });
         }
         if (custody_record->readiness_reached) {
@@ -1515,8 +1515,10 @@ inline Managed_child_custody_observation observe_managed_child(
     observation.accepted = true;
     std::lock_guard<std::mutex> lock(custody.m_record->mutex);
     observation.readiness_reached = custody.m_record->readiness_reached;
-    observation.release_requested = custody.m_record->release_requested;
-    observation.release_complete = custody.m_record->release_complete;
+    observation.release_requested =
+        custody.m_record->phase != detail::Custody_phase::open;
+    observation.release_complete =
+        custody.m_record->phase == detail::Custody_phase::released;
     observation.admitted_occurrences = custody.m_record->occurrences.size();
     for (const auto& occurrence : custody.m_record->occurrences) {
         observation.created_occurrences += occurrence.os_process_created ? 1u : 0u;
@@ -1534,7 +1536,7 @@ inline Managed_child_custody_observation wait_managed_child(
     }
     std::unique_lock<std::mutex> lock(custody.m_record->mutex);
     custody.m_record->changed.wait_until(lock, deadline, [&]() {
-        return custody.m_record->release_complete;
+        return custody.m_record->phase == detail::Custody_phase::released;
     });
     lock.unlock();
     return observe_managed_child(custody);

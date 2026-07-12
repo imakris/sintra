@@ -365,7 +365,8 @@ bool wait_for_release(
 {
     std::unique_lock<std::mutex> lock(record->mutex);
     return record->changed.wait_for(lock, 5s, [&]() {
-        return record->release_complete && record->readiness_observer_complete;
+        return record->phase == sintra::detail::Custody_phase::released &&
+            record->readiness_observer_complete;
     });
 }
 
@@ -573,7 +574,7 @@ std::optional<std::array<bool, 4>> occurrence_release_attempt_facts(
         custody->cleanup_started,
         custody->cleanup_attempt_failed,
         occurrence->communication_retirement_started,
-        custody->release_complete};
+        custody->phase == sintra::detail::Custody_phase::released};
 }
 
 void reset_failure_hook()
@@ -731,8 +732,8 @@ bool run_recovery_create_release_race(
     bool incomplete_while_held = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        incomplete_while_held = custody->release_requested &&
-            !custody->release_complete &&
+        incomplete_while_held =
+            custody->phase == sintra::detail::Custody_phase::releasing &&
             custody->occurrences.front().setup ==
                 sintra::detail::Managed_child_occurrence_record::setup_state::pending;
     }
