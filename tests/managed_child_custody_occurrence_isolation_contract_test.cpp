@@ -383,7 +383,9 @@ int main(int argc, char* argv[])
     }
 
 #ifndef _WIN32
-    sintra::detail::test_hooks::s_child_reaped.store(&observe_reap, std::memory_order_release);
+    sintra::test::managed_child::Scoped_test_hook child_reaped_hook(
+        sintra::detail::test_hooks::s_child_reaped,
+        &observe_reap);
 #endif
 
     std::mutex recovery_mutex;
@@ -412,8 +414,9 @@ int main(int argc, char* argv[])
         std::memory_order_release);
     s_outbound_hold.entered.store(false, std::memory_order_relaxed);
     s_outbound_hold.release.store(false, std::memory_order_relaxed);
-    sintra::detail::test_hooks::s_rpc_outbound_request.store(
-        &hold_predecessor_request, std::memory_order_release);
+    sintra::test::managed_child::Scoped_test_hook outbound_request_hook(
+        sintra::detail::test_hooks::s_rpc_outbound_request,
+        &hold_predecessor_request);
 
     constexpr uint32_t request_token = 0x5a31u;
     std::atomic<bool> request_done{false};
@@ -669,10 +672,10 @@ int main(int argc, char* argv[])
     if (!no_survivors && ledger_1 && signal_exact_process(ledger_1->pid, ledger_1->start_stamp, SIGTERM)) {
         forced_cleanup = true;
     }
-    sintra::detail::test_hooks::s_child_reaped.store(nullptr, std::memory_order_release);
+    child_reaped_hook.restore();
 #endif
 
-    sintra::detail::test_hooks::s_rpc_outbound_request.store(nullptr, std::memory_order_release);
+    outbound_request_hook.restore();
     s_outbound_hold.expected.store(sintra::invalid_instance_id, std::memory_order_release);
     watchdog_done.store(true, std::memory_order_release);
     watchdog.join();
