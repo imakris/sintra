@@ -6,6 +6,7 @@
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/runtime.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -37,6 +38,7 @@
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_custody_finalize_race_child";
 constexpr std::string_view k_nonce_flag = "--managed_child_custody_finalize_race_nonce";
@@ -89,30 +91,6 @@ Posix_reap_observation s_posix_reap;
 fs::path marker_path(const fs::path& dir, std::string_view name)
 {
     return dir / std::string(name);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& contents)
-{
-    const fs::path temporary = path.string() + ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return false;
-        }
-        out << contents;
-        out.flush();
-        if (!out) {
-            return false;
-        }
-    }
-
-    std::error_code error;
-    fs::rename(temporary, path, error);
-    if (error) {
-        fs::remove(temporary, error);
-        return false;
-    }
-    return true;
 }
 
 template <typename Predicate>

@@ -6,6 +6,7 @@
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/runtime.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -39,6 +40,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_nonce_env = "SINTRA_R6_NONCE";
 constexpr std::string_view k_ledger_0 = "occurrence_0.complete";
@@ -134,29 +136,6 @@ Reap_observation s_reaps;
 fs::path marker(const fs::path& dir, std::string_view name)
 {
     return dir / std::string(name);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& body)
-{
-    const fs::path temporary = path.string() + ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return false;
-        }
-        out << body;
-        out.flush();
-        if (!out) {
-            return false;
-        }
-    }
-    std::error_code error;
-    fs::rename(temporary, path, error);
-    if (error) {
-        fs::remove(temporary, error);
-        return false;
-    }
-    return true;
 }
 
 std::optional<Occurrence_ledger> read_ledger(const fs::path& path)

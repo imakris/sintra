@@ -8,6 +8,7 @@
 #include <sintra/sintra.h>
 #include <sintra/detail/ipc/process_utils.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -40,6 +41,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_public_cleanup_child";
 constexpr std::string_view k_nonce_flag = "--managed_child_public_cleanup_nonce";
@@ -67,29 +69,6 @@ struct Child_ledger
 fs::path marker_path(const fs::path& directory, std::string_view name)
 {
     return directory / std::string(name);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& contents)
-{
-    const fs::path temporary = path.string() + ".tmp";
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return false;
-        }
-        out << contents;
-        out.flush();
-        if (!out) {
-            return false;
-        }
-    }
-    std::error_code error;
-    fs::rename(temporary, path, error);
-    if (error) {
-        fs::remove(temporary, error);
-        return false;
-    }
-    return true;
 }
 
 std::optional<Child_ledger> read_ledger(const fs::path& path)
