@@ -882,28 +882,107 @@ bool run_pre_create_exception(
 
     bool threw = false;
     sintra::Managed_child_custody custody;
-    const auto started = std::chrono::steady_clock::now();
     try {
         custody = sintra::spawn_swarm_process(options);
-        custody.wait_ready_until(started + 300ms);
     }
     catch (...) {
         threw = true;
     }
-    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    const auto hook_wait_started = std::chrono::steady_clock::now();
+    bool hook_seen = false;
+    {
+        std::unique_lock<std::mutex> lock(plan.mutex);
+        hook_seen = plan.changed.wait_for(
+            lock, 5s, [&]() { return plan.hits == 1; });
+    }
+    const auto hook_wait_elapsed =
+        std::chrono::steady_clock::now() - hook_wait_started;
+    const bool hook_wait_bounded = hook_wait_elapsed < 6s;
+    sintra::detail::test_hooks::s_managed_child_failure.store(
+        nullptr, std::memory_order_release);
+
+    const auto readiness_started = std::chrono::steady_clock::now();
+    try {
+        if (custody) {
+            custody.wait_ready_until(readiness_started + 300ms);
+        }
+    }
+    catch (...) {
+        threw = true;
+    }
+    const auto readiness_elapsed =
+        std::chrono::steady_clock::now() - readiness_started;
+    const bool readiness_bounded = readiness_elapsed < 1500ms;
+
+    const auto release_started = std::chrono::steady_clock::now();
     const auto released = custody.release_until(
-        std::chrono::steady_clock::now() + 5s);
+        release_started + 5s);
+    const auto release_elapsed =
+        std::chrono::steady_clock::now() - release_started;
+    const bool release_bounded = release_elapsed < 6s;
     const auto hits = failure_hits(plan);
     reset_failure_hook();
     const bool finalized = settle_detail_finalize("pre_create_exception");
     const bool marker_missing = marker_absent(marker);
     std::filesystem::remove(marker, ec);
 
-    return !threw && elapsed < 1s && released.accepted &&
+    const bool failure_kind_match = released.last_failure.kind ==
+        sintra::Managed_child_failure_kind::setup_exception;
+    const bool failure_occurrence_match =
+        released.last_failure.occurrence == 0;
+    const bool failure_native_error_match =
+        released.last_failure.native_error == 0;
+    const bool failure_stage_match =
+        released.last_failure.message.find(plan.stage) != std::string::npos;
+    const bool valid = !threw && hook_seen && hook_wait_bounded &&
+        readiness_bounded && release_bounded && released.accepted &&
         released.admitted_occurrences == 1 &&
         released.created_occurrences == 0 && released.release_requested &&
-        released.release_complete && observed_setup_exception(released, plan.stage) &&
+        released.release_complete && failure_kind_match &&
+        failure_occurrence_match && failure_native_error_match &&
+        failure_stage_match && observed_setup_exception(released, plan.stage) &&
         hits == 1 && marker_missing && finalized;
+    if (!valid) {
+        std::fprintf(stderr,
+            "PRE_CREATE_EXCEPTION_INVALID threw=%d hook_seen=%d hits=%u "
+            "hook_wait_bounded=%d readiness_bounded=%d release_bounded=%d "
+            "accepted=%d admitted=%zu created=%zu release_requested=%d "
+            "release_complete=%d failure_kind=%d kind_match=%d "
+            "failure_occurrence=%u occurrence_match=%d native_error=%d "
+            "native_error_match=%d stage_match=%d marker_missing=%d "
+            "finalized=%d hook_wait_ms=%lld readiness_ms=%lld release_ms=%lld\n",
+            threw ? 1 : 0,
+            hook_seen ? 1 : 0,
+            hits,
+            hook_wait_bounded ? 1 : 0,
+            readiness_bounded ? 1 : 0,
+            release_bounded ? 1 : 0,
+            released.accepted ? 1 : 0,
+            released.admitted_occurrences,
+            released.created_occurrences,
+            released.release_requested ? 1 : 0,
+            released.release_complete ? 1 : 0,
+            static_cast<int>(released.last_failure.kind),
+            failure_kind_match ? 1 : 0,
+            released.last_failure.occurrence,
+            failure_occurrence_match ? 1 : 0,
+            released.last_failure.native_error,
+            failure_native_error_match ? 1 : 0,
+            failure_stage_match ? 1 : 0,
+            marker_missing ? 1 : 0,
+            finalized ? 1 : 0,
+            static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    hook_wait_elapsed).count()),
+            static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    readiness_elapsed).count()),
+            static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    release_elapsed).count()));
+    }
+    return valid;
 }
 
 bool run_owned_native_exception(
