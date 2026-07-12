@@ -11,9 +11,9 @@ Summary:
 `spawn_swarm_process` adds one managed process to a running swarm
 after `init` has completed. It launches the requested binary with the
 required Sintra arguments, optionally waits for a named instance to appear,
-and applies the configured lifeline policy. The starter process or any
-running participant may call it; child processes inherit the swarm and
-coordinator id from the parent.
+and applies the configured lifeline policy. Only the process hosting the local
+coordinator may call it; child processes inherit the swarm and coordinator id
+from that process.
 
 Signature:
 
@@ -61,8 +61,9 @@ Contract:
   as `argv[0]` if not already present), and gets `--swarm_id`,
   `--instance_id`, and `--coordinator_id` appended automatically.
 - `process_instance_id` defaults to a fresh process instance id. Setting it
-  pins the new process to a specific id; the caller must guarantee the id
-  is not already in use.
+  pins the new process to a specific valid process id. Transceiver ids,
+  wildcard ids, ids with an invalid process component, pending invitation ids,
+  and ids with unresolved child custody are rejected before acceptance.
 - `wait_for_instance_name` is optional. Readiness resolution runs as
   Sintra-owned work. With a positive `wait_timeout`, the caller waits only on
   the custody record's monotone notification through that deadline; timeout
@@ -75,14 +76,19 @@ Contract:
   confirmed readiness, admitted/created/exited occurrence counts, and release
   state. OS-create failure remains an accepted no-child record rather than a
   fabricated native identity.
+- Once custody is accepted, synchronous setup failures do not escape and discard
+  the handle. A failure before native creation returns accepted no-child custody
+  and requests release. A failure after native creation returns accepted custody
+  while retained cleanup continues through exact exit confirmation.
 - Calls made while a lifecycle teardown protocol is active are rejected and
   return an empty handle with a warning logged; rejection creates no child.
 
 Threading and lifecycle:
 
-- Call from a top-level user thread. Acceptance takes the teardown admission
-  lock; deadline-facing waits do not enter coordinator work and wait only on
-  custody notifications.
+- Call from a top-level user thread in the coordinator process. Worker-process
+  calls are rejected before acceptance and cannot create a child. Acceptance
+  takes the teardown admission lock; deadline-facing waits do not enter
+  coordinator work and wait only on custody notifications.
 - Successful spawns participate in subsequent barriers and coordinator
   membership immediately. The wait variant is the way to gate later code on
   the participant having published its name.
@@ -109,6 +115,8 @@ Failures:
 
 - Returns an empty handle (with a logged error) when validation or lifecycle
   admission rejects before custody acceptance.
+- Resource exceptions before durable acceptance may propagate; no OS creation
+  authority has been granted at that point.
 - Readiness timeout or resolution failure returns accepted custody with
   `readiness_reached == false`; it is not a spawn-count failure.
 
