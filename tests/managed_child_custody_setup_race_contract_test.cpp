@@ -571,8 +571,14 @@ std::optional<std::array<bool, 4>> occurrence_release_attempt_facts(
         return std::nullopt;
     }
     return std::array{
-        custody->cleanup_started,
-        custody->cleanup_attempt_failed,
+        custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::running ||
+            custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::failing,
+        custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::failing ||
+            custody->release_attempt_phase ==
+                sintra::detail::Release_attempt_phase::retryable,
         occurrence->communication_retirement_started,
         custody->phase == sintra::detail::Custody_phase::released};
 }
@@ -727,7 +733,8 @@ bool run_recovery_create_release_race(
                 sintra::detail::Managed_child_occurrence_record::setup_state::pending;
     }
 
-    sintra::s_mproc->request_child_custody_release(custody, true);
+    sintra::s_mproc->request_child_custody_release(
+        custody, sintra::detail::Release_mode::cleanup);
     std::this_thread::sleep_for(100ms);
     bool incomplete_while_held = false;
     {

@@ -1237,7 +1237,11 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             }
         }
         record->changed.notify_all();
-        owner->request_child_custody_release(record, child_created);
+        owner->request_child_custody_release(
+            record,
+            child_created
+                ? detail::Release_mode::cleanup
+                : detail::Release_mode::passive);
         return child_created;
     };
 
@@ -1474,7 +1478,8 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 custody_record->readiness_observer_complete = true;
             }
             custody_record->changed.notify_all();
-            custody_owner->request_child_custody_release(custody_record, true);
+            custody_owner->request_child_custody_release(
+                custody_record, detail::Release_mode::cleanup);
             return custody;
         }
     }
@@ -1501,7 +1506,8 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     Log_stream(log_level::warning)
         << "spawn_swarm_process: readiness incomplete at deadline for instance '"
         << options.wait_for_instance_name << "'; custody retained\n";
-    custody_owner->request_child_custody_release(custody_record, true);
+    custody_owner->request_child_custody_release(
+        custody_record, detail::Release_mode::cleanup);
     return custody;
 }
 
@@ -1557,7 +1563,8 @@ inline Managed_child_custody_observation cleanup_managed_child(
     std::chrono::steady_clock::time_point deadline)
 {
     if (custody.m_record && s_mproc) {
-        s_mproc->request_child_custody_release(custody.m_record, true);
+        s_mproc->request_child_custody_release(
+            custody.m_record, detail::Release_mode::cleanup);
     }
     return wait_managed_child(custody, deadline);
 }

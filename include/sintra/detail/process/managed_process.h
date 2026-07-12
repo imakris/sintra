@@ -201,6 +201,20 @@ enum class Custody_phase
     released
 };
 
+enum class Release_mode
+{
+    passive,
+    cleanup
+};
+
+enum class Release_attempt_phase
+{
+    idle,
+    running,
+    failing,
+    retryable
+};
+
 // One retained logical custody record.  Subsystems remain authoritative for
 // their own facts; this record only joins their exact-occurrence reports.
 struct Managed_child_custody_record
@@ -212,10 +226,10 @@ struct Managed_child_custody_record
     bool                                       readiness_observer_complete = true;
     Custody_phase                              phase = Custody_phase::open;
     std::atomic<bool>                          readiness_cancelled{false};
-    bool                                       cleanup_requested = false;
-    bool                                       cleanup_started = false;
-    uint64_t                                   cleanup_attempt = 0;
-    bool                                       cleanup_attempt_failed = false;
+    Release_mode                               release_mode = Release_mode::passive;
+    Release_attempt_phase                      release_attempt_phase =
+        Release_attempt_phase::idle;
+    uint64_t                                   release_attempt_generation = 0;
     std::vector<Managed_child_occurrence_record> occurrences;
 };
 
@@ -481,7 +495,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uint32_t occurrence);
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
-        bool initiate_cleanup = false);
+        detail::Release_mode release_mode = detail::Release_mode::passive);
     void request_all_child_custody_releases();
     bool wait_for_all_child_custodies(
         std::chrono::steady_clock::time_point deadline);
@@ -497,11 +511,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const detail::Managed_child_occurrence_token& token);
     bool begin_child_communication_retirement(
         const detail::Managed_child_occurrence_token& token,
-        uint64_t expected_cleanup_attempt,
-        uint64_t& claimed_cleanup_attempt);
+        uint64_t expected_release_attempt_generation,
+        uint64_t& claimed_release_attempt_generation);
     void reset_child_communication_retirement(
         const detail::Managed_child_occurrence_token& token,
-        uint64_t cleanup_attempt);
+        uint64_t release_attempt_generation);
     bool join_child_communication(
         const detail::Managed_child_occurrence_token& token,
         const std::shared_ptr<Process_message_reader>& reader);
