@@ -2121,14 +2121,13 @@ void Managed_process::init(int argc, const char* const* argv)
 }
 
 inline std::shared_ptr<detail::Managed_child_custody_record>
-Managed_process::accept_child_custody(const std::string& wait_target_name)
+Managed_process::accept_child_custody()
 {
     auto custody = std::make_shared<detail::Managed_child_custody_record>();
     {
         std::lock_guard<std::mutex> lock(m_child_custody_mutex);
         custody->identity = m_next_child_custody_identity++;
         custody->accepted = true;
-        custody->wait_target_name = wait_target_name;
         m_child_custodies.emplace(custody->identity, custody);
     }
     return custody;
@@ -2279,25 +2278,36 @@ inline void Managed_process::request_child_custody_release(
     }
 
     uint64_t cleanup_attempt = 0;
+    bool readiness_cancelled = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         custody->recovery_open = false;
         custody->release_requested = true;
+        readiness_cancelled = !custody->readiness_cancelled.exchange(
+            true, std::memory_order_release);
         custody->cleanup_requested = custody->cleanup_requested || initiate_cleanup;
         if (custody->release_complete) {
             custody->changed.notify_all();
-            return;
+            cleanup_attempt = 0;
         }
-        if (custody->cleanup_started) {
+        else if (custody->cleanup_started) {
             custody->changed.notify_all();
-            return;
+            cleanup_attempt = 0;
         }
-        custody->cleanup_started = true;
-        cleanup_attempt = ++custody->cleanup_attempt;
-        if (cleanup_attempt == 0) {
+        else {
+            custody->cleanup_started = true;
             cleanup_attempt = ++custody->cleanup_attempt;
+            if (cleanup_attempt == 0) {
+                cleanup_attempt = ++custody->cleanup_attempt;
+            }
+            custody->cleanup_attempt_failed = false;
         }
-        custody->cleanup_attempt_failed = false;
+    }
+    if (readiness_cancelled && s_coord) {
+        s_coord->notify_managed_child_readiness_cancelled();
+    }
+    if (cleanup_attempt == 0) {
+        return;
     }
 
     auto cleanup_worker = [this, custody, cleanup_attempt]() {
@@ -4307,10 +4317,18 @@ inline bool Managed_process::prepare_process_reader(
     }
 
     auto progress = std::make_shared<Process_message_reader::Delivery_progress>();
+    uint64_t managed_child_custody_identity = 0;
+    const auto custody_occurrence = child_custody_occurrence_token(process_instance_id);
+    if (custody_occurrence.occurrence == occurrence) {
+        if (auto custody = custody_occurrence.custody.lock()) {
+            managed_child_custody_identity = custody->identity;
+        }
+    }
     auto reader = std::make_shared<Process_message_reader>(
         process_instance_id,
         progress,
-        occurrence);
+        occurrence,
+        managed_child_custody_identity);
     auto [reader_it, inserted] = m_readers.emplace(process_instance_id, reader);
     (void)reader_it;
     assert(inserted == true);

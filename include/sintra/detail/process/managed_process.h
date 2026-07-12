@@ -206,12 +206,12 @@ struct Managed_child_custody_record
     bool                                       readiness_observer_complete = true;
     bool                                       recovery_open = true;
     bool                                       release_requested = false;
+    std::atomic<bool>                          readiness_cancelled{false};
     bool                                       cleanup_requested = false;
     bool                                       cleanup_started = false;
     uint64_t                                   cleanup_attempt = 0;
     bool                                       cleanup_attempt_failed = false;
     bool                                       release_complete = false;
-    std::string                                wait_target_name;
     std::vector<Managed_child_occurrence_record> occurrences;
 };
 
@@ -469,8 +469,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args);
 
-    std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody(
-        const std::string& wait_target_name = {});
+    std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
     bool admit_child_custody_occurrence(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,

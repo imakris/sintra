@@ -446,6 +446,11 @@ struct Message_prefix
 
     // used by the serializer, set in communicators
     instance_id_type   receiver_instance_id = invalid_instance_id;
+
+    // Coordinator-stamped internal metadata for managed-child service RPCs.
+    // These fields are zero for ordinary messages and are never caller authority.
+    uint64_t           managed_child_custody_identity = 0;
+    uint32_t           managed_child_occurrence       = 0;
 };
 
 struct corrupted_message_exception : public std::runtime_error
@@ -900,9 +905,15 @@ struct Message_ring_W: public Ring_W<char>
     Message_ring_W(const Message_ring_W&) = delete;
     const Message_ring_W& operator = (const Message_ring_W&) = delete;
 
-    void relay(const Message_prefix& msg)
+    void relay(
+        const Message_prefix& msg,
+        uint64_t managed_child_custody_identity = 0,
+        uint32_t managed_child_occurrence = 0)
     {
-        write((const char*)&msg, msg.bytes_to_next_message);
+        auto* relayed = reinterpret_cast<Message_prefix*>(
+            write((const char*)&msg, msg.bytes_to_next_message));
+        relayed->managed_child_custody_identity = managed_child_custody_identity;
+        relayed->managed_child_occurrence = managed_child_occurrence;
         done_writing();
     }
 

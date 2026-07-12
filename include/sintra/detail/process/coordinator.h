@@ -26,7 +26,10 @@
 namespace sintra {
 
 // Forward declaration for friend access from Coordinator.
-namespace detail { inline bool finalize_impl(); }
+namespace detail {
+inline bool finalize_impl();
+struct Managed_child_readiness_access;
+}
 
 using std::condition_variable;
 using std::map;
@@ -255,6 +258,49 @@ private:
     // to trigger the deferral path.
     instance_id_type wait_for_instance(const string& assigned_name);
 
+    struct Managed_child_publication_identity
+    {
+        uint64_t          custody_identity = 0;
+        instance_id_type  process_iid      = invalid_instance_id;
+        uint32_t          occurrence        = 0;
+
+        bool matches(
+            uint64_t          expected_custody_identity,
+            instance_id_type  expected_process_iid,
+            uint32_t          expected_occurrence) const noexcept
+        {
+            return custody_identity == expected_custody_identity &&
+                process_iid == expected_process_iid &&
+                occurrence == expected_occurrence;
+        }
+
+        explicit operator bool() const noexcept
+        {
+            return custody_identity != 0 &&
+                process_iid != invalid_instance_id;
+        }
+    };
+
+    instance_id_type resolve_managed_child_instance_locked(
+        const string&     assigned_name,
+        uint64_t          custody_identity,
+        instance_id_type  process_iid,
+        uint32_t          occurrence,
+        const std::atomic<bool>& cancelled);
+    instance_id_type resolve_managed_child_instance(
+        const string&     assigned_name,
+        uint64_t          custody_identity,
+        instance_id_type  process_iid,
+        uint32_t          occurrence,
+        const std::atomic<bool>& cancelled);
+    instance_id_type wait_for_managed_child_instance(
+        const string&     assigned_name,
+        uint64_t          custody_identity,
+        instance_id_type  process_iid,
+        uint32_t          occurrence,
+        const std::atomic<bool>& cancelled);
+    void notify_managed_child_readiness_cancelled();
+
     // Publish a transceiver instance and assigned name in the registry. Enforces
     // name uniqueness and per-process limits, emits instance_published (or
     // queues it during startup), and unblocks waiters. For Managed_process,
@@ -263,6 +309,11 @@ private:
         type_id_type       type_id,
         instance_id_type   instance_id,
         const string&      assigned_name);
+    instance_id_type publish_transceiver_with_managed_child_identity(
+        type_id_type                              type_id,
+        instance_id_type                          instance_id,
+        const string&                             assigned_name,
+        const Managed_child_publication_identity& managed_child_identity);
 
     // Unpublish a transceiver, erase name mappings, and emit instance_unpublished.
     // If the unpublished instance is a Managed_process, this also drops it from
@@ -333,6 +384,11 @@ private:
     void unpublish_process_group(Process_group& group);
     bool add_external_process_to_standard_groups(instance_id_type process_iid);
 
+    // Access only after acquiring m_publish_mutex.
+    map<instance_id_type, Managed_child_publication_identity>
+                                                m_managed_child_publication_identities;
+    detail::Coordinator_condition_variable      m_managed_child_publication_changed;
+
 public:
     // Helpers (not exported for RPC).
     // ================================================
@@ -344,6 +400,24 @@ public:
         const string& assigned_name)
     {
         return publish_transceiver(tid, iid, assigned_name);
+    }
+
+    instance_id_type publish_managed_child_transceiver_for_test(
+        type_id_type       tid,
+        instance_id_type   iid,
+        const string&      assigned_name,
+        uint64_t           custody_identity,
+        instance_id_type   process_iid,
+        uint32_t           occurrence)
+    {
+        return publish_transceiver_with_managed_child_identity(
+            tid,
+            iid,
+            assigned_name,
+            Managed_child_publication_identity{
+                custody_identity,
+                process_iid,
+                occurrence});
     }
 #endif
 
@@ -428,7 +502,6 @@ public:
             Tn_type                             // type id and assigned name
         >
     >                                              m_transceiver_registry;
-
     // access only after acquiring m_groups_mutex
     map<
         instance_id_type,
@@ -596,6 +669,7 @@ public:
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
 
     friend struct Managed_process;
+    friend struct detail::Managed_child_readiness_access;
     friend struct Transceiver;
     friend bool finalize();
     friend bool detail::finalize_impl();
