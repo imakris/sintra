@@ -701,6 +701,68 @@ int main(int argc, char* argv[])
                 });
     }
 
+    sintra::test::managed_child::Occurrence_isolation_outcome typed_outcome;
+    auto copy_identity = [](const Occurrence_ledger& source) {
+        sintra::test::managed_child::Occurrence_isolation_identity destination;
+        destination.nonce = source.nonce;
+        destination.process_iid = source.process_iid;
+        destination.witness_iid = source.witness_iid;
+        destination.occurrence = source.occurrence;
+        destination.pid = source.pid;
+        destination.start_stamp_available = source.start_stamp_available;
+        destination.start_stamp = source.start_stamp;
+        destination.witness_name = source.witness_name;
+        return destination;
+    };
+    if (ledger_0) typed_outcome.predecessor = copy_identity(*ledger_0);
+    if (ledger_1) typed_outcome.replacement = copy_identity(*ledger_1);
+    typed_outcome.ledger_0_valid = ledger_0_valid;
+    typed_outcome.predecessor_live = predecessor_live;
+    typed_outcome.predecessor_request_held = predecessor_request_held;
+    typed_outcome.recovery_observed = recovery_observed;
+    typed_outcome.exact_crash = exact_crash;
+    typed_outcome.predecessor_name_retired = predecessor_retired;
+    typed_outcome.predecessor_request_still_held = predecessor_request_still_held;
+    typed_outcome.ledger_1_valid = ledger_1_valid;
+    typed_outcome.replacement_live = replacement_live;
+    typed_outcome.replacement_satisfied_predecessor =
+        replacement_satisfied_predecessor;
+    typed_outcome.request_completed = request_completed;
+    typed_outcome.request_threw = request_threw.load(std::memory_order_acquire);
+    typed_outcome.request_result = request_result.load(std::memory_order_acquire);
+    typed_outcome.custody_record_found = tuple_facts.record_found;
+    typed_outcome.occurrence_count_exact = tuple_facts.occurrence_count_exact;
+    typed_outcome.predecessor_occurrence = tuple_facts.predecessor_occurrence;
+    typed_outcome.predecessor_setup = tuple_facts.predecessor_setup;
+    typed_outcome.predecessor_pid = tuple_facts.predecessor_pid;
+    typed_outcome.predecessor_stamp_available =
+        tuple_facts.predecessor_stamp_available;
+    typed_outcome.predecessor_stamp = tuple_facts.predecessor_stamp;
+    typed_outcome.predecessor_publication_retired =
+        tuple_facts.predecessor_publication_retired;
+    typed_outcome.predecessor_communication_retired =
+        tuple_facts.predecessor_communication_retired;
+    typed_outcome.predecessor_exit_confirmed =
+        tuple_facts.predecessor_exit_confirmed;
+    typed_outcome.replacement_occurrence = tuple_facts.replacement_occurrence;
+    typed_outcome.replacement_setup = tuple_facts.replacement_setup;
+    typed_outcome.replacement_pid = tuple_facts.replacement_pid;
+    typed_outcome.replacement_stamp_available =
+        tuple_facts.replacement_stamp_available;
+    typed_outcome.replacement_stamp = tuple_facts.replacement_stamp;
+    typed_outcome.replacement_created = tuple_facts.replacement_created;
+    typed_outcome.replacement_not_exited = tuple_facts.replacement_not_exited;
+    typed_outcome.release_marker_written = release_written;
+    typed_outcome.replacement_finalize_marker = replacement_finalized;
+    typed_outcome.root_finalized = root_finalized;
+    typed_outcome.predecessor_abnormal_exit = predecessor_abnormal_exit;
+    typed_outcome.replacement_normal_exit = replacement_normal_exit;
+    typed_outcome.forced_cleanup = forced_cleanup;
+    typed_outcome.survivors_absent = no_survivors;
+    typed_outcome.custody_release_complete =
+        custody_release_closed_all_occurrences;
+    sintra::test::managed_child::emit_occurrence_isolation_outcome(typed_outcome);
+
     if (causal_witness && cleanup_valid && custody_release_closed_all_occurrences) {
         std::fprintf(stdout,
             "R6_GREEN_VALID nonce=%s occurrence_0=%u pid_0=%d stamp_0=%llu "
