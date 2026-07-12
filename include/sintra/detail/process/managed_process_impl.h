@@ -2726,10 +2726,8 @@ inline void Managed_process::request_child_custody_release(
                         return false;
                     }
                     native_terminal = occurrence->os_exit_confirmed;
-                    communication_eligible = occurrence->publication_retired &&
-                        occurrence->communication_retirement_authority_captured &&
-                        !occurrence->communication_retired &&
-                        !occurrence->communication_retirement_started;
+                    communication_eligible =
+                        occurrence->transport.ready_to_retire();
                 }
                 if (release_mode == detail::Release_mode::cleanup &&
                     !native_terminal && !cleanup_child_native(token))
@@ -2781,11 +2779,7 @@ inline void Managed_process::request_child_custody_release(
                             detail::Managed_child_occurrence_record::setup_state::no_child ||
                         (occurrence.setup ==
                             detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
-                         occurrence.publication_retired &&
-                         occurrence.communication_retirement_authority_captured &&
-                         occurrence.communication_retired &&
-                         !occurrence.communication_retirement_started &&
-                         !occurrence.communication_retirement_reader &&
+                         occurrence.transport.fully_retired() &&
                          occurrence.os_exit_confirmed));
                 });
         };
@@ -2804,10 +2798,10 @@ inline void Managed_process::request_child_custody_release(
                     });
                 if (occurrence != custody->occurrences.end() &&
                     (cleanup_applied || occurrence->os_exit_confirmed) &&
-                    !occurrence->communication_retirement_started &&
+                    !occurrence->transport.retirement_started() &&
                     (occurrence->initialization_reservation_active ||
-                     !occurrence->publication_retired ||
-                     !occurrence->communication_retired))
+                     !occurrence->transport.publication_retired() ||
+                     !occurrence->transport.retirement_terminal()))
                 {
                     targets.emplace_back(occurrence_number, process_iid);
                 }
@@ -2838,10 +2832,7 @@ inline void Managed_process::request_child_custody_release(
                 if (occurrence.setup == detail::Managed_child_occurrence_record::
                         setup_state::ownership_ready &&
                     !current_successor_live &&
-                    occurrence.publication_retired &&
-                    occurrence.communication_retirement_authority_captured &&
-                    !occurrence.communication_retired &&
-                    !occurrence.communication_retirement_started)
+                    occurrence.transport.ready_to_retire())
                 {
                     targets.emplace_back(
                         occurrence.occurrence, occurrence.process_instance_id);
@@ -3173,30 +3164,6 @@ Managed_process::child_custody_occurrence_token_exact(
     return {custody, process_instance_id, occurrence};
 }
 
-namespace detail {
-
-inline void update_child_occurrence(
-    const Managed_child_occurrence_token& token,
-    bool Managed_child_occurrence_record::* fact)
-{
-    auto custody = token.custody.lock();
-    if (!custody) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(custody->mutex);
-    for (auto& occurrence : custody->occurrences) {
-        if (occurrence.process_instance_id == token.process_instance_id &&
-            occurrence.occurrence == token.occurrence)
-        {
-            occurrence.*fact = true;
-            break;
-        }
-    }
-    custody->changed.notify_all();
-}
-
-} // namespace detail
-
 inline void Managed_process::note_child_initialization_complete(
     const detail::Managed_child_occurrence_token& token)
 {
@@ -3219,9 +3186,20 @@ inline void Managed_process::note_child_initialization_complete(
 inline void Managed_process::note_child_publication_retired(
     const detail::Managed_child_occurrence_token& token)
 {
-    detail::update_child_occurrence(
-        token,
-        &detail::Managed_child_occurrence_record::publication_retired);
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    for (auto& occurrence : custody->occurrences) {
+        if (occurrence.process_instance_id == token.process_instance_id &&
+            occurrence.occurrence == token.occurrence)
+        {
+            occurrence.transport.note_publication_retired();
+            break;
+        }
+    }
+    custody->changed.notify_all();
 }
 
 inline bool Managed_process::capture_child_communication_retirement_authority(
@@ -3249,22 +3227,11 @@ inline bool Managed_process::capture_child_communication_retirement_authority(
         {
             continue;
         }
-        if (occurrence.communication_retired) {
-            return !reader &&
-                occurrence.communication_retirement_authority_captured &&
-                !occurrence.communication_retirement_started &&
-                !occurrence.communication_retirement_reader;
+        if (!occurrence.transport.capture_authority(reader)) {
+            Log_stream(log_level::error)
+                << "Managed-child communication authority changed for an exact occurrence.\n";
+            return false;
         }
-        if (occurrence.communication_retirement_authority_captured) {
-            if (occurrence.communication_retirement_reader != reader) {
-                Log_stream(log_level::error)
-                    << "Managed-child communication authority changed for an exact occurrence.\n";
-                return false;
-            }
-            return true;
-        }
-        occurrence.communication_retirement_authority_captured = true;
-        occurrence.communication_retirement_reader = reader;
         custody->changed.notify_all();
         return true;
     }
@@ -3299,18 +3266,12 @@ inline bool Managed_process::capture_replaced_child_communication_authority(
                         reader->get_process_instance_id() &&
                     occurrence.occurrence == reader->get_occurrence();
             });
-        if (exact == custody->occurrences.end() || !exact->publication_retired)
+        if (exact == custody->occurrences.end() ||
+            !exact->transport.publication_retired())
         {
             return false;
         }
-        communication_terminal = exact->communication_retired;
-        if (communication_terminal &&
-            (!exact->communication_retirement_authority_captured ||
-             exact->communication_retirement_started ||
-             exact->communication_retirement_reader))
-        {
-            return false;
-        }
+        communication_terminal = exact->transport.retirement_terminal();
     }
     if (communication_terminal) {
         return true;
@@ -3353,14 +3314,9 @@ inline bool Managed_process::begin_child_communication_retirement(
         if (occurrence.process_instance_id == token.process_instance_id &&
             occurrence.occurrence == token.occurrence)
         {
-            if (!occurrence.communication_retirement_authority_captured ||
-                occurrence.communication_retired ||
-                occurrence.communication_retirement_started)
-            {
+            if (!occurrence.transport.begin_retirement(reader)) {
                 return false;
             }
-            occurrence.communication_retirement_started = true;
-            reader = occurrence.communication_retirement_reader;
             if (custody->release_attempt_phase ==
                 detail::Release_attempt_phase::running)
             {
@@ -3391,14 +3347,10 @@ inline bool Managed_process::complete_child_communication_retirement(
                     occurrence.occurrence == token.occurrence;
             });
         if (exact == custody->occurrences.end() ||
-            !exact->communication_retirement_authority_captured ||
-            exact->communication_retirement_reader != reader)
+            !exact->transport.complete_retirement(reader, retired_authority))
         {
             return false;
         }
-        exact->communication_retired = true;
-        exact->communication_retirement_started = false;
-        retired_authority = std::move(exact->communication_retirement_reader);
     }
     custody->changed.notify_all();
 
@@ -3426,9 +3378,8 @@ inline void Managed_process::reset_child_communication_retirement(
     for (auto& occurrence : custody->occurrences) {
         if (occurrence.process_instance_id == token.process_instance_id &&
             occurrence.occurrence == token.occurrence &&
-            !occurrence.communication_retired)
+            occurrence.transport.reset_retirement())
         {
-            occurrence.communication_retirement_started = false;
             if (release_attempt_generation != 0 &&
                 custody->release_attempt_phase ==
                     detail::Release_attempt_phase::running &&

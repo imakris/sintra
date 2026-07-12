@@ -173,6 +173,101 @@ inline constexpr const char* k_external_attach_token_arg      = "--external_atta
 inline constexpr const char* k_external_attach_occurrence_arg = "--external_attach_occurrence";
 inline constexpr auto        k_external_attach_claim_timeout  = std::chrono::seconds(5);
 
+class Managed_child_transport_retirement
+{
+public:
+    bool publication_retired() const noexcept
+    {
+        return m_publication_retired;
+    }
+
+    bool retirement_started() const noexcept
+    {
+        return m_state == State::RETIRING;
+    }
+
+    bool retirement_terminal() const noexcept
+    {
+        return m_state == State::RETIRED;
+    }
+
+    bool ready_to_retire() const noexcept
+    {
+        return m_publication_retired && m_state == State::CAPTURED;
+    }
+
+    bool fully_retired() const noexcept
+    {
+        return m_publication_retired && m_state == State::RETIRED;
+    }
+
+    void note_publication_retired() noexcept
+    {
+        m_publication_retired = true;
+    }
+
+    bool capture_authority(
+        const std::shared_ptr<Process_message_reader>& reader)
+    {
+        if (m_state == State::RETIRED) {
+            return !reader && !m_reader;
+        }
+        if (m_state != State::UNCAPTURED) {
+            return m_reader == reader;
+        }
+        m_reader = reader;
+        m_state = State::CAPTURED;
+        return true;
+    }
+
+    bool begin_retirement(std::shared_ptr<Process_message_reader>& reader)
+    {
+        if (m_state != State::CAPTURED) {
+            return false;
+        }
+        m_state = State::RETIRING;
+        reader = m_reader;
+        return true;
+    }
+
+    bool reset_retirement() noexcept
+    {
+        if (m_state != State::RETIRING && m_state != State::CAPTURED) {
+            return false;
+        }
+        m_state = State::CAPTURED;
+        return true;
+    }
+
+    bool complete_retirement(
+        const std::shared_ptr<Process_message_reader>& reader,
+        std::shared_ptr<Process_message_reader>& retired_authority)
+    {
+        if (m_state == State::RETIRED) {
+            return !reader && !m_reader;
+        }
+        if (m_state != State::RETIRING || m_reader != reader) {
+            return false;
+        }
+        m_state = State::RETIRED;
+        retired_authority = std::move(m_reader);
+        return true;
+    }
+
+private:
+    enum class State
+    {
+        UNCAPTURED,
+        CAPTURED,
+        RETIRING,
+        RETIRED
+    };
+
+    bool                                    m_publication_retired = false;
+    State                                   m_state = State::UNCAPTURED;
+    std::shared_ptr<Process_message_reader> m_reader;
+};
+
 struct Managed_child_occurrence_record
 {
     enum class setup_state {
@@ -186,12 +281,8 @@ struct Managed_child_occurrence_record
     setup_state                setup = setup_state::pending;
     bool                       os_process_created = false;
     bool                       initialization_reservation_active = false;
-    bool                       publication_retired = false;
-    bool                       communication_retirement_authority_captured = false;
-    std::shared_ptr<Process_message_reader>
-                               communication_retirement_reader;
-    bool                       communication_retirement_started = false;
-    bool                       communication_retired = false;
+    Managed_child_transport_retirement
+                               transport;
     bool                       os_exit_confirmed = false;
     bool                       os_wait_status_available = false;
     int                        os_wait_status = 0;

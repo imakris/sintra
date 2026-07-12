@@ -532,8 +532,10 @@ int main(int argc, char* argv[])
             predecessor.os_process_start_stamp_available;
         facts.predecessor_stamp =
             predecessor.os_process_start_stamp == ledger_0->start_stamp;
-        facts.predecessor_publication_retired = predecessor.publication_retired;
-        facts.predecessor_communication_retired = predecessor.communication_retired;
+        facts.predecessor_publication_retired =
+            predecessor.transport.publication_retired();
+        facts.predecessor_communication_retired =
+            predecessor.transport.retirement_terminal();
         facts.predecessor_exit_confirmed = predecessor.os_exit_confirmed;
         facts.replacement_occurrence =
             replacement.occurrence == ledger_1->occurrence;
@@ -695,8 +697,7 @@ int main(int argc, char* argv[])
                             setup_state::no_child ||
                         (occurrence.setup == sintra::detail::Managed_child_occurrence_record::
                             setup_state::ownership_ready &&
-                         occurrence.publication_retired &&
-                         occurrence.communication_retired &&
+                         occurrence.transport.fully_retired() &&
                          occurrence.os_exit_confirmed);
                 });
     }
@@ -762,7 +763,7 @@ int main(int argc, char* argv[])
         std::lock_guard<std::mutex> lock(custody_record->mutex);
         if (custody_record->occurrences.size() == 2) {
             typed_outcome.predecessor_communication_retired =
-                custody_record->occurrences[0].communication_retired;
+                custody_record->occurrences[0].transport.retirement_terminal();
             typed_outcome.predecessor_native_exit_observer_registered =
                 custody_record->occurrences[0].os_exit_observer_registered;
             typed_outcome.replacement_native_exit_observer_registered =
@@ -774,7 +775,7 @@ int main(int argc, char* argv[])
         std::lock_guard<std::mutex> lock(custody_record->mutex);
         if (custody_record->occurrences.size() == 2) {
             typed_outcome.predecessor_communication_retired =
-                custody_record->occurrences[0].communication_retired;
+                custody_record->occurrences[0].transport.retirement_terminal();
         }
     }
     typed_outcome.predecessor_native_exit_observer_registered = true;

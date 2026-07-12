@@ -108,10 +108,7 @@ inline bool wait_for_failed_claim_reset()
                         candidate.occurrence == 0;
                 });
             if (exact != custody->occurrences.end() &&
-                exact->publication_retired &&
-                exact->communication_retirement_authority_captured &&
-                !exact->communication_retired &&
-                !exact->communication_retirement_started)
+                exact->transport.ready_to_retire())
             {
                 std::lock_guard<std::mutex> gate_lock(gate.mutex);
                 gate.recovery_release_after_unblock_join_reset =
@@ -454,12 +451,15 @@ Exact_facts exact_facts(const Outcome& outcome)
             predecessor.os_process_created && replacement.os_process_created &&
             !predecessor.initialization_reservation_active &&
             !replacement.initialization_reservation_active;
-        facts.publication_retired = predecessor.publication_retired;
-        facts.communication_started = predecessor.communication_retirement_started;
-        facts.communication_retired = predecessor.communication_retired;
+        facts.publication_retired =
+            predecessor.transport.publication_retired();
+        facts.communication_started =
+            predecessor.transport.retirement_started();
+        facts.communication_retired =
+            predecessor.transport.retirement_terminal();
         facts.predecessor_exit = predecessor.os_exit_confirmed;
-        facts.replacement_terminal = replacement.publication_retired &&
-            replacement.communication_retired && replacement.os_exit_confirmed;
+        facts.replacement_terminal = replacement.transport.fully_retired() &&
+            replacement.os_exit_confirmed;
         facts.release_complete = custody->phase == sintra::detail::Custody_phase::released;
         facts.survivors_absent = facts.identities &&
             !sintra::test::managed_child::exact_process_is_live(

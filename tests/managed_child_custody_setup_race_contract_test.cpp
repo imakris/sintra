@@ -565,8 +565,8 @@ std::optional<std::array<bool, 3>> occurrence_terminal_facts(
     }
     return std::array{
         occurrence->initialization_reservation_active,
-        occurrence->publication_retired,
-        occurrence->communication_retired};
+        occurrence->transport.publication_retired(),
+        occurrence->transport.retirement_terminal()};
 }
 
 std::optional<std::array<bool, 4>> occurrence_release_attempt_facts(
@@ -598,7 +598,7 @@ std::optional<std::array<bool, 4>> occurrence_release_attempt_facts(
                 sintra::detail::Release_attempt_phase::failing ||
             custody->release_attempt_phase ==
                 sintra::detail::Release_attempt_phase::retryable,
-        occurrence->communication_retirement_started,
+        occurrence->transport.retirement_started(),
         custody->phase == sintra::detail::Custody_phase::released};
 }
 
