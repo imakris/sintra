@@ -10,7 +10,7 @@ Summary:
 
 `spawn_swarm_process` adds one managed process to a running swarm
 after `init` has completed. It launches the requested binary with the
-required Sintra arguments, optionally waits for a named instance to appear,
+required Sintra arguments, optionally observes a named instance as readiness,
 and applies the configured lifeline policy. Only the process hosting the local
 coordinator may call it; child processes inherit the swarm and coordinator id
 from that process.
@@ -23,8 +23,7 @@ struct Spawn_options
     std::string                binary_path;
     std::vector<std::string>   args;
     instance_id_type           process_instance_id = invalid_instance_id;
-    std::string                wait_for_instance_name;
-    std::chrono::milliseconds  wait_timeout{0};
+    std::string                readiness_instance_name;
     Lifetime_policy            lifetime;
 };
 
@@ -34,6 +33,8 @@ class Managed_child_custody
 {
 public:
     Managed_child_status status() const;
+    Managed_child_status wait_ready_until(
+        std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
@@ -45,9 +46,9 @@ Use when:
 
 - A new participant must join a running swarm dynamically (a worker pool
   scaling out, a late-arriving subscriber, a tool launching a helper).
-- The caller needs to block until the new participant publishes a known
-  instance name (`wait_for_instance_name`), with an optional bounded wait
-  (`wait_timeout`).
+- The caller needs to observe whether the new participant publishes a known
+  instance name (`readiness_instance_name`) through an explicit absolute
+  deadline.
 
 Contract:
 
@@ -59,11 +60,12 @@ Contract:
   pins the new process to a specific valid process id. Transceiver ids,
   wildcard ids, ids with an invalid process component, pending invitation ids,
   and ids with unresolved child custody are rejected before acceptance.
-- `wait_for_instance_name` is optional. Readiness resolution runs as
-  Sintra-owned work. With a positive `wait_timeout`, the caller waits only on
-  the custody record's monotone notification through that deadline; timeout
-  returns accepted, incomplete custody and starts failed-readiness cleanup.
-  A zero timeout retains the unbounded legacy readiness wait intentionally.
+- `readiness_instance_name` is optional. When configured, occurrence setup and
+  readiness resolution run as Sintra-owned work and `spawn_swarm_process`
+  returns the accepted handle immediately. `wait_ready_until()` waits only on
+  the custody record's monotone notification through its absolute steady-clock
+  deadline. Deadline expiry returns accepted, incomplete custody and requests
+  adverse cleanup after leaving the record lock.
 - `lifetime` controls the lifeline policy applied to the child (see
   `Lifetime_policy`).
 - A return handle that converts to `true` means Sintra accepted durable logical
@@ -82,11 +84,11 @@ Threading and lifecycle:
 
 - Call from a top-level user thread in the coordinator process. Worker-process
   calls are rejected before acceptance and cannot create a child. Acceptance
-  takes the teardown admission lock; deadline-facing waits do not enter
-  coordinator work and wait only on custody notifications.
+  takes the teardown admission lock; `wait_ready_until()` does not enter
+  coordinator work and waits only on custody notifications.
 - Successful spawns participate in subsequent barriers and coordinator
-  membership immediately. The wait variant is the way to gate later code on
-  the participant having published its name.
+  membership once setup completes. `wait_ready_until()` is the way to gate
+  later code on the exact participant having published its readiness name.
 - `readiness_reached` means the coordinator observed the requested name; it
   does not imply release or any later retirement fact.
 - `Managed_child_custody::release_until()` closes recovery before requesting retirement and
@@ -114,7 +116,7 @@ Failures:
   admission rejects before custody acceptance.
 - Resource exceptions before durable acceptance may propagate; no OS creation
   authority has been granted at that point.
-- Readiness timeout or resolution failure returns accepted custody with
+- Readiness deadline expiry or resolution failure returns accepted custody with
   `readiness_reached == false`; it is not a spawn-count failure.
 
 Example source:

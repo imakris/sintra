@@ -366,7 +366,7 @@ bool wait_for_release(
     std::unique_lock<std::mutex> lock(record->mutex);
     return record->changed.wait_for(lock, 5s, [&]() {
         return record->phase == sintra::detail::Custody_phase::released &&
-            record->readiness_observer_complete;
+            record->readiness != sintra::detail::Readiness_phase::pending;
     });
 }
 
@@ -805,14 +805,13 @@ bool run_deadline_setup_shutdown_retry(
     options.binary_path = binary_path;
     options.args = {k_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = "managed_child_setup_race_never_published";
-    options.wait_timeout = 200ms;
+    options.readiness_instance_name = "managed_child_setup_race_never_published";
     options.lifetime.enable_lifeline = false;
 
     const auto started = std::chrono::steady_clock::now();
     auto custody = sintra::spawn_swarm_process(options);
+    const auto observation = custody.wait_ready_until(started + 200ms);
     const auto elapsed = std::chrono::steady_clock::now() - started;
-    const auto observation = custody.status();
     const bool setup_held = wait_for_gate(gate);
     const bool caller_bounded =
         elapsed >= 150ms && elapsed <= 1000ms && observation.accepted &&
@@ -878,8 +877,7 @@ bool run_pre_create_exception(
     options.binary_path = binary_path;
     options.args = {k_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = "managed_child_pre_create_never_published";
-    options.wait_timeout = 300ms;
+    options.readiness_instance_name = "managed_child_pre_create_never_published";
     options.lifetime.enable_lifeline = false;
 
     bool threw = false;
@@ -887,6 +885,7 @@ bool run_pre_create_exception(
     const auto started = std::chrono::steady_clock::now();
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(started + 300ms);
     }
     catch (...) {
         threw = true;
@@ -935,9 +934,8 @@ bool run_owned_native_exception(
     options.binary_path = binary_path;
     options.args = {k_native_bound_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name =
+    options.readiness_instance_name =
         std::string("managed_child_") + phase + "_never_published";
-    options.wait_timeout = 500ms;
     options.lifetime.enable_lifeline = false;
 
     const std::string unrelated_name =
@@ -957,6 +955,7 @@ bool run_owned_native_exception(
     sintra::Managed_child_custody custody;
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(std::chrono::steady_clock::now() + 500ms);
     }
     catch (...) {
         threw = true;
@@ -1386,10 +1385,10 @@ bool run_prepublication_publish_race(
     options.binary_path = binary_path;
     options.args = {k_native_bound_child_flag, marker.string()};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = "managed_child_prepublication_never_published";
-    options.wait_timeout = 500ms;
+    options.readiness_instance_name = "managed_child_prepublication_never_published";
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
+    custody.wait_ready_until(std::chrono::steady_clock::now() + 500ms);
 
     bool first_miss = false;
     {
@@ -1681,11 +1680,12 @@ bool run_exact_readiness_acceptance(
         marker.string(),
         target_name};
     options.process_instance_id = piid;
-    options.wait_for_instance_name = target_name;
+    options.readiness_instance_name = target_name;
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
 
-    const auto observed = custody.status();
+    const auto observed = custody.wait_ready_until(
+        std::chrono::steady_clock::now() + 5s);
     const auto resolved = sintra::Coordinator::rpc_resolve_instance(
         sintra::s_coord_id, target_name);
     const bool exact_publication = resolved != sintra::invalid_instance_id &&
@@ -1751,16 +1751,19 @@ bool run_unbounded_readiness_cancellation(
     const auto piid = sintra::make_process_instance_id();
     sintra::Managed_child_custody custody;
     std::atomic<bool> spawn_returned{false};
+    std::atomic<bool> readiness_wait_returned{false};
     std::thread spawn_caller([&]() {
         sintra::Spawn_options options;
         options.binary_path = binary_path;
         options.args = {k_readiness_cancellation_child_flag, marker.string()};
         options.process_instance_id = piid;
-        options.wait_for_instance_name =
+        options.readiness_instance_name =
             "managed_child_readiness_cancel_never_" + std::to_string(piid);
         options.lifetime.enable_lifeline = false;
         custody = sintra::spawn_swarm_process(options);
         spawn_returned.store(true, std::memory_order_release);
+        custody.wait_ready_until(std::chrono::steady_clock::time_point::max());
+        readiness_wait_returned.store(true, std::memory_order_release);
     });
 
     const auto identity = wait_for_file(marker, 5s)
@@ -1772,7 +1775,8 @@ bool run_unbounded_readiness_cancellation(
     }
 #endif
     const bool blocked_before_finalize = identity &&
-        !spawn_returned.load(std::memory_order_acquire);
+        spawn_returned.load(std::memory_order_acquire) &&
+        !readiness_wait_returned.load(std::memory_order_acquire);
     std::atomic<bool> finalize_done{false};
     std::thread cancellation_watchdog([&]() {
         const auto deadline = std::chrono::steady_clock::now() + 8s;
@@ -2136,9 +2140,8 @@ bool run_concurrent_posix_roster_reservations(
             options.binary_path = binary_path;
             options.args = {k_native_bound_child_flag, markers[i].string()};
             options.process_instance_id = piids[i];
-            options.wait_for_instance_name =
+            options.readiness_instance_name =
                 "managed_child_posix_roster_never_" + std::to_string(i);
-            options.wait_timeout = 2s;
             options.lifetime.enable_lifeline = false;
             custodies[i] = sintra::spawn_swarm_process(options);
         });

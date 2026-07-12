@@ -619,14 +619,13 @@ bool run_native_escalation_phase(
         nonce,
     };
     options.process_instance_id = k_native_child_process_iid;
-    options.wait_for_instance_name = "managed_child_native_never_ready_" + nonce;
-    options.wait_timeout = k_requested_wait_timeout;
+    options.readiness_instance_name = "managed_child_native_never_ready_" + nonce;
     options.lifetime.enable_lifeline = false;
 
     const auto started = std::chrono::steady_clock::now();
     auto custody = sintra::spawn_swarm_process(options);
+    const auto first = custody.wait_ready_until(started + k_requested_wait_timeout);
     const auto returned = std::chrono::steady_clock::now();
-    const auto first = custody.status();
     const bool ledger_seen = sintra::test::wait_for_file(
         native_child_ledger_path(shared_dir),
         k_watchdog_timeout,
@@ -989,8 +988,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         nonce,
     };
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = requested_target;
-    options.wait_timeout = k_requested_wait_timeout;
+    options.readiness_instance_name = requested_target;
     options.lifetime.enable_lifeline = false;
 
     std::thread spawn_thread([&]() {
@@ -1000,6 +998,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         }
         try {
             call.custody = sintra::spawn_swarm_process(options);
+            call.custody.wait_ready_until(
+                call.started_at + k_requested_wait_timeout);
         }
         catch (...) {
             call.threw = true;
@@ -1097,8 +1097,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool returned_by_deadline =
         cleanup_entered &&
         caller_done_at_observation &&
-        caller_completed_at <= observation_deadline &&
-        observed_at >= observation_deadline;
+        caller_completed_at <= observation_deadline;
     const auto overrun_ms = cleanup_entered
         ? std::chrono::duration_cast<std::chrono::milliseconds>(
             observed_at - call_started_at - k_requested_wait_timeout).count()

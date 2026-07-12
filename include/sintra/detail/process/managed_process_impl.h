@@ -2266,7 +2266,7 @@ inline void Managed_process::retire_child_custody_if_complete(
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         if (custody->phase != detail::Custody_phase::released ||
-            !custody->readiness_observer_complete)
+            custody->readiness == detail::Readiness_phase::pending)
         {
             return;
         }
@@ -2794,7 +2794,7 @@ inline bool Managed_process::all_child_custodies_released() const
     for (const auto& custody : custodies) {
         std::lock_guard<std::mutex> lock(custody->mutex);
         if (custody->phase != detail::Custody_phase::released ||
-            !custody->readiness_observer_complete)
+            custody->readiness == detail::Readiness_phase::pending)
         {
             return false;
         }

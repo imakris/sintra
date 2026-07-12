@@ -378,8 +378,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     options.binary_path = binary_path;
     options.args = {std::string(k_child_flag), std::string(k_nonce_flag), nonce};
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = ready_name;
-    options.wait_timeout = 8s;
+    options.readiness_instance_name = ready_name;
     options.lifetime.enable_lifeline = true;
     options.lifetime.hard_exit_timeout_ms = 100;
 
@@ -387,6 +386,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool spawn_threw = false;
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(std::chrono::steady_clock::now() + 8s);
     }
     catch (...) {
         spawn_threw = true;

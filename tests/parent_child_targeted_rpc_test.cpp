@@ -33,7 +33,7 @@
 //   1. Parent (coordinator) initializes Sintra and constructs a Parent_ack
 //      receiver, publishing it under k_parent_ack_name so the child can
 //      resolve it.
-//   2. Parent calls spawn_swarm_process with wait_for_instance_name =
+//   2. Parent calls spawn_swarm_process with readiness_instance_name =
 //      k_child_service_name so the spawned child has published its named
 //      transceiver before the parent proceeds.
 //   3. Parent resolves k_child_service_name -> child_iid via the coordinator
@@ -236,11 +236,11 @@ int run_coordinator(const std::string& binary_path)
     // ---- 1. spawn the child and wait for its named transceiver ------------
     sintra::Spawn_options spawn_options;
     spawn_options.binary_path            = binary_path;
-    spawn_options.wait_for_instance_name = k_child_service_name;
-    spawn_options.wait_timeout           = std::chrono::milliseconds(15000);
+    spawn_options.readiness_instance_name = k_child_service_name;
 
     const auto custody = sintra::spawn_swarm_process(spawn_options);
-    const auto launch = custody.status();
+    const auto launch = custody.wait_ready_until(
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(15000));
     if (!sintra::test::assert_true(
             launch.accepted && launch.readiness_reached && launch.created_occurrences == 1,
             "[COORD] ", "spawn_swarm_process should return ready child custody"))

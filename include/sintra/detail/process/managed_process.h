@@ -143,7 +143,6 @@ enum class Managed_child_failure_kind
     native_identity,
     setup_exception,
     setup_worker_start,
-    readiness_observer_start,
     readiness_observation
 };
 
@@ -225,6 +224,14 @@ enum class Custody_phase
     released
 };
 
+enum class Readiness_phase
+{
+    not_requested,
+    pending,
+    reached,
+    stopped
+};
+
 enum class Release_mode
 {
     passive,
@@ -246,8 +253,7 @@ struct Managed_child_custody_record
     mutable std::mutex                         mutex;
     std::condition_variable                    changed;
     uint64_t                                   identity = 0;
-    bool                                       readiness_reached = false;
-    bool                                       readiness_observer_complete = true;
+    Readiness_phase                            readiness = Readiness_phase::not_requested;
     Custody_phase                              phase = Custody_phase::open;
     std::atomic<bool>                          readiness_cancelled{false};
     Release_mode                               release_mode = Release_mode::passive;

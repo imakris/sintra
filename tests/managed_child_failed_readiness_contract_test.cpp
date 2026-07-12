@@ -517,13 +517,14 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         nonce,
     };
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = requested_target;
-    options.wait_timeout = k_requested_wait_timeout;
+    options.readiness_instance_name = requested_target;
     options.lifetime.enable_lifeline = false;
 
     std::thread spawn_thread([&]() {
         try {
             call.custody = sintra::spawn_swarm_process(options);
+            call.custody.wait_ready_until(
+                std::chrono::steady_clock::now() + k_requested_wait_timeout);
         }
         catch (...) {
             call.threw = true;

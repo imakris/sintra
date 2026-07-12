@@ -380,8 +380,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         nonce,
     };
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = never_published_name;
-    options.wait_timeout = std::chrono::seconds(8);
+    options.readiness_instance_name = never_published_name;
     options.lifetime.enable_lifeline = false;
 
     std::atomic<bool> spawn_finished{false};
@@ -454,8 +453,15 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool no_lifeline_entry =
         !s_spawn_hold.lifeline_enabled.load(std::memory_order_acquire) &&
         !s_spawn_hold.lifeline_write_retained.load(std::memory_order_acquire);
+    const bool spawn_returned_while_readiness_held = wait_until([&]() {
+        return spawn_finished.load(std::memory_order_acquire);
+    }, std::chrono::seconds(2));
+    const auto accepted_observation = custody.status();
     const bool accepted_like_hold =
-        spawn_hold_entered && !spawn_finished.load(std::memory_order_acquire) &&
+        spawn_hold_entered && spawn_returned_while_readiness_held &&
+        !spawn_threw && accepted_observation.accepted &&
+        !accepted_observation.readiness_reached &&
+        !accepted_observation.release_requested &&
         ledger_identity_valid && start_stamp_verified && native_alive_before &&
         publication_confirmed && no_lifeline_entry &&
         exact_process_unpublished.load(std::memory_order_acquire) == 0;
@@ -474,8 +480,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool runtime_state_retained =
         sintra::s_mproc != nullptr && sintra::s_coord != nullptr &&
         s_destroy_publication_count.load(std::memory_order_acquire) == 0;
-    const bool caller_still_held_after_finalize =
-        !spawn_finished.load(std::memory_order_acquire);
+    const bool returned_custody_retained_after_finalize =
+        spawn_finished.load(std::memory_order_acquire) && custody.status().accepted;
     const bool finalize_incomplete = !root_finalized && runtime_state_retained;
 
     bool platform_hold_valid = false;
@@ -483,7 +489,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool native_live_after_finalize = ledger &&
         exact_posix_child_is_live(ledger->pid, ledger->start_stamp) &&
         s_posix_reap.count.load(std::memory_order_acquire) == 0;
-    platform_hold_valid = finalize_incomplete && caller_still_held_after_finalize &&
+    platform_hold_valid = finalize_incomplete && returned_custody_retained_after_finalize &&
         native_live_after_finalize;
 #else
     const bool native_live_after_finalize = ledger && child_process &&
@@ -492,7 +498,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             std::optional<uint64_t>(ledger->start_stamp);
     platform_hold_valid =
         finalize_incomplete &&
-        caller_still_held_after_finalize && native_live_after_finalize;
+        returned_custody_retained_after_finalize && native_live_after_finalize;
 #endif
 
     s_spawn_hold.release.store(true, std::memory_order_release);
@@ -592,7 +598,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::printf(
             "R8_W_GREEN_VALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
             "lifeline_enabled=0 lifeline_entry=absent self_published=1 begin_draining=1 "
-            "caller_held=1 finalize_returned_incomplete=1 runtime_state_retained=1 "
+            "spawn_returned=1 finalize_returned_incomplete=1 runtime_state_retained=1 "
             "native_alive_after_finalize=1 custody_retained=1 release_complete=1 "
             "finalize_retry_succeeded=1 natural_cleanup=1 survivor_absent=1\n",
             nonce.c_str(), output_piid, output_occurrence, output_pid, output_stamp.c_str());
@@ -600,7 +606,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::printf(
             "R8_P_GREEN_VALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
             "lifeline_enabled=0 lifeline_entry=absent self_published=1 begin_draining=1 "
-            "caller_held=1 finalize_returned_incomplete=1 runtime_state_retained=1 "
+            "spawn_returned=1 finalize_returned_incomplete=1 runtime_state_retained=1 "
             "native_alive_after_finalize=1 custody_retained=1 release_complete=1 "
             "finalize_retry_succeeded=1 reap_count=%u reap_status=%d survivor_absent=1\n",
             nonce.c_str(), output_piid, output_occurrence, output_pid, output_stamp.c_str(),
@@ -616,7 +622,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         "R8_INVALID nonce=%s piid=%llu occurrence=%u pid=%d start_stamp=%s "
         "spawn_hold=%d ledger_valid=%d start_stamp_verified=%d native_alive_before=%d "
         "publication_confirmed=%d no_lifeline_entry=%d first_finalize_succeeded=%d "
-        "destroy_publication_count=%u unpublished_count=%u caller_held=%d "
+        "destroy_publication_count=%u unpublished_count=%u spawn_returned=%d "
         "platform_hold_valid=%d custody_accepted=%d spawn_threw=%d cleanup_valid=%d forced_cleanup=%d\n",
         nonce.c_str(), output_piid, output_occurrence, output_pid, output_stamp.c_str(),
         spawn_hold_entered ? 1 : 0,
@@ -628,7 +634,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         root_finalized ? 1 : 0,
         s_destroy_publication_count.load(std::memory_order_acquire),
         exact_process_unpublished.load(std::memory_order_acquire),
-        caller_still_held_after_finalize ? 1 : 0,
+        returned_custody_retained_after_finalize ? 1 : 0,
         platform_hold_valid ? 1 : 0,
         held_observation.accepted ? 1 : 0,
         spawn_threw ? 1 : 0,

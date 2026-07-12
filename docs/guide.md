@@ -281,8 +281,7 @@ struct Spawn_options
     std::string binary_path;
     std::vector<std::string> args;
     instance_id_type process_instance_id = invalid_instance_id;
-    std::string wait_for_instance_name;
-    std::chrono::milliseconds wait_timeout{0};
+    std::string readiness_instance_name;
     Lifetime_policy lifetime;
 };
 ```
@@ -317,11 +316,13 @@ Managed_child_custody spawn_swarm_process(const Spawn_options& options);
 Accepts durable custody for one additional managed process before authorizing
 OS creation. This operation is available only in the process hosting the local
 coordinator; worker calls and malformed explicit process ids are rejected
-before acceptance. Use `Spawn_options` to select
-the binary, arguments, optional expected instance name, wait timeout, and
-lifeline policy. The opaque handle supports compact `status()` observation and
-bounded `release_until()` and `terminate_until()` operations. Test handle
-validity through its explicit boolean conversion.
+before acceptance. Use `Spawn_options` to select the binary, arguments,
+optional readiness instance name, and lifeline policy. A readiness-configured
+spawn returns its accepted handle immediately; call `wait_ready_until()` with
+an absolute steady-clock deadline to observe that exact occurrence. The opaque
+handle also supports compact `status()` observation and bounded
+`release_until()` and `terminate_until()` operations. Test handle validity
+through its explicit boolean conversion.
 Graceful release is idempotent, so another call waits on the same retained
 custody through a new absolute deadline. It remains passive; explicit cleanup
 monotonically escalates the retained custody owner to lifeline release and

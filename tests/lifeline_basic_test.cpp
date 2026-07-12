@@ -654,18 +654,21 @@ int run_owner(
     else
     if (test_case == k_case_wait_timeout) {
         spawn_options.lifetime.hard_exit_timeout_ms = k_hung_hard_exit_timeout_ms;
-        spawn_options.wait_for_instance_name = k_wait_timeout_service_name;
-        spawn_options.wait_timeout = std::chrono::milliseconds(k_wait_timeout_spawn_wait_ms);
+        spawn_options.readiness_instance_name = k_wait_timeout_service_name;
     }
     else
     if (test_case == k_case_wedged_handler) {
         spawn_options.lifetime.hard_exit_timeout_ms = k_hung_hard_exit_timeout_ms;
-        spawn_options.wait_for_instance_name = k_wedged_service_name;
-        spawn_options.wait_timeout = std::chrono::milliseconds(3000);
+        spawn_options.readiness_instance_name = k_wedged_service_name;
     }
 
+    const auto readiness_deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(
+            test_case == k_case_wait_timeout ? k_wait_timeout_spawn_wait_ms : 3000);
     const auto custody = sintra::spawn_swarm_process(spawn_options);
-    const auto launch = custody.status();
+    const auto launch = spawn_options.readiness_instance_name.empty()
+        ? custody.status()
+        : custody.wait_ready_until(readiness_deadline);
     if (test_case == k_case_wait_timeout) {
         if (!launch.accepted || launch.created_occurrences != 1 ||
             launch.readiness_reached || !launch.release_requested)
@@ -691,7 +694,7 @@ int run_owner(
     }
 
     if (!launch.accepted || launch.created_occurrences != 1 ||
-        (!spawn_options.wait_for_instance_name.empty() && !launch.readiness_reached))
+        (!spawn_options.readiness_instance_name.empty() && !launch.readiness_reached))
     {
         std::fprintf(stderr, "[owner] failed to spawn child\n");
         std::_Exit(2);

@@ -429,14 +429,15 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         nonce,
     };
     options.process_instance_id = k_child_process_iid;
-    options.wait_for_instance_name = requested_name;
-    options.wait_timeout = std::chrono::seconds(8);
+    options.readiness_instance_name = requested_name;
     options.lifetime.enable_lifeline = false;
 
     sintra::Managed_child_custody custody;
     bool spawn_threw = false;
     try {
         custody = sintra::spawn_swarm_process(options);
+        custody.wait_ready_until(
+            std::chrono::steady_clock::now() + std::chrono::seconds(8));
     }
     catch (...) {
         spawn_threw = true;

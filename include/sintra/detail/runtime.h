@@ -292,8 +292,7 @@ struct Spawn_options
     std::vector<std::string>   args;
     std::vector<std::string>   env_overrides;
     instance_id_type           process_instance_id = invalid_instance_id;
-    std::string                wait_for_instance_name;
-    std::chrono::milliseconds  wait_timeout{0};
+    std::string                readiness_instance_name;
     Lifetime_policy            lifetime;
 };
 
@@ -317,6 +316,8 @@ public:
     explicit operator bool() const noexcept { return static_cast<bool>(m_record); }
 
     Managed_child_status status() const;
+    Managed_child_status wait_ready_until(
+        std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
@@ -1104,16 +1105,10 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         return {};
     }
 
-    const bool       wait_requested = !options.wait_for_instance_name.empty();
-    const auto       wait_timeout   = options.wait_timeout;
-    const bool       async_deadline_setup = wait_requested && wait_timeout.count() > 0;
-    const auto       deadline = wait_timeout.count() > 0
-        ? std::chrono::steady_clock::now() + wait_timeout
-        : std::chrono::steady_clock::time_point::max();
+    const bool       readiness_requested = !options.readiness_instance_name.empty();
     instance_id_type coord_id       = invalid_instance_id;
     Coordinator*     readiness_coordinator = nullptr;
     uint64_t         custody_identity = 0;
-    uint32_t         readiness_occurrence = 0;
 
     const auto piid = (options.process_instance_id != invalid_instance_id)
         ? options.process_instance_id
@@ -1145,7 +1140,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         Coordinator* coordinator,
         const std::shared_ptr<detail::Managed_child_custody_record>& record,
         const std::string& target,
-        std::chrono::steady_clock::time_point readiness_deadline,
         bool child_created,
         uint64_t custody_identity,
         instance_id_type process_iid,
@@ -1158,9 +1152,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             release_requested = record->phase != detail::Custody_phase::open;
         }
         try {
-            if (child_created && !release_requested &&
-                readiness_deadline == std::chrono::steady_clock::time_point::max())
-            {
+            if (child_created && !release_requested) {
                 readiness_reached = detail::Managed_child_readiness_access::wait(
                     coordinator,
                     target,
@@ -1168,38 +1160,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     process_iid,
                     occurrence,
                     record->readiness_cancelled) != invalid_instance_id;
-            }
-            else if (child_created && !release_requested) {
-                auto poll_delay = std::chrono::milliseconds(5);
-                while (std::chrono::steady_clock::now() < readiness_deadline) {
-                    {
-                        std::lock_guard<std::mutex> lock(record->mutex);
-                        if (record->phase != detail::Custody_phase::open) {
-                            break;
-                        }
-                    }
-                    if (detail::Managed_child_readiness_access::resolve(
-                            coordinator,
-                            target,
-                            custody_identity,
-                            process_iid,
-                            occurrence,
-                            record->readiness_cancelled) != invalid_instance_id)
-                    {
-                        readiness_reached = true;
-                        break;
-                    }
-                    const auto now = std::chrono::steady_clock::now();
-                    if (now >= readiness_deadline) {
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::min(
-                        poll_delay,
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            readiness_deadline - now)));
-                    poll_delay = std::min(
-                        poll_delay * 2, std::chrono::milliseconds(200));
-                }
             }
         }
         catch (...) {
@@ -1216,9 +1176,9 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         }
         {
             std::lock_guard<std::mutex> lock(record->mutex);
-            record->readiness_reached =
-                record->readiness_reached || readiness_reached;
-            record->readiness_observer_complete = true;
+            record->readiness = readiness_reached
+                ? detail::Readiness_phase::reached
+                : detail::Readiness_phase::stopped;
         }
         record->changed.notify_all();
         if (owner) {
@@ -1275,7 +1235,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         }
 
         coord_id = s_coord_id;
-        if (wait_requested && coord_id == invalid_instance_id) {
+        if (readiness_requested && coord_id == invalid_instance_id) {
             Log_stream(log_level::error)
                 << "spawn_swarm_process: wait requires a valid coordinator\n";
             return {};
@@ -1335,8 +1295,11 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         spawn_args.custody = custody_record;
         readiness_coordinator = s_coord;
         custody_identity = custody_record->identity;
-        readiness_occurrence = spawn_args.occurrence;
-        if (async_deadline_setup) {
+        if (readiness_requested) {
+            {
+                std::lock_guard<std::mutex> lock(custody_record->mutex);
+                custody_record->readiness = detail::Readiness_phase::pending;
+            }
             bool admitted = false;
             try {
                 admitted = s_mproc->admit_child_custody_occurrence(
@@ -1367,6 +1330,15 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                          "Managed child occurrence admission failed")});
                 settle_setup_exception(
                     s_mproc, custody_record, piid, spawn_args.occurrence);
+                readiness_observer(
+                    s_mproc,
+                    readiness_coordinator,
+                    custody_record,
+                    options.readiness_instance_name,
+                    false,
+                    custody_identity,
+                    piid,
+                    spawn_args.occurrence);
                 return Managed_child_custody(custody_record);
             }
             if (!admitted) {
@@ -1377,18 +1349,23 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                      0,
                      "Managed child custody closed during occurrence admission"});
                 s_mproc->request_child_custody_release(custody_record);
+                readiness_observer(
+                    s_mproc,
+                    readiness_coordinator,
+                    custody_record,
+                    options.readiness_instance_name,
+                    false,
+                    custody_identity,
+                    piid,
+                    spawn_args.occurrence);
                 return Managed_child_custody(custody_record);
             }
             spawn_args.custody_occurrence_admitted = true;
-            {
-                std::lock_guard<std::mutex> lock(custody_record->mutex);
-                custody_record->readiness_observer_complete = false;
-            }
             auto* custody_owner = s_mproc;
             auto async_setup =
                 [custody_owner, readiness_coordinator, custody_record, spawn_args,
                  custody_identity,
-                 target = options.wait_for_instance_name, deadline,
+                 target = options.readiness_instance_name,
                  readiness_observer, settle_setup_exception]() mutable
                 {
                     bool created = false;
@@ -1423,7 +1400,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                         readiness_coordinator,
                         custody_record,
                         target,
-                        deadline,
                         created,
                         custody_identity,
                         spawn_args.piid,
@@ -1460,8 +1436,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     custody_owner,
                     readiness_coordinator,
                     custody_record,
-                    options.wait_for_instance_name,
-                    deadline,
+                    options.readiness_instance_name,
                     false,
                     custody_identity,
                     spawn_args.piid,
@@ -1483,7 +1458,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             }
         }
     }
-    if (!async_deadline_setup && os_process_created) {
+    if (!readiness_requested && os_process_created) {
         detail::runtime_spawn_success_for_test(
             spawn_result.instance_id,
             spawn_result.os_pid,
@@ -1494,78 +1469,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     }
 
     Managed_child_custody custody(custody_record);
-    if (!async_deadline_setup && (!os_process_created || !wait_requested)) {
-        return custody;
-    }
-    auto* custody_owner = s_mproc;
-    if (!async_deadline_setup) {
-        {
-            std::lock_guard<std::mutex> lock(custody_record->mutex);
-            custody_record->readiness_observer_complete = false;
-        }
-        try {
-            custody_owner->start_child_custody_worker(
-                [custody_owner, readiness_coordinator, custody_record,
-                 custody_identity, piid, readiness_occurrence,
-                 target = options.wait_for_instance_name, deadline,
-                 readiness_observer]()
-                {
-                    readiness_observer(
-                        custody_owner,
-                        readiness_coordinator,
-                        custody_record,
-                        target,
-                        deadline,
-                        true,
-                        custody_identity,
-                        piid,
-                        readiness_occurrence);
-                });
-        }
-        catch (...) {
-            custody_owner->note_child_custody_failure(
-                custody_record,
-                {Managed_child_failure_kind::readiness_observer_start,
-                 readiness_occurrence,
-                 0,
-                 exception_message(
-                     std::current_exception(),
-                     "Managed child readiness observer failed to start")});
-            {
-                std::lock_guard<std::mutex> lock(custody_record->mutex);
-                custody_record->readiness_observer_complete = true;
-            }
-            custody_record->changed.notify_all();
-            custody_owner->request_child_custody_release(
-                custody_record, detail::Release_mode::cleanup);
-            return custody;
-        }
-    }
-
-    {
-        std::unique_lock<std::mutex> lock(custody_record->mutex);
-        if (deadline == std::chrono::steady_clock::time_point::max()) {
-            custody_record->changed.wait(lock, [&]() {
-                return custody_record->readiness_reached ||
-                    custody_record->phase != detail::Custody_phase::open;
-            });
-        }
-        else {
-            custody_record->changed.wait_until(lock, deadline, [&]() {
-                return custody_record->readiness_reached ||
-                    custody_record->phase != detail::Custody_phase::open;
-            });
-        }
-        if (custody_record->readiness_reached) {
-            return custody;
-        }
-    }
-
-    Log_stream(log_level::warning)
-        << "spawn_swarm_process: readiness incomplete at deadline for instance '"
-        << options.wait_for_instance_name << "'; custody retained\n";
-    custody_owner->request_child_custody_release(
-        custody_record, detail::Release_mode::cleanup);
     return custody;
 }
 
@@ -1577,7 +1480,8 @@ inline Managed_child_status Managed_child_custody::status() const
     }
     result.accepted = true;
     std::lock_guard<std::mutex> lock(m_record->mutex);
-    result.readiness_reached = m_record->readiness_reached;
+    result.readiness_reached =
+        m_record->readiness == detail::Readiness_phase::reached;
     result.release_requested =
         m_record->phase != detail::Custody_phase::open;
     result.release_complete =
@@ -1589,6 +1493,42 @@ inline Managed_child_status Managed_child_custody::status() const
         result.exited_occurrences += occurrence.os_exit_confirmed ? 1u : 0u;
     }
     return result;
+}
+
+inline Managed_child_status Managed_child_custody::wait_ready_until(
+    std::chrono::steady_clock::time_point deadline) const
+{
+    if (!m_record) {
+        return {};
+    }
+
+    bool readiness_deadline_expired = false;
+    {
+        std::unique_lock<std::mutex> lock(m_record->mutex);
+        if (m_record->readiness == detail::Readiness_phase::pending) {
+            if (deadline == std::chrono::steady_clock::time_point::max()) {
+                m_record->changed.wait(lock, [&]() {
+                    return m_record->readiness != detail::Readiness_phase::pending;
+                });
+            }
+            else {
+                readiness_deadline_expired = !m_record->changed.wait_until(
+                    lock,
+                    deadline,
+                    [&]() {
+                        return m_record->readiness != detail::Readiness_phase::pending;
+                    });
+            }
+        }
+    }
+
+    if (readiness_deadline_expired && s_mproc) {
+        Log_stream(log_level::warning)
+            << "Managed child readiness incomplete at deadline; custody retained\n";
+        s_mproc->request_child_custody_release(
+            m_record, detail::Release_mode::cleanup);
+    }
+    return status();
 }
 
 inline Managed_child_status Managed_child_custody::wait_until_released(
