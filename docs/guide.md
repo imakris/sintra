@@ -320,13 +320,15 @@ coordinator; worker calls and malformed explicit process ids are rejected
 before acceptance. Use `Spawn_options` to select
 the binary, arguments, optional expected instance name, wait timeout, and
 lifeline policy. The opaque handle supports compact observation and bounded
-`release_managed_child`, `cleanup_managed_child`,
-`retry_managed_child_release`, and `wait_managed_child` operations. Graceful
-release remains passive; explicit cleanup monotonically escalates the retained
-custody owner to lifeline release and authoritative retirement. Readiness or
-cleanup timeout never discards custody. A synchronous setup failure after
-acceptance returns the retained handle and settles a no-child occurrence or
-continues active cleanup for an already-created child.
+`release_managed_child`, `cleanup_managed_child`, and `wait_managed_child`
+operations. Test handle validity through its explicit boolean conversion.
+Graceful release is idempotent, so another call waits on the same retained
+custody through a new absolute deadline. It remains passive; explicit cleanup
+monotonically escalates the retained custody owner to lifeline release and
+authoritative retirement. Readiness or cleanup timeout never discards custody.
+A synchronous setup failure after acceptance returns the retained handle and
+settles a no-child occurrence or continues active cleanup for an already-created
+child.
 
 Compiled examples/tests:
 - [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp)

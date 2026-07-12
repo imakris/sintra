@@ -507,7 +507,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         process_unpublished.load(std::memory_order_acquire) == 0;
 
     const bool first_finalize_succeeded = sintra::detail::finalize();
-    const auto retry = sintra::retry_managed_child_release(
+    const auto retry = sintra::release_managed_child(
         custody, std::chrono::steady_clock::now() + 80ms);
     const bool retained_across_finalize = !first_finalize_succeeded && retry.accepted &&
         retry.release_requested && !retry.release_complete && ledger &&

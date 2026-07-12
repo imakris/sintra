@@ -1030,7 +1030,7 @@ bool run_release_worker_retry(
         custody, std::chrono::steady_clock::now() + 250ms);
     const auto hits_after_first = failure_hits(plan);
     const bool release_written = write_release_marker(marker);
-    const auto second = sintra::retry_managed_child_release(
+    const auto second = sintra::release_managed_child(
         custody, std::chrono::steady_clock::now() + 5s);
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
     reset_failure_hook();
