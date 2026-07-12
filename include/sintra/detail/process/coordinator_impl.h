@@ -1278,9 +1278,37 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // atomic with respect to a concurrent re-publish of the same process slot
     // (e.g. a recovery respawn or an external re-attach reusing the id).
     const auto process_iid = process_of(iid);
-    const auto custody_occurrence = s_mproc
-        ? s_mproc->child_custody_occurrence_token(process_iid)
-        : detail::Managed_child_occurrence_token{};
+    Managed_child_publication_identity incoming_managed_child_identity;
+    const bool has_incoming_managed_child_context =
+        s_tl_current_message &&
+        s_tl_current_message->managed_child_custody_identity != 0;
+    if (has_incoming_managed_child_context)
+    {
+        incoming_managed_child_identity.custody_identity =
+            s_tl_current_message->managed_child_custody_identity;
+        incoming_managed_child_identity.process_iid =
+            process_of(s_tl_current_message->sender_instance_id);
+        incoming_managed_child_identity.occurrence =
+            s_tl_current_message->managed_child_occurrence;
+    }
+
+    // Resolve exact custody authority without nesting m_child_custody_mutex
+    // under m_publish_mutex. It becomes authoritative only after the stored
+    // publication identity is compared under the publication lock below.
+    detail::Managed_child_occurrence_token exact_custody_occurrence;
+    if (has_incoming_managed_child_context &&
+        incoming_managed_child_identity && iid == process_iid && s_mproc)
+    {
+        exact_custody_occurrence =
+            s_mproc->child_custody_occurrence_token_exact(
+                incoming_managed_child_identity.custody_identity,
+                incoming_managed_child_identity.process_iid,
+                incoming_managed_child_identity.occurrence);
+    }
+    auto custody_occurrence =
+        !has_incoming_managed_child_context && s_mproc
+            ? s_mproc->child_custody_occurrence_token(process_iid)
+            : detail::Managed_child_occurrence_token{};
 
     std::unique_lock groups_lock(m_groups_mutex, std::defer_lock);
     if (iid == process_iid) {
@@ -1300,6 +1328,25 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     auto it = pr.find(iid);
     if (it == pr.end()) {
         return false;
+    }
+
+    if (has_incoming_managed_child_context) {
+        const auto stored_identity =
+            m_managed_child_publication_identities.find(iid);
+        if (stored_identity == m_managed_child_publication_identities.end() ||
+            !stored_identity->second.matches(
+                incoming_managed_child_identity.custody_identity,
+                incoming_managed_child_identity.process_iid,
+                incoming_managed_child_identity.occurrence))
+        {
+            return false;
+        }
+        if (iid == process_iid) {
+            if (!exact_custody_occurrence) {
+                return false;
+            }
+            custody_occurrence = exact_custody_occurrence;
+        }
     }
 
     // the transceiver is assumed to have a name, not an empty string

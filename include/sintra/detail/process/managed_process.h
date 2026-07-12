@@ -536,6 +536,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool child_custody_allows_recovery(instance_id_type process_instance_id) const;
     detail::Managed_child_occurrence_token child_custody_occurrence_token(
         instance_id_type process_instance_id) const;
+    detail::Managed_child_occurrence_token child_custody_occurrence_token_exact(
+        uint64_t          custody_identity,
+        instance_id_type process_instance_id,
+        uint32_t         occurrence) const;
     void note_child_initialization_complete(
         const detail::Managed_child_occurrence_token& token);
     void note_child_publication_retired(

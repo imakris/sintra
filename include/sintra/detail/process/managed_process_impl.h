@@ -2888,6 +2888,40 @@ Managed_process::child_custody_occurrence_token(
     return token;
 }
 
+inline detail::Managed_child_occurrence_token
+Managed_process::child_custody_occurrence_token_exact(
+    uint64_t          custody_identity,
+    instance_id_type process_instance_id,
+    uint32_t         occurrence) const
+{
+    std::shared_ptr<detail::Managed_child_custody_record> custody;
+    {
+        std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+        const auto it = m_child_custodies.find(custody_identity);
+        if (it == m_child_custodies.end()) {
+            return {};
+        }
+        custody = it->second;
+    }
+    if (!custody) {
+        return {};
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        const auto admitted = std::find_if(
+            custody->occurrences.begin(), custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& candidate) {
+                return candidate.process_instance_id == process_instance_id &&
+                    candidate.occurrence == occurrence;
+            });
+        if (admitted == custody->occurrences.end()) {
+            return {};
+        }
+    }
+    return {custody, process_instance_id, occurrence};
+}
+
 namespace detail {
 
 inline void update_child_occurrence(
