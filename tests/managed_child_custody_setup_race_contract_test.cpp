@@ -30,6 +30,8 @@ constexpr const char* k_native_bound_child_flag =
 constexpr const char* k_owned_child_flag = "--managed-child-owned-failure-child";
 constexpr const char* k_prepublication_exit_child_flag =
     "--managed-child-prepublication-exit-child";
+constexpr const char* k_immediate_exit_child_flag =
+    "--managed-child-immediate-exit-child";
 
 struct Unrelated_publication_target :
     sintra::Derived_transceiver<Unrelated_publication_target>
@@ -270,6 +272,23 @@ struct Concurrent_posix_reap_observation
 };
 
 Concurrent_posix_reap_observation s_concurrent_posix_reap;
+std::atomic<pid_t> s_immediate_exit_pid{-1};
+std::atomic<bool> s_immediate_exit_observed{false};
+
+void wait_after_immediate_exec_handshake(pid_t pid)
+{
+    s_immediate_exit_pid.store(pid, std::memory_order_release);
+    s_posix_reap.expected_pid.store(pid, std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (sintra::is_process_alive(static_cast<uint32_t>(pid)) &&
+        std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(10ms);
+    }
+    s_immediate_exit_observed.store(
+        !sintra::is_process_alive(static_cast<uint32_t>(pid)),
+        std::memory_order_release);
+}
 
 void observe_posix_reap(pid_t pid, int status) noexcept
 {
@@ -1387,6 +1406,81 @@ bool run_prepublication_publish_race(
     return valid;
 }
 
+bool run_immediate_reaped_classification(
+    int argc,
+    char* argv[],
+    const std::string& binary_path)
+{
+#ifdef _WIN32
+    (void)argc;
+    (void)argv;
+    (void)binary_path;
+    return true;
+#else
+    sintra::init(argc, argv);
+    size_t roster_size_before = 0;
+    {
+        std::lock_guard<std::mutex> lock(
+            sintra::s_mproc->m_spawned_child_pids_mutex);
+        roster_size_before = sintra::s_mproc->m_spawned_child_pids.size();
+    }
+    s_immediate_exit_pid.store(-1, std::memory_order_relaxed);
+    s_immediate_exit_observed.store(false, std::memory_order_relaxed);
+    s_posix_reap.expected_pid.store(-1, std::memory_order_relaxed);
+    s_posix_reap.count.store(0, std::memory_order_relaxed);
+    s_posix_reap.status.store(0, std::memory_order_relaxed);
+    sintra::detail::test_hooks::s_child_reaped.store(
+        &observe_posix_reap, std::memory_order_release);
+    sintra::testing::set_spawn_detached_exec_handshake(
+        &wait_after_immediate_exec_handshake);
+
+    sintra::Spawn_options options;
+    options.binary_path = binary_path;
+    options.args = {k_immediate_exit_child_flag};
+    options.process_instance_id = sintra::make_process_instance_id();
+    options.lifetime.enable_lifeline = false;
+    auto custody = sintra::spawn_swarm_process(options);
+    const auto observed = sintra::observe_managed_child(custody);
+    const pid_t child_pid = s_immediate_exit_pid.load(std::memory_order_acquire);
+
+    bool roster_unchanged = false;
+    {
+        std::lock_guard<std::mutex> lock(
+            sintra::s_mproc->m_spawned_child_pids_mutex);
+        roster_unchanged =
+            sintra::s_mproc->m_spawned_child_pids.size() == roster_size_before &&
+            std::none_of(
+                sintra::s_mproc->m_spawned_child_pids.begin(),
+                sintra::s_mproc->m_spawned_child_pids.end(),
+                [&](const sintra::Managed_process::Spawned_child_reap_slot& slot) {
+                    return slot.pid == child_pid;
+                });
+    }
+    const auto released = sintra::release_managed_child(
+        custody, std::chrono::steady_clock::now() + 5s);
+    const bool reap_normal = posix_reap_normal();
+    const bool survivor_absent = child_pid > 0 &&
+        !sintra::is_process_alive(static_cast<uint32_t>(child_pid));
+    sintra::testing::set_spawn_detached_exec_handshake(nullptr);
+    clear_posix_reap();
+    const bool finalized = settle_detail_finalize("immediate_reaped_classification");
+
+    return
+        s_immediate_exit_observed.load(std::memory_order_acquire) &&
+        observed.accepted                                         &&
+        observed.created_occurrences == 1                         &&
+        observed.exited_occurrences  == 1                         &&
+        !observed.release_complete                                &&
+        released.release_complete                                 &&
+        released.created_occurrences == 1                         &&
+        released.exited_occurrences  == 1                         &&
+        roster_unchanged                                          &&
+        reap_normal                                               &&
+        survivor_absent                                           &&
+        finalized;
+#endif
+}
+
 bool run_concurrent_posix_roster_reservations(
     int argc,
     char* argv[],
@@ -1490,12 +1584,29 @@ bool run_concurrent_posix_roster_reservations(
         write_release_marker(markers[0]) && write_release_marker(markers[1]);
 
     std::array<sintra::Managed_child_custody_observation, 2> released;
-    bool survivors_absent = true;
+    const auto release_deadline = std::chrono::steady_clock::now() + 5s;
+    bool releases_terminal = false;
+    do {
+        releases_terminal = true;
+        for (size_t i = 0; i < 2; ++i) {
+            if (!released[i].release_complete) {
+                const auto attempt_deadline = std::min(
+                    release_deadline,
+                    std::chrono::steady_clock::now() + 250ms);
+                released[i] = sintra::release_managed_child(
+                    custodies[i], attempt_deadline);
+            }
+            releases_terminal =
+                releases_terminal && released[i].release_complete;
+        }
+    }
+    while (!releases_terminal &&
+        std::chrono::steady_clock::now() < release_deadline);
+
+    bool survivors_absent = releases_terminal;
     for (size_t i = 0; i < 2; ++i) {
-        released[i] = sintra::wait_managed_child(
-            custodies[i], std::chrono::steady_clock::now() + 5s);
         survivors_absent = survivors_absent && identities[i] &&
-            wait_for_child_absent(*identities[i], 5s);
+            exact_child_absent(*identities[i]);
     }
     const bool reaps_normal = identities[0] && identities[1] &&
         concurrent_posix_reaps_normal();
@@ -1561,6 +1672,9 @@ int main(int argc, char* argv[])
             std::this_thread::sleep_for(250ms);
             return identity_written ? 0 : 3;
         }
+        if (std::string(argv[i]) == k_immediate_exit_child_flag) {
+            return 0;
+        }
     }
 
     const std::string binary_path = std::filesystem::absolute(argv[0]).string();
@@ -1613,6 +1727,11 @@ int main(int argc, char* argv[])
     if (!s_teardown_settled) {
         return 2;
     }
+    const bool immediate_reaped_classification =
+        run_immediate_reaped_classification(argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool concurrent_posix_roster = run_concurrent_posix_roster_reservations(
         argc, argv, binary_path);
     if (!s_teardown_settled) {
@@ -1622,7 +1741,8 @@ int main(int argc, char* argv[])
     if (recovery_race && deadline_race && pre_create_exception &&
         post_native_exception && observer_start_failure && release_worker_retry &&
         prepublication_exit && split_transport_retirement &&
-        prepublication_publish_race && concurrent_posix_roster)
+        prepublication_publish_race && immediate_reaped_classification &&
+        concurrent_posix_roster)
     {
         std::printf(
             "SETUP_RACE_GREEN_VALID recovery_pending=1 release_waited=1 "
@@ -1634,11 +1754,16 @@ int main(int argc, char* argv[])
             "split_transport_join_false=1 total_stop_deadline_bounded=1 "
             "distinct_release_retry=1 communication_worker_retry=1 "
             "inflight_publish_canonically_retired=1 "
+            "immediate_created_reaped=%s immediate_reap_count=%s "
             "posix_concurrent_roster=%s reap_count_per_owned_phase=%s survivors=0\n",
 #ifdef _WIN32
             "not_applicable",
+            "not_applicable",
+            "not_applicable",
             "not_applicable"
 #else
+            "1",
+            "1",
             "2",
             "1"
 #endif
@@ -1651,13 +1776,15 @@ int main(int argc, char* argv[])
         "pre_create_exception=%d post_native_exception=%d "
         "observer_start_failure=%d release_worker_retry=%d "
         "prepublication_exit=%d split_transport_retirement=%d "
-        "prepublication_publish_race=%d concurrent_posix_roster=%d\n",
+        "prepublication_publish_race=%d immediate_reaped=%d "
+        "concurrent_posix_roster=%d\n",
         recovery_race ? 1 : 0, deadline_race ? 1 : 0,
         pre_create_exception ? 1 : 0, post_native_exception ? 1 : 0,
         observer_start_failure ? 1 : 0, release_worker_retry ? 1 : 0,
         prepublication_exit ? 1 : 0,
         split_transport_retirement ? 1 : 0,
         prepublication_publish_race ? 1 : 0,
+        immediate_reaped_classification ? 1 : 0,
         concurrent_posix_roster ? 1 : 0);
     return 2;
 }
