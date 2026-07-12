@@ -113,6 +113,8 @@ inline constexpr const char* k_managed_child_fail_post_native_setup =
     "managed_child_post_native_setup";
 inline constexpr const char* k_managed_child_fail_native_observer_start =
     "managed_child_native_observer_start";
+inline constexpr const char* k_managed_child_fail_admission_mapping =
+    "managed_child_admission_mapping";
 inline constexpr const char* k_managed_child_fail_release_worker =
     "managed_child_release_worker";
 inline constexpr const char* k_managed_child_fail_cleanup_actions =
@@ -2169,6 +2171,10 @@ inline bool Managed_process::admit_child_custody_occurrence(
         admitted.process_instance_id = process_instance_id;
         custody->occurrences.push_back(admitted);
     }
+    detail::managed_child_failure_for_test(
+        detail::test_hooks::k_managed_child_fail_admission_mapping,
+        process_instance_id,
+        occurrence);
     {
         std::lock_guard<std::mutex> lock(m_child_custody_mutex);
         m_child_custody_by_process[process_instance_id] = {custody, occurrence};

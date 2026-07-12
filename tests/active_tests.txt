@@ -57,6 +57,7 @@ lifeline_basic_test                                      5
 locality_messaging_test                                  1
 log_stream_move_test                                    10
 managed_child_adverse_cleanup_contract_test              1
+managed_child_custody_admission_transaction_contract_test 1
 managed_child_custody_finalize_race_contract_test        1
 managed_child_custody_name_retirement_contract_test      1
 managed_child_custody_occurrence_isolation_contract_test 1
