@@ -196,6 +196,22 @@ struct Spawn_detached_options
 
 namespace detail {
 
+struct Spawn_detached_result
+{
+    enum class State {
+        no_child,
+        created_live,
+        created_reaped
+    };
+
+    State state = State::no_child;
+    int   pid = -1;
+    int   wait_status = 0;
+    bool  wait_status_available = false;
+
+    bool created() const noexcept { return state != State::no_child; }
+};
+
 #ifndef _WIN32
 
 using pipe2_fn                = int(*)(int[2], int);
@@ -203,6 +219,7 @@ using write_fn                = ssize_t(*)(int, const void*, size_t);
 using read_fn                 = ssize_t(*)(int, void*, size_t);
 using waitpid_fn              = pid_t(*)(pid_t, int*, int);
 using spawn_detached_debug_fn = void(*)(const struct spawn_detached_debug_info_t&);
+using spawn_detached_exec_handshake_fn = void(*)(pid_t);
 
 struct spawn_detached_debug_info_t
 {
@@ -250,11 +267,29 @@ inline std::atomic<spawn_detached_debug_fn>& spawn_detached_debug_override()
     return fn;
 }
 
+inline std::atomic<spawn_detached_exec_handshake_fn>&
+spawn_detached_exec_handshake_override()
+{
+    static std::atomic<spawn_detached_exec_handshake_fn> fn{nullptr};
+    return fn;
+}
+
 inline void emit_spawn_detached_debug(const spawn_detached_debug_info_t& info)
 {
     if (auto fn = spawn_detached_debug_override().load()) {
         fn(info);
     }
+}
+
+inline void spawn_detached_exec_handshake_for_test(pid_t pid)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto fn = spawn_detached_exec_handshake_override().load()) {
+        fn(pid);
+    }
+#else
+    (void)pid;
+#endif
 }
 
 inline int fcntl_retry(int fd, int cmd)
@@ -564,6 +599,12 @@ inline detail::waitpid_fn set_waitpid_override(detail::waitpid_fn fn)
 inline detail::spawn_detached_debug_fn set_spawn_detached_debug(detail::spawn_detached_debug_fn fn)
 {
     return detail::spawn_detached_debug_override().exchange(fn);
+}
+
+inline detail::spawn_detached_exec_handshake_fn
+set_spawn_detached_exec_handshake(detail::spawn_detached_exec_handshake_fn fn)
+{
+    return detail::spawn_detached_exec_handshake_override().exchange(fn);
 }
 
 } // namespace testing
@@ -919,21 +960,11 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
 }
 #else
 inline
-bool spawn_detached_posix(const Spawn_detached_options& options)
+Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options)
 {
 
-
-    // 1. we fork to obtain an inbetween process
-    // 2. the inbetween child process gets a new terminal and makes a pipe
-    // 3. fork again to get the grandchild process
-    // 4. grandchild copies args to force copy, since copy-on-write is not very useful here,
-    //    as the pages need to be copied before the execv, in order to be able to signal
-    //    the inbetween child process to exit. There are other ways to achieve the same effect.
-    // 5. the inbetween child process reads the pipe and exits with pid of the grandchild or -1
-    //    in case of error. The grandchild is orphaned (this is to prevent zombification).
-    // 6. the parent waits the inbetween process and returns.
-
-    // yes, all that (because, Linux...)
+    // The direct child starts a new session and execs in place. The close-on-exec
+    // status pipe distinguishes an exec failure from a committed native child.
 
     auto ignore_sigpipe = [] {
         struct sigaction signal_ignored;
@@ -944,10 +975,8 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
 
     const char*        prog          = options.prog;
     const char* const* argv          = options.argv;
-    int*               child_pid_out = options.child_pid_out;
-
     if (prog == nullptr || argv == nullptr) {
-        return false;
+        return {};
     }
 
     // Build argv/prog copies in the parent so the child never allocates between
@@ -1004,7 +1033,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         if (saved_errno != EINTR) {
             report_failure(spawn_detached_debug_info_t::Stage::PIPE_CREATION, saved_errno, saved_errno);
             errno = saved_errno;
-            return false;
+            return {};
         }
     }
 
@@ -1017,7 +1046,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         if (ready_pipe[0] >= 0) { close(ready_pipe[0]); }
         if (ready_pipe[1] >= 0) { close(ready_pipe[1]); }
         report_failure(spawn_detached_debug_info_t::Stage::FORK, errno, errno);
-        return false;
+        return {};
     }
 
     if (child_pid == 0) {
@@ -1133,7 +1162,7 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         }
     }
 
-    bool read_success = !spawn_failed;
+    const bool read_success = !spawn_failed;
 
     if (ready_pipe[0] >= 0) {
         close(ready_pipe[0]);
@@ -1151,10 +1180,11 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
         }
         report_failure(failure_stage, observed_errno, exec_errno);
         errno = exec_errno ? exec_errno : errno;
-        return false;
+        return {};
     }
 
 #ifndef _WIN32
+    spawn_detached_exec_handshake_for_test(child_pid);
     int   wait_status = 0;
     pid_t wait_result = 0;
     do {
@@ -1163,52 +1193,72 @@ bool spawn_detached_posix(const Spawn_detached_options& options)
     while (wait_result == -1 && errno == EINTR);
 
     if (wait_result == child_pid) {
-        if (!(WIFEXITED(wait_status) && WEXITSTATUS(wait_status) == 0)) {
-            report_failure(spawn_detached_debug_info_t::Stage::PARENT_WAITPID,
-                exec_errno ? exec_errno : ECHILD,
-                exec_errno);
-            errno = exec_errno ? exec_errno : ECHILD;
-            return false;
-        }
-        if (child_pid_out) {
-            *child_pid_out = -1;
-        }
-        return true;
+        return {
+            Spawn_detached_result::State::created_reaped,
+            static_cast<int>(child_pid),
+            wait_status,
+            true};
     }
 
     if (wait_result == -1) {
         if (errno == ECHILD) {
-            if (child_pid_out) {
-                *child_pid_out = -1;
-            }
             errno = 0;
-            return true;
+            return {
+                Spawn_detached_result::State::created_reaped,
+                static_cast<int>(child_pid),
+                0,
+                false};
         }
         report_failure(spawn_detached_debug_info_t::Stage::PARENT_WAITPID, errno, exec_errno);
-        return false;
+        return {};
     }
 #endif
 
-    if (child_pid_out) {
-        *child_pid_out = static_cast<int>(child_pid);
-    }
-
-    return true;
+    return {
+        Spawn_detached_result::State::created_live,
+        static_cast<int>(child_pid),
+        0,
+        false};
 
 
 }
 #endif
+
+inline Spawn_detached_result spawn_detached_with_result(
+    const Spawn_detached_options& options)
+{
+#ifdef _WIN32
+    if (!spawn_detached_win32(options)) {
+        return {};
+    }
+    const int pid = options.child_pid_out ? *options.child_pid_out : -1;
+    return {Spawn_detached_result::State::created_live, pid, 0, false};
+#else
+    return spawn_detached_posix(options);
+#endif
+}
 
 } // namespace detail
 
 inline
 bool spawn_detached(const Spawn_detached_options& options)
 {
-#ifdef _WIN32
-    return detail::spawn_detached_win32(options);
-#else
-    return detail::spawn_detached_posix(options);
+    const auto result = detail::spawn_detached_with_result(options);
+#ifndef _WIN32
+    if (options.child_pid_out) {
+        *options.child_pid_out =
+            result.state == detail::Spawn_detached_result::State::created_live
+                ? result.pid
+                : -1;
+    }
+    if (result.state == detail::Spawn_detached_result::State::created_reaped &&
+        result.wait_status_available &&
+        !(WIFEXITED(result.wait_status) && WEXITSTATUS(result.wait_status) == 0))
+    {
+        return false;
+    }
 #endif
+    return result.created();
 }
 
 

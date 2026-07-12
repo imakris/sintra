@@ -129,6 +129,14 @@ inline constexpr const char* k_managed_child_cleanup_lifeline_released =
     "managed_child_cleanup_lifeline_released";
 inline constexpr const char* k_managed_child_cleanup_retirement_confirmed =
     "managed_child_cleanup_retirement_confirmed";
+inline constexpr const char* k_managed_child_cleanup_soft_termination =
+    "managed_child_cleanup_soft_termination";
+inline constexpr const char* k_managed_child_fail_native_hard_termination =
+    "managed_child_native_hard_termination";
+inline constexpr const char* k_managed_child_cleanup_hard_termination =
+    "managed_child_cleanup_hard_termination";
+inline constexpr const char* k_managed_child_cleanup_native_exit_confirmed =
+    "managed_child_cleanup_native_exit_confirmed";
 inline constexpr const char* k_managed_child_release_waiting_passive =
     "managed_child_release_waiting_passive";
 inline constexpr const char* k_managed_child_communication_before_join =
@@ -1350,13 +1358,21 @@ Managed_process::~Managed_process()
         auto       forceful_deadline = graceful_deadline + std::chrono::seconds(1);
         bool       sent_sigterm      = false;
         bool       sent_sigkill      = false;
+        auto exact_process_alive = [&]() {
+            if (!slot.start_stamp_available) {
+                return false;
+            }
+            const auto observed = query_process_start_stamp(
+                static_cast<uint32_t>(pid));
+            return observed && *observed == slot.start_stamp;
+        };
 
         while (true) {
             int   status = 0;
             pid_t result = ::waitpid(pid, &status, sent_sigkill ? 0 : WNOHANG);
 
             if (result == pid) {
-                note_child_os_exit(static_cast<int>(pid));
+                note_child_os_exit(slot.occurrence, status);
                 detail::child_reaped_for_test(pid, status);
                 break;
             }
@@ -1364,6 +1380,9 @@ Managed_process::~Managed_process()
             if (result == 0) {
                 auto now = std::chrono::steady_clock::now();
                 if (!sent_sigterm && now >= graceful_deadline) {
+                    if (!exact_process_alive()) {
+                        break;
+                    }
                     if (::kill(pid, SIGTERM) == -1 && errno == ESRCH) {
                         break;
                     }
@@ -1373,6 +1392,9 @@ Managed_process::~Managed_process()
                 }
 
                 if (sent_sigterm && !sent_sigkill && now >= forceful_deadline) {
+                    if (!exact_process_alive()) {
+                        break;
+                    }
                     if (::kill(pid, SIGKILL) == -1 && errno == ESRCH) {
                         break;
                     }
@@ -1390,6 +1412,9 @@ Managed_process::~Managed_process()
 
                 // Unexpected error: escalate to SIGKILL once before aborting the loop.
                 if (!sent_sigkill) {
+                    if (!exact_process_alive()) {
+                        break;
+                    }
                     if (::kill(pid, SIGKILL) == -1 && errno == ESRCH) {
                         break;
                     }
@@ -1451,7 +1476,7 @@ inline void Managed_process::reap_finished_children()
             }
 
             if (result == pid) {
-                note_child_os_exit(static_cast<int>(pid));
+                note_child_os_exit(slot->occurrence, status);
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
                 reaped_children.emplace_back(pid, status);
 #endif
@@ -1462,6 +1487,9 @@ inline void Managed_process::reap_finished_children()
             if (result == -1 && errno != ECHILD) {
                 ++slot;
                 continue;
+            }
+            if (result == -1 && errno == ECHILD) {
+                note_child_os_exit(slot->occurrence, 0, false);
             }
             slot = m_spawned_child_pids.erase(slot);
         }
@@ -1474,15 +1502,6 @@ inline void Managed_process::reap_finished_children()
 #endif
 }
 
-inline void Managed_process::forget_spawned_child_pid(pid_t pid)
-{
-    std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
-    m_spawned_child_pids.erase(
-        std::remove_if(
-            m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
-            [pid](const Spawned_child_reap_slot& slot) { return slot.pid == pid; }),
-        m_spawned_child_pids.end());
-}
 #endif
 
 // returns the argc/argv as a vector of strings
@@ -2375,6 +2394,21 @@ inline void Managed_process::request_child_custody_release(
                     custody,
                     process_iid,
                     occurrence};
+                auto converge_native = [&]() -> bool {
+                    if (!initiate_cleanup || cleanup_child_native(token)) {
+                        return true;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(custody->mutex);
+                        if (custody->cleanup_started &&
+                            custody->cleanup_attempt == cleanup_attempt)
+                        {
+                            custody->cleanup_attempt_failed = true;
+                        }
+                    }
+                    custody->changed.notify_all();
+                    return false;
+                };
                 if (initiate_cleanup) {
                     detail::managed_child_cleanup_for_test(
                         detail::test_hooks::k_managed_child_cleanup_before_actions,
@@ -2400,6 +2434,7 @@ inline void Managed_process::request_child_custody_release(
                             claimed_cleanup_attempt);
                     if (!communication_claimed) {
                         if (!release_attempt_active()) {
+                            converge_native();
                             return false;
                         }
                     }
@@ -2426,12 +2461,14 @@ inline void Managed_process::request_child_custody_release(
                         if (!join_child_communication(token, retiring_reader)) {
                             reset_child_communication_retirement(
                                 token, claimed_cleanup_attempt);
+                            converge_native();
                             return false;
                         }
                     }
                     catch (...) {
                         reset_child_communication_retirement(
                             token, claimed_cleanup_attempt);
+                        converge_native();
                         throw;
                     }
                     detail::managed_child_prepublication_cleanup_for_test(
@@ -2446,6 +2483,10 @@ inline void Managed_process::request_child_custody_release(
                     }
                 }
                 if (!release_attempt_active()) {
+                    converge_native();
+                    return false;
+                }
+                if (initiate_cleanup && !converge_native()) {
                     return false;
                 }
                 if (initiate_cleanup && s_coord) {
@@ -2930,25 +2971,300 @@ inline void Managed_process::retire_child_communication(
     }
 }
 
-inline void Managed_process::note_child_os_exit(int os_pid)
+inline void Managed_process::note_child_os_exit(
+    const detail::Managed_child_occurrence_token& token,
+    int wait_status,
+    bool wait_status_available)
 {
-    std::vector<std::shared_ptr<detail::Managed_child_custody_record>> custodies;
-    {
-        std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-        for (const auto& entry : m_child_custodies) {
-            custodies.push_back(entry.second);
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    for (auto& occurrence : custody->occurrences) {
+        if (occurrence.process_instance_id == token.process_instance_id &&
+            occurrence.occurrence == token.occurrence)
+        {
+            if (!occurrence.os_exit_confirmed) {
+                occurrence.os_exit_confirmed = true;
+                occurrence.os_wait_status = wait_status;
+                occurrence.os_wait_status_available = wait_status_available;
+            }
+            custody->changed.notify_all();
+            return;
         }
     }
-    for (const auto& custody : custodies) {
+}
+
+#ifndef _WIN32
+inline bool Managed_process::signal_child_native_exact(
+    const detail::Managed_child_occurrence_token& token,
+    int signal_number)
+{
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
+    auto slot = std::find_if(
+        m_spawned_child_pids.begin(),
+        m_spawned_child_pids.end(),
+        [&](const Spawned_child_reap_slot& candidate) {
+            if (candidate.pid <= 0 ||
+                candidate.occurrence.custody.lock() != custody)
+            {
+                return false;
+            }
+            if (candidate.occurrence.process_instance_id !=
+                token.process_instance_id)
+            {
+                return false;
+            }
+            return candidate.occurrence.occurrence == token.occurrence;
+        });
+    if (slot == m_spawned_child_pids.end() ||
+        !slot->start_stamp_available)
+    {
+        return false;
+    }
+
+    const auto observed = query_process_start_stamp(
+        static_cast<uint32_t>(slot->pid));
+    if (!observed || *observed != slot->start_stamp) {
+        return false;
+    }
+    return ::kill(slot->pid, signal_number) == 0;
+}
+#endif
+
+inline bool Managed_process::wait_for_child_native_exit(
+    const detail::Managed_child_occurrence_token& token,
+    std::chrono::steady_clock::time_point deadline)
+{
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return false;
+    }
+    std::unique_lock<std::mutex> lock(custody->mutex);
+    auto exited = [&]() {
+        auto occurrence = std::find_if(
+            custody->occurrences.begin(),
+            custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& candidate) {
+                return
+                    candidate.process_instance_id == token.process_instance_id &&
+                    candidate.occurrence          == token.occurrence;
+            });
+        return
+            occurrence != custody->occurrences.end() &&
+            occurrence->os_exit_confirmed;
+    };
+    custody->changed.wait_until(lock, deadline, exited);
+    return exited();
+}
+
+inline bool Managed_process::cleanup_child_native(
+    const detail::Managed_child_occurrence_token& token)
+{
+    constexpr auto grace_period = std::chrono::seconds(6);
+    constexpr auto soft_period  = std::chrono::milliseconds(250);
+    constexpr auto hard_period  = std::chrono::seconds(5);
+
+#ifndef _WIN32
+    if (wait_for_child_native_exit(
+            token, std::chrono::steady_clock::now() + grace_period))
+    {
+        detail::managed_child_cleanup_for_test(
+            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
+            token.process_instance_id,
+            token.occurrence);
+        return true;
+    }
+#endif
+
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return false;
+    }
+
+#ifdef _WIN32
+    HANDLE process = nullptr;
+    DWORD pid = 0;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        auto occurrence = std::find_if(
+            custody->occurrences.begin(),
+            custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& candidate) {
+                return
+                    candidate.process_instance_id == token.process_instance_id &&
+                    candidate.occurrence          == token.occurrence;
+            });
+        if (occurrence == custody->occurrences.end()) {
+            return false;
+        }
+        if (occurrence->os_exit_confirmed) {
+            return true;
+        }
+        if (!occurrence->os_process_handle_owned ||
+            occurrence->os_process_handle == 0)
+        {
+            return false;
+        }
+        pid = static_cast<DWORD>(occurrence->os_pid);
+        HANDLE retained = reinterpret_cast<HANDLE>(occurrence->os_process_handle);
+        if (!DuplicateHandle(
+                GetCurrentProcess(),
+                retained,
+                GetCurrentProcess(),
+                &process,
+                0,
+                FALSE,
+                DUPLICATE_SAME_ACCESS))
+        {
+            return false;
+        }
+    }
+    Instantiator process_guard(std::function<void()>([&]() {
+        if (process) {
+            CloseHandle(process);
+        }
+    }));
+
+    auto record_exit = [&]() -> bool {
+        DWORD exit_code = 0;
+        if (GetExitCodeProcess(process, &exit_code) == 0) {
+            return false;
+        }
         std::lock_guard<std::mutex> lock(custody->mutex);
         for (auto& occurrence : custody->occurrences) {
-            if (occurrence.os_pid == os_pid && !occurrence.os_exit_confirmed) {
+            if (occurrence.process_instance_id == token.process_instance_id &&
+                occurrence.occurrence == token.occurrence)
+            {
                 occurrence.os_exit_confirmed = true;
+                occurrence.os_wait_status_available = true;
+                occurrence.os_wait_status = static_cast<int>(exit_code);
+                if (!occurrence.os_exit_observer_registered &&
+                    occurrence.os_process_handle_owned)
+                {
+                    CloseHandle(reinterpret_cast<HANDLE>(
+                        occurrence.os_process_handle));
+                    occurrence.os_process_handle_owned = false;
+                    occurrence.os_process_handle = 0;
+                }
                 custody->changed.notify_all();
-                return;
+                return true;
             }
         }
+        return false;
+    };
+    const auto grace_ms = static_cast<DWORD>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            grace_period).count());
+    const auto grace_wait = WaitForSingleObject(process, grace_ms);
+    if (grace_wait == WAIT_OBJECT_0) {
+        const bool recorded = record_exit();
+        if (!recorded) {
+            return false;
+        }
+        detail::managed_child_cleanup_for_test(
+            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
+            token.process_instance_id,
+            token.occurrence);
+        return true;
     }
+    if (grace_wait != WAIT_TIMEOUT) {
+        return false;
+    }
+
+    detail::managed_child_cleanup_for_test(
+        detail::test_hooks::k_managed_child_cleanup_soft_termination,
+        token.process_instance_id,
+        token.occurrence);
+    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
+    DWORD wait_result = WaitForSingleObject(
+        process, static_cast<DWORD>(soft_period.count()));
+    if (wait_result == WAIT_TIMEOUT) {
+        detail::managed_child_failure_for_test(
+            detail::test_hooks::k_managed_child_fail_native_hard_termination,
+            token.process_instance_id,
+            token.occurrence);
+        detail::managed_child_cleanup_for_test(
+            detail::test_hooks::k_managed_child_cleanup_hard_termination,
+            token.process_instance_id,
+            token.occurrence);
+        if (!TerminateProcess(process, 137)) {
+            wait_result = WaitForSingleObject(process, 0);
+            if (wait_result != WAIT_OBJECT_0) {
+                return false;
+            }
+        }
+        else {
+            wait_result = WaitForSingleObject(
+                process, static_cast<DWORD>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        hard_period).count()));
+        }
+    }
+    if (wait_result != WAIT_OBJECT_0) {
+        return false;
+    }
+    const bool recorded = record_exit();
+    if (!recorded) {
+        return false;
+    }
+    detail::managed_child_cleanup_for_test(
+        detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
+        token.process_instance_id,
+        token.occurrence);
+    return true;
+#else
+    detail::managed_child_cleanup_for_test(
+        detail::test_hooks::k_managed_child_cleanup_soft_termination,
+        token.process_instance_id,
+        token.occurrence);
+    const bool soft_signaled = signal_child_native_exact(token, SIGTERM);
+    if (wait_for_child_native_exit(
+            token, std::chrono::steady_clock::now() + soft_period))
+    {
+        detail::managed_child_cleanup_for_test(
+            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
+            token.process_instance_id,
+            token.occurrence);
+        return true;
+    }
+    if (!soft_signaled) {
+        return false;
+    }
+
+    detail::managed_child_failure_for_test(
+        detail::test_hooks::k_managed_child_fail_native_hard_termination,
+        token.process_instance_id,
+        token.occurrence);
+    detail::managed_child_cleanup_for_test(
+        detail::test_hooks::k_managed_child_cleanup_hard_termination,
+        token.process_instance_id,
+        token.occurrence);
+    const bool hard_signaled = signal_child_native_exact(token, SIGKILL);
+    if (!hard_signaled &&
+        !wait_for_child_native_exit(
+            token, std::chrono::steady_clock::now()))
+    {
+        return false;
+    }
+#endif
+
+    if (wait_for_child_native_exit(
+            token, std::chrono::steady_clock::now() + hard_period))
+    {
+        detail::managed_child_cleanup_for_test(
+            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
+            token.process_instance_id,
+            token.occurrence);
+        return true;
+    }
+    return false;
 }
 
 inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
@@ -3089,7 +3405,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     {
         std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
         posix_reap_reservation = m_next_spawned_child_reservation++;
-        m_spawned_child_pids.push_back({posix_reap_reservation, 0});
+        m_spawned_child_pids.push_back(
+            {posix_reap_reservation, 0, 0, false, occurrence_token});
     }
     detail::managed_child_roster_reserved_for_test(
         s.piid,
@@ -3202,8 +3519,16 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             << " lifeline=" << (s.lifetime.enable_lifeline ? "enabled" : "disabled")
             << "\n";
 
-        result.success = spawn_detached(spawn_options);
-        result.os_pid  = spawned_pid;
+        const auto native_result =
+            detail::spawn_detached_with_result(spawn_options);
+        result.success = native_result.created();
+        spawned_pid = native_result.pid;
+        result.os_pid = native_result.pid;
+        result.os_process_already_reaped =
+            native_result.state ==
+                detail::Spawn_detached_result::State::created_reaped;
+        result.os_wait_status_available = native_result.wait_status_available;
+        result.os_wait_status = native_result.wait_status;
 #ifdef _WIN32
         if (spawned_process_handle) {
             result.os_process_handle =
@@ -3213,7 +3538,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 #endif
         result.os_process_created =
             result.success &&
-            (spawned_pid > 0
+            (result.os_pid > 0
 #ifdef _WIN32
                 || result.os_process_handle != 0
 #endif
@@ -3228,9 +3553,12 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
-            occurrence.os_creation_attempted = true;
             occurrence.os_process_created = result.os_process_created;
             occurrence.os_pid = result.os_pid;
+            occurrence.os_exit_confirmed = result.os_process_already_reaped;
+            occurrence.os_wait_status_available =
+                result.os_wait_status_available;
+            occurrence.os_wait_status = result.os_wait_status;
             if (result.os_process_created && result.os_pid > 0) {
                 if (auto stamp = query_process_start_stamp(
                         static_cast<uint32_t>(result.os_pid)))
@@ -3260,7 +3588,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
-            occurrence.os_creation_attempted = false;
             occurrence.os_process_created = false;
             custody->changed.notify_all();
         }
@@ -3280,7 +3607,35 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 
     if (result.success) {
 #ifndef _WIN32
-        if (spawned_pid > 0) {
+        if (result.os_process_already_reaped) {
+            {
+                std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
+                m_spawned_child_pids.erase(
+                    std::remove_if(
+                        m_spawned_child_pids.begin(),
+                        m_spawned_child_pids.end(),
+                        [&](const Spawned_child_reap_slot& slot) {
+                            return slot.reservation_id == posix_reap_reservation;
+                        }),
+                    m_spawned_child_pids.end());
+                posix_reap_reservation = 0;
+            }
+            if (result.os_wait_status_available) {
+                detail::child_reaped_for_test(
+                    static_cast<pid_t>(spawned_pid),
+                    result.os_wait_status);
+            }
+        }
+        else if (spawned_pid > 0) {
+            uint64_t spawned_start_stamp = 0;
+            bool spawned_start_stamp_available = false;
+            {
+                std::lock_guard<std::mutex> lock(custody->mutex);
+                const auto& occurrence = exact_occurrence_locked();
+                spawned_start_stamp = occurrence.os_process_start_stamp;
+                spawned_start_stamp_available =
+                    occurrence.os_process_start_stamp_available;
+            }
             {
                 std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
                 auto slot = std::find_if(
@@ -3290,6 +3645,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
                     });
                 assert(slot != m_spawned_child_pids.end());
                 slot->pid = static_cast<pid_t>(spawned_pid);
+                slot->start_stamp = spawned_start_stamp;
+                slot->start_stamp_available = spawned_start_stamp_available;
                 posix_reap_reservation = 0;
             }
             // A very short-lived child may exit before the SIGCHLD dispatcher
@@ -3329,7 +3686,14 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
                     for (auto& occurrence : custody->occurrences) {
                         if (occurrence.occurrence == occurrence_number) {
                             if (wait_result == WAIT_OBJECT_0) {
+                                DWORD exit_code = 0;
                                 occurrence.os_exit_confirmed = true;
+                                occurrence.os_wait_status_available =
+                                    GetExitCodeProcess(
+                                        spawned_process_handle,
+                                        &exit_code) != 0;
+                                occurrence.os_wait_status =
+                                    static_cast<int>(exit_code);
                                 if (occurrence.os_process_handle_owned) {
                                     CloseHandle(spawned_process_handle);
                                     occurrence.os_process_handle_owned = false;
@@ -3446,7 +3810,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
-            occurrence.os_creation_attempted = true;
             occurrence.os_process_created = false;
             occurrence.setup =
                 detail::Managed_child_occurrence_record::setup_state::no_child;

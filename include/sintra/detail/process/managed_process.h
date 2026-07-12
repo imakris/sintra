@@ -159,13 +159,14 @@ struct Managed_child_occurrence_record
     uint32_t                   occurrence = 0;
     instance_id_type           process_instance_id = invalid_instance_id;
     setup_state                setup = setup_state::pending;
-    bool                       os_creation_attempted = false;
     bool                       os_process_created = false;
     bool                       initialization_reservation_active = false;
     bool                       publication_retired = false;
     bool                       communication_retirement_started = false;
     bool                       communication_retired = false;
     bool                       os_exit_confirmed = false;
+    bool                       os_wait_status_available = false;
+    int                        os_wait_status = 0;
     int                        os_pid = -1;
     uint64_t                   os_process_start_stamp = 0;
     bool                       os_process_start_stamp_available = false;
@@ -425,6 +426,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     {
         bool                       success = false;
         bool                       os_process_created = false;
+        bool                       os_process_already_reaped = false;
+        bool                       os_wait_status_available = false;
+        int                        os_wait_status = 0;
         bool                       lifeline_enabled = false;
         bool                       lifeline_write_retained = false;
         std::string                binary_name;
@@ -444,13 +448,15 @@ struct Managed_process: Derived_transceiver<Managed_process>
     {
         uint64_t reservation_id = 0;
         pid_t    pid = 0;
+        uint64_t start_stamp = 0;
+        bool     start_stamp_available = false;
+        detail::Managed_child_occurrence_token occurrence;
     };
     std::vector<Spawned_child_reap_slot> m_spawned_child_pids;
     uint64_t                            m_next_spawned_child_reservation = 1;
     mutable std::mutex                  m_spawned_child_pids_mutex;
 
     void reap_finished_children();
-    void forget_spawned_child_pid(pid_t pid);
 #endif
 
     using lifeline_handle_type = uintptr_t;
@@ -499,7 +505,20 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void retire_child_communication(
         const detail::Managed_child_occurrence_token& token,
         std::shared_ptr<Process_message_reader> reader);
-    void note_child_os_exit(int os_pid);
+    void note_child_os_exit(
+        const detail::Managed_child_occurrence_token& token,
+        int wait_status,
+        bool wait_status_available = true);
+#ifndef _WIN32
+    bool signal_child_native_exact(
+        const detail::Managed_child_occurrence_token& token,
+        int signal_number);
+#endif
+    bool wait_for_child_native_exit(
+        const detail::Managed_child_occurrence_token& token,
+        std::chrono::steady_clock::time_point deadline);
+    bool cleanup_child_native(
+        const detail::Managed_child_occurrence_token& token);
     void start_child_custody_worker(
         std::function<void()> worker,
         const char* failure_stage = nullptr,
