@@ -1491,23 +1491,25 @@ bool run_concurrent_posix_roster_reservations(
 
     std::array<sintra::Managed_child_custody_observation, 2> released;
     const auto release_deadline = std::chrono::steady_clock::now() + 5s;
-    bool releases_terminal = false;
-    do {
-        releases_terminal = true;
-        for (size_t i = 0; i < 2; ++i) {
-            if (!released[i].release_complete) {
+    std::array<std::thread, 2> release_callers;
+    for (size_t i = 0; i < 2; ++i) {
+        release_callers[i] = std::thread([&, i]() {
+            do {
                 const auto attempt_deadline = std::min(
                     release_deadline,
                     std::chrono::steady_clock::now() + 250ms);
                 released[i] = sintra::release_managed_child(
                     custodies[i], attempt_deadline);
             }
-            releases_terminal =
-                releases_terminal && released[i].release_complete;
-        }
+            while (!released[i].release_complete &&
+                std::chrono::steady_clock::now() < release_deadline);
+        });
     }
-    while (!releases_terminal &&
-        std::chrono::steady_clock::now() < release_deadline);
+    for (auto& caller : release_callers) {
+        caller.join();
+    }
+    const bool releases_terminal =
+        released[0].release_complete && released[1].release_complete;
 
     bool survivors_absent = releases_terminal;
     for (size_t i = 0; i < 2; ++i) {
