@@ -22,6 +22,7 @@ struct Spawn_options
 {
     std::string                binary_path;
     std::vector<std::string>   args;
+    std::vector<std::string>   env_overrides;
     instance_id_type           process_instance_id = invalid_instance_id;
     std::string                readiness_instance_name;
     Lifetime_policy            lifetime;
@@ -29,9 +30,46 @@ struct Spawn_options
 
 Managed_child_custody spawn_swarm_process(const Spawn_options& options);
 
+enum class Managed_child_failure_kind
+{
+    none,
+    custody_not_accepted,
+    custody_closed,
+    occurrence_admission,
+    reader_setup,
+    lifeline_setup,
+    native_spawn,
+    native_identity,
+    setup_exception,
+    setup_worker_start,
+    readiness_observation
+};
+
+struct Managed_child_failure
+{
+    Managed_child_failure_kind kind = Managed_child_failure_kind::none;
+    std::uint32_t occurrence = 0;
+    int native_error = 0;
+    std::string message;
+};
+
+struct Managed_child_status
+{
+    bool accepted = false;
+    bool readiness_reached = false;
+    bool release_requested = false;
+    bool release_complete = false;
+    std::size_t admitted_occurrences = 0;
+    std::size_t created_occurrences = 0;
+    std::size_t exited_occurrences = 0;
+    Managed_child_failure last_failure;
+};
+
 class Managed_child_custody
 {
 public:
+    explicit operator bool() const noexcept;
+
     Managed_child_status status() const;
     Managed_child_status wait_ready_until(
         std::chrono::steady_clock::time_point deadline) const;
@@ -56,6 +94,12 @@ Contract:
   receives `args` as positional arguments (Sintra inserts the binary name
   as `argv[0]` if not already present), and gets `--swarm_id`,
   `--instance_id`, and `--coordinator_id` appended automatically.
+- `env_overrides` is a sequence of environment entries, normally in
+  `NAME=VALUE` form. The child inherits the current environment and Sintra
+  merges these entries in order. A later entry for the same name wins. Name
+  matching is case-insensitive on Windows and case-sensitive on POSIX. The
+  same overrides are reused for recovery occurrences. Sintra does not validate
+  entry syntax; callers must not rely on malformed entries.
 - `process_instance_id` defaults to a fresh process instance id. Setting it
   pins the new process to a specific valid process id. Transceiver ids,
   wildcard ids, ids with an invalid process component, pending invitation ids,
@@ -91,6 +135,10 @@ Threading and lifecycle:
   later code on the exact participant having published its readiness name.
 - `readiness_reached` means the coordinator observed the requested name; it
   does not imply release or any later retirement fact.
+- `status()` is an immediate snapshot. `wait_ready_until()`, `release_until()`,
+  and `terminate_until()` return the same status shape after waiting only until
+  their absolute steady-clock deadlines. An incomplete snapshot reports only
+  confirmed facts; it does not invent a lifecycle milestone.
 - `Managed_child_custody::release_until()` closes recovery before requesting retirement and
   waits for graceful/natural retirement, returning only confirmed facts by its
   absolute deadline. It does not release the child's lifeline or initiate
@@ -116,8 +164,19 @@ Failures:
   admission rejects before custody acceptance.
 - Resource exceptions before durable acceptance may propagate; no OS creation
   authority has been granted at that point.
-- Readiness deadline expiry or resolution failure returns accepted custody with
-  `readiness_reached == false`; it is not a spawn-count failure.
+- A readiness deadline reached while the requested instance is still absent
+  returns accepted custody with `readiness_reached == false`; it does not by
+  itself record a managed-child failure. Release or termination deadline expiry
+  likewise returns incomplete confirmed facts without minting a failure. An
+  exception in readiness observation may instead be recorded as
+  `readiness_observation`.
+- `last_failure` is a retained historical diagnostic, not the current custody
+  state. Its `occurrence` identifies the recovery occurrence to which `kind`,
+  `native_error`, and `message` apply. Later successful progress, including
+  complete release, does not erase an earlier report.
+- `Managed_child_failure_kind::none` means no managed-child failure report has
+  been recorded. It is not an independent success result; use the other status
+  fields to decide whether the requested milestone is confirmed.
 
 Example source:
 
