@@ -1489,6 +1489,23 @@ bool run_unrelated_readiness_rejection(
     char* argv[],
     const std::string& binary_path)
 {
+    static std::atomic<sintra::instance_id_type> expected_spawn_iid{
+        sintra::invalid_instance_id};
+    static std::atomic<int> observed_spawn_pid{-1};
+    static std::atomic<unsigned> observed_spawn_count{0};
+    auto observe_spawn_success = +[](
+        sintra::instance_id_type process_iid,
+        int                      os_pid,
+        bool,
+        bool)
+    {
+        if (process_iid != expected_spawn_iid.load(std::memory_order_acquire)) {
+            return;
+        }
+        observed_spawn_pid.store(os_pid, std::memory_order_relaxed);
+        observed_spawn_count.fetch_add(1, std::memory_order_release);
+    };
+
     sintra::init(argc, argv);
     const auto marker = unique_marker("readiness_unrelated");
     const auto release = release_marker(marker);
@@ -1502,9 +1519,10 @@ bool run_unrelated_readiness_rejection(
 
     bool unrelated_assigned = false;
     bool unrelated_resolved = false;
-    bool readiness_rejected = false;
-    bool deadline_observed = false;
+    bool exact_identity_rejected = false;
+    bool spawn_observed = false;
     bool identity_written = false;
+    bool start_stamp_matched = false;
     bool release_written = false;
     bool survivor_absent = false;
     bool reap_normal = false;
@@ -1521,23 +1539,53 @@ bool run_unrelated_readiness_rejection(
         options.binary_path = binary_path;
         options.args = {k_native_bound_child_flag, marker.string()};
         options.process_instance_id = piid;
-        options.wait_for_instance_name = target_name;
-        options.wait_timeout = 500ms;
         options.lifetime.enable_lifeline = false;
 
-        const auto started = std::chrono::steady_clock::now();
+        expected_spawn_iid.store(piid, std::memory_order_release);
+        observed_spawn_pid.store(-1, std::memory_order_relaxed);
+        observed_spawn_count.store(0, std::memory_order_relaxed);
+        sintra::detail::test_hooks::s_runtime_spawn_success.store(
+            observe_spawn_success, std::memory_order_release);
         auto custody = sintra::spawn_swarm_process(options);
-        const auto elapsed = std::chrono::steady_clock::now() - started;
-        const auto observed = sintra::observe_managed_child(custody);
-        readiness_rejected = observed.accepted &&
-            observed.created_occurrences == 1 &&
-            !observed.readiness_reached;
-        deadline_observed = elapsed >= 350ms && elapsed < 3s;
+        sintra::detail::test_hooks::s_runtime_spawn_success.store(
+            nullptr, std::memory_order_release);
+        expected_spawn_iid.store(
+            sintra::invalid_instance_id, std::memory_order_release);
 
+        const auto observed = sintra::observe_managed_child(custody);
         const auto identity = wait_for_file(marker, 5s)
             ? read_child_identity(marker)
             : std::nullopt;
         identity_written = identity.has_value();
+        spawn_observed = identity && observed.accepted &&
+            observed.admitted_occurrences == 1 &&
+            observed.created_occurrences == 1 &&
+            observed_spawn_count.load(std::memory_order_acquire) == 1 &&
+            observed_spawn_pid.load(std::memory_order_relaxed) == identity->pid;
+        if (identity) {
+            const auto live_start_stamp = sintra::query_process_start_stamp(
+                static_cast<uint32_t>(identity->pid));
+            start_stamp_matched = live_start_stamp &&
+                *live_start_stamp == identity->start_stamp;
+        }
+
+        const auto occurrence_token =
+            sintra::s_mproc->child_custody_occurrence_token(piid);
+        const auto occurrence_custody = occurrence_token.custody.lock();
+        if (occurrence_custody &&
+            occurrence_token.process_instance_id == piid)
+        {
+            const auto exact_resolution =
+                sintra::detail::Managed_child_readiness_access::resolve(
+                    sintra::s_coord,
+                    target_name,
+                    occurrence_custody->identity,
+                    piid,
+                    occurrence_token.occurrence,
+                    occurrence_custody->readiness_cancelled);
+            exact_identity_rejected =
+                exact_resolution == sintra::invalid_instance_id;
+        }
 #ifndef _WIN32
         if (identity) {
             arm_posix_reap(*identity);
@@ -1560,20 +1608,22 @@ bool run_unrelated_readiness_rejection(
     std::filesystem::remove(release, ec);
 
     const bool valid = unrelated_assigned && unrelated_resolved &&
-        readiness_rejected && deadline_observed && identity_written &&
-        release_written && released.release_complete &&
+        exact_identity_rejected && spawn_observed && identity_written &&
+        start_stamp_matched && release_written && released.release_complete &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         survivor_absent && reap_normal && finalized;
     if (!valid) {
         std::fprintf(stderr,
-            "READINESS_UNRELATED_INVALID assigned=%d resolved=%d rejected=%d "
-            "deadline=%d identity=%d release_written=%d release_complete=%d "
-            "created=%zu exited=%zu survivor_absent=%d reap_normal=%d finalized=%d\n",
+            "READINESS_UNRELATED_INVALID assigned=%d resolved=%d exact_rejected=%d "
+            "spawn_observed=%d identity=%d start_stamp=%d release_written=%d "
+            "release_complete=%d created=%zu exited=%zu survivor_absent=%d "
+            "reap_normal=%d finalized=%d\n",
             unrelated_assigned ? 1 : 0,
             unrelated_resolved ? 1 : 0,
-            readiness_rejected ? 1 : 0,
-            deadline_observed ? 1 : 0,
+            exact_identity_rejected ? 1 : 0,
+            spawn_observed ? 1 : 0,
             identity_written ? 1 : 0,
+            start_stamp_matched ? 1 : 0,
             release_written ? 1 : 0,
             released.release_complete ? 1 : 0,
             released.created_occurrences,
