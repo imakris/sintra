@@ -757,6 +757,29 @@ int main(int argc, char* argv[])
     typed_outcome.root_finalized = root_finalized;
     typed_outcome.predecessor_abnormal_exit = predecessor_abnormal_exit;
     typed_outcome.replacement_normal_exit = replacement_normal_exit;
+#ifdef _WIN32
+    if (custody_record) {
+        std::lock_guard<std::mutex> lock(custody_record->mutex);
+        if (custody_record->occurrences.size() == 2) {
+            typed_outcome.predecessor_communication_retired =
+                custody_record->occurrences[0].communication_retired;
+            typed_outcome.predecessor_native_exit_observer_registered =
+                custody_record->occurrences[0].os_exit_observer_registered;
+            typed_outcome.replacement_native_exit_observer_registered =
+                custody_record->occurrences[1].os_exit_observer_registered;
+        }
+    }
+#else
+    if (custody_record) {
+        std::lock_guard<std::mutex> lock(custody_record->mutex);
+        if (custody_record->occurrences.size() == 2) {
+            typed_outcome.predecessor_communication_retired =
+                custody_record->occurrences[0].communication_retired;
+        }
+    }
+    typed_outcome.predecessor_native_exit_observer_registered = true;
+    typed_outcome.replacement_native_exit_observer_registered = true;
+#endif
     typed_outcome.forced_cleanup = forced_cleanup;
     typed_outcome.survivors_absent = no_survivors;
     typed_outcome.custody_release_complete =

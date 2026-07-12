@@ -185,6 +185,9 @@ struct Managed_child_occurrence_record
     bool                       os_process_created = false;
     bool                       initialization_reservation_active = false;
     bool                       publication_retired = false;
+    bool                       communication_retirement_authority_captured = false;
+    std::shared_ptr<Process_message_reader>
+                               communication_retirement_reader;
     bool                       communication_retirement_started = false;
     bool                       communication_retired = false;
     bool                       os_exit_confirmed = false;
@@ -544,12 +547,19 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const detail::Managed_child_occurrence_token& token);
     void note_child_publication_retired(
         const detail::Managed_child_occurrence_token& token);
-    void note_child_communication_retired(
-        const detail::Managed_child_occurrence_token& token);
+    bool capture_child_communication_retirement_authority(
+        const detail::Managed_child_occurrence_token& token,
+        const std::shared_ptr<Process_message_reader>& reader);
+    bool capture_replaced_child_communication_authority(
+        const std::shared_ptr<Process_message_reader>& reader);
     bool begin_child_communication_retirement(
         const detail::Managed_child_occurrence_token& token,
         uint64_t expected_release_attempt_generation,
-        uint64_t& claimed_release_attempt_generation);
+        uint64_t& claimed_release_attempt_generation,
+        std::shared_ptr<Process_message_reader>& reader);
+    bool complete_child_communication_retirement(
+        const detail::Managed_child_occurrence_token& token,
+        const std::shared_ptr<Process_message_reader>& reader);
     void reset_child_communication_retirement(
         const detail::Managed_child_occurrence_token& token,
         uint64_t release_attempt_generation);

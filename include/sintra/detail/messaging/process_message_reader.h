@@ -19,6 +19,45 @@ using std::condition_variable;
 using std::mutex;
 using std::thread;
 
+namespace detail {
+namespace test_hooks {
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Process_reader_rpc_unblock_callback =
+    void (*)(const char*, instance_id_type, uint32_t);
+inline std::atomic<Process_reader_rpc_unblock_callback>
+    s_process_reader_rpc_unblock{nullptr};
+#endif
+
+inline constexpr const char* k_process_reader_rpc_unblock_entered =
+    "process_reader_rpc_unblock_entered";
+inline constexpr const char* k_process_reader_rpc_unblock_claimed =
+    "process_reader_rpc_unblock_claimed";
+inline constexpr const char* k_process_reader_rpc_unblock_complete =
+    "process_reader_rpc_unblock_complete";
+
+} // namespace test_hooks
+
+inline void process_reader_rpc_unblock_for_test(
+    const char* stage,
+    instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_process_reader_rpc_unblock.load(
+            std::memory_order_acquire))
+    {
+        callback(stage, process_instance_id, occurrence);
+    }
+#else
+    (void)stage;
+    (void)process_instance_id;
+    (void)occurrence;
+#endif
+}
+
+} // namespace detail
+
 
 struct Outstanding_rpc_control;
 struct Process_message_reader;
@@ -147,6 +186,11 @@ struct Process_message_reader
         m_rep_running.store(reply_running);
         m_stop_condition.notify_all();
     }
+
+    void unblock_rpc_for_test()
+    {
+        unblock_rpc_once();
+    }
 #endif
 
 
@@ -176,6 +220,16 @@ struct Process_message_reader
     instance_id_type get_process_instance_id() const
     {
         return m_process_instance_id;
+    }
+
+    uint32_t get_occurrence() const
+    {
+        return m_occurrence;
+    }
+
+    uint64_t get_managed_child_custody_identity() const
+    {
+        return m_managed_child_custody_identity;
     }
 
     sequence_counter_type get_request_reading_sequence() const
@@ -220,6 +274,8 @@ struct Process_message_reader
 
 private:
 
+    void unblock_rpc_once();
+
     void begin_reading_session(
         const std::shared_ptr<Message_ring_R>& ring,
         std::atomic<bool>&                     running_flag);
@@ -244,6 +300,7 @@ private:
     
     atomic<bool>                        m_req_running               = false;
     atomic<bool>                        m_rep_running               = false;
+    std::once_flag                      m_rpc_unblock_once;
     mutex                               m_ready_mutex;
     condition_variable                  m_ready_condition;
     mutex                               m_stop_mutex;

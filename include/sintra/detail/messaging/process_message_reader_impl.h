@@ -579,6 +579,27 @@ void Process_message_reader::wait_until_ready()
 
 
 inline
+void Process_message_reader::unblock_rpc_once()
+{
+    detail::process_reader_rpc_unblock_for_test(
+        detail::test_hooks::k_process_reader_rpc_unblock_entered,
+        m_process_instance_id,
+        m_occurrence);
+    std::call_once(m_rpc_unblock_once, [this]() {
+        detail::process_reader_rpc_unblock_for_test(
+            detail::test_hooks::k_process_reader_rpc_unblock_claimed,
+            m_process_instance_id,
+            m_occurrence);
+        s_mproc->unblock_rpc(m_process_instance_id);
+        detail::process_reader_rpc_unblock_for_test(
+            detail::test_hooks::k_process_reader_rpc_unblock_complete,
+            m_process_instance_id,
+            m_occurrence);
+    });
+}
+
+
+inline
 void Process_message_reader::stop_nowait()
 {
     m_reader_state = READER_STOPPING;
@@ -603,7 +624,7 @@ void Process_message_reader::stop_nowait()
 
     // if there are outstanding RPC calls waiting for reply, they should be
     // unblocked (and fail), to avoid a deadlock
-    s_mproc->unblock_rpc();
+    unblock_rpc_once();
 
 
     if (!tl_is_req_thread || tl_in_post_handler()) {
@@ -678,7 +699,7 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
     if (!no_readers()) {
         // We might get here, if the coordinator is gone already.
         // In this case, we unblock pending RPC calls and do some more waiting.
-        s_mproc->unblock_rpc(m_process_instance_id);
+        unblock_rpc_once();
         wait_for_readers();
     }
 

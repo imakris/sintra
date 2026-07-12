@@ -2507,12 +2507,36 @@ inline void Managed_process::request_child_custody_release(
                         occurrence);
                 }
                 if (s_coord && !s_coord->unpublish_transceiver(process_iid)) {
+                    std::shared_ptr<Process_message_reader> retiring_reader;
+                    {
+                        Dispatch_shared_lock readers_lock(m_readers_mutex);
+                        auto reader = m_readers.find(process_iid);
+                        if (reader != m_readers.end()) {
+                            retiring_reader = reader->second;
+                        }
+                    }
+                    const bool authority_captured =
+                        capture_child_communication_retirement_authority(
+                            token, retiring_reader);
+                    if (!authority_captured) {
+                        std::lock_guard<std::mutex> lock(custody->mutex);
+                        if (custody->release_attempt_generation ==
+                                release_attempt_generation)
+                        {
+                            custody->release_attempt_phase =
+                                detail::Release_attempt_phase::failing;
+                        }
+                        custody->changed.notify_all();
+                        return false;
+                    }
                     uint64_t claimed_release_attempt_generation = 0;
+                    std::shared_ptr<Process_message_reader> claimed_reader;
                     const bool communication_claimed =
                         begin_child_communication_retirement(
                             token,
                             release_attempt_generation,
-                            claimed_release_attempt_generation);
+                            claimed_release_attempt_generation,
+                            claimed_reader);
                     if (!communication_claimed) {
                         if (!release_attempt_active()) {
                             converge_native();
@@ -2530,16 +2554,8 @@ inline void Managed_process::request_child_custody_release(
                         detail::test_hooks::k_managed_child_prepublication_first_miss,
                         process_iid,
                         occurrence);
-                    std::shared_ptr<Process_message_reader> retiring_reader;
-                    {
-                        Dispatch_shared_lock readers_lock(m_readers_mutex);
-                        auto reader = m_readers.find(process_iid);
-                        if (reader != m_readers.end()) {
-                            retiring_reader = reader->second;
-                        }
-                    }
                     try {
-                        if (!join_child_communication(token, retiring_reader)) {
+                        if (!join_child_communication(token, claimed_reader)) {
                             reset_child_communication_retirement(
                                 token, claimed_release_attempt_generation);
                             converge_native();
@@ -2586,6 +2602,81 @@ inline void Managed_process::request_child_custody_release(
             return release_attempt_active();
         };
 
+        // Exact historical convergence never performs process-slot operations.
+        // Communication uses retained per-occurrence authority; native cleanup
+        // uses the exact PID/start-stamp or Windows handle already in custody.
+        auto converge_historical =
+            [this, &custody, release_attempt_generation,
+             &release_attempt_active](
+                const std::vector<std::pair<uint32_t, instance_id_type>>& targets,
+                detail::Release_mode release_mode) -> bool
+        {
+            for (const auto& [occurrence_number, process_iid] : targets) {
+                if (!release_attempt_active()) {
+                    return false;
+                }
+                const detail::Managed_child_occurrence_token token{
+                    custody, process_iid, occurrence_number};
+                bool native_terminal = true;
+                bool communication_eligible = false;
+                {
+                    std::lock_guard<std::mutex> lock(custody->mutex);
+                    const auto occurrence = std::find_if(
+                        custody->occurrences.begin(), custody->occurrences.end(),
+                        [&](const detail::Managed_child_occurrence_record& candidate) {
+                            return candidate.process_instance_id == process_iid &&
+                                candidate.occurrence == occurrence_number;
+                        });
+                    if (occurrence == custody->occurrences.end()) {
+                        return false;
+                    }
+                    native_terminal = occurrence->os_exit_confirmed;
+                    communication_eligible = occurrence->publication_retired &&
+                        occurrence->communication_retirement_authority_captured &&
+                        !occurrence->communication_retired &&
+                        !occurrence->communication_retirement_started;
+                }
+                if (release_mode == detail::Release_mode::cleanup &&
+                    !native_terminal && !cleanup_child_native(token))
+                {
+                    std::lock_guard<std::mutex> lock(custody->mutex);
+                    if (custody->release_attempt_generation ==
+                            release_attempt_generation)
+                    {
+                        custody->release_attempt_phase =
+                            detail::Release_attempt_phase::failing;
+                    }
+                    custody->changed.notify_all();
+                    return false;
+                }
+                if (!communication_eligible) {
+                    continue;
+                }
+
+                uint64_t claimed_generation = 0;
+                std::shared_ptr<Process_message_reader> reader;
+                if (!begin_child_communication_retirement(
+                        token, release_attempt_generation,
+                        claimed_generation, reader))
+                {
+                    continue;
+                }
+                try {
+                    if (!join_child_communication(token, reader)) {
+                        reset_child_communication_retirement(
+                            token, claimed_generation);
+                        return false;
+                    }
+                }
+                catch (...) {
+                    reset_child_communication_retirement(
+                        token, claimed_generation);
+                    throw;
+                }
+            }
+            return release_attempt_active();
+        };
+
         auto all_terminal_locked = [&]() {
             return std::all_of(
                 custody->occurrences.begin(), custody->occurrences.end(),
@@ -2596,7 +2687,10 @@ inline void Managed_process::request_child_custody_release(
                         (occurrence.setup ==
                             detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
                          occurrence.publication_retired &&
+                         occurrence.communication_retirement_authority_captured &&
                          occurrence.communication_retired &&
+                         !occurrence.communication_retirement_started &&
+                         !occurrence.communication_retirement_reader &&
                          occurrence.os_exit_confirmed));
                 });
         };
@@ -2625,9 +2719,45 @@ inline void Managed_process::request_child_custody_release(
             }
             return targets;
         };
+        auto historical_communication_targets_locked = [&]() {
+            std::vector<std::pair<uint32_t, instance_id_type>> targets;
+            for (const auto& occurrence : custody->occurrences) {
+                bool current_successor_live = false;
+                for (const auto& [active_occurrence, active_process_iid] : active) {
+                    if (active_process_iid != occurrence.process_instance_id ||
+                        active_occurrence == occurrence.occurrence)
+                    {
+                        continue;
+                    }
+                    const auto successor = std::find_if(
+                        custody->occurrences.begin(), custody->occurrences.end(),
+                        [&](const detail::Managed_child_occurrence_record& candidate) {
+                            return candidate.process_instance_id == active_process_iid &&
+                                candidate.occurrence == active_occurrence;
+                        });
+                    current_successor_live =
+                        successor != custody->occurrences.end() &&
+                        !successor->os_exit_confirmed;
+                    break;
+                }
+                if (occurrence.setup == detail::Managed_child_occurrence_record::
+                        setup_state::ownership_ready &&
+                    !current_successor_live &&
+                    occurrence.publication_retired &&
+                    occurrence.communication_retirement_authority_captured &&
+                    !occurrence.communication_retired &&
+                    !occurrence.communication_retirement_started)
+                {
+                    targets.emplace_back(
+                        occurrence.occurrence, occurrence.process_instance_id);
+                }
+            }
+            return targets;
+        };
         while (true) {
             bool should_cleanup = false;
             std::vector<std::pair<uint32_t, instance_id_type>> passive_targets;
+            std::vector<std::pair<uint32_t, instance_id_type>> historical_targets;
 #ifdef _WIN32
             HANDLE fallback_handle = nullptr;
             uint32_t fallback_occurrence = 0;
@@ -2662,6 +2792,7 @@ inline void Managed_process::request_child_custody_release(
                     !cleanup_applied;
                 if (!should_cleanup) {
                     passive_targets = passive_targets_locked();
+                    historical_targets = historical_communication_targets_locked();
                 }
                 if (custody->release_mode == detail::Release_mode::passive &&
                     !passive_wait_reported)
@@ -2694,7 +2825,8 @@ inline void Managed_process::request_child_custody_release(
                     }
                 }
 #endif
-                if (!should_cleanup && passive_targets.empty()
+                if (!should_cleanup && passive_targets.empty() &&
+                    historical_targets.empty()
 #ifdef _WIN32
                     && !fallback_handle
 #endif
@@ -2709,7 +2841,8 @@ inline void Managed_process::request_child_custody_release(
                             (custody->release_mode ==
                                 detail::Release_mode::cleanup &&
                              !cleanup_applied) ||
-                            !passive_targets_locked().empty();
+                            !passive_targets_locked().empty() ||
+                            !historical_communication_targets_locked().empty();
                     });
                     continue;
                 }
@@ -2719,6 +2852,11 @@ inline void Managed_process::request_child_custody_release(
                 if (!retire_transport(active, detail::Release_mode::cleanup)) {
                     continue;
                 }
+                if (!converge_historical(
+                        admitted, detail::Release_mode::cleanup))
+                {
+                    continue;
+                }
                 cleanup_applied = true;
                 continue;
             }
@@ -2726,6 +2864,15 @@ inline void Managed_process::request_child_custody_release(
             if (!passive_targets.empty()) {
                 if (!retire_transport(
                         passive_targets, detail::Release_mode::passive))
+                {
+                    continue;
+                }
+                continue;
+            }
+
+            if (!historical_targets.empty()) {
+                if (!converge_historical(
+                        historical_targets, detail::Release_mode::passive))
                 {
                     continue;
                 }
@@ -2973,18 +3120,107 @@ inline void Managed_process::note_child_publication_retired(
         &detail::Managed_child_occurrence_record::publication_retired);
 }
 
-inline void Managed_process::note_child_communication_retired(
-    const detail::Managed_child_occurrence_token& token)
+inline bool Managed_process::capture_child_communication_retirement_authority(
+    const detail::Managed_child_occurrence_token& token,
+    const std::shared_ptr<Process_message_reader>& reader)
 {
-    detail::update_child_occurrence(
-        token,
-        &detail::Managed_child_occurrence_record::communication_retired);
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return false;
+    }
+    if (reader &&
+        (reader->get_process_instance_id() != token.process_instance_id ||
+         reader->get_occurrence() != token.occurrence ||
+         reader->get_managed_child_custody_identity() != custody->identity))
+    {
+        Log_stream(log_level::error)
+            << "Managed-child communication authority identity mismatch.\n";
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    for (auto& occurrence : custody->occurrences) {
+        if (occurrence.process_instance_id != token.process_instance_id ||
+            occurrence.occurrence != token.occurrence)
+        {
+            continue;
+        }
+        if (occurrence.communication_retired) {
+            return !reader &&
+                occurrence.communication_retirement_authority_captured &&
+                !occurrence.communication_retirement_started &&
+                !occurrence.communication_retirement_reader;
+        }
+        if (occurrence.communication_retirement_authority_captured) {
+            if (occurrence.communication_retirement_reader != reader) {
+                Log_stream(log_level::error)
+                    << "Managed-child communication authority changed for an exact occurrence.\n";
+                return false;
+            }
+            return true;
+        }
+        occurrence.communication_retirement_authority_captured = true;
+        occurrence.communication_retirement_reader = reader;
+        custody->changed.notify_all();
+        return true;
+    }
+    return false;
+}
+
+inline bool Managed_process::capture_replaced_child_communication_authority(
+    const std::shared_ptr<Process_message_reader>& reader)
+{
+    if (!reader || reader->get_managed_child_custody_identity() == 0) {
+        return true;
+    }
+    std::shared_ptr<detail::Managed_child_custody_record> custody;
+    {
+        std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+        const auto found = m_child_custodies.find(
+            reader->get_managed_child_custody_identity());
+        if (found != m_child_custodies.end()) {
+            custody = found->second;
+        }
+    }
+    if (!custody) {
+        return false;
+    }
+    bool communication_terminal = false;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        const auto exact = std::find_if(
+            custody->occurrences.begin(), custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& occurrence) {
+                return occurrence.process_instance_id ==
+                        reader->get_process_instance_id() &&
+                    occurrence.occurrence == reader->get_occurrence();
+            });
+        if (exact == custody->occurrences.end() || !exact->publication_retired)
+        {
+            return false;
+        }
+        communication_terminal = exact->communication_retired;
+        if (communication_terminal &&
+            (!exact->communication_retirement_authority_captured ||
+             exact->communication_retirement_started ||
+             exact->communication_retirement_reader))
+        {
+            return false;
+        }
+    }
+    if (communication_terminal) {
+        return true;
+    }
+    return capture_child_communication_retirement_authority(
+        {custody, reader->get_process_instance_id(), reader->get_occurrence()},
+        reader);
 }
 
 inline bool Managed_process::begin_child_communication_retirement(
     const detail::Managed_child_occurrence_token& token,
     uint64_t expected_release_attempt_generation,
-    uint64_t& claimed_release_attempt_generation)
+    uint64_t& claimed_release_attempt_generation,
+    std::shared_ptr<Process_message_reader>& reader)
 {
     claimed_release_attempt_generation = 0;
     auto custody = token.custody.lock();
@@ -3013,12 +3249,14 @@ inline bool Managed_process::begin_child_communication_retirement(
         if (occurrence.process_instance_id == token.process_instance_id &&
             occurrence.occurrence == token.occurrence)
         {
-            if (occurrence.communication_retired ||
+            if (!occurrence.communication_retirement_authority_captured ||
+                occurrence.communication_retired ||
                 occurrence.communication_retirement_started)
             {
                 return false;
             }
             occurrence.communication_retirement_started = true;
+            reader = occurrence.communication_retirement_reader;
             if (custody->release_attempt_phase ==
                 detail::Release_attempt_phase::running)
             {
@@ -3029,6 +3267,47 @@ inline bool Managed_process::begin_child_communication_retirement(
         }
     }
     return false;
+}
+
+inline bool Managed_process::complete_child_communication_retirement(
+    const detail::Managed_child_occurrence_token& token,
+    const std::shared_ptr<Process_message_reader>& reader)
+{
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return false;
+    }
+    std::shared_ptr<Process_message_reader> retired_authority;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        auto exact = std::find_if(
+            custody->occurrences.begin(), custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& occurrence) {
+                return occurrence.process_instance_id == token.process_instance_id &&
+                    occurrence.occurrence == token.occurrence;
+            });
+        if (exact == custody->occurrences.end() ||
+            !exact->communication_retirement_authority_captured ||
+            exact->communication_retirement_reader != reader)
+        {
+            return false;
+        }
+        exact->communication_retired = true;
+        exact->communication_retirement_started = false;
+        retired_authority = std::move(exact->communication_retirement_reader);
+    }
+    custody->changed.notify_all();
+
+    if (reader) {
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
+        auto it = m_readers.find(token.process_instance_id);
+        if (it != m_readers.end() && it->second == reader) {
+            m_readers.erase(it);
+        }
+    }
+    // `retired_authority` and the caller's copy keep destruction outside both
+    // lifecycle locks. The exact reader has already stopped successfully.
+    return true;
 }
 
 inline void Managed_process::reset_child_communication_retirement(
@@ -3076,14 +3355,8 @@ inline bool Managed_process::join_child_communication(
             token.occurrence);
         return false;
     }
-    unblock_rpc(token.process_instance_id);
-    note_child_communication_retired(token);
-    if (reader) {
-        Dispatch_unique_lock readers_lock(m_readers_mutex);
-        auto it = m_readers.find(token.process_instance_id);
-        if (it != m_readers.end() && it->second == reader) {
-            m_readers.erase(it);
-        }
+    if (!complete_child_communication_retirement(token, reader)) {
+        return false;
     }
     detail::managed_child_transport_retirement_for_test(
         detail::test_hooks::k_managed_child_communication_after_join,
@@ -3096,16 +3369,22 @@ inline void Managed_process::retire_child_communication(
     const detail::Managed_child_occurrence_token& token,
     std::shared_ptr<Process_message_reader> reader)
 {
+    if (!token ||
+        !capture_child_communication_retirement_authority(token, reader))
+    {
+        return;
+    }
     uint64_t release_attempt_generation = 0;
-    if (!token || !begin_child_communication_retirement(
-            token, 0, release_attempt_generation))
+    std::shared_ptr<Process_message_reader> claimed_reader;
+    if (!begin_child_communication_retirement(
+            token, 0, release_attempt_generation, claimed_reader))
     {
         return;
     }
     try {
         start_child_custody_worker(
             [this, token, release_attempt_generation,
-             reader = std::move(reader)]() mutable {
+             reader = std::move(claimed_reader)]() mutable {
             try {
                 if (!join_child_communication(token, reader)) {
                     reset_child_communication_retirement(
@@ -4525,6 +4804,11 @@ inline bool Managed_process::prepare_process_reader(
             return false;
         }
         if (existing->second) {
+            if (!capture_replaced_child_communication_authority(
+                    existing->second))
+            {
+                return false;
+            }
             existing->second->stop_and_wait(1.0);
         }
         m_readers.erase(existing);

@@ -62,6 +62,8 @@ struct Occurrence_isolation_outcome
     bool root_finalized = false;
     bool predecessor_abnormal_exit = false;
     bool replacement_normal_exit = false;
+    bool predecessor_native_exit_observer_registered = false;
+    bool replacement_native_exit_observer_registered = false;
     bool forced_cleanup = false;
     bool survivors_absent = false;
     bool custody_release_complete = false;
