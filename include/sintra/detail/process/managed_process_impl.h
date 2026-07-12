@@ -2166,18 +2166,50 @@ inline bool Managed_process::admit_child_custody_occurrence(
         if (custody->phase != detail::Custody_phase::open) {
             return false;
         }
+        const auto duplicate = std::find_if(
+            custody->occurrences.begin(),
+            custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& candidate) {
+                return candidate.process_instance_id == process_instance_id &&
+                    candidate.occurrence == occurrence;
+            });
+        if (duplicate != custody->occurrences.end()) {
+            return false;
+        }
         detail::Managed_child_occurrence_record admitted;
         admitted.occurrence = occurrence;
         admitted.process_instance_id = process_instance_id;
         custody->occurrences.push_back(admitted);
     }
-    detail::managed_child_failure_for_test(
-        detail::test_hooks::k_managed_child_fail_admission_mapping,
-        process_instance_id,
-        occurrence);
-    {
-        std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-        m_child_custody_by_process[process_instance_id] = {custody, occurrence};
+    try {
+        detail::managed_child_failure_for_test(
+            detail::test_hooks::k_managed_child_fail_admission_mapping,
+            process_instance_id,
+            occurrence);
+        {
+            std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+            m_child_custody_by_process[process_instance_id] = {custody, occurrence};
+        }
+    }
+    catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(custody->mutex);
+            const auto admitted = std::find_if(
+                custody->occurrences.begin(),
+                custody->occurrences.end(),
+                [&](const detail::Managed_child_occurrence_record& candidate) {
+                    return candidate.process_instance_id == process_instance_id &&
+                        candidate.occurrence == occurrence &&
+                        candidate.setup == detail::Managed_child_occurrence_record::
+                            setup_state::pending &&
+                        !candidate.os_process_created;
+                });
+            if (admitted != custody->occurrences.end()) {
+                custody->occurrences.erase(admitted);
+            }
+        }
+        custody->changed.notify_all();
+        throw;
     }
     custody->changed.notify_all();
     return true;
