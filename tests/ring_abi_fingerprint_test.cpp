@@ -48,7 +48,7 @@ void test_message_prefix_ring_abi()
         k_failure_prefix,
         "managed-child metadata offsets must remain part of the versioned framing");
 
-    const sintra::Message_prefix ordinary_prefix;
+    const sintra::Message_prefix ordinary_prefix{};
     sintra::test::require_true(
         ordinary_prefix.managed_child_custody_identity == 0 &&
             ordinary_prefix.managed_child_occurrence == 0,
