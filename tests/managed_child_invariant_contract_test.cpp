@@ -46,6 +46,8 @@ std::atomic<uint64_t> s_reservation{0};
 std::atomic<int> s_expected_pid{-1};
 std::atomic<unsigned> s_reap_count{0};
 std::atomic<int> s_reap_status{0};
+std::atomic<bool> s_cleanup_entered{false};
+std::atomic<bool> s_cleanup_release{false};
 fs::path s_marker;
 
 std::optional<Child_identity> read_identity(const fs::path& path)
@@ -121,6 +123,30 @@ void observe_reap(pid_t pid, int status) noexcept
 }
 #endif
 
+void gate_automatic_cleanup(
+    const char* stage,
+    sintra::instance_id_type process_iid,
+    uint32_t occurrence)
+{
+    if (!stage ||
+        s_target.load(std::memory_order_acquire) !=
+            Target::posix_reap_reservation ||
+        process_iid != s_expected_iid.load(std::memory_order_acquire) ||
+        occurrence != 0 ||
+        std::string_view(stage) != sintra::detail::test_hooks::
+            k_managed_child_cleanup_before_actions)
+    {
+        return;
+    }
+    s_cleanup_entered.store(true, std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!s_cleanup_release.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(1ms);
+    }
+}
+
 int child_main(const fs::path& marker)
 {
     const auto stamp = sintra::current_process_start_stamp();
@@ -154,6 +180,8 @@ Case_result run_case(
     s_expected_pid.store(-1, std::memory_order_relaxed);
     s_reap_count.store(0, std::memory_order_relaxed);
     s_reap_status.store(0, std::memory_order_relaxed);
+    s_cleanup_entered.store(false, std::memory_order_relaxed);
+    s_cleanup_release.store(false, std::memory_order_relaxed);
     s_marker = shared.path() / (std::string(name) + ".complete");
 
     const auto process_iid = sintra::make_process_instance_id();
@@ -163,6 +191,9 @@ Case_result run_case(
         sintra::test::managed_child::Scoped_test_hook invariant_hook(
             sintra::detail::test_hooks::s_managed_child_invariant,
             &force_invariant_miss);
+        sintra::test::managed_child::Scoped_test_hook cleanup_hook(
+            sintra::detail::test_hooks::s_managed_child_cleanup,
+            &gate_automatic_cleanup);
 #ifndef _WIN32
         sintra::test::managed_child::Scoped_test_hook reap_hook(
             sintra::detail::test_hooks::s_child_reaped,
@@ -175,6 +206,16 @@ Case_result run_case(
         options.lifetime.enable_lifeline = true;
         custody = sintra::spawn_swarm_process(options);
 
+        if (target == Target::posix_reap_reservation) {
+            const auto cleanup_deadline =
+                std::chrono::steady_clock::now() + 3s;
+            while (!s_cleanup_entered.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < cleanup_deadline)
+            {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+
         const auto before = custody.status();
         std::optional<Child_identity> identity;
         if (before.created_occurrences != 0 &&
@@ -186,10 +227,70 @@ Case_result run_case(
             }
         }
 
-        const auto terminate_started = std::chrono::steady_clock::now();
-        auto released = custody.terminate_until(terminate_started + 6s);
-        const bool terminate_bounded =
-            std::chrono::steady_clock::now() - terminate_started < 7s;
+        const bool reader_retained_before_cleanup =
+            sintra::s_mproc->has_process_reader(process_iid);
+        bool lifeline_retained_before_cleanup = false;
+        {
+            std::lock_guard<std::mutex> lock(sintra::s_mproc->m_lifeline_mutex);
+            lifeline_retained_before_cleanup =
+                sintra::s_mproc->m_lifeline_writes.count(process_iid) == 1;
+        }
+        bool init_clear_before_cleanup = false;
+        {
+            std::lock_guard lock(sintra::s_coord->m_init_tracking_mutex);
+            init_clear_before_cleanup =
+                sintra::s_coord->m_processes_in_initialization.count(
+                    process_iid) == 0;
+        }
+        bool roster_empty_before_cleanup = true;
+        bool exact_roster_authority_before_cleanup = false;
+#ifndef _WIN32
+        {
+            std::lock_guard<std::mutex> lock(
+                sintra::s_mproc->m_spawned_child_pids_mutex);
+            roster_empty_before_cleanup =
+                sintra::s_mproc->m_spawned_child_pids.empty();
+            if (identity) {
+                const auto reservation =
+                    s_reservation.load(std::memory_order_acquire);
+                exact_roster_authority_before_cleanup = std::any_of(
+                    sintra::s_mproc->m_spawned_child_pids.begin(),
+                    sintra::s_mproc->m_spawned_child_pids.end(),
+                    [&](const auto& slot) {
+                        return slot.reservation_id == reservation &&
+                            reservation != 0 && slot.pid == identity->pid &&
+                            slot.start_stamp_available &&
+                            slot.start_stamp == identity->start_stamp &&
+                            slot.occurrence.process_instance_id == process_iid &&
+                            slot.occurrence.occurrence == 0;
+                    });
+            }
+        }
+#endif
+
+        const auto cleanup_started = std::chrono::steady_clock::now();
+        bool automatic_cleanup_requested = false;
+        sintra::Managed_child_status released;
+        if (target == Target::posix_reap_reservation) {
+            const bool automatic_cleanup_entered =
+                s_cleanup_entered.load(std::memory_order_acquire);
+            s_cleanup_release.store(true, std::memory_order_release);
+            released = custody.status();
+            automatic_cleanup_requested =
+                automatic_cleanup_entered && released.release_requested;
+            const auto automatic_deadline = cleanup_started + 6s;
+            while (!released.release_complete &&
+                   std::chrono::steady_clock::now() < automatic_deadline)
+            {
+                std::this_thread::sleep_for(5ms);
+                released = custody.status();
+            }
+        }
+        else {
+            released = custody.terminate_until(cleanup_started + 6s);
+        }
+        const bool cleanup_bounded =
+            std::chrono::steady_clock::now() - cleanup_started < 7s;
         const bool exact_absent = !identity ||
             !sintra::test::managed_child::exact_process_is_live(
                 identity->pid, identity->start_stamp);
@@ -208,13 +309,21 @@ Case_result run_case(
                 sintra::s_coord->m_processes_in_initialization.count(process_iid) == 0;
         }
 
-        const bool common = terminate_bounded && released.accepted &&
+        const bool common = cleanup_bounded && released.accepted &&
             released.release_requested && released.release_complete &&
             exact_absent && roster_empty && init_clear;
+        const char* expected_failure_stage =
+            target == Target::exact_occurrence
+            ? sintra::detail::test_hooks::k_managed_child_exact_occurrence_lookup
+            : sintra::detail::test_hooks::
+                k_managed_child_posix_reap_reservation_lookup;
         const bool typed_failure =
             released.last_failure.kind ==
                 sintra::Managed_child_failure_kind::setup_exception &&
-            released.last_failure.occurrence == 0;
+            released.last_failure.occurrence == 0 &&
+            released.last_failure.native_error == 0 &&
+            released.last_failure.message.find(expected_failure_stage) !=
+                std::string::npos;
         const bool no_failure = released.last_failure.kind ==
             sintra::Managed_child_failure_kind::none;
         const bool exact_hit = s_exact_hits.load(std::memory_order_acquire) == 1;
@@ -238,6 +347,9 @@ Case_result run_case(
         bool red = false;
         if (target == Target::exact_occurrence) {
             green = common && exact_hit && !roster_hit && typed_failure &&
+                !reader_retained_before_cleanup &&
+                !lifeline_retained_before_cleanup &&
+                init_clear_before_cleanup && roster_empty_before_cleanup &&
                 released.admitted_occurrences == 1 &&
                 released.created_occurrences == 0 &&
                 released.exited_occurrences == 0 && !identity;
@@ -249,6 +361,11 @@ Case_result run_case(
 #ifndef _WIN32
         else {
             green = common && !exact_hit && roster_hit && typed_failure &&
+                reader_retained_before_cleanup &&
+                lifeline_retained_before_cleanup &&
+                init_clear_before_cleanup &&
+                exact_roster_authority_before_cleanup &&
+                automatic_cleanup_requested &&
                 s_reservation.load(std::memory_order_acquire) != 0 &&
                 released.admitted_occurrences == 1 &&
                 released.created_occurrences == 1 &&
@@ -258,14 +375,37 @@ Case_result run_case(
                 released.admitted_occurrences == 1 &&
                 released.created_occurrences == 1 &&
                 released.exited_occurrences == 1 && identity_valid && reap_exact;
+            if (!green && !red) {
+                std::fprintf(stderr,
+                    "F03_REAP_INVALID common=%d exact_hit=%d roster_hit=%d "
+                    "typed=%d no_failure=%d reader=%d lifeline=%d init=%d "
+                    "authority=%d auto=%d reservation=%llu "
+                    "admitted=%zu created=%zu exited=%zu identity=%d reap=%d\n",
+                    common, exact_hit, roster_hit, typed_failure, no_failure,
+                    reader_retained_before_cleanup,
+                    lifeline_retained_before_cleanup,
+                    init_clear_before_cleanup,
+                    exact_roster_authority_before_cleanup,
+                    automatic_cleanup_requested,
+                    static_cast<unsigned long long>(
+                        s_reservation.load(std::memory_order_acquire)),
+                    released.admitted_occurrences,
+                    released.created_occurrences,
+                    released.exited_occurrences,
+                    identity_valid,
+                    reap_exact);
+            }
         }
 #endif
         invariant_hook.restore();
+        cleanup_hook.restore();
 #ifndef _WIN32
         reap_hook.restore();
 #endif
         const bool hooks_restored =
             sintra::detail::test_hooks::s_managed_child_invariant.load(
+                std::memory_order_acquire) == nullptr
+            && sintra::detail::test_hooks::s_managed_child_cleanup.load(
                 std::memory_order_acquire) == nullptr
 #ifndef _WIN32
             && sintra::detail::test_hooks::s_child_reaped.load(
