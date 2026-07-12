@@ -3,6 +3,7 @@
 
 #include <sintra/sintra.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -27,6 +28,12 @@ constexpr const char* k_child_flag = "--managed-child-setup-race-child";
 constexpr const char* k_native_bound_child_flag =
     "--managed-child-native-bound-failure-child";
 constexpr const char* k_owned_child_flag = "--managed-child-owned-failure-child";
+constexpr const char* k_prepublication_exit_child_flag =
+    "--managed-child-prepublication-exit-child";
+
+struct Unrelated_publication_target :
+    sintra::Derived_transceiver<Unrelated_publication_target>
+{};
 
 struct Setup_gate
 {
@@ -66,6 +73,23 @@ struct Prepublication_gate
 };
 
 Prepublication_gate* s_prepublication_gate = nullptr;
+
+struct Transport_retirement_gate
+{
+    std::mutex                  mutex;
+    std::condition_variable     changed;
+    sintra::instance_id_type    expected_iid = sintra::invalid_instance_id;
+    uint32_t                    expected_occurrence = 0;
+    bool                        before_join = false;
+    bool                        join_incomplete = false;
+    bool                        after_join = false;
+    bool                        force_incomplete = false;
+    std::chrono::steady_clock::time_point before_join_at{};
+    std::chrono::steady_clock::time_point join_incomplete_at{};
+    std::shared_ptr<sintra::Process_message_reader> reader;
+};
+
+Transport_retirement_gate* s_transport_retirement_gate = nullptr;
 
 #ifndef _WIN32
 struct Roster_reservation_gate
@@ -120,6 +144,62 @@ void observe_prepublication_cleanup(
         sintra::detail::test_hooks::k_managed_child_prepublication_reader_terminal)
     {
         gate->reader_terminal = true;
+        gate->changed.notify_all();
+    }
+}
+
+void hold_transport_retirement(
+    const char* stage,
+    sintra::instance_id_type process_iid,
+    uint32_t occurrence)
+{
+    auto* gate = s_transport_retirement_gate;
+    if (!gate || !stage || process_iid != gate->expected_iid ||
+        occurrence != gate->expected_occurrence)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    if (std::string_view(stage) ==
+        sintra::detail::test_hooks::k_managed_child_communication_before_join)
+    {
+        if (gate->force_incomplete) {
+            {
+                sintra::Dispatch_shared_lock readers_lock(
+                    sintra::s_mproc->m_readers_mutex);
+                auto reader = sintra::s_mproc->m_readers.find(process_iid);
+                if (reader != sintra::s_mproc->m_readers.end()) {
+                    gate->reader = reader->second;
+                }
+            }
+            const auto deadline = std::chrono::steady_clock::now() + 2s;
+            while (gate->reader && gate->reader->running_for_test() &&
+                std::chrono::steady_clock::now() < deadline)
+            {
+                lock.unlock();
+                std::this_thread::sleep_for(10ms);
+                lock.lock();
+            }
+            if (gate->reader) {
+                gate->reader->set_running_for_test(true, false);
+            }
+        }
+        gate->before_join_at = std::chrono::steady_clock::now();
+        gate->before_join = true;
+        gate->changed.notify_all();
+    }
+    else if (std::string_view(stage) ==
+        sintra::detail::test_hooks::k_managed_child_communication_join_incomplete)
+    {
+        gate->force_incomplete = false;
+        gate->join_incomplete_at = std::chrono::steady_clock::now();
+        gate->join_incomplete = true;
+        gate->changed.notify_all();
+    }
+    else if (std::string_view(stage) ==
+        sintra::detail::test_hooks::k_managed_child_communication_after_join)
+    {
+        gate->after_join = true;
         gate->changed.notify_all();
     }
 }
@@ -372,6 +452,65 @@ bool process_registry_absent(sintra::instance_id_type process_iid)
     std::lock_guard lock(sintra::s_coord->m_publish_mutex);
     return sintra::s_coord->m_transceiver_registry.find(process_iid) ==
         sintra::s_coord->m_transceiver_registry.end();
+}
+
+bool initialization_tracking_absent(sintra::instance_id_type process_iid)
+{
+    std::lock_guard lock(sintra::s_coord->m_init_tracking_mutex);
+    return sintra::s_coord->m_processes_in_initialization.count(process_iid) == 0;
+}
+
+std::optional<std::array<bool, 3>> occurrence_terminal_facts(
+    sintra::instance_id_type process_iid,
+    uint32_t occurrence_number)
+{
+    const auto token = sintra::s_mproc->child_custody_occurrence_token(process_iid);
+    auto custody = token.custody.lock();
+    if (!custody || token.occurrence != occurrence_number) {
+        return std::nullopt;
+    }
+    std::lock_guard lock(custody->mutex);
+    auto occurrence = std::find_if(
+        custody->occurrences.begin(),
+        custody->occurrences.end(),
+        [&](const sintra::detail::Managed_child_occurrence_record& candidate) {
+            return candidate.process_instance_id == process_iid &&
+                candidate.occurrence == occurrence_number;
+        });
+    if (occurrence == custody->occurrences.end()) {
+        return std::nullopt;
+    }
+    return std::array{
+        occurrence->initialization_reservation_active,
+        occurrence->publication_retired,
+        occurrence->communication_retired};
+}
+
+std::optional<std::array<bool, 4>> occurrence_release_attempt_facts(
+    sintra::instance_id_type process_iid,
+    uint32_t occurrence_number)
+{
+    const auto token = sintra::s_mproc->child_custody_occurrence_token(process_iid);
+    auto custody = token.custody.lock();
+    if (!custody || token.occurrence != occurrence_number) {
+        return std::nullopt;
+    }
+    std::lock_guard lock(custody->mutex);
+    auto occurrence = std::find_if(
+        custody->occurrences.begin(),
+        custody->occurrences.end(),
+        [&](const sintra::detail::Managed_child_occurrence_record& candidate) {
+            return candidate.process_instance_id == process_iid &&
+                candidate.occurrence == occurrence_number;
+        });
+    if (occurrence == custody->occurrences.end()) {
+        return std::nullopt;
+    }
+    return std::array{
+        custody->cleanup_started,
+        custody->cleanup_attempt_failed,
+        occurrence->communication_retirement_started,
+        custody->release_complete};
 }
 
 void reset_failure_hook()
@@ -716,6 +855,19 @@ bool run_owned_native_exception(
     options.wait_timeout = 500ms;
     options.lifetime.enable_lifeline = false;
 
+    const std::string unrelated_name =
+        std::string("managed_child_unrelated_after_") + phase + "_" +
+        std::to_string(piid);
+    std::atomic<unsigned> unrelated_publications{0};
+    auto observe_unrelated = [&](const sintra::Coordinator::instance_published& message) {
+        if (static_cast<std::string>(message.assigned_name) == unrelated_name) {
+            unrelated_publications.fetch_add(1, std::memory_order_release);
+        }
+    };
+    sintra::activate_slot(
+        observe_unrelated,
+        sintra::Typed_instance_id<sintra::Coordinator>(sintra::s_coord_id));
+
     bool threw = false;
     sintra::Managed_child_custody custody;
     try {
@@ -736,6 +888,21 @@ bool run_owned_native_exception(
     const bool release_written = write_release_marker(marker);
     const auto released = sintra::wait_managed_child(
         custody, std::chrono::steady_clock::now() + 5s);
+    const bool initialization_retired = initialization_tracking_absent(piid);
+    bool unrelated_delivered = false;
+    {
+        Unrelated_publication_target unrelated;
+        const bool assigned = unrelated.assign_name(unrelated_name);
+        const auto publication_deadline = std::chrono::steady_clock::now() + 2s;
+        while (unrelated_publications.load(std::memory_order_acquire) != 1 &&
+            std::chrono::steady_clock::now() < publication_deadline)
+        {
+            std::this_thread::sleep_for(10ms);
+        }
+        unrelated_delivered = assigned &&
+            unrelated_publications.load(std::memory_order_acquire) == 1;
+    }
+    sintra::deactivate_all_slots();
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
     const auto hits = failure_hits(plan);
     reset_failure_hook();
@@ -753,7 +920,8 @@ bool run_owned_native_exception(
         released.accepted && released.admitted_occurrences == 1 &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         released.release_requested && released.release_complete &&
-        survivor_absent && reap_normal && finalized;
+        initialization_retired && unrelated_delivered && survivor_absent &&
+        reap_normal && finalized;
 }
 
 bool run_release_worker_retry(
@@ -817,6 +985,281 @@ bool run_release_worker_retry(
         first.release_requested && !first.release_complete && release_written &&
         second.release_complete && second.created_occurrences == 1 &&
         second.exited_occurrences == 1 && survivor_absent && reap_normal && finalized;
+}
+
+bool run_prepublication_exit_convergence(
+    int argc,
+    char* argv[],
+    const std::string& binary_path)
+{
+    sintra::init(argc, argv);
+    const auto marker = unique_marker("prepublication_exit");
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+
+    const auto piid = sintra::make_process_instance_id();
+    sintra::Spawn_options options;
+    options.binary_path = binary_path;
+    options.args = {k_prepublication_exit_child_flag, marker.string()};
+    options.process_instance_id = piid;
+    options.lifetime.enable_lifeline = false;
+
+    auto custody = sintra::spawn_swarm_process(options);
+    const bool identity_written = wait_for_file(marker, 5s);
+    const auto identity = identity_written
+        ? read_child_identity(marker)
+        : std::nullopt;
+#ifndef _WIN32
+    if (identity) {
+        arm_posix_reap(*identity);
+    }
+#endif
+    auto exited = sintra::observe_managed_child(custody);
+    const auto exit_deadline = std::chrono::steady_clock::now() + 5s;
+    while (exited.exited_occurrences != 1 &&
+        std::chrono::steady_clock::now() < exit_deadline)
+    {
+        std::this_thread::sleep_for(10ms);
+        exited = sintra::observe_managed_child(custody);
+    }
+
+    const auto released = sintra::release_managed_child(
+        custody, std::chrono::steady_clock::now() + 5s);
+    const bool initialization_retired = initialization_tracking_absent(piid);
+    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+#ifndef _WIN32
+    const bool reap_normal = identity && posix_reap_normal();
+    clear_posix_reap();
+#else
+    const bool reap_normal = true;
+#endif
+    const bool finalized = sintra::detail::finalize();
+    std::filesystem::remove(marker, ec);
+
+    const bool valid = identity && exited.created_occurrences == 1 &&
+        exited.exited_occurrences == 1 && released.release_requested &&
+        released.release_complete && released.admitted_occurrences == 1 &&
+        released.created_occurrences == 1 && released.exited_occurrences == 1 &&
+        initialization_retired && survivor_absent && reap_normal && finalized;
+    if (!valid) {
+        std::fprintf(stderr,
+            "PREPUBLICATION_EXIT_INVALID identity=%d created=%zu exited=%zu "
+            "release_requested=%d release_complete=%d init_retired=%d "
+            "survivor_absent=%d reap_normal=%d finalized=%d\n",
+            identity ? 1 : 0,
+            released.created_occurrences,
+            released.exited_occurrences,
+            released.release_requested ? 1 : 0,
+            released.release_complete ? 1 : 0,
+            initialization_retired ? 1 : 0,
+            survivor_absent ? 1 : 0,
+            reap_normal ? 1 : 0,
+            finalized ? 1 : 0);
+    }
+    return valid;
+}
+
+bool run_split_transport_retirement(
+    int argc,
+    char* argv[],
+    const std::string& binary_path)
+{
+    sintra::init(argc, argv);
+    const auto marker = unique_marker("split_transport_retirement");
+    const auto release = release_marker(marker);
+    std::error_code ec;
+    std::filesystem::remove(marker, ec);
+    std::filesystem::remove(release, ec);
+
+    const auto piid = sintra::make_process_instance_id();
+    Transport_retirement_gate gate;
+    gate.expected_iid = piid;
+    gate.expected_occurrence = 0;
+    gate.force_incomplete = true;
+    s_transport_retirement_gate = &gate;
+    sintra::detail::test_hooks::s_managed_child_transport_retirement.store(
+        &hold_transport_retirement, std::memory_order_release);
+
+    sintra::Spawn_options options;
+    options.binary_path = binary_path;
+    options.args = {k_owned_child_flag, marker.string()};
+    options.process_instance_id = piid;
+    options.lifetime.enable_lifeline = false;
+    auto custody = sintra::spawn_swarm_process(options);
+
+    const bool identity_written = wait_for_file(marker, 5s);
+    const auto identity = identity_written
+        ? read_child_identity(marker)
+        : std::nullopt;
+#ifndef _WIN32
+    if (identity) {
+        arm_posix_reap(*identity);
+    }
+#endif
+
+    sintra::Managed_child_custody_observation first_release;
+    std::thread first_release_caller([&]() {
+        first_release = sintra::release_managed_child(
+            custody, std::chrono::steady_clock::now() + 2500ms);
+    });
+    const bool release_written = write_release_marker(marker);
+    bool join_incomplete = false;
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        join_incomplete = gate.changed.wait_for(lock, 5s, [&]() {
+            return gate.join_incomplete;
+        });
+    }
+    if (first_release_caller.joinable()) {
+        first_release_caller.join();
+    }
+    std::optional<std::array<bool, 4>> first_attempt;
+    const auto first_attempt_deadline = std::chrono::steady_clock::now() + 2s;
+    do {
+        first_attempt = occurrence_release_attempt_facts(piid, 0);
+        if (first_attempt && !(*first_attempt)[0]) {
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    } while (std::chrono::steady_clock::now() < first_attempt_deadline);
+    const auto held_facts = occurrence_terminal_facts(piid, 0);
+    const auto stop_elapsed = gate.join_incomplete_at - gate.before_join_at;
+    const bool stop_deadline_bounded =
+        stop_elapsed >= 900ms && stop_elapsed <= 1250ms;
+    const bool first_pass_ended = join_incomplete && first_attempt &&
+        !(*first_attempt)[0] && (*first_attempt)[1] &&
+        !(*first_attempt)[2] && !(*first_attempt)[3] && held_facts &&
+        !(*held_facts)[0] && (*held_facts)[1] && !(*held_facts)[2] &&
+        !first_release.release_complete && stop_deadline_bounded;
+
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        if (gate.reader) {
+            gate.reader->set_running_for_test(false, false);
+        }
+    }
+    const auto released = sintra::release_managed_child(
+        custody, std::chrono::steady_clock::now() + 5s);
+    bool after_join = false;
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        after_join = gate.changed.wait_for(lock, 5s, [&]() {
+            return gate.after_join;
+        });
+    }
+    sintra::detail::test_hooks::s_managed_child_transport_retirement.store(
+        nullptr, std::memory_order_release);
+    s_transport_retirement_gate = nullptr;
+    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+#ifndef _WIN32
+    const bool reap_normal = identity && posix_reap_normal();
+    clear_posix_reap();
+#else
+    const bool reap_normal = true;
+#endif
+
+    const auto retry_marker = unique_marker("communication_worker_retry");
+    const auto retry_release = release_marker(retry_marker);
+    std::filesystem::remove(retry_marker, ec);
+    std::filesystem::remove(retry_release, ec);
+    const auto retry_piid = sintra::make_process_instance_id();
+    Failure_plan retry_plan;
+    retry_plan.stage =
+        sintra::detail::test_hooks::k_managed_child_fail_communication_worker_start;
+    retry_plan.expected_iid = retry_piid;
+    retry_plan.expected_occurrence = 0;
+    retry_plan.remaining = 1;
+    s_failure_plan = &retry_plan;
+    sintra::detail::test_hooks::s_managed_child_failure.store(
+        &inject_managed_child_failure, std::memory_order_release);
+
+    sintra::Spawn_options retry_options;
+    retry_options.binary_path = binary_path;
+    retry_options.args = {k_owned_child_flag, retry_marker.string()};
+    retry_options.process_instance_id = retry_piid;
+    retry_options.lifetime.enable_lifeline = false;
+    auto retry_custody = sintra::spawn_swarm_process(retry_options);
+    const bool retry_identity_written = wait_for_file(retry_marker, 5s);
+    const auto retry_identity = retry_identity_written
+        ? read_child_identity(retry_marker)
+        : std::nullopt;
+#ifndef _WIN32
+    if (retry_identity) {
+        arm_posix_reap(*retry_identity);
+    }
+#endif
+    sintra::Managed_child_custody_observation retry_first_release;
+    std::thread retry_first_caller([&]() {
+        retry_first_release = sintra::release_managed_child(
+            retry_custody, std::chrono::steady_clock::now() + 2s);
+    });
+    const bool retry_release_written = write_release_marker(retry_marker);
+    if (retry_first_caller.joinable()) {
+        retry_first_caller.join();
+    }
+    std::optional<std::array<bool, 4>> retry_first_attempt;
+    const auto retry_attempt_deadline = std::chrono::steady_clock::now() + 2s;
+    do {
+        retry_first_attempt = occurrence_release_attempt_facts(retry_piid, 0);
+        if (retry_first_attempt && !(*retry_first_attempt)[0]) {
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    } while (std::chrono::steady_clock::now() < retry_attempt_deadline);
+    const bool retry_survivor_absent = retry_identity &&
+        wait_for_child_absent(*retry_identity, 5s);
+    const bool worker_failure_seen = failure_hits(retry_plan) == 1;
+    const auto retry_held_facts = occurrence_terminal_facts(retry_piid, 0);
+    const bool worker_first_pass_ended = retry_first_attempt &&
+        !(*retry_first_attempt)[0] && (*retry_first_attempt)[1] &&
+        !(*retry_first_attempt)[2] && !(*retry_first_attempt)[3] &&
+        retry_held_facts && !(*retry_held_facts)[0] &&
+        (*retry_held_facts)[1] && !(*retry_held_facts)[2] &&
+        !retry_first_release.release_complete;
+    reset_failure_hook();
+    const auto retried = sintra::release_managed_child(
+        retry_custody, std::chrono::steady_clock::now() + 5s);
+#ifndef _WIN32
+    const bool retry_reap_normal = retry_identity && posix_reap_normal();
+    clear_posix_reap();
+#else
+    const bool retry_reap_normal = true;
+#endif
+    const bool worker_retry_valid = retry_identity && retry_release_written &&
+        worker_failure_seen && worker_first_pass_ended &&
+        retried.release_complete &&
+        retried.created_occurrences == 1 && retried.exited_occurrences == 1 &&
+        retry_survivor_absent && retry_reap_normal;
+
+    const bool finalized = settle_detail_finalize("split_transport_retirement");
+    std::filesystem::remove(marker, ec);
+    std::filesystem::remove(release, ec);
+    std::filesystem::remove(retry_marker, ec);
+    std::filesystem::remove(retry_release, ec);
+
+    const bool valid = identity && release_written && first_pass_ended && after_join &&
+        released.release_complete && released.created_occurrences == 1 &&
+        released.exited_occurrences == 1 && survivor_absent && reap_normal &&
+        worker_retry_valid && finalized;
+    if (!valid) {
+        std::fprintf(stderr,
+            "SPLIT_TRANSPORT_INVALID identity=%d release_written=%d first_pass_ended=%d "
+            "stop_deadline_bounded=%d after_join=%d release_complete=%d created=%zu exited=%zu "
+            "survivor_absent=%d reap_normal=%d worker_retry=%d finalized=%d\n",
+            identity ? 1 : 0,
+            release_written ? 1 : 0,
+            first_pass_ended ? 1 : 0,
+            stop_deadline_bounded ? 1 : 0,
+            after_join ? 1 : 0,
+            released.release_complete ? 1 : 0,
+            released.created_occurrences,
+            released.exited_occurrences,
+            survivor_absent ? 1 : 0,
+            reap_normal ? 1 : 0,
+            worker_retry_valid ? 1 : 0,
+            finalized ? 1 : 0);
+    }
+    return valid;
 }
 
 bool run_prepublication_publish_race(
@@ -1047,12 +1490,31 @@ bool run_concurrent_posix_roster_reservations(
         write_release_marker(markers[0]) && write_release_marker(markers[1]);
 
     std::array<sintra::Managed_child_custody_observation, 2> released;
-    bool survivors_absent = true;
+    const auto release_deadline = std::chrono::steady_clock::now() + 5s;
+    std::array<std::thread, 2> release_callers;
     for (size_t i = 0; i < 2; ++i) {
-        released[i] = sintra::wait_managed_child(
-            custodies[i], std::chrono::steady_clock::now() + 5s);
+        release_callers[i] = std::thread([&, i]() {
+            do {
+                const auto attempt_deadline = std::min(
+                    release_deadline,
+                    std::chrono::steady_clock::now() + 250ms);
+                released[i] = sintra::release_managed_child(
+                    custodies[i], attempt_deadline);
+            }
+            while (!released[i].release_complete &&
+                std::chrono::steady_clock::now() < release_deadline);
+        });
+    }
+    for (auto& caller : release_callers) {
+        caller.join();
+    }
+    const bool releases_terminal =
+        released[0].release_complete && released[1].release_complete;
+
+    bool survivors_absent = releases_terminal;
+    for (size_t i = 0; i < 2; ++i) {
         survivors_absent = survivors_absent && identities[i] &&
-            wait_for_child_absent(*identities[i], 5s);
+            exact_child_absent(*identities[i]);
     }
     const bool reaps_normal = identities[0] && identities[1] &&
         concurrent_posix_reaps_normal();
@@ -1112,6 +1574,12 @@ int main(int argc, char* argv[])
             const bool finalized = settle_detail_finalize("owned_child");
             return identity_written && released && finalized ? 0 : 3;
         }
+        if (std::string(argv[i]) == k_prepublication_exit_child_flag) {
+            const std::filesystem::path marker = argv[i + 1];
+            const bool identity_written = write_child_identity(marker);
+            std::this_thread::sleep_for(250ms);
+            return identity_written ? 0 : 3;
+        }
     }
 
     const std::string binary_path = std::filesystem::absolute(argv[0]).string();
@@ -1149,6 +1617,16 @@ int main(int argc, char* argv[])
     if (!s_teardown_settled) {
         return 2;
     }
+    const bool prepublication_exit = run_prepublication_exit_convergence(
+        argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
+    const bool split_transport_retirement = run_split_transport_retirement(
+        argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
     const bool prepublication_publish_race = run_prepublication_publish_race(
         argc, argv, binary_path);
     if (!s_teardown_settled) {
@@ -1162,6 +1640,7 @@ int main(int argc, char* argv[])
 
     if (recovery_race && deadline_race && pre_create_exception &&
         post_native_exception && observer_start_failure && release_worker_retry &&
+        prepublication_exit && split_transport_retirement &&
         prepublication_publish_race && concurrent_posix_roster)
     {
         std::printf(
@@ -1170,6 +1649,9 @@ int main(int argc, char* argv[])
             "shutdown_retry_resumed_finalize=1 finalize_retained=1 final_shutdown=1 "
             "pre_create_exception_no_child=1 post_native_exception_owned=1 "
             "observer_start_failure_owned=1 release_worker_retry=1 "
+            "prepublication_exit_converged=1 split_transport_retirement=1 "
+            "split_transport_join_false=1 total_stop_deadline_bounded=1 "
+            "distinct_release_retry=1 communication_worker_retry=1 "
             "inflight_publish_canonically_retired=1 "
             "posix_concurrent_roster=%s reap_count_per_owned_phase=%s survivors=0\n",
 #ifdef _WIN32
@@ -1187,10 +1669,13 @@ int main(int argc, char* argv[])
         "SETUP_RACE_INVALID recovery_race=%d deadline_race=%d "
         "pre_create_exception=%d post_native_exception=%d "
         "observer_start_failure=%d release_worker_retry=%d "
+        "prepublication_exit=%d split_transport_retirement=%d "
         "prepublication_publish_race=%d concurrent_posix_roster=%d\n",
         recovery_race ? 1 : 0, deadline_race ? 1 : 0,
         pre_create_exception ? 1 : 0, post_native_exception ? 1 : 0,
         observer_start_failure ? 1 : 0, release_worker_retry ? 1 : 0,
+        prepublication_exit ? 1 : 0,
+        split_transport_retirement ? 1 : 0,
         prepublication_publish_race ? 1 : 0,
         concurrent_posix_roster ? 1 : 0);
     return 2;

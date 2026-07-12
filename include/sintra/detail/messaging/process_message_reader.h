@@ -131,7 +131,22 @@ struct Process_message_reader
 
 
     inline
-    bool stop_and_wait(double waiting_period);  // waiting period in seconds
+    // `waiting_period` is the total stop budget in seconds across all phases.
+    bool stop_and_wait(double waiting_period);
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    bool running_for_test() const
+    {
+        return m_req_running.load() || m_rep_running.load();
+    }
+
+    void set_running_for_test(bool request_running, bool reply_running)
+    {
+        m_req_running.store(request_running);
+        m_rep_running.store(reply_running);
+        m_stop_condition.notify_all();
+    }
+#endif
 
 
     // This implementation of the following functions assumes the following:

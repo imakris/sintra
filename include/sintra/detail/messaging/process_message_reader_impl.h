@@ -653,21 +653,30 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
     std::unique_lock<std::mutex> lk(m_stop_mutex);
     stop_nowait();
 
+    // `waiting_period` is a total budget for the complete stop transaction,
+    // not a budget that each fallback phase may spend independently.
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::duration<double>(waiting_period > 0.0 ? waiting_period : 0.0);
+
     auto no_readers = [&]() {
         const bool req_running = m_req_running.load();
         const bool rep_running = m_rep_running.load();
         return !(req_running || rep_running);
     };
 
-    m_stop_condition.wait_for(
-        lk, std::chrono::duration<double>(waiting_period), no_readers);
+    auto wait_for_readers = [&]() {
+        if (!no_readers()) {
+            m_stop_condition.wait_until(lk, deadline, no_readers);
+        }
+    };
+
+    wait_for_readers();
 
     if (!no_readers()) {
         // We might get here, if the coordinator is gone already.
         // In this case, we unblock pending RPC calls and do some more waiting.
         s_mproc->unblock_rpc(m_process_instance_id);
-        m_stop_condition.wait_for(
-            lk, std::chrono::duration<double>(waiting_period), no_readers);
+        wait_for_readers();
     }
 
     if (!no_readers()) {
@@ -675,8 +684,7 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
         m_in_req_c->request_stop();
         m_in_rep_c->done_reading();
         m_in_rep_c->request_stop();
-        m_stop_condition.wait_for(
-            lk, std::chrono::duration<double>(1.0), no_readers);
+        wait_for_readers();
         if (!no_readers()) {
             Log_stream(log_level::warning)
                 << "Process_message_reader::stop_and_wait timeout: "
