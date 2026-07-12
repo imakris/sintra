@@ -28,6 +28,8 @@ constexpr const char* k_child_flag = "--managed-child-setup-race-child";
 constexpr const char* k_native_bound_child_flag =
     "--managed-child-native-bound-failure-child";
 constexpr const char* k_owned_child_flag = "--managed-child-owned-failure-child";
+constexpr const char* k_hold_after_finalize_flag =
+    "--managed-child-hold-after-finalize";
 constexpr const char* k_prepublication_exit_child_flag =
     "--managed-child-prepublication-exit-child";
 constexpr const char* k_immediate_exit_child_flag =
@@ -64,7 +66,7 @@ struct Failure_plan
     unsigned                    hits = 0;
 };
 
-Failure_plan* s_failure_plan = nullptr;
+std::atomic<Failure_plan*> s_failure_plan{nullptr};
 
 struct Prepublication_gate
 {
@@ -243,7 +245,7 @@ bool inject_managed_child_failure(
     sintra::instance_id_type process_iid,
     uint32_t occurrence) noexcept
 {
-    auto* plan = s_failure_plan;
+    auto* plan = s_failure_plan.load(std::memory_order_acquire);
     if (!plan || !stage) {
         return false;
     }
@@ -388,6 +390,16 @@ std::filesystem::path release_marker(const std::filesystem::path& marker)
     return marker.string() + ".release";
 }
 
+std::filesystem::path finalized_marker(const std::filesystem::path& marker)
+{
+    return marker.string() + ".finalized";
+}
+
+std::filesystem::path exit_marker(const std::filesystem::path& marker)
+{
+    return marker.string() + ".exit";
+}
+
 bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds timeout)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -405,6 +417,13 @@ bool write_release_marker(const std::filesystem::path& marker)
 {
     std::ofstream out(release_marker(marker), std::ios::binary | std::ios::trunc);
     out << "release=1\n";
+    return static_cast<bool>(out);
+}
+
+bool write_signal_marker(const std::filesystem::path& marker, const char* signal)
+{
+    std::ofstream out(marker, std::ios::binary | std::ios::trunc);
+    out << signal << "=1\n";
     return static_cast<bool>(out);
 }
 
@@ -587,7 +606,7 @@ void reset_failure_hook()
 {
     sintra::detail::test_hooks::s_managed_child_failure.store(
         nullptr, std::memory_order_release);
-    s_failure_plan = nullptr;
+    s_failure_plan.store(nullptr, std::memory_order_release);
 }
 
 bool observed_setup_exception(
@@ -617,6 +636,19 @@ bool posix_reap_normal()
     const auto count = s_posix_reap.count.load(std::memory_order_acquire);
     const auto status = s_posix_reap.status.load(std::memory_order_relaxed);
     return count == 1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+bool wait_for_exact_posix_reap(std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto count = s_posix_reap.count.load(std::memory_order_acquire);
+        if (count != 0) {
+            return count == 1;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return s_posix_reap.count.load(std::memory_order_acquire) == 1;
 }
 
 void clear_posix_reap()
@@ -869,7 +901,7 @@ bool run_pre_create_exception(
     plan.expected_iid = piid;
     plan.expected_occurrence = 0;
     plan.remaining = 1;
-    s_failure_plan = &plan;
+    s_failure_plan.store(&plan, std::memory_order_release);
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &inject_managed_child_failure, std::memory_order_release);
 
@@ -1005,7 +1037,7 @@ bool run_owned_native_exception(
     plan.expected_iid = piid;
     plan.expected_occurrence = 0;
     plan.remaining = 1;
-    s_failure_plan = &plan;
+    s_failure_plan.store(&plan, std::memory_order_release);
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &inject_managed_child_failure, std::memory_order_release);
 
@@ -1147,7 +1179,7 @@ Release_worker_retry_result run_release_worker_retry(
     plan.expected_iid = piid;
     plan.expected_occurrence = 0;
     plan.remaining = 1;
-    s_failure_plan = &plan;
+    s_failure_plan.store(&plan, std::memory_order_release);
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &inject_managed_child_failure, std::memory_order_release);
 
@@ -1374,8 +1406,12 @@ bool run_split_transport_retirement(
 
     const auto retry_marker = unique_marker("communication_worker_retry");
     const auto retry_release = release_marker(retry_marker);
+    const auto retry_finalized = finalized_marker(retry_marker);
+    const auto retry_exit = exit_marker(retry_marker);
     std::filesystem::remove(retry_marker, ec);
     std::filesystem::remove(retry_release, ec);
+    std::filesystem::remove(retry_finalized, ec);
+    std::filesystem::remove(retry_exit, ec);
     const auto retry_piid = sintra::make_process_instance_id();
     Failure_plan retry_plan;
     retry_plan.stage =
@@ -1383,13 +1419,16 @@ bool run_split_transport_retirement(
     retry_plan.expected_iid = retry_piid;
     retry_plan.expected_occurrence = 0;
     retry_plan.remaining = 1;
-    s_failure_plan = &retry_plan;
+    s_failure_plan.store(&retry_plan, std::memory_order_release);
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &inject_managed_child_failure, std::memory_order_release);
 
     sintra::Spawn_options retry_options;
     retry_options.binary_path = binary_path;
-    retry_options.args = {k_owned_child_flag, retry_marker.string()};
+    retry_options.args = {
+        k_owned_child_flag,
+        retry_marker.string(),
+        k_hold_after_finalize_flag};
     retry_options.process_instance_id = retry_piid;
     retry_options.lifetime.enable_lifeline = false;
     auto retry_custody = sintra::spawn_swarm_process(retry_options);
@@ -1407,7 +1446,47 @@ bool run_split_transport_retirement(
         retry_first_release = retry_custody.release_until(
             std::chrono::steady_clock::now() + 2s);
     });
-    const bool retry_release_written = write_release_marker(retry_marker);
+
+    std::optional<std::array<bool, 4>> retry_started_attempt;
+    const auto retry_start_deadline = std::chrono::steady_clock::now() + 2s;
+    do {
+        retry_started_attempt = occurrence_release_attempt_facts(retry_piid, 0);
+        if (retry_started_attempt && (*retry_started_attempt)[0]) {
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    } while (std::chrono::steady_clock::now() < retry_start_deadline);
+    const bool worker_attempt_started = retry_started_attempt &&
+        (*retry_started_attempt)[0];
+
+    // Passive release waits for native exit before transport retirement. Once
+    // the first attempt is active, let the child finalize and unpublish, but
+    // hold its native process after finalize so the failed attempt can be
+    // observed without an exit race.
+    bool retry_release_written = worker_attempt_started &&
+        write_release_marker(retry_marker);
+
+    bool worker_failure_seen = false;
+    if (worker_attempt_started && retry_release_written) {
+        std::unique_lock<std::mutex> lock(retry_plan.mutex);
+        worker_failure_seen = retry_plan.changed.wait_for(lock, 5s, [&]() {
+            return retry_plan.hits == 1;
+        });
+    }
+
+    // A failed injection latch must not strand the child behind either test
+    // latch. On the causal path the child remains native-live after finalize
+    // until the failed attempt's exact retryable facts are captured below.
+    bool failure_hook_reset = false;
+    bool retry_exit_written = false;
+    if (!worker_failure_seen) {
+        reset_failure_hook();
+        failure_hook_reset = true;
+        if (!retry_release_written) {
+            retry_release_written = write_release_marker(retry_marker);
+        }
+        retry_exit_written = write_signal_marker(retry_exit, "exit");
+    }
     if (retry_first_caller.joinable()) {
         retry_first_caller.join();
     }
@@ -1420,36 +1499,73 @@ bool run_split_transport_retirement(
         }
         std::this_thread::sleep_for(10ms);
     } while (std::chrono::steady_clock::now() < retry_attempt_deadline);
-    const bool retry_survivor_absent = retry_identity &&
-        wait_for_child_absent(*retry_identity, 5s);
-    const bool worker_failure_seen = failure_hits(retry_plan) == 1;
     const auto retry_held_facts = occurrence_terminal_facts(retry_piid, 0);
-    const bool worker_first_pass_ended = retry_first_attempt &&
-        !(*retry_first_attempt)[0] && (*retry_first_attempt)[1] &&
-        !(*retry_first_attempt)[2] && !(*retry_first_attempt)[3] &&
-        retry_held_facts && !(*retry_held_facts)[0] &&
-        (*retry_held_facts)[1] && !(*retry_held_facts)[2] &&
-        !retry_first_release.release_complete;
-    reset_failure_hook();
+    const bool worker_finalize_completed = wait_for_file(retry_finalized, 10s);
+    const bool worker_injection_exactly_once = worker_failure_seen &&
+        failure_hits(retry_plan) == 1;
+    const bool worker_attempt_stopped = retry_first_attempt &&
+        !(*retry_first_attempt)[0];
+    const bool worker_attempt_retryable = retry_first_attempt &&
+        (*retry_first_attempt)[1];
+    const bool worker_transport_not_started = retry_first_attempt &&
+        !(*retry_first_attempt)[2];
+    const bool worker_first_release_incomplete = retry_first_attempt &&
+        !(*retry_first_attempt)[3] && !retry_first_release.release_complete;
+    const bool worker_initialization_retired = retry_held_facts &&
+        !(*retry_held_facts)[0];
+    const bool worker_publication_retired = retry_held_facts &&
+        (*retry_held_facts)[1];
+    const bool worker_communication_nonterminal = retry_held_facts &&
+        !(*retry_held_facts)[2];
+    const bool worker_native_held_after_finalize =
+        worker_finalize_completed && retry_identity &&
+        !exact_child_absent(*retry_identity);
+    const bool worker_first_pass_ended =
+        worker_attempt_started && worker_injection_exactly_once &&
+        worker_attempt_stopped &&
+        worker_attempt_retryable && worker_transport_not_started &&
+        worker_first_release_incomplete && worker_initialization_retired &&
+        worker_publication_retired && worker_communication_nonterminal &&
+        worker_native_held_after_finalize;
+
+    if (!failure_hook_reset) {
+        reset_failure_hook();
+        failure_hook_reset = true;
+    }
+    if (!retry_release_written) {
+        retry_release_written = write_release_marker(retry_marker);
+    }
+    if (!retry_exit_written) {
+        retry_exit_written = write_signal_marker(retry_exit, "exit");
+    }
+    const bool retry_survivor_absent = retry_identity &&
+        wait_for_child_absent(*retry_identity, 10s);
     const auto retried = retry_custody.release_until(
         std::chrono::steady_clock::now() + 5s);
 #ifndef _WIN32
-    const bool retry_reap_normal = retry_identity && posix_reap_normal();
+    const bool worker_reap_seen = retry_identity &&
+        wait_for_exact_posix_reap(5s);
+    const bool retry_reap_normal = worker_reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool worker_reap_seen = true;
     const bool retry_reap_normal = true;
 #endif
-    const bool worker_retry_valid = retry_identity && retry_release_written &&
-        worker_failure_seen && worker_first_pass_ended &&
+    const bool worker_retry_completed =
         retried.release_complete &&
-        retried.created_occurrences == 1 && retried.exited_occurrences == 1 &&
-        retry_survivor_absent && retry_reap_normal;
+        retried.created_occurrences == 1 && retried.exited_occurrences == 1;
+    const bool worker_retry_valid = retry_identity && retry_release_written &&
+        retry_exit_written &&
+        worker_first_pass_ended && worker_retry_completed &&
+        retry_survivor_absent && worker_reap_seen && retry_reap_normal;
 
     const bool finalized = settle_detail_finalize("split_transport_retirement");
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
     std::filesystem::remove(retry_marker, ec);
     std::filesystem::remove(retry_release, ec);
+    std::filesystem::remove(retry_finalized, ec);
+    std::filesystem::remove(retry_exit, ec);
 
     const bool valid = identity && release_written && first_pass_ended && after_join &&
         released.release_complete && released.created_occurrences == 1 &&
@@ -1459,7 +1575,19 @@ bool run_split_transport_retirement(
         std::fprintf(stderr,
             "SPLIT_TRANSPORT_INVALID identity=%d release_written=%d first_pass_ended=%d "
             "stop_deadline_bounded=%d after_join=%d release_complete=%d created=%zu exited=%zu "
-            "survivor_absent=%d reap_normal=%d worker_retry=%d finalized=%d\n",
+            "survivor_absent=%d reap_normal=%d worker_retry=%d "
+            "worker_identity=%d worker_finalize_release_written=%d "
+            "worker_exit_release_written=%d worker_attempt_started=%d "
+            "worker_injection=%d "
+            "worker_attempt_stopped=%d worker_attempt_retryable=%d "
+            "worker_transport_not_started=%d worker_first_release_incomplete=%d "
+            "worker_initialization_retired=%d worker_publication_retired=%d "
+            "worker_communication_nonterminal=%d worker_finalize_completed=%d "
+            "worker_native_held_after_finalize=%d "
+            "worker_survivor_absent=%d worker_reap_seen=%d "
+            "worker_reap_normal=%d "
+            "worker_retry_complete=%d worker_created=%zu worker_exited=%zu "
+            "finalized=%d\n",
             identity ? 1 : 0,
             release_written ? 1 : 0,
             first_pass_ended ? 1 : 0,
@@ -1471,6 +1599,26 @@ bool run_split_transport_retirement(
             survivor_absent ? 1 : 0,
             reap_normal ? 1 : 0,
             worker_retry_valid ? 1 : 0,
+            retry_identity ? 1 : 0,
+            retry_release_written ? 1 : 0,
+            retry_exit_written ? 1 : 0,
+            worker_attempt_started ? 1 : 0,
+            worker_injection_exactly_once ? 1 : 0,
+            worker_attempt_stopped ? 1 : 0,
+            worker_attempt_retryable ? 1 : 0,
+            worker_transport_not_started ? 1 : 0,
+            worker_first_release_incomplete ? 1 : 0,
+            worker_initialization_retired ? 1 : 0,
+            worker_publication_retired ? 1 : 0,
+            worker_communication_nonterminal ? 1 : 0,
+            worker_finalize_completed ? 1 : 0,
+            worker_native_held_after_finalize ? 1 : 0,
+            retry_survivor_absent ? 1 : 0,
+            worker_reap_seen ? 1 : 0,
+            retry_reap_normal ? 1 : 0,
+            worker_retry_completed ? 1 : 0,
+            retried.created_occurrences,
+            retried.exited_occurrences,
             finalized ? 1 : 0);
     }
     return valid;
@@ -1497,7 +1645,7 @@ bool run_prepublication_publish_race(
     plan.expected_iid = piid;
     plan.expected_occurrence = 0;
     plan.remaining = 1;
-    s_failure_plan = &plan;
+    s_failure_plan.store(&plan, std::memory_order_release);
 
     Prepublication_gate gate;
     gate.expected_iid = piid;
@@ -2407,11 +2555,21 @@ int main(int argc, char* argv[])
         }
         if (std::string(argv[i]) == k_owned_child_flag) {
             const std::filesystem::path marker = argv[i + 1];
+            const bool hold_after_finalize =
+                i + 2 < argc &&
+                std::string(argv[i + 2]) == k_hold_after_finalize_flag;
             sintra::init(argc, argv);
             const bool identity_written = write_child_identity(marker);
             const bool released = wait_for_file(release_marker(marker), 10s);
             const bool finalized = settle_detail_finalize("owned_child");
-            return identity_written && released && finalized ? 0 : 3;
+            const bool finalized_written =
+                !hold_after_finalize ||
+                (finalized && write_signal_marker(
+                    finalized_marker(marker), "finalized"));
+            const bool exit_released =
+                !hold_after_finalize || wait_for_file(exit_marker(marker), 15s);
+            return identity_written && released && finalized &&
+                finalized_written && exit_released ? 0 : 3;
         }
         if (std::string(argv[i]) == k_prepublication_exit_child_flag) {
             const std::filesystem::path marker = argv[i + 1];
