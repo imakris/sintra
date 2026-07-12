@@ -97,6 +97,17 @@ void reset_failure_hook()
     s_failure_plan = nullptr;
 }
 
+bool observed_setup_exception(
+    const sintra::Managed_child_custody_observation& observation,
+    const char* stage)
+{
+    return observation.last_failure.kind ==
+            sintra::Managed_child_failure_kind::setup_exception &&
+        observation.last_failure.occurrence == 0 &&
+        observation.last_failure.native_error == 0 &&
+        observation.last_failure.message.find(stage) != std::string::npos;
+}
+
 bool settle_finalize()
 {
     for (int attempt = 0; attempt < 200; ++attempt) {
@@ -218,6 +229,7 @@ bool run_pre_create_exception(
         released.created_occurrences  == 0                  &&
         released.release_requested                          &&
         released.release_complete                           &&
+        observed_setup_exception(released, plan.stage)      &&
         plan.remaining.load(std::memory_order_acquire) == 0 &&
         marker_absent(marker);
 }
@@ -264,8 +276,27 @@ bool run_post_native_exception(
         released.exited_occurrences   == 1                  &&
         released.release_requested                          &&
         released.release_complete                           &&
+        observed_setup_exception(released, plan.stage)      &&
         plan.remaining.load(std::memory_order_acquire) == 0 &&
         survivor_absent;
+}
+
+bool run_native_spawn_failure(const std::filesystem::path& missing_binary)
+{
+    sintra::Spawn_options options;
+    options.binary_path = missing_binary.string();
+    options.lifetime.enable_lifeline = false;
+
+    const auto custody = sintra::spawn_swarm_process(options);
+    const auto released = sintra::wait_managed_child(
+        custody, std::chrono::steady_clock::now() + 5s);
+    return released.accepted && released.admitted_occurrences == 1 &&
+        released.created_occurrences == 0 && released.release_requested &&
+        released.release_complete && released.last_failure.kind ==
+            sintra::Managed_child_failure_kind::native_spawn &&
+        released.last_failure.occurrence == 0 &&
+        released.last_failure.native_error != 0 &&
+        !released.last_failure.message.empty();
 }
 
 bool run_worker_rejection(
@@ -350,6 +381,7 @@ int main(int argc, char* argv[])
     const auto malformed_marker = scratch / "malformed_child.marker";
     const auto pre_create_marker = scratch / "pre_create_child.marker";
     const auto post_native_marker = scratch / "post_native_child.marker";
+    const auto missing_binary = scratch / "managed_child_missing_binary";
     const auto worker_outcome = scratch / "worker.outcome";
     const auto worker_child = scratch / "worker_nested_child.marker";
     const std::string binary_path = std::filesystem::absolute(argv[0]).string();
@@ -361,6 +393,7 @@ int main(int argc, char* argv[])
         binary_path, pre_create_marker);
     const bool post_native_settled = run_post_native_exception(
         binary_path, post_native_marker);
+    const bool native_spawn_reported = run_native_spawn_failure(missing_binary);
     const bool worker_rejected = run_worker_rejection(
         binary_path, worker_outcome, worker_child);
     const bool finalized = settle_finalize();
@@ -369,14 +402,15 @@ int main(int argc, char* argv[])
     std::filesystem::remove_all(scratch, ec);
 
     const bool valid = malformed_rejected && pre_create_settled &&
-        post_native_settled && worker_rejected && finalized;
+        post_native_settled && native_spawn_reported && worker_rejected && finalized;
     if (!valid) {
         std::fprintf(stderr,
             "MANAGED_CHILD_SPAWN_ADMISSION_INVALID malformed=%d pre_create=%d "
-            "post_native=%d worker=%d finalized=%d\n",
+            "post_native=%d native_spawn=%d worker=%d finalized=%d\n",
             malformed_rejected ? 1 : 0,
             pre_create_settled ? 1 : 0,
             post_native_settled ? 1 : 0,
+            native_spawn_reported ? 1 : 0,
             worker_rejected ? 1 : 0,
             finalized ? 1 : 0);
     }

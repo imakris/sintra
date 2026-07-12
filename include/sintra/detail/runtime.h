@@ -306,6 +306,7 @@ struct Managed_child_custody_observation
     std::size_t admitted_occurrences = 0;
     std::size_t created_occurrences = 0;
     std::size_t exited_occurrences = 0;
+    Managed_child_failure last_failure;
 };
 
 class Managed_child_custody
@@ -1136,7 +1137,21 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     std::shared_ptr<detail::Managed_child_custody_record> custody_record;
     Managed_process::Spawn_result spawn_result;
     bool os_process_created = false;
-    auto readiness_observer = [](
+    auto exception_message = [](
+        std::exception_ptr exception,
+        const char* fallback)
+    {
+        try {
+            std::rethrow_exception(exception);
+        }
+        catch (const std::exception& error) {
+            return std::string(error.what());
+        }
+        catch (...) {
+            return std::string(fallback);
+        }
+    };
+    auto readiness_observer = [exception_message](
         Managed_process* owner,
         Coordinator* coordinator,
         const std::shared_ptr<detail::Managed_child_custody_record>& record,
@@ -1199,6 +1214,16 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             }
         }
         catch (...) {
+            if (owner) {
+                owner->note_child_custody_failure(
+                    record,
+                    {Managed_child_failure_kind::readiness_observation,
+                     occurrence,
+                     0,
+                     exception_message(
+                         std::current_exception(),
+                         "Managed child readiness observation failed")});
+            }
         }
         {
             std::lock_guard<std::mutex> lock(record->mutex);
@@ -1329,11 +1354,39 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     custody_record, piid, spawn_args.occurrence);
             }
             catch (...) {
+                uint32_t admitted_failure_occurrence = 0;
+                {
+                    std::lock_guard<std::mutex> lock(custody_record->mutex);
+                    const auto admitted = std::find_if(
+                        custody_record->occurrences.begin(),
+                        custody_record->occurrences.end(),
+                        [&](const detail::Managed_child_occurrence_record& occurrence) {
+                            return occurrence.process_instance_id == piid &&
+                                occurrence.occurrence == spawn_args.occurrence;
+                        });
+                    if (admitted != custody_record->occurrences.end()) {
+                        admitted_failure_occurrence = spawn_args.occurrence;
+                    }
+                }
+                s_mproc->note_child_custody_failure(
+                    custody_record,
+                    {Managed_child_failure_kind::occurrence_admission,
+                     admitted_failure_occurrence,
+                     0,
+                     exception_message(
+                         std::current_exception(),
+                         "Managed child occurrence admission failed")});
                 settle_setup_exception(
                     s_mproc, custody_record, piid, spawn_args.occurrence);
                 return Managed_child_custody(custody_record);
             }
             if (!admitted) {
+                s_mproc->note_child_custody_failure(
+                    custody_record,
+                    {Managed_child_failure_kind::custody_closed,
+                     0,
+                     0,
+                     "Managed child custody closed during occurrence admission"});
                 s_mproc->request_child_custody_release(custody_record);
                 return Managed_child_custody(custody_record);
             }
@@ -1391,6 +1444,14 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 custody_owner->start_child_custody_worker(std::move(async_setup));
             }
             catch (...) {
+                custody_owner->note_child_custody_failure(
+                    custody_record,
+                    {Managed_child_failure_kind::setup_worker_start,
+                     spawn_args.occurrence,
+                     0,
+                     exception_message(
+                         std::current_exception(),
+                         "Managed child setup worker failed to start")});
                 {
                     std::lock_guard<std::mutex> lock(custody_record->mutex);
                     for (auto& occurrence : custody_record->occurrences) {
@@ -1473,6 +1534,14 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 });
         }
         catch (...) {
+            custody_owner->note_child_custody_failure(
+                custody_record,
+                {Managed_child_failure_kind::readiness_observer_start,
+                 readiness_occurrence,
+                 0,
+                 exception_message(
+                     std::current_exception(),
+                     "Managed child readiness observer failed to start")});
             {
                 std::lock_guard<std::mutex> lock(custody_record->mutex);
                 custody_record->readiness_observer_complete = true;
@@ -1525,6 +1594,7 @@ inline Managed_child_custody_observation observe_managed_child(
         custody.m_record->phase != detail::Custody_phase::open;
     observation.release_complete =
         custody.m_record->phase == detail::Custody_phase::released;
+    observation.last_failure = custody.m_record->last_failure;
     observation.admitted_occurrences = custody.m_record->occurrences.size();
     for (const auto& occurrence : custody.m_record->occurrences) {
         observation.created_occurrences += occurrence.os_process_created ? 1u : 0u;

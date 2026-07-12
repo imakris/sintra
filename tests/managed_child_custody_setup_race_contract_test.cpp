@@ -590,6 +590,17 @@ void reset_failure_hook()
     s_failure_plan = nullptr;
 }
 
+bool observed_setup_exception(
+    const sintra::Managed_child_custody_observation& observation,
+    const char* stage)
+{
+    return observation.last_failure.kind ==
+            sintra::Managed_child_failure_kind::setup_exception &&
+        observation.last_failure.occurrence == 0 &&
+        observation.last_failure.native_error == 0 &&
+        observation.last_failure.message.find(stage) != std::string::npos;
+}
+
 #ifndef _WIN32
 void arm_posix_reap(const Child_identity& identity)
 {
@@ -807,6 +818,8 @@ bool run_deadline_setup_shutdown_retry(
         elapsed >= 150ms && elapsed <= 1000ms && observation.accepted &&
         observation.admitted_occurrences == 1 &&
         observation.created_occurrences == 0 &&
+        observation.last_failure.kind ==
+            sintra::Managed_child_failure_kind::none &&
         observation.release_requested && !observation.release_complete;
 
     bool first_shutdown = true;
@@ -890,7 +903,8 @@ bool run_pre_create_exception(
     return !threw && elapsed < 1s && released.accepted &&
         released.admitted_occurrences == 1 &&
         released.created_occurrences == 0 && released.release_requested &&
-        released.release_complete && hits == 1 && marker_missing && finalized;
+        released.release_complete && observed_setup_exception(released, plan.stage) &&
+        hits == 1 && marker_missing && finalized;
 }
 
 bool run_owned_native_exception(
@@ -991,6 +1005,7 @@ bool run_owned_native_exception(
         released.accepted && released.admitted_occurrences == 1 &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         released.release_requested && released.release_complete &&
+        observed_setup_exception(released, failure_stage) &&
         initialization_retired && unrelated_delivered && survivor_absent &&
         reap_normal && finalized;
 }

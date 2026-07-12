@@ -131,6 +131,30 @@ struct Lifetime_policy
     int                hard_exit_timeout_ms = 100;
 };
 
+enum class Managed_child_failure_kind
+{
+    none,
+    custody_not_accepted,
+    custody_closed,
+    occurrence_admission,
+    reader_setup,
+    lifeline_setup,
+    native_spawn,
+    native_identity,
+    setup_exception,
+    setup_worker_start,
+    readiness_observer_start,
+    readiness_observation
+};
+
+struct Managed_child_failure
+{
+    Managed_child_failure_kind kind = Managed_child_failure_kind::none;
+    uint32_t                   occurrence = 0;
+    int                        native_error = 0;
+    std::string                message;
+};
+
 
 // Branch indices have the following meaning:
 // -1: No branching has taken place - this variable is not relevant
@@ -230,6 +254,7 @@ struct Managed_child_custody_record
     Release_attempt_phase                      release_attempt_phase =
         Release_attempt_phase::idle;
     uint64_t                                   release_attempt_generation = 0;
+    Managed_child_failure                      last_failure;
     std::vector<Managed_child_occurrence_record> occurrences;
 };
 
@@ -456,9 +481,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uintptr_t                  os_process_handle = 0;
         bool                       os_process_handle_owned = false;
 #endif
-        int                        errno_value = 0;
-        std::string                failure_stage;
-        std::string                error_message;
+        Managed_child_failure      failure;
     };
 
 #ifndef _WIN32
@@ -485,7 +508,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool release_lifeline(instance_id_type process_instance_id);
     void release_all_lifelines();
 
-    Spawn_result spawn_swarm_process( const Spawn_swarm_process_args& ssp_args);
+    Spawn_result spawn_swarm_process(const Spawn_swarm_process_args& ssp_args);
+    Spawn_result spawn_swarm_process_impl(const Spawn_swarm_process_args& ssp_args);
 
     std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
@@ -493,6 +517,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         instance_id_type process_instance_id,
         uint32_t occurrence);
+    void note_child_custody_failure(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        Managed_child_failure failure);
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         detail::Release_mode release_mode = detail::Release_mode::passive);

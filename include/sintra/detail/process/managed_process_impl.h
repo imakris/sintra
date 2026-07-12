@@ -2177,6 +2177,24 @@ inline bool Managed_process::admit_child_custody_occurrence(
     return true;
 }
 
+inline void Managed_process::note_child_custody_failure(
+    const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+    Managed_child_failure failure)
+{
+    if (!custody || failure.kind == Managed_child_failure_kind::none) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        if (custody->last_failure.kind == Managed_child_failure_kind::none ||
+            failure.occurrence >= custody->last_failure.occurrence)
+        {
+            custody->last_failure = std::move(failure);
+        }
+    }
+    custody->changed.notify_all();
+}
+
 inline void Managed_process::start_child_custody_worker(
     std::function<void()> worker,
     const char* failure_stage,
@@ -3340,6 +3358,63 @@ inline bool Managed_process::cleanup_child_native(
 inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     const Spawn_swarm_process_args& s)
 {
+    auto admitted_failure_occurrence = [&]() {
+        if (!s.custody) {
+            return uint32_t{0};
+        }
+        std::lock_guard<std::mutex> lock(s.custody->mutex);
+        const auto admitted = std::find_if(
+            s.custody->occurrences.begin(),
+            s.custody->occurrences.end(),
+            [&](const detail::Managed_child_occurrence_record& occurrence) {
+                return occurrence.process_instance_id == s.piid &&
+                    occurrence.occurrence == s.occurrence;
+            });
+        return admitted == s.custody->occurrences.end()
+            ? uint32_t{0}
+            : s.occurrence;
+    };
+    Spawn_result result;
+    try {
+        result = spawn_swarm_process_impl(s);
+    }
+    catch (const std::exception& exception) {
+        try {
+            note_child_custody_failure(
+                s.custody,
+                {Managed_child_failure_kind::setup_exception,
+                 admitted_failure_occurrence(),
+                 0,
+                 exception.what()});
+        }
+        catch (...) {
+        }
+        throw;
+    }
+    catch (...) {
+        try {
+            note_child_custody_failure(
+                s.custody,
+                {Managed_child_failure_kind::setup_exception,
+                 admitted_failure_occurrence(),
+                 0,
+                 "Managed child setup threw an unknown exception"});
+        }
+        catch (...) {
+        }
+        throw;
+    }
+    if (!result.success &&
+        result.failure.kind != Managed_child_failure_kind::none)
+    {
+        note_child_custody_failure(s.custody, result.failure);
+    }
+    return result;
+}
+
+inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
+    const Spawn_swarm_process_args& s)
+{
     assert(s_coord);
     Spawn_result result;
     result.binary_name      = s.binary_name;
@@ -3347,8 +3422,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     result.lifeline_enabled = s.lifetime.enable_lifeline;
 
     if (!s.custody) {
-        result.failure_stage = "custody_not_accepted";
-        result.error_message = "Managed child launch requires accepted custody";
+        result.failure.kind = Managed_child_failure_kind::custody_not_accepted;
+        result.failure.message = "Managed child launch requires accepted custody";
         return result;
     }
     auto custody = s.custody;
@@ -3356,10 +3431,11 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     if (!s.custody_occurrence_admitted &&
         !admit_child_custody_occurrence(custody, s.piid, s.occurrence))
     {
-        result.failure_stage = "custody_closed";
-        result.error_message = "Managed child custody is closed";
+        result.failure.kind = Managed_child_failure_kind::custody_closed;
+        result.failure.message = "Managed child custody is closed";
         return result;
     }
+    result.failure.occurrence = s.occurrence;
 
     bool setup_resolved = false;
     bool reader_prepared = false;
@@ -3436,8 +3512,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         if (custody->phase != detail::Custody_phase::open) {
-            result.failure_stage = "custody_closed";
-            result.error_message = "Managed child custody closed before setup";
+            result.failure.kind = Managed_child_failure_kind::custody_closed;
+            result.failure.message = "Managed child custody closed before setup";
             return result;
         }
     }
@@ -3449,8 +3525,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     // reading threads are up and running.
     if (!prepare_process_reader(s.piid, s.occurrence, true)) {
         result.success       = false;
-        result.failure_stage = "prepare_process_reader";
-        result.error_message = "Failed to prepare process reader";
+        result.failure.kind = Managed_child_failure_kind::reader_setup;
+        result.failure.message = "Failed to prepare process reader";
         return result;
     }
     reader_prepared = true;
@@ -3462,8 +3538,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             custody->phase != detail::Custody_phase::open;
     }
     if (custody_closed_during_reader_setup) {
-        result.failure_stage = "custody_closed";
-        result.error_message = "Managed child custody closed during reader setup";
+        result.failure.kind = Managed_child_failure_kind::custody_closed;
+        result.failure.message = "Managed child custody closed during reader setup";
         remove_process_reader(s.piid, 1.0);
         reader_prepared = false;
         return result;
@@ -3494,8 +3570,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         if (custody->phase != detail::Custody_phase::open) {
-            result.failure_stage = "custody_closed";
-            result.error_message =
+            result.failure.kind = Managed_child_failure_kind::custody_closed;
+            result.failure.message =
                 "Managed child custody closed before OS creation";
             return result;
         }
@@ -3529,7 +3605,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         if (!create_lifeline_pipe(lifeline_read_handle, lifeline_write_handle_win, &spawn_error)) {
             spawn_ready = false;
             spawn_error_message = "Failed to create lifeline pipe";
-            result.failure_stage = "lifeline_pipe";
+            result.failure.kind = Managed_child_failure_kind::lifeline_setup;
         }
         else {
             lifeline_write_handle = static_cast<Managed_process::lifeline_handle_type>(
@@ -3550,7 +3626,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         if (!create_lifeline_pipe(lifeline_read_fd, lifeline_write_fd, &spawn_error)) {
             spawn_ready = false;
             spawn_error_message = "Failed to create lifeline pipe";
-            result.failure_stage = "lifeline_pipe";
+            result.failure.kind = Managed_child_failure_kind::lifeline_setup;
         }
         else {
             lifeline_write_handle =
@@ -3622,8 +3698,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
             );
         if (result.success && !result.os_process_created) {
             result.success = false;
-            result.failure_stage = "native_identity";
-            result.error_message =
+            result.failure.kind = Managed_child_failure_kind::native_identity;
+            result.failure.message =
                 "OS process creation returned without a bindable native identity";
         }
 
@@ -3654,14 +3730,14 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     }
     else {
         result.success = false;
-        result.errno_value = spawn_error;
+        result.failure.native_error = spawn_error;
         std::ostringstream error_msg;
         error_msg << spawn_error_message;
         if (spawn_error != 0) {
             std::error_code ec(spawn_error, std::system_category());
             error_msg << " (errno " << spawn_error << ": " << ec.message() << ')';
         }
-        result.error_message = error_msg.str();
+        result.failure.message = error_msg.str();
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
@@ -3861,19 +3937,21 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         }
         int saved_errno = 0;
 #ifdef _WIN32
-        if (result.errno_value != 0 || !result.error_message.empty()) {
-            saved_errno = result.errno_value;
+        if (result.failure.native_error != 0 || !result.failure.message.empty()) {
+            saved_errno = result.failure.native_error;
         }
         else {
             _get_errno(&saved_errno);
         }
 #else
-        saved_errno = result.errno_value != 0 ? result.errno_value : errno;
+        saved_errno = result.failure.native_error != 0
+            ? result.failure.native_error
+            : errno;
 #endif
-        if (result.error_message.empty()) {
-            result.errno_value = saved_errno;
-            if (result.failure_stage.empty()) {
-                result.failure_stage = "os_spawn";
+        if (result.failure.message.empty()) {
+            result.failure.native_error = saved_errno;
+            if (result.failure.kind == Managed_child_failure_kind::none) {
+                result.failure.kind = Managed_child_failure_kind::native_spawn;
             }
             std::ostringstream error_msg;
             error_msg << "Failed to spawn process";
@@ -3881,7 +3959,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
                 std::error_code ec(saved_errno, std::system_category());
                 error_msg << " (errno " << saved_errno << ": " << ec.message() << ')';
             }
-            result.error_message = error_msg.str();
+            result.failure.message = error_msg.str();
         }
 
         {
@@ -3895,15 +3973,17 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
         }
 
         // Log spawn failures to stderr
-        if (!spawn_ready && !result.error_message.empty()) {
-            Log_stream(log_level::error) << result.error_message << "\n";
+        if (!spawn_ready && !result.failure.message.empty()) {
+            Log_stream(log_level::error) << result.failure.message << "\n";
         }
         else
-        if (result.errno_value != 0) {
-            std::error_code ec(result.errno_value, std::system_category());
+        if (result.failure.native_error != 0) {
+            std::error_code ec(
+                result.failure.native_error, std::system_category());
             Log_stream(log_level::error)
                 << "failed to launch " << s.binary_name
-                << " (errno " << result.errno_value << ": " << ec.message() << ")\n";
+                << " (errno " << result.failure.native_error << ": "
+                << ec.message() << ")\n";
         }
         else {
             Log_stream(log_level::error)
@@ -4022,8 +4102,8 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
                     result.binary_name,
                     result.instance_id,
                     init_error::cause::spawn_failed,
-                    result.errno_value,
-                    result.error_message
+                    result.failure.native_error,
+                    result.failure.message
                 );
             }
         }
