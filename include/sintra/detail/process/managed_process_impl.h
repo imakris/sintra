@@ -91,6 +91,11 @@ using Managed_child_roster_reserved_callback =
 inline std::atomic<Managed_child_roster_reserved_callback>
     s_managed_child_roster_reserved{nullptr};
 
+using Managed_child_invariant_callback =
+    bool (*)(const char*, instance_id_type, uint32_t, uint64_t) noexcept;
+inline std::atomic<Managed_child_invariant_callback>
+    s_managed_child_invariant{nullptr};
+
 using Managed_child_prepublication_cleanup_callback =
     void (*)(const char*, instance_id_type, uint32_t);
 inline std::atomic<Managed_child_prepublication_cleanup_callback>
@@ -115,6 +120,10 @@ inline constexpr const char* k_managed_child_fail_native_observer_start =
     "managed_child_native_observer_start";
 inline constexpr const char* k_managed_child_fail_admission_mapping =
     "managed_child_admission_mapping";
+inline constexpr const char* k_managed_child_exact_occurrence_lookup =
+    "managed_child_exact_occurrence_lookup";
+inline constexpr const char* k_managed_child_posix_reap_reservation_lookup =
+    "managed_child_posix_reap_reservation_lookup";
 inline constexpr const char* k_managed_child_fail_release_worker =
     "managed_child_release_worker";
 inline constexpr const char* k_managed_child_fail_release_worker_start =
@@ -205,6 +214,28 @@ inline void managed_child_roster_reserved_for_test(
     (void)occurrence;
     (void)reservation_id;
 #endif
+}
+
+inline bool managed_child_invariant_for_test(
+    const char* stage,
+    instance_id_type process_instance_id,
+    uint32_t occurrence,
+    uint64_t reservation_id = 0) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_managed_child_invariant.load(
+            std::memory_order_acquire))
+    {
+        return callback(
+            stage, process_instance_id, occurrence, reservation_id);
+    }
+#else
+    (void)stage;
+    (void)process_instance_id;
+    (void)occurrence;
+    (void)reservation_id;
+#endif
+    return false;
 }
 
 inline void managed_child_prepublication_cleanup_for_test(
@@ -4066,6 +4097,12 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         std::lock_guard init_lock(s_coord->m_init_tracking_mutex);
         s_coord->m_processes_in_initialization.insert(s.piid);
     }
+    // Fail-first seam. The repair will honor this as an exact lookup miss;
+    // the RED atom deliberately leaves current production behavior unchanged.
+    (void)detail::managed_child_invariant_for_test(
+        detail::test_hooks::k_managed_child_exact_occurrence_lookup,
+        s.piid,
+        s.occurrence);
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         exact_occurrence_locked().initialization_reservation_active = true;
@@ -4200,6 +4237,13 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                     occurrence.os_process_start_stamp_available;
             }
             {
+                // Fail-first seam. The repair will fail closed while retaining
+                // reap authority; RED deliberately ignores the request.
+                (void)detail::managed_child_invariant_for_test(
+                    detail::test_hooks::k_managed_child_posix_reap_reservation_lookup,
+                    s.piid,
+                    s.occurrence,
+                    posix_reap_reservation);
                 std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
                 auto slot = std::find_if(
                     m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
