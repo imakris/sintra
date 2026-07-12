@@ -2127,7 +2127,6 @@ Managed_process::accept_child_custody()
     {
         std::lock_guard<std::mutex> lock(m_child_custody_mutex);
         custody->identity = m_next_child_custody_identity++;
-        custody->accepted = true;
         m_child_custodies.emplace(custody->identity, custody);
     }
     return custody;

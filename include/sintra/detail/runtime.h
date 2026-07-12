@@ -1512,8 +1512,8 @@ inline Managed_child_custody_observation observe_managed_child(
     if (!custody.m_record) {
         return observation;
     }
+    observation.accepted = true;
     std::lock_guard<std::mutex> lock(custody.m_record->mutex);
-    observation.accepted = custody.m_record->accepted;
     observation.readiness_reached = custody.m_record->readiness_reached;
     observation.release_requested = custody.m_record->release_requested;
     observation.release_complete = custody.m_record->release_complete;

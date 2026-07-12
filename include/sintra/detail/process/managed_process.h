@@ -201,7 +201,6 @@ struct Managed_child_custody_record
     mutable std::mutex                         mutex;
     std::condition_variable                    changed;
     uint64_t                                   identity = 0;
-    bool                                       accepted = false;
     bool                                       readiness_reached = false;
     bool                                       readiness_observer_complete = true;
     bool                                       recovery_open = true;
