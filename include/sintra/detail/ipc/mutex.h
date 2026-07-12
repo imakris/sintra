@@ -320,12 +320,6 @@ private:
         std::this_thread::sleep_for(sleep_us);
     }
 
-    // Attempts to acquire the mutex for 'self' with recursion detection.
-    bool try_acquire(owner_token self)
-    {
-        return try_acquire(self, /*throw_on_recursive=*/true);
-    }
-
     // Internal helper lets timed/try APIs avoid throwing on recursion.
     bool try_acquire(owner_token self, bool throw_on_recursive)
     {
