@@ -117,6 +117,8 @@ inline constexpr const char* k_managed_child_fail_admission_mapping =
     "managed_child_admission_mapping";
 inline constexpr const char* k_managed_child_fail_release_worker =
     "managed_child_release_worker";
+inline constexpr const char* k_managed_child_fail_release_worker_start =
+    "managed_child_release_worker_start";
 inline constexpr const char* k_managed_child_fail_cleanup_actions =
     "managed_child_cleanup_actions";
 inline constexpr const char* k_managed_child_fail_communication_worker_start =
@@ -2374,17 +2376,19 @@ inline void Managed_process::request_child_custody_release(
         return;
     }
 
-    auto cleanup_worker = [this, custody, release_attempt_generation]() {
+    instance_id_type failure_iid = invalid_instance_id;
+    uint32_t failure_occurrence = 0;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        if (!custody->occurrences.empty()) {
+            failure_iid = custody->occurrences.front().process_instance_id;
+            failure_occurrence = custody->occurrences.front().occurrence;
+        }
+    }
+
+    auto cleanup_worker = [this, custody, release_attempt_generation,
+                           failure_iid, failure_occurrence]() {
         try {
-            instance_id_type failure_iid = invalid_instance_id;
-            uint32_t failure_occurrence = 0;
-            {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                if (!custody->occurrences.empty()) {
-                    failure_iid = custody->occurrences.front().process_instance_id;
-                    failure_occurrence = custody->occurrences.front().occurrence;
-                }
-            }
             detail::managed_child_failure_for_test(
                 detail::test_hooks::k_managed_child_fail_release_worker,
                 failure_iid,
@@ -2933,7 +2937,11 @@ inline void Managed_process::request_child_custody_release(
     };
 
     try {
-        start_child_custody_worker(std::move(cleanup_worker));
+        start_child_custody_worker(
+            std::move(cleanup_worker),
+            detail::test_hooks::k_managed_child_fail_release_worker_start,
+            failure_iid,
+            failure_occurrence);
     }
     catch (...) {
         {

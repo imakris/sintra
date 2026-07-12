@@ -1009,13 +1009,36 @@ bool run_owned_native_exception(
         reap_normal && finalized;
 }
 
-bool run_release_worker_retry(
+enum class Release_worker_retry_result
+{
+    green,
+    red_missing_report,
+    invalid
+};
+
+const char* release_worker_retry_result_name(
+    Release_worker_retry_result result)
+{
+    switch (result) {
+        case Release_worker_retry_result::green:
+            return "green";
+        case Release_worker_retry_result::red_missing_report:
+            return "red_missing_report";
+        case Release_worker_retry_result::invalid:
+            return "invalid";
+    }
+    return "invalid";
+}
+
+Release_worker_retry_result run_release_worker_retry(
     int argc,
     char* argv[],
-    const std::string& binary_path)
+    const std::string& binary_path,
+    const char* phase,
+    const char* failure_stage)
 {
     sintra::init(argc, argv);
-    const auto marker = unique_marker("release_retry");
+    const auto marker = unique_marker(phase);
     const auto release = release_marker(marker);
     std::error_code ec;
     std::filesystem::remove(marker, ec);
@@ -1040,7 +1063,7 @@ bool run_release_worker_retry(
 #endif
 
     Failure_plan plan;
-    plan.stage = sintra::detail::test_hooks::k_managed_child_fail_release_worker;
+    plan.stage = failure_stage;
     plan.expected_iid = piid;
     plan.expected_occurrence = 0;
     plan.remaining = 1;
@@ -1062,14 +1085,40 @@ bool run_release_worker_retry(
 #else
     const bool reap_normal = true;
 #endif
-    const bool finalized = settle_detail_finalize("release_worker_retry");
+    const bool finalized = settle_detail_finalize(phase);
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
 
-    return identity && hits_after_first == 1 && first.accepted &&
-        first.release_requested && !first.release_complete && release_written &&
+    const bool unaffected_prefix = identity && hits_after_first == 1 &&
+        first.accepted &&
+        first.release_requested && !first.release_complete &&
+        release_written && second.accepted && second.release_requested &&
         second.release_complete && second.created_occurrences == 1 &&
-        second.exited_occurrences == 1 && survivor_absent && reap_normal && finalized;
+        second.exited_occurrences == 1 &&
+        survivor_absent && reap_normal && finalized;
+
+    const bool first_failure_is_typed =
+        first.last_failure.kind != sintra::Managed_child_failure_kind::none &&
+        first.last_failure.occurrence == 0 &&
+        first.last_failure.native_error == 0 &&
+        first.last_failure.message.find(failure_stage) != std::string::npos;
+    const bool historical_failure_is_exact =
+        second.last_failure.kind == first.last_failure.kind &&
+        second.last_failure.occurrence == first.last_failure.occurrence &&
+        second.last_failure.native_error == first.last_failure.native_error &&
+        second.last_failure.message == first.last_failure.message;
+    if (unaffected_prefix && first_failure_is_typed &&
+        historical_failure_is_exact)
+    {
+        return Release_worker_retry_result::green;
+    }
+
+    const bool report_missing =
+        first.last_failure.kind == sintra::Managed_child_failure_kind::none &&
+        second.last_failure.kind == sintra::Managed_child_failure_kind::none;
+    return unaffected_prefix && report_missing
+        ? Release_worker_retry_result::red_missing_report
+        : Release_worker_retry_result::invalid;
 }
 
 bool run_prepublication_exit_convergence(
@@ -2349,8 +2398,21 @@ int main(int argc, char* argv[])
     if (!s_teardown_settled) {
         return 2;
     }
-    const bool release_worker_retry = run_release_worker_retry(
-        argc, argv, binary_path);
+    const auto release_worker_retry = run_release_worker_retry(
+        argc,
+        argv,
+        binary_path,
+        "release_worker_retry",
+        sintra::detail::test_hooks::k_managed_child_fail_release_worker);
+    if (!s_teardown_settled) {
+        return 2;
+    }
+    const auto release_worker_start_retry = run_release_worker_retry(
+        argc,
+        argv,
+        binary_path,
+        "release_worker_start_retry",
+        sintra::detail::test_hooks::k_managed_child_fail_release_worker_start);
     if (!s_teardown_settled) {
         return 2;
     }
@@ -2400,14 +2462,32 @@ int main(int argc, char* argv[])
         return 2;
     }
 
-    if (recovery_race && deadline_race && pre_create_exception &&
-        post_native_exception && observer_start_failure && release_worker_retry &&
+    const bool unrelated_setup_race_green =
+        recovery_race && deadline_race && pre_create_exception &&
+        post_native_exception && observer_start_failure &&
         prepublication_exit && split_transport_retirement &&
         prepublication_publish_race && unrelated_readiness_rejection &&
         exact_readiness_acceptance && unbounded_readiness_cancellation &&
         publication_occurrence_identity &&
         immediate_reaped_classification &&
-        concurrent_posix_roster)
+        concurrent_posix_roster;
+
+    if (unrelated_setup_race_green &&
+        release_worker_retry ==
+            Release_worker_retry_result::red_missing_report &&
+        release_worker_start_retry ==
+            Release_worker_retry_result::red_missing_report)
+    {
+        std::fprintf(
+            stderr,
+            "F04_RELEASE_FAILURE_RED_VALID body=red_missing_report "
+            "start=red_missing_report unrelated_setup_race=green\n");
+        return 4;
+    }
+
+    if (unrelated_setup_race_green &&
+        release_worker_retry == Release_worker_retry_result::green &&
+        release_worker_start_retry == Release_worker_retry_result::green)
     {
         std::printf(
             "SETUP_RACE_GREEN_VALID recovery_pending=1 release_waited=1 "
@@ -2415,6 +2495,7 @@ int main(int argc, char* argv[])
             "shutdown_retry_resumed_finalize=1 finalize_retained=1 final_shutdown=1 "
             "pre_create_exception_no_child=1 post_native_exception_owned=1 "
             "observer_start_failure_owned=1 release_worker_retry=1 "
+            "release_worker_start_retry=1 "
             "prepublication_exit_converged=1 split_transport_retirement=1 "
             "split_transport_join_false=1 total_stop_deadline_bounded=1 "
             "distinct_release_retry=1 communication_worker_retry=1 "
@@ -2442,14 +2523,17 @@ int main(int argc, char* argv[])
     std::fprintf(stderr,
         "SETUP_RACE_INVALID recovery_race=%d deadline_race=%d "
         "pre_create_exception=%d post_native_exception=%d "
-        "observer_start_failure=%d release_worker_retry=%d "
+        "observer_start_failure=%d release_worker_retry=%s "
+        "release_worker_start_retry=%s "
         "prepublication_exit=%d split_transport_retirement=%d "
         "prepublication_publish_race=%d readiness_unrelated=%d "
         "readiness_exact=%d readiness_cancelled=%d immediate_reaped=%d "
         "publication_occurrence=%d concurrent_posix_roster=%d\n",
         recovery_race ? 1 : 0, deadline_race ? 1 : 0,
         pre_create_exception ? 1 : 0, post_native_exception ? 1 : 0,
-        observer_start_failure ? 1 : 0, release_worker_retry ? 1 : 0,
+        observer_start_failure ? 1 : 0,
+        release_worker_retry_result_name(release_worker_retry),
+        release_worker_retry_result_name(release_worker_start_retry),
         prepublication_exit ? 1 : 0,
         split_transport_retirement ? 1 : 0,
         prepublication_publish_race ? 1 : 0,
