@@ -1102,9 +1102,11 @@ bool run_owned_native_exception(
     const auto hits = failure_hits(plan);
     reset_failure_hook();
 #ifndef _WIN32
-    const bool reap_normal = identity && posix_reap_normal();
+    const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
+    const bool reap_normal = reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool reap_seen = true;
     const bool reap_normal = true;
 #endif
     const bool finalized = settle_detail_finalize(phase);
@@ -1117,7 +1119,7 @@ bool run_owned_native_exception(
         released.release_requested && released.release_complete &&
         observed_setup_exception(released, failure_stage) &&
         initialization_retired && unrelated_delivered && survivor_absent &&
-        reap_normal && finalized;
+        reap_seen && reap_normal && finalized;
 }
 
 enum class Release_worker_retry_result
@@ -1192,9 +1194,11 @@ Release_worker_retry_result run_release_worker_retry(
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
     reset_failure_hook();
 #ifndef _WIN32
-    const bool reap_normal = identity && posix_reap_normal();
+    const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
+    const bool reap_normal = reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool reap_seen = true;
     const bool reap_normal = true;
 #endif
     const bool finalized = settle_detail_finalize(phase);
@@ -1207,7 +1211,7 @@ Release_worker_retry_result run_release_worker_retry(
         release_written && second.accepted && second.release_requested &&
         second.release_complete && second.created_occurrences == 1 &&
         second.exited_occurrences == 1 &&
-        survivor_absent && reap_normal && finalized;
+        survivor_absent && reap_seen && reap_normal && finalized;
 
     const bool first_failure_is_typed =
         first.last_failure.kind == expected_failure_kind &&
@@ -1274,9 +1278,11 @@ bool run_prepublication_exit_convergence(
     const bool initialization_retired = initialization_tracking_absent(piid);
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
-    const bool reap_normal = identity && posix_reap_normal();
+    const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
+    const bool reap_normal = reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool reap_seen = true;
     const bool reap_normal = true;
 #endif
     const bool finalized = sintra::detail::finalize();
@@ -1286,12 +1292,13 @@ bool run_prepublication_exit_convergence(
         exited.exited_occurrences == 1 && released.release_requested &&
         released.release_complete && released.admitted_occurrences == 1 &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
-        initialization_retired && survivor_absent && reap_normal && finalized;
+        initialization_retired && survivor_absent && reap_seen && reap_normal &&
+        finalized;
     if (!valid) {
         std::fprintf(stderr,
             "PREPUBLICATION_EXIT_INVALID identity=%d created=%zu exited=%zu "
             "release_requested=%d release_complete=%d init_retired=%d "
-            "survivor_absent=%d reap_normal=%d finalized=%d\n",
+            "survivor_absent=%d reap_seen=%d reap_normal=%d finalized=%d\n",
             identity ? 1 : 0,
             released.created_occurrences,
             released.exited_occurrences,
@@ -1299,6 +1306,7 @@ bool run_prepublication_exit_convergence(
             released.release_complete ? 1 : 0,
             initialization_retired ? 1 : 0,
             survivor_absent ? 1 : 0,
+            reap_seen ? 1 : 0,
             reap_normal ? 1 : 0,
             finalized ? 1 : 0);
     }
@@ -1398,9 +1406,11 @@ bool run_split_transport_retirement(
     s_transport_retirement_gate = nullptr;
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
-    const bool reap_normal = identity && posix_reap_normal();
+    const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
+    const bool reap_normal = reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool reap_seen = true;
     const bool reap_normal = true;
 #endif
 
@@ -1569,13 +1579,13 @@ bool run_split_transport_retirement(
 
     const bool valid = identity && release_written && first_pass_ended && after_join &&
         released.release_complete && released.created_occurrences == 1 &&
-        released.exited_occurrences == 1 && survivor_absent && reap_normal &&
-        worker_retry_valid && finalized;
+        released.exited_occurrences == 1 && survivor_absent && reap_seen &&
+        reap_normal && worker_retry_valid && finalized;
     if (!valid) {
         std::fprintf(stderr,
             "SPLIT_TRANSPORT_INVALID identity=%d release_written=%d first_pass_ended=%d "
             "stop_deadline_bounded=%d after_join=%d release_complete=%d created=%zu exited=%zu "
-            "survivor_absent=%d reap_normal=%d worker_retry=%d "
+            "survivor_absent=%d reap_seen=%d reap_normal=%d worker_retry=%d "
             "worker_identity=%d worker_finalize_release_written=%d "
             "worker_exit_release_written=%d worker_attempt_started=%d "
             "worker_injection=%d "
@@ -1597,6 +1607,7 @@ bool run_split_transport_retirement(
             released.created_occurrences,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
+            reap_seen ? 1 : 0,
             reap_normal ? 1 : 0,
             worker_retry_valid ? 1 : 0,
             retry_identity ? 1 : 0,
@@ -1722,9 +1733,11 @@ bool run_prepublication_publish_race(
     s_prepublication_gate = nullptr;
     reset_failure_hook();
 #ifndef _WIN32
-    const bool reap_normal = identity && posix_reap_normal();
+    const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
+    const bool reap_normal = reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool reap_seen = true;
     const bool reap_normal = true;
 #endif
     const bool finalized = settle_detail_finalize("prepublication_publish_race");
@@ -1734,17 +1747,19 @@ bool run_prepublication_publish_race(
     const bool valid = first_miss && reader_terminal && publish_held &&
         !held_observation.release_complete && publish_result == piid &&
         release_written && released.release_complete && canonical_absence &&
-        survivor_absent && reap_normal && finalized;
+        survivor_absent && reap_seen && reap_normal && finalized;
     if (!valid) {
         std::fprintf(stderr,
             "PREPUBLICATION_INVALID first_miss=%d reader_terminal=%d publish_held=%d "
             "held_incomplete=%d publish_result=%d release_written=%d release_complete=%d "
-            "canonical_absence=%d survivor_absent=%d reap_normal=%d finalized=%d\n",
+            "canonical_absence=%d survivor_absent=%d reap_seen=%d reap_normal=%d "
+            "finalized=%d\n",
             first_miss ? 1 : 0, reader_terminal ? 1 : 0, publish_held ? 1 : 0,
             !held_observation.release_complete ? 1 : 0,
             publish_result == piid ? 1 : 0, release_written ? 1 : 0,
             released.release_complete ? 1 : 0, canonical_absence ? 1 : 0,
-            survivor_absent ? 1 : 0, reap_normal ? 1 : 0, finalized ? 1 : 0);
+            survivor_absent ? 1 : 0, reap_seen ? 1 : 0,
+            reap_normal ? 1 : 0, finalized ? 1 : 0);
     }
     return valid;
 }
@@ -1824,6 +1839,7 @@ bool run_unrelated_readiness_rejection(
     bool start_stamp_matched = false;
     bool release_written = false;
     bool survivor_absent = false;
+    bool reap_seen = false;
     bool reap_normal = false;
     sintra::Managed_child_status released;
     {
@@ -1895,9 +1911,11 @@ bool run_unrelated_readiness_rejection(
             std::chrono::steady_clock::now() + 5s);
         survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
-        reap_normal = identity && posix_reap_normal();
+        reap_seen = identity && wait_for_exact_posix_reap(5s);
+        reap_normal = reap_seen && posix_reap_normal();
         clear_posix_reap();
 #else
+        reap_seen = true;
         reap_normal = true;
 #endif
     }
@@ -1910,13 +1928,13 @@ bool run_unrelated_readiness_rejection(
         exact_identity_rejected && spawn_observed && identity_written &&
         start_stamp_matched && release_written && released.release_complete &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
-        survivor_absent && reap_normal && finalized;
+        survivor_absent && reap_seen && reap_normal && finalized;
     if (!valid) {
         std::fprintf(stderr,
             "READINESS_UNRELATED_INVALID assigned=%d resolved=%d exact_rejected=%d "
             "spawn_observed=%d identity=%d start_stamp=%d release_written=%d "
             "release_complete=%d created=%zu exited=%zu survivor_absent=%d "
-            "reap_normal=%d finalized=%d\n",
+            "reap_seen=%d reap_normal=%d finalized=%d\n",
             unrelated_assigned ? 1 : 0,
             unrelated_resolved ? 1 : 0,
             exact_identity_rejected ? 1 : 0,
@@ -1928,6 +1946,7 @@ bool run_unrelated_readiness_rejection(
             released.created_occurrences,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
+            reap_seen ? 1 : 0,
             reap_normal ? 1 : 0,
             finalized ? 1 : 0);
     }
@@ -1980,9 +1999,11 @@ bool run_exact_readiness_acceptance(
         std::chrono::steady_clock::now() + 5s);
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
-    const bool reap_normal = identity && posix_reap_normal();
+    const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
+    const bool reap_normal = reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool reap_seen = true;
     const bool reap_normal = true;
 #endif
     const bool finalized = settle_detail_finalize("readiness_exact");
@@ -1993,13 +2014,13 @@ bool run_exact_readiness_acceptance(
         observed.created_occurrences == 1 && exact_publication && identity &&
         release_written && released.release_complete &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
-        survivor_absent && reap_normal && finalized;
+        survivor_absent && reap_seen && reap_normal && finalized;
     if (!valid) {
         std::fprintf(stderr,
             "READINESS_EXACT_INVALID accepted=%d readiness=%d created=%zu "
             "exact_publication=%d identity=%d release_written=%d "
-            "release_complete=%d exited=%zu survivor_absent=%d reap_normal=%d "
-            "finalized=%d\n",
+            "release_complete=%d exited=%zu survivor_absent=%d reap_seen=%d "
+            "reap_normal=%d finalized=%d\n",
             observed.accepted ? 1 : 0,
             observed.readiness_reached ? 1 : 0,
             observed.created_occurrences,
@@ -2009,6 +2030,7 @@ bool run_exact_readiness_acceptance(
             released.release_complete ? 1 : 0,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
+            reap_seen ? 1 : 0,
             reap_normal ? 1 : 0,
             finalized ? 1 : 0);
     }
@@ -2102,9 +2124,11 @@ bool run_unbounded_readiness_cancellation(
     const auto released = custody.status();
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
 #ifndef _WIN32
-    const bool reap_normal = identity && posix_reap_normal();
+    const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
+    const bool reap_normal = reap_seen && posix_reap_normal();
     clear_posix_reap();
 #else
+    const bool reap_seen = true;
     const bool reap_normal = true;
 #endif
     std::filesystem::remove(marker, ec);
@@ -2114,13 +2138,13 @@ bool run_unbounded_readiness_cancellation(
         released.accepted && !released.readiness_reached &&
         released.release_requested && released.release_complete &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
-        survivor_absent && reap_normal && sintra::s_mproc == nullptr;
+        survivor_absent && reap_seen && reap_normal && sintra::s_mproc == nullptr;
     if (!valid) {
         std::fprintf(stderr,
             "READINESS_CANCELLATION_INVALID blocked=%d finalized=%d bounded=%d "
             "spawn_returned=%d accepted=%d readiness=%d release_requested=%d "
             "release_complete=%d created=%zu exited=%zu survivor_absent=%d "
-            "reap_normal=%d runtime_gone=%d\n",
+            "reap_seen=%d reap_normal=%d runtime_gone=%d\n",
             blocked_before_finalize ? 1 : 0,
             finalized ? 1 : 0,
             finalize_elapsed < 5s ? 1 : 0,
@@ -2132,6 +2156,7 @@ bool run_unbounded_readiness_cancellation(
             released.created_occurrences,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
+            reap_seen ? 1 : 0,
             reap_normal ? 1 : 0,
             sintra::s_mproc == nullptr ? 1 : 0);
     }
