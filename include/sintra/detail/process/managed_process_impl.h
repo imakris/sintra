@@ -3410,6 +3410,116 @@ inline Managed_child_release_action_plan plan_managed_child_release_action_locke
 
 } // namespace detail
 
+#ifdef _WIN32
+namespace detail {
+namespace managed_child_windows_fallback_result {
+
+struct timed_out {};
+
+struct signaled
+{
+    int exit_status = 0;
+};
+
+enum class failed_operation
+{
+    wait,
+    exit_query
+};
+
+struct wait_failed
+{
+    failed_operation operation = failed_operation::wait;
+    DWORD            native_error = 0;
+};
+
+using execution_result = std::variant<timed_out, signaled, wait_failed>;
+
+struct retry {};
+
+struct applied
+{
+    uintptr_t released_handle = 0;
+};
+
+struct transition_failed {};
+
+using application_result = std::variant<
+    retry,
+    applied,
+    wait_failed,
+    transition_failed>;
+
+} // namespace managed_child_windows_fallback_result
+
+inline managed_child_windows_fallback_result::execution_result
+execute_managed_child_windows_fallback(
+    const managed_child_release_action::poll_windows_fallback& target)
+{
+    using namespace managed_child_windows_fallback_result;
+
+    // Borrowed authority: selection retains ownership in the exact occurrence.
+    const auto process_handle = reinterpret_cast<HANDLE>(target.process_handle);
+    const auto wait_result = WaitForSingleObject(process_handle, 20);
+    if (wait_result == WAIT_TIMEOUT) {
+        return timed_out{};
+    }
+    if (wait_result == WAIT_FAILED) {
+        return wait_failed{failed_operation::wait, GetLastError()};
+    }
+    if (wait_result != WAIT_OBJECT_0) {
+        return wait_failed{failed_operation::wait, ERROR_INVALID_DATA};
+    }
+
+    DWORD exit_status = 0;
+    if (GetExitCodeProcess(process_handle, &exit_status) == 0) {
+        return wait_failed{failed_operation::exit_query, GetLastError()};
+    }
+    return signaled{static_cast<int>(exit_status)};
+}
+
+inline managed_child_windows_fallback_result::application_result
+apply_managed_child_windows_fallback_locked(
+    Managed_child_custody_record& custody,
+    const managed_child_release_action::poll_windows_fallback& target,
+    const managed_child_windows_fallback_result::execution_result& result)
+{
+    using namespace managed_child_windows_fallback_result;
+
+    if (std::holds_alternative<timed_out>(result)) {
+        return retry{};
+    }
+    if (const auto failure = std::get_if<wait_failed>(&result)) {
+        return *failure;
+    }
+
+    const auto exact = std::find_if(
+        custody.occurrences.begin(), custody.occurrences.end(),
+        [&](const Managed_child_occurrence_record& occurrence) {
+            return occurrence.process_instance_id == target.process_instance_id &&
+                occurrence.occurrence == target.occurrence;
+        });
+    if (exact == custody.occurrences.end() ||
+        !exact->native.fallback_wait_available() ||
+        exact->native.process_handle() != target.process_handle)
+    {
+        return transition_failed{};
+    }
+
+    const auto& exit = std::get<signaled>(result);
+    uintptr_t released_handle = 0;
+    if (!exact->native.note_exit(exit.exit_status, true) ||
+        !exact->native.take_owned_process_handle(
+            target.process_handle, released_handle))
+    {
+        return transition_failed{};
+    }
+    return applied{released_handle};
+}
+
+} // namespace detail
+#endif
+
 inline void Managed_process::request_child_custody_release(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
     detail::Release_mode release_mode)
@@ -3890,46 +4000,49 @@ inline void Managed_process::request_child_custody_release(
             // A retained fallback handle must not hide a later cleanup upgrade.
             // Poll briefly in this owned worker, then re-check the release mode;
             // public deadline callers continue to wait only on custody->changed.
-            const auto fallback_handle = reinterpret_cast<HANDLE>(
-                fallback_target->process_handle);
-            const auto wait_result = WaitForSingleObject(fallback_handle, 20);
-            uintptr_t released_fallback_handle = 0;
-            bool fallback_transition_valid = wait_result != WAIT_OBJECT_0;
+            const auto fallback_execution =
+                detail::execute_managed_child_windows_fallback(
+                    *fallback_target);
+            auto fallback_application = detail::
+                managed_child_windows_fallback_result::application_result{
+                    detail::managed_child_windows_fallback_result::retry{}};
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
-                for (auto& occurrence : custody->occurrences) {
-                    if (occurrence.process_instance_id ==
-                            fallback_target->process_instance_id &&
-                        occurrence.occurrence == fallback_target->occurrence &&
-                        occurrence.native.process_handle() ==
-                            reinterpret_cast<uintptr_t>(fallback_handle))
-                    {
-                        if (wait_result == WAIT_OBJECT_0) {
-                            fallback_transition_valid =
-                                occurrence.native.note_exit(0, false) &&
-                                occurrence.native.take_owned_process_handle(
-                                    reinterpret_cast<uintptr_t>(fallback_handle),
-                                    released_fallback_handle);
-                        }
-                        break;
-                    }
-                }
+                fallback_application =
+                    detail::apply_managed_child_windows_fallback_locked(
+                        *custody, *fallback_target, fallback_execution);
                 custody->changed.notify_all();
             }
-            if (released_fallback_handle != 0) {
+            if (const auto applied = std::get_if<detail::
+                    managed_child_windows_fallback_result::applied>(
+                        &fallback_application))
+            {
                 CloseHandle(reinterpret_cast<HANDLE>(
-                    released_fallback_handle));
+                    applied->released_handle));
                 detail::managed_child_cleanup_for_test(
                     detail::test_hooks::
                         k_managed_child_windows_fallback_handle_closed,
                     fallback_target->process_instance_id,
                     fallback_target->occurrence);
             }
-            if (wait_result == WAIT_FAILED) {
+            if (const auto failure = std::get_if<detail::
+                    managed_child_windows_fallback_result::wait_failed>(
+                        &fallback_application))
+            {
+                if (failure->operation == detail::
+                        managed_child_windows_fallback_result::
+                            failed_operation::exit_query)
+                {
+                    throw std::runtime_error(
+                        "Managed-child fallback native-exit query failed");
+                }
                 throw std::runtime_error(
                     "Managed-child fallback native-exit wait failed");
             }
-            if (!fallback_transition_valid) {
+            if (std::holds_alternative<detail::
+                    managed_child_windows_fallback_result::transition_failed>(
+                        fallback_application))
+            {
                 throw std::runtime_error(
                     "Managed-child fallback native-exit transition failed");
             }
