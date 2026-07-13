@@ -3578,317 +3578,15 @@ inline void Managed_process::request_child_custody_release(
         }
     }
 
-    auto cleanup_worker = [this, custody, release_attempt_generation,
-                           failure_iid, failure_occurrence]() {
-        try {
-            detail::managed_child_failure_for_test(
-                detail::test_hooks::k_managed_child_fail_release_worker,
-                failure_iid,
-                failure_occurrence);
-
-        detail::Managed_child_release_roster release_roster;
-        {
-            std::unique_lock<std::mutex> lock(custody->mutex);
-            custody->changed.wait(lock, [&]() {
-                return std::none_of(
-                    custody->occurrences.begin(), custody->occurrences.end(),
-                    [](const detail::Managed_child_occurrence_record& occurrence) {
-                        return occurrence.setup ==
-                            detail::Managed_child_occurrence_record::setup_state::pending;
-                    });
-            });
-            for (const auto& occurrence : custody->occurrences) {
-                if (occurrence.setup ==
-                    detail::Managed_child_occurrence_record::setup_state::ownership_ready)
-                {
-                    release_roster.push_back({
-                        occurrence.process_instance_id,
-                        occurrence.occurrence,
-                        false});
-                }
-            }
-        }
-
-        for (auto& exact : release_roster) {
-            {
-                std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-                auto it = m_child_custody_by_process.find(
-                    exact.process_instance_id);
-                if (it != m_child_custody_by_process.end()) {
-                    exact.slot_current =
-                        it->second.custody.lock() == custody &&
-                        it->second.occurrence == exact.occurrence;
-                }
-            }
-            if (!exact.slot_current) {
-                continue;
-            }
-
-            {
-                std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
-                auto cached = m_cached_spawns.find(exact.process_instance_id);
-                if (cached != m_cached_spawns.end() &&
-                    cached->second.custody == custody &&
-                    cached->second.occurrence == exact.occurrence + 1)
-                {
-                    m_cached_spawns.erase(cached);
-                }
-            }
-
-        }
-
-        auto release_attempt_active = [&]() {
-            std::lock_guard<std::mutex> lock(custody->mutex);
-            return custody->release_attempt_phase ==
-                    detail::Release_attempt_phase::running &&
-                custody->release_attempt_generation == release_attempt_generation;
-        };
-
-        bool cleanup_applied = false;
-        bool passive_wait_reported = false;
-        using namespace detail::managed_child_release_action;
-        while (true) {
-            std::unique_lock<std::mutex> lock(custody->mutex);
-            auto action = detail::plan_managed_child_release_action_locked(
-                *custody,
-                release_roster,
-                release_attempt_generation,
-                cleanup_applied);
-
-            if (std::holds_alternative<stop_attempt>(action)) {
-                if (custody->release_attempt_phase ==
-                        detail::Release_attempt_phase::failing &&
-                    custody->release_attempt_generation ==
-                        release_attempt_generation)
-                {
-                    custody->release_attempt_phase =
-                        detail::Release_attempt_phase::retryable;
-                }
-                lock.unlock();
-                custody->changed.notify_all();
-                return;
-            }
-
-            if (std::holds_alternative<complete_release>(action)) {
-                custody->phase = detail::Custody_phase::released;
-                custody->release_attempt_phase =
-                    detail::Release_attempt_phase::idle;
-                break;
-            }
-
-            if (custody->release_mode == detail::Release_mode::passive &&
-                !passive_wait_reported)
-            {
-                // Observation-only test seam: at this point the single
-                // retained worker has evaluated the monotone cleanup flag
-                // as false and is about to wait (or poll a fallback native
-                // handle). The callback must not re-enter custody APIs.
-                const auto first_current = std::find_if(
-                    release_roster.begin(), release_roster.end(),
-                    [](const detail::Managed_child_release_occurrence& exact) {
-                        return exact.slot_current;
-                    });
-                detail::managed_child_cleanup_for_test(
-                    detail::test_hooks::k_managed_child_release_waiting_passive,
-                    first_current == release_roster.end()
-                        ? invalid_instance_id
-                        : first_current->process_instance_id,
-                    first_current == release_roster.end()
-                        ? 0
-                        : first_current->occurrence);
-                passive_wait_reported = true;
-            }
-
-            if (std::holds_alternative<wait_for_change>(action)) {
-                // Selection and the unconditional wait share this lock. Any
-                // notification after planning is therefore observed before the
-                // next plan, without a second availability predicate to drift.
-                custody->changed.wait(lock);
-                continue;
-            }
-
-            lock.unlock();
-
-            if (auto cleanup = std::get_if<apply_cleanup>(&action)) {
-                if (!execute_current_slot_child_retirement(
-                        custody,
-                        cleanup->targets,
-                        release_attempt_generation,
-                        detail::Release_mode::cleanup))
-                {
-                    continue;
-                }
-                bool historical_cleanup_complete = true;
-                for (const auto& target : cleanup->targets) {
-                    if (!release_attempt_active()) {
-                        historical_cleanup_complete = false;
-                        break;
-                    }
-                    const detail::Managed_child_occurrence_token token{
-                        custody,
-                        target.process_instance_id,
-                        target.occurrence};
-                    bool native_terminal = false;
-                    bool communication_eligible = false;
-                    {
-                        std::lock_guard<std::mutex> custody_lock(custody->mutex);
-                        const auto occurrence = std::find_if(
-                            custody->occurrences.begin(),
-                            custody->occurrences.end(),
-                            [&](const detail::Managed_child_occurrence_record&
-                                    candidate)
-                            {
-                                return candidate.process_instance_id ==
-                                        target.process_instance_id &&
-                                    candidate.occurrence == target.occurrence;
-                            });
-                        if (occurrence == custody->occurrences.end()) {
-                            historical_cleanup_complete = false;
-                            break;
-                        }
-                        native_terminal = occurrence->native.exited();
-                        communication_eligible =
-                            occurrence->transport.ready_to_retire();
-                    }
-                    if (!native_terminal && !cleanup_child_native(token)) {
-                        std::lock_guard<std::mutex> custody_lock(custody->mutex);
-                        if (custody->release_attempt_generation ==
-                                release_attempt_generation)
-                        {
-                            custody->release_attempt_phase =
-                                detail::Release_attempt_phase::failing;
-                        }
-                        custody->changed.notify_all();
-                        historical_cleanup_complete = false;
-                        break;
-                    }
-                    if (communication_eligible) {
-                        const detail::Managed_child_release_roster exact_target{
-                            target};
-                        if (!execute_exact_historical_child_communication(
-                                custody,
-                                exact_target,
-                                release_attempt_generation))
-                        {
-                            historical_cleanup_complete = false;
-                            break;
-                        }
-                    }
-                }
-                if (!historical_cleanup_complete) {
-                    continue;
-                }
-                cleanup_applied = true;
-                continue;
-            }
-
-            if (auto current = std::get_if<retire_current_transport>(&action)) {
-                if (!execute_current_slot_child_retirement(
-                        custody,
-                        current->targets,
-                        release_attempt_generation,
-                        detail::Release_mode::passive))
-                {
-                    continue;
-                }
-                continue;
-            }
-
-            if (auto historical =
-                    std::get_if<retire_historical_communication>(&action))
-            {
-                if (!execute_exact_historical_child_communication(
-                        custody,
-                        historical->targets,
-                        release_attempt_generation))
-                {
-                    continue;
-                }
-                continue;
-            }
-
-#ifdef _WIN32
-            auto fallback_target =
-                std::get_if<poll_windows_fallback>(&action);
-            // A retained fallback handle must not hide a later cleanup upgrade.
-            // Poll briefly in this owned worker, then re-check the release mode;
-            // public deadline callers continue to wait only on custody->changed.
-            const auto fallback_execution =
-                detail::execute_managed_child_windows_fallback(
-                    *fallback_target);
-            auto fallback_application = detail::
-                managed_child_windows_fallback_result::application_result{
-                    detail::managed_child_windows_fallback_result::retry{}};
-            {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                fallback_application =
-                    detail::apply_managed_child_windows_fallback_locked(
-                        *custody, *fallback_target, fallback_execution);
-                custody->changed.notify_all();
-            }
-            if (const auto applied = std::get_if<detail::
-                    managed_child_windows_fallback_result::applied>(
-                        &fallback_application))
-            {
-                CloseHandle(reinterpret_cast<HANDLE>(
-                    applied->released_handle));
-                detail::managed_child_cleanup_for_test(
-                    detail::test_hooks::
-                        k_managed_child_windows_fallback_handle_closed,
-                    fallback_target->process_instance_id,
-                    fallback_target->occurrence);
-            }
-            if (const auto failure = std::get_if<detail::
-                    managed_child_windows_fallback_result::wait_failed>(
-                        &fallback_application))
-            {
-                if (failure->operation == detail::
-                        managed_child_windows_fallback_result::
-                            failed_operation::exit_query)
-                {
-                    throw std::runtime_error(
-                        "Managed-child fallback native-exit query failed");
-                }
-                throw std::runtime_error(
-                    "Managed-child fallback native-exit wait failed");
-            }
-            if (std::holds_alternative<detail::
-                    managed_child_windows_fallback_result::transition_failed>(
-                        fallback_application))
-            {
-                throw std::runtime_error(
-                    "Managed-child fallback native-exit transition failed");
-            }
-#endif
-        }
-        custody->changed.notify_all();
-        retire_child_custody_if_complete(custody);
-        }
-        catch (const std::exception& exception) {
-            fail_release_attempt(
-                custody,
-                release_attempt_generation,
-                {Managed_child_failure_kind::release_worker_execution,
-                 failure_occurrence,
-                 0,
-                 exception.what()},
-                failure_iid);
-        }
-        catch (...) {
-            fail_release_attempt(
-                custody,
-                release_attempt_generation,
-                {Managed_child_failure_kind::release_worker_execution,
-                 failure_occurrence,
-                 0,
-                 "Unknown exception in managed-child release worker"},
-                failure_iid);
-        }
-    };
-
     try {
         start_child_custody_worker(
-            std::move(cleanup_worker),
+            std::bind(
+                &Managed_process::execute_child_custody_release_attempt,
+                this,
+                custody,
+                release_attempt_generation,
+                failure_iid,
+                failure_occurrence),
             detail::test_hooks::k_managed_child_fail_release_worker_start,
             failure_iid,
             failure_occurrence);
@@ -3911,6 +3609,318 @@ inline void Managed_process::request_child_custody_release(
              failure_occurrence,
              0,
              "Unknown exception while starting managed-child release worker"},
+            failure_iid);
+    }
+}
+
+inline void Managed_process::execute_child_custody_release_attempt(
+    std::shared_ptr<detail::Managed_child_custody_record> custody,
+    uint64_t release_attempt_generation,
+    instance_id_type failure_iid,
+    uint32_t failure_occurrence)
+{
+    try {
+        detail::managed_child_failure_for_test(
+            detail::test_hooks::k_managed_child_fail_release_worker,
+            failure_iid,
+            failure_occurrence);
+
+    detail::Managed_child_release_roster release_roster;
+    {
+        std::unique_lock<std::mutex> lock(custody->mutex);
+        custody->changed.wait(lock, [&]() {
+            return std::none_of(
+                custody->occurrences.begin(), custody->occurrences.end(),
+                [](const detail::Managed_child_occurrence_record& occurrence) {
+                    return occurrence.setup ==
+                        detail::Managed_child_occurrence_record::setup_state::pending;
+                });
+        });
+        for (const auto& occurrence : custody->occurrences) {
+            if (occurrence.setup ==
+                detail::Managed_child_occurrence_record::setup_state::ownership_ready)
+            {
+                release_roster.push_back({
+                    occurrence.process_instance_id,
+                    occurrence.occurrence,
+                    false});
+            }
+        }
+    }
+
+    for (auto& exact : release_roster) {
+        {
+            std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+            auto it = m_child_custody_by_process.find(
+                exact.process_instance_id);
+            if (it != m_child_custody_by_process.end()) {
+                exact.slot_current =
+                    it->second.custody.lock() == custody &&
+                    it->second.occurrence == exact.occurrence;
+            }
+        }
+        if (!exact.slot_current) {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
+            auto cached = m_cached_spawns.find(exact.process_instance_id);
+            if (cached != m_cached_spawns.end() &&
+                cached->second.custody == custody &&
+                cached->second.occurrence == exact.occurrence + 1)
+            {
+                m_cached_spawns.erase(cached);
+            }
+        }
+
+    }
+
+    auto release_attempt_active = [&]() {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        return custody->release_attempt_phase ==
+                detail::Release_attempt_phase::running &&
+            custody->release_attempt_generation == release_attempt_generation;
+    };
+
+    bool cleanup_applied = false;
+    bool passive_wait_reported = false;
+    using namespace detail::managed_child_release_action;
+    while (true) {
+        std::unique_lock<std::mutex> lock(custody->mutex);
+        auto action = detail::plan_managed_child_release_action_locked(
+            *custody,
+            release_roster,
+            release_attempt_generation,
+            cleanup_applied);
+
+        if (std::holds_alternative<stop_attempt>(action)) {
+            if (custody->release_attempt_phase ==
+                    detail::Release_attempt_phase::failing &&
+                custody->release_attempt_generation ==
+                    release_attempt_generation)
+            {
+                custody->release_attempt_phase =
+                    detail::Release_attempt_phase::retryable;
+            }
+            lock.unlock();
+            custody->changed.notify_all();
+            return;
+        }
+
+        if (std::holds_alternative<complete_release>(action)) {
+            custody->phase = detail::Custody_phase::released;
+            custody->release_attempt_phase =
+                detail::Release_attempt_phase::idle;
+            break;
+        }
+
+        if (custody->release_mode == detail::Release_mode::passive &&
+            !passive_wait_reported)
+        {
+            // Observation-only test seam: at this point the single
+            // retained worker has evaluated the monotone cleanup flag
+            // as false and is about to wait (or poll a fallback native
+            // handle). The callback must not re-enter custody APIs.
+            const auto first_current = std::find_if(
+                release_roster.begin(), release_roster.end(),
+                [](const detail::Managed_child_release_occurrence& exact) {
+                    return exact.slot_current;
+                });
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::k_managed_child_release_waiting_passive,
+                first_current == release_roster.end()
+                    ? invalid_instance_id
+                    : first_current->process_instance_id,
+                first_current == release_roster.end()
+                    ? 0
+                    : first_current->occurrence);
+            passive_wait_reported = true;
+        }
+
+        if (std::holds_alternative<wait_for_change>(action)) {
+            // Selection and the unconditional wait share this lock. Any
+            // notification after planning is therefore observed before the
+            // next plan, without a second availability predicate to drift.
+            custody->changed.wait(lock);
+            continue;
+        }
+
+        lock.unlock();
+
+        if (auto cleanup = std::get_if<apply_cleanup>(&action)) {
+            if (!execute_current_slot_child_retirement(
+                    custody,
+                    cleanup->targets,
+                    release_attempt_generation,
+                    detail::Release_mode::cleanup))
+            {
+                continue;
+            }
+            bool historical_cleanup_complete = true;
+            for (const auto& target : cleanup->targets) {
+                if (!release_attempt_active()) {
+                    historical_cleanup_complete = false;
+                    break;
+                }
+                const detail::Managed_child_occurrence_token token{
+                    custody,
+                    target.process_instance_id,
+                    target.occurrence};
+                bool native_terminal = false;
+                bool communication_eligible = false;
+                {
+                    std::lock_guard<std::mutex> custody_lock(custody->mutex);
+                    const auto occurrence = std::find_if(
+                        custody->occurrences.begin(),
+                        custody->occurrences.end(),
+                        [&](const detail::Managed_child_occurrence_record&
+                                candidate)
+                        {
+                            return candidate.process_instance_id ==
+                                    target.process_instance_id &&
+                                candidate.occurrence == target.occurrence;
+                        });
+                    if (occurrence == custody->occurrences.end()) {
+                        historical_cleanup_complete = false;
+                        break;
+                    }
+                    native_terminal = occurrence->native.exited();
+                    communication_eligible =
+                        occurrence->transport.ready_to_retire();
+                }
+                if (!native_terminal && !cleanup_child_native(token)) {
+                    std::lock_guard<std::mutex> custody_lock(custody->mutex);
+                    if (custody->release_attempt_generation ==
+                            release_attempt_generation)
+                    {
+                        custody->release_attempt_phase =
+                            detail::Release_attempt_phase::failing;
+                    }
+                    custody->changed.notify_all();
+                    historical_cleanup_complete = false;
+                    break;
+                }
+                if (communication_eligible) {
+                    const detail::Managed_child_release_roster exact_target{
+                        target};
+                    if (!execute_exact_historical_child_communication(
+                            custody,
+                            exact_target,
+                            release_attempt_generation))
+                    {
+                        historical_cleanup_complete = false;
+                        break;
+                    }
+                }
+            }
+            if (!historical_cleanup_complete) {
+                continue;
+            }
+            cleanup_applied = true;
+            continue;
+        }
+
+        if (auto current = std::get_if<retire_current_transport>(&action)) {
+            if (!execute_current_slot_child_retirement(
+                    custody,
+                    current->targets,
+                    release_attempt_generation,
+                    detail::Release_mode::passive))
+            {
+                continue;
+            }
+            continue;
+        }
+
+        if (auto historical =
+                std::get_if<retire_historical_communication>(&action))
+        {
+            if (!execute_exact_historical_child_communication(
+                    custody,
+                    historical->targets,
+                    release_attempt_generation))
+            {
+                continue;
+            }
+            continue;
+        }
+
+#ifdef _WIN32
+        auto fallback_target =
+            std::get_if<poll_windows_fallback>(&action);
+        // A retained fallback handle must not hide a later cleanup upgrade.
+        // Poll briefly in this owned worker, then re-check the release mode;
+        // public deadline callers continue to wait only on custody->changed.
+        const auto fallback_execution =
+            detail::execute_managed_child_windows_fallback(
+                *fallback_target);
+        auto fallback_application = detail::
+            managed_child_windows_fallback_result::application_result{
+                detail::managed_child_windows_fallback_result::retry{}};
+        {
+            std::lock_guard<std::mutex> lock(custody->mutex);
+            fallback_application =
+                detail::apply_managed_child_windows_fallback_locked(
+                    *custody, *fallback_target, fallback_execution);
+            custody->changed.notify_all();
+        }
+        if (const auto applied = std::get_if<detail::
+                managed_child_windows_fallback_result::applied>(
+                    &fallback_application))
+        {
+            CloseHandle(reinterpret_cast<HANDLE>(
+                applied->released_handle));
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::
+                    k_managed_child_windows_fallback_handle_closed,
+                fallback_target->process_instance_id,
+                fallback_target->occurrence);
+        }
+        if (const auto failure = std::get_if<detail::
+                managed_child_windows_fallback_result::wait_failed>(
+                    &fallback_application))
+        {
+            if (failure->operation == detail::
+                    managed_child_windows_fallback_result::
+                        failed_operation::exit_query)
+            {
+                throw std::runtime_error(
+                    "Managed-child fallback native-exit query failed");
+            }
+            throw std::runtime_error(
+                "Managed-child fallback native-exit wait failed");
+        }
+        if (std::holds_alternative<detail::
+                managed_child_windows_fallback_result::transition_failed>(
+                    fallback_application))
+        {
+            throw std::runtime_error(
+                "Managed-child fallback native-exit transition failed");
+        }
+#endif
+    }
+    custody->changed.notify_all();
+    retire_child_custody_if_complete(custody);
+    }
+    catch (const std::exception& exception) {
+        fail_release_attempt(
+            custody,
+            release_attempt_generation,
+            {Managed_child_failure_kind::release_worker_execution,
+             failure_occurrence,
+             0,
+             exception.what()},
+            failure_iid);
+    }
+    catch (...) {
+        fail_release_attempt(
+            custody,
+            release_attempt_generation,
+            {Managed_child_failure_kind::release_worker_execution,
+             failure_occurrence,
+             0,
+             "Unknown exception in managed-child release worker"},
             failure_iid);
     }
 }

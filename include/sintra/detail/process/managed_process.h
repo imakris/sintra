@@ -1087,6 +1087,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         detail::Release_mode release_mode = detail::Release_mode::passive);
+    void execute_child_custody_release_attempt(
+        std::shared_ptr<detail::Managed_child_custody_record> custody,
+        uint64_t release_attempt_generation,
+        instance_id_type failure_iid,
+        uint32_t failure_occurrence);
     void request_all_child_custody_releases();
     bool wait_for_all_child_custodies(
         std::chrono::steady_clock::time_point deadline);
