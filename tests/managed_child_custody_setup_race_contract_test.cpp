@@ -764,7 +764,9 @@ bool run_recovery_create_release_race(
 
     sintra::Managed_process::Spawn_result result;
     std::thread create([&]() {
-        result = sintra::s_mproc->spawn_swarm_process(args);
+        auto launch_attempt = sintra::s_mproc->admit_child_custody_occurrence(
+            custody, piid, args.occurrence);
+        result = sintra::s_mproc->spawn_swarm_process(args, launch_attempt);
     });
 
     const bool setup_held = wait_for_gate(gate);

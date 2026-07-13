@@ -722,8 +722,8 @@ public:
     {
         return m_posix_reap_reservation_id;
     }
+    void cancel_posix_native_handoff();
     Posix_native_handoff_result commit_posix_native_handoff(
-        bool process_created,
         int pid,
         bool already_reaped,
         bool wait_status_available,
@@ -735,11 +735,7 @@ public:
     {
         return m_windows_process_handle;
     }
-    void commit_windows_native_authority(
-        int pid,
-        bool already_exited,
-        bool wait_status_available,
-        int wait_status);
+    void commit_windows_native_authority(int pid);
     void confirm_windows_native_absent();
     void start_windows_native_observer();
 #endif
@@ -1022,9 +1018,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     {
         bool                       success = false;
         bool                       os_process_created = false;
-        bool                       os_process_already_reaped = false;
-        bool                       os_wait_status_available = false;
-        int                        os_wait_status = 0;
         bool                       lifeline_enabled = false;
         bool                       lifeline_write_retained = false;
         std::string                binary_name;
@@ -1057,7 +1050,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool release_lifeline(instance_id_type process_instance_id);
     void release_all_lifelines();
 
-    Spawn_result spawn_swarm_process(const Spawn_swarm_process_args& ssp_args);
     Spawn_result spawn_swarm_process(
         const Spawn_swarm_process_args& ssp_args,
         detail::Managed_child_launch_attempt& launch_attempt);
