@@ -60,10 +60,14 @@ struct Failure_plan
     std::mutex                  mutex;
     std::condition_variable     changed;
     const char*                 stage = nullptr;
+    const char*                 park_stage = nullptr;
     sintra::instance_id_type    expected_iid = sintra::invalid_instance_id;
     uint32_t                    expected_occurrence = 0;
     unsigned                    remaining = 0;
     unsigned                    hits = 0;
+    bool                        parked = false;
+    bool                        park_released = false;
+    bool                        park_watchdog_released = false;
 };
 
 std::atomic<Failure_plan*> s_failure_plan{nullptr};
@@ -249,11 +253,28 @@ bool inject_managed_child_failure(
     if (!plan || !stage) {
         return false;
     }
-    std::lock_guard<std::mutex> lock(plan->mutex);
-    if (plan->remaining == 0 || process_iid != plan->expected_iid ||
-        occurrence != plan->expected_occurrence ||
-        std::string_view(stage) != plan->stage)
+    std::unique_lock<std::mutex> lock(plan->mutex);
+    if (process_iid != plan->expected_iid ||
+        occurrence != plan->expected_occurrence)
     {
+        return false;
+    }
+    if (plan->park_stage && std::string_view(stage) == plan->park_stage &&
+        !plan->park_released)
+    {
+        plan->parked = true;
+        plan->changed.notify_all();
+        if (!plan->changed.wait_for(lock, 20s, [&]() {
+                return plan->park_released;
+            }))
+        {
+            plan->park_watchdog_released = true;
+            plan->park_released = true;
+            plan->changed.notify_all();
+        }
+        return false;
+    }
+    if (plan->remaining == 0 || std::string_view(stage) != plan->stage) {
         return false;
     }
     --plan->remaining;
@@ -1428,6 +1449,8 @@ bool run_split_transport_retirement(
     Failure_plan retry_plan;
     retry_plan.stage =
         sintra::detail::test_hooks::k_managed_child_fail_communication_worker_start;
+    retry_plan.park_stage =
+        sintra::detail::test_hooks::k_managed_child_fail_release_worker;
     retry_plan.expected_iid = retry_piid;
     retry_plan.expected_occurrence = 0;
     retry_plan.remaining = 1;
@@ -1459,22 +1482,32 @@ bool run_split_transport_retirement(
             std::chrono::steady_clock::now() + 2s);
     });
 
+    bool worker_parked = false;
+    {
+        std::unique_lock<std::mutex> lock(retry_plan.mutex);
+        worker_parked = retry_plan.changed.wait_for(lock, 5s, [&]() {
+            return retry_plan.parked;
+        });
+    }
     std::optional<std::array<bool, 4>> retry_started_attempt;
     const auto retry_start_deadline = std::chrono::steady_clock::now() + 2s;
     do {
         retry_started_attempt = occurrence_release_attempt_facts(retry_piid, 0);
-        if (retry_started_attempt && (*retry_started_attempt)[0]) {
+        if (retry_started_attempt && (*retry_started_attempt)[0] &&
+            !(*retry_started_attempt)[1])
+        {
             break;
         }
         std::this_thread::sleep_for(10ms);
     } while (std::chrono::steady_clock::now() < retry_start_deadline);
-    const bool worker_attempt_started = retry_started_attempt &&
-        (*retry_started_attempt)[0];
+    const bool worker_attempt_started = worker_parked && retry_started_attempt &&
+        (*retry_started_attempt)[0] && !(*retry_started_attempt)[1];
 
-    // Passive release waits for native exit before transport retirement. Once
-    // the first attempt is active, let the child finalize and unpublish, but
-    // hold its native process after finalize so the failed attempt can be
-    // observed without an exit race.
+    // Park the passive release worker before target selection, then let the
+    // child finalize and unpublish. Coordinator retirement must claim the exact
+    // reader and make the same release generation fail while that worker is
+    // still parked. The child remains native-live after finalize so those facts
+    // can be observed without an exit race.
     bool retry_release_written = worker_attempt_started &&
         write_release_marker(retry_marker);
 
@@ -1486,9 +1519,47 @@ bool run_split_transport_retirement(
         });
     }
 
-    // A failed injection latch must not strand the child behind either test
-    // latch. On the causal path the child remains native-live after finalize
-    // until the failed attempt's exact retryable facts are captured below.
+    std::optional<std::array<bool, 4>> retry_failing_attempt;
+    const auto retry_failing_deadline = std::chrono::steady_clock::now() + 2s;
+    do {
+        retry_failing_attempt = occurrence_release_attempt_facts(retry_piid, 0);
+        if (retry_failing_attempt && (*retry_failing_attempt)[0] &&
+            (*retry_failing_attempt)[1])
+        {
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    } while (std::chrono::steady_clock::now() < retry_failing_deadline);
+    const bool worker_attempt_failing = worker_failure_seen &&
+        retry_failing_attempt && (*retry_failing_attempt)[0] &&
+        (*retry_failing_attempt)[1];
+    const bool worker_finalize_completed = retry_release_written &&
+        wait_for_file(retry_finalized, 10s);
+    const auto retry_held_facts = occurrence_terminal_facts(retry_piid, 0);
+    const bool worker_initialization_retired = retry_held_facts &&
+        !(*retry_held_facts)[0];
+    const bool worker_publication_retired = retry_held_facts &&
+        (*retry_held_facts)[1];
+    const bool worker_communication_nonterminal = retry_held_facts &&
+        !(*retry_held_facts)[2];
+    const bool worker_native_held_after_finalize =
+        worker_finalize_completed && retry_identity &&
+        !exact_child_absent(*retry_identity);
+
+    bool worker_park_released = false;
+    bool worker_park_watchdog_released = false;
+    {
+        std::lock_guard<std::mutex> lock(retry_plan.mutex);
+        worker_park_released =
+            retry_plan.parked && !retry_plan.park_released;
+        retry_plan.park_released = true;
+        worker_park_watchdog_released = retry_plan.park_watchdog_released;
+        retry_plan.changed.notify_all();
+    }
+
+    // Neither the injected-failure latch nor the worker park may strand the
+    // child. The callback also has a bounded watchdog release if this path
+    // cannot perform the explicit release above.
     bool failure_hook_reset = false;
     bool retry_exit_written = false;
     if (!worker_failure_seen) {
@@ -1511,8 +1582,6 @@ bool run_split_transport_retirement(
         }
         std::this_thread::sleep_for(10ms);
     } while (std::chrono::steady_clock::now() < retry_attempt_deadline);
-    const auto retry_held_facts = occurrence_terminal_facts(retry_piid, 0);
-    const bool worker_finalize_completed = wait_for_file(retry_finalized, 10s);
     const bool worker_injection_exactly_once = worker_failure_seen &&
         failure_hits(retry_plan) == 1;
     const bool worker_attempt_stopped = retry_first_attempt &&
@@ -1523,18 +1592,10 @@ bool run_split_transport_retirement(
         !(*retry_first_attempt)[2];
     const bool worker_first_release_incomplete = retry_first_attempt &&
         !(*retry_first_attempt)[3] && !retry_first_release.release_complete;
-    const bool worker_initialization_retired = retry_held_facts &&
-        !(*retry_held_facts)[0];
-    const bool worker_publication_retired = retry_held_facts &&
-        (*retry_held_facts)[1];
-    const bool worker_communication_nonterminal = retry_held_facts &&
-        !(*retry_held_facts)[2];
-    const bool worker_native_held_after_finalize =
-        worker_finalize_completed && retry_identity &&
-        !exact_child_absent(*retry_identity);
     const bool worker_first_pass_ended =
-        worker_attempt_started && worker_injection_exactly_once &&
-        worker_attempt_stopped &&
+        worker_attempt_started && worker_parked && worker_attempt_failing &&
+        worker_park_released && !worker_park_watchdog_released &&
+        worker_injection_exactly_once && worker_attempt_stopped &&
         worker_attempt_retryable && worker_transport_not_started &&
         worker_first_release_incomplete && worker_initialization_retired &&
         worker_publication_retired && worker_communication_nonterminal &&
@@ -1590,6 +1651,8 @@ bool run_split_transport_retirement(
             "survivor_absent=%d reap_seen=%d reap_normal=%d worker_retry=%d "
             "worker_identity=%d worker_finalize_release_written=%d "
             "worker_exit_release_written=%d worker_attempt_started=%d "
+            "worker_parked=%d worker_attempt_failing=%d "
+            "worker_park_released=%d worker_park_watchdog_released=%d "
             "worker_injection=%d "
             "worker_attempt_stopped=%d worker_attempt_retryable=%d "
             "worker_transport_not_started=%d worker_first_release_incomplete=%d "
@@ -1616,6 +1679,10 @@ bool run_split_transport_retirement(
             retry_release_written ? 1 : 0,
             retry_exit_written ? 1 : 0,
             worker_attempt_started ? 1 : 0,
+            worker_parked ? 1 : 0,
+            worker_attempt_failing ? 1 : 0,
+            worker_park_released ? 1 : 0,
+            worker_park_watchdog_released ? 1 : 0,
             worker_injection_exactly_once ? 1 : 0,
             worker_attempt_stopped ? 1 : 0,
             worker_attempt_retryable ? 1 : 0,
