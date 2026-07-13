@@ -1124,6 +1124,10 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool join_child_communication(
         const detail::Managed_child_occurrence_token& token,
         const std::shared_ptr<Process_message_reader>& reader);
+    bool execute_exact_historical_child_communication(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        const detail::Managed_child_release_roster& targets,
+        uint64_t release_attempt_generation);
     void retire_child_communication(
         const detail::Managed_child_occurrence_token& token,
         std::shared_ptr<Process_message_reader> reader);
