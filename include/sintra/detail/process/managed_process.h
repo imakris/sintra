@@ -339,7 +339,7 @@ public:
             ) ||
             (!already_exited && wait_status_available)
 #ifdef _WIN32
-            || process_handle_owned != (process_handle != 0)
+            || process_handle == 0 || !process_handle_owned
 #endif
             )
         {
@@ -389,10 +389,11 @@ public:
     int wait_status() const noexcept { return m_wait_status; }
 
 #ifdef _WIN32
-    bool register_exit_observer() noexcept
+    bool register_exit_observer(uintptr_t expected_handle) noexcept
     {
         if (!running() || !m_process_handle_owned ||
-            m_process_handle == 0)
+            m_process_handle == 0 || m_process_handle != expected_handle ||
+            m_exit_observer_registered)
         {
             return false;
         }
@@ -400,9 +401,15 @@ public:
         return true;
     }
 
-    void cancel_exit_observer() noexcept
+    bool cancel_exit_observer(uintptr_t expected_handle) noexcept
     {
+        if (!m_process_handle_owned || m_process_handle == 0 ||
+            m_process_handle != expected_handle)
+        {
+            return !m_exit_observer_registered;
+        }
         m_exit_observer_registered = false;
+        return true;
     }
 
     bool take_owned_process_handle(
@@ -722,6 +729,19 @@ public:
         bool wait_status_available,
         int wait_status,
         bool force_reservation_lookup_failure);
+#else
+    void adopt_windows_process_handle(uintptr_t process_handle) noexcept;
+    uintptr_t windows_process_handle() const noexcept
+    {
+        return m_windows_process_handle;
+    }
+    void commit_windows_native_authority(
+        int pid,
+        bool already_exited,
+        bool wait_status_available,
+        int wait_status);
+    void confirm_windows_native_absent();
+    void start_windows_native_observer();
 #endif
 
 private:
@@ -746,6 +766,14 @@ private:
         reserved,
         transferred
     };
+#else
+    enum class Windows_native_ownership
+    {
+        absent,
+        raw_owned,
+        native_observer_pending,
+        transferred
+    };
 #endif
 
     static constexpr uintptr_t invalid_lifeline_endpoint =
@@ -756,6 +784,8 @@ private:
     void rollback_reader() noexcept;
 #ifndef _WIN32
     void rollback_posix_reap_reservation() noexcept;
+#else
+    void rollback_windows_native_authority() noexcept;
 #endif
     void close_lifeline_write_endpoint() noexcept;
     bool lifeline_endpoint_valid(uintptr_t endpoint) const noexcept;
@@ -773,6 +803,10 @@ private:
 #ifndef _WIN32
     Posix_reap_ownership m_posix_reap = Posix_reap_ownership::absent;
     uint64_t m_posix_reap_reservation_id = 0;
+#else
+    Windows_native_ownership m_windows_native =
+        Windows_native_ownership::absent;
+    uintptr_t m_windows_process_handle = 0;
 #endif
     uintptr_t m_lifeline_read_endpoint = invalid_lifeline_endpoint;
     uintptr_t m_lifeline_write_endpoint = invalid_lifeline_endpoint;
@@ -996,10 +1030,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::string                binary_name;
         instance_id_type           instance_id;
         int                        os_pid = -1;
-#ifdef _WIN32
-        uintptr_t                  os_process_handle = 0;
-        bool                       os_process_handle_owned = false;
-#endif
         Managed_child_failure      failure;
     };
 

@@ -977,6 +977,9 @@ inline detail::Managed_child_launch_attempt::Managed_child_launch_attempt(
 #ifndef _WIN32
     , m_posix_reap(other.m_posix_reap)
     , m_posix_reap_reservation_id(other.m_posix_reap_reservation_id)
+#else
+    , m_windows_native(other.m_windows_native)
+    , m_windows_process_handle(other.m_windows_process_handle)
 #endif
     , m_lifeline_read_endpoint(other.m_lifeline_read_endpoint)
     , m_lifeline_write_endpoint(other.m_lifeline_write_endpoint)
@@ -990,6 +993,9 @@ inline detail::Managed_child_launch_attempt::Managed_child_launch_attempt(
 #ifndef _WIN32
     other.m_posix_reap = Posix_reap_ownership::absent;
     other.m_posix_reap_reservation_id = 0;
+#else
+    other.m_windows_native = Windows_native_ownership::absent;
+    other.m_windows_process_handle = 0;
 #endif
     other.m_lifeline_read_endpoint = invalid_lifeline_endpoint;
     other.m_lifeline_write_endpoint = invalid_lifeline_endpoint;
@@ -1013,6 +1019,9 @@ detail::Managed_child_launch_attempt::operator=(
         m_posix_reap = other.m_posix_reap;
         m_posix_reap_reservation_id =
             other.m_posix_reap_reservation_id;
+#else
+        m_windows_native = other.m_windows_native;
+        m_windows_process_handle = other.m_windows_process_handle;
 #endif
         m_lifeline_read_endpoint = other.m_lifeline_read_endpoint;
         m_lifeline_write_endpoint = other.m_lifeline_write_endpoint;
@@ -1026,6 +1035,9 @@ detail::Managed_child_launch_attempt::operator=(
 #ifndef _WIN32
         other.m_posix_reap = Posix_reap_ownership::absent;
         other.m_posix_reap_reservation_id = 0;
+#else
+        other.m_windows_native = Windows_native_ownership::absent;
+        other.m_windows_process_handle = 0;
 #endif
         other.m_lifeline_read_endpoint = invalid_lifeline_endpoint;
         other.m_lifeline_write_endpoint = invalid_lifeline_endpoint;
@@ -1367,6 +1379,213 @@ detail::Managed_child_launch_attempt::commit_posix_native_handoff(
     m_custody->changed.notify_all();
     return result;
 }
+#else
+inline void detail::Managed_child_launch_attempt::adopt_windows_process_handle(
+    uintptr_t process_handle) noexcept
+{
+    if (process_handle == 0) {
+        return;
+    }
+    assert(m_windows_native == Windows_native_ownership::absent);
+    assert(m_windows_process_handle == 0);
+    m_windows_process_handle = process_handle;
+    m_windows_native = Windows_native_ownership::raw_owned;
+}
+
+inline void
+detail::Managed_child_launch_attempt::commit_windows_native_authority(
+    int pid,
+    bool already_exited,
+    bool wait_status_available,
+    int wait_status)
+{
+    if (!m_custody ||
+        m_windows_native != Windows_native_ownership::raw_owned ||
+        m_windows_process_handle == 0)
+    {
+        throw std::runtime_error(
+            "Managed-child Windows native handoff lacks an owned raw handle");
+    }
+
+    bool start_stamp_available = false;
+    uint64_t start_stamp = 0;
+    if (pid > 0) {
+        if (auto stamp = query_process_start_stamp(static_cast<uint32_t>(pid))) {
+            start_stamp = *stamp;
+            start_stamp_available = true;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_custody->mutex);
+        const auto exact = std::find_if(
+            m_custody->occurrences.begin(), m_custody->occurrences.end(),
+            [&](const Managed_child_occurrence_record& occurrence) {
+                return occurrence.process_instance_id == m_process_instance_id &&
+                    occurrence.occurrence == m_occurrence;
+            });
+        if (exact == m_custody->occurrences.end()) {
+            throw std::runtime_error(
+                "Managed-child exact occurrence lookup failed during Windows "
+                "native handoff");
+        }
+        if (!exact->native.commit_created(
+                pid,
+                start_stamp_available,
+                start_stamp,
+                already_exited,
+                wait_status_available,
+                wait_status,
+                m_windows_process_handle,
+                true))
+        {
+            throw std::runtime_error(
+                "Managed-child Windows native authority commit failed");
+        }
+
+        // The exact native record now owns the original process handle.  Until
+        // an observer is registered, it is also the authoritative fallback.
+        m_windows_native =
+            Windows_native_ownership::native_observer_pending;
+    }
+    m_custody->changed.notify_all();
+}
+
+inline void
+detail::Managed_child_launch_attempt::confirm_windows_native_absent()
+{
+    if (!m_custody) {
+        throw std::runtime_error(
+            "Managed-child Windows native absence check lacks custody");
+    }
+    std::lock_guard<std::mutex> lock(m_custody->mutex);
+    const auto exact = std::find_if(
+        m_custody->occurrences.begin(), m_custody->occurrences.end(),
+        [&](const Managed_child_occurrence_record& occurrence) {
+            return occurrence.process_instance_id == m_process_instance_id &&
+                occurrence.occurrence == m_occurrence;
+        });
+    if (exact == m_custody->occurrences.end() ||
+        !exact->native.confirm_absent())
+    {
+        throw std::runtime_error(
+            "Managed-child Windows native authority was not absent");
+    }
+}
+
+inline void
+detail::Managed_child_launch_attempt::start_windows_native_observer()
+{
+    if (!m_owner || !m_custody ||
+        m_windows_native !=
+            Windows_native_ownership::native_observer_pending ||
+        m_windows_process_handle == 0)
+    {
+        throw std::runtime_error(
+            "Managed-child Windows observer lacks pending native authority");
+    }
+
+    auto custody = m_custody;
+    const auto process_instance_id = m_process_instance_id;
+    const auto occurrence_number = m_occurrence;
+    const auto process_handle_value = m_windows_process_handle;
+    const auto process_handle =
+        reinterpret_cast<HANDLE>(process_handle_value);
+    auto observer_complete = std::make_shared<std::atomic<bool>>(false);
+
+    m_owner->start_child_custody_worker(
+        [custody, process_instance_id, occurrence_number, process_handle,
+         process_handle_value, observer_complete]() {
+            const auto wait_result =
+                WaitForSingleObject(process_handle, INFINITE);
+            uintptr_t released_handle = 0;
+            bool transition_valid = false;
+            {
+                std::lock_guard<std::mutex> lock(custody->mutex);
+                for (auto& occurrence : custody->occurrences) {
+                    if (occurrence.process_instance_id == process_instance_id &&
+                        occurrence.occurrence == occurrence_number)
+                    {
+                        if (wait_result == WAIT_OBJECT_0) {
+                            DWORD exit_code = 0;
+                            const bool exit_code_available =
+                                GetExitCodeProcess(process_handle, &exit_code) != 0;
+                            transition_valid = occurrence.native.note_exit(
+                                static_cast<int>(exit_code),
+                                exit_code_available);
+                            if (transition_valid &&
+                                occurrence.native.process_handle_owned())
+                            {
+                                transition_valid =
+                                    occurrence.native.take_owned_process_handle(
+                                        process_handle_value,
+                                        released_handle);
+                            }
+                        }
+                        else {
+                            transition_valid =
+                                occurrence.native.cancel_exit_observer(
+                                    process_handle_value);
+                        }
+                        break;
+                    }
+                }
+                observer_complete->store(true, std::memory_order_release);
+                custody->changed.notify_all();
+            }
+            if (released_handle != 0) {
+                CloseHandle(reinterpret_cast<HANDLE>(released_handle));
+            }
+            if (!transition_valid) {
+                Log_stream(log_level::error)
+                    << "Managed-child native observer transition failed.\n";
+            }
+        },
+        test_hooks::k_managed_child_fail_native_observer_start,
+        process_instance_id,
+        occurrence_number);
+
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        const auto exact = std::find_if(
+            custody->occurrences.begin(), custody->occurrences.end(),
+            [&](const Managed_child_occurrence_record& occurrence) {
+                return occurrence.process_instance_id == process_instance_id &&
+                    occurrence.occurrence == occurrence_number;
+            });
+        if (exact == custody->occurrences.end()) {
+            throw std::runtime_error(
+                "Managed-child exact occurrence lookup failed during Windows "
+                "observer registration");
+        }
+
+        const bool worker_complete =
+            observer_complete->load(std::memory_order_acquire);
+        if (exact->native.running()) {
+            if (worker_complete) {
+                if (!exact->native.fallback_wait_available() ||
+                    exact->native.process_handle() != process_handle_value)
+                {
+                    throw std::runtime_error(
+                        "Managed-child Windows observer fallback handoff failed");
+                }
+            }
+            else if (!exact->native.register_exit_observer(
+                         process_handle_value))
+            {
+                throw std::runtime_error(
+                    "Managed-child native observer registration failed");
+            }
+        }
+        else if (!exact->native.exited()) {
+            throw std::runtime_error(
+                "Managed-child Windows observer found absent native authority");
+        }
+
+        m_windows_native = Windows_native_ownership::transferred;
+        m_windows_process_handle = 0;
+    }
+}
 #endif
 
 inline void
@@ -1459,12 +1678,63 @@ detail::Managed_child_launch_attempt::rollback_posix_reap_reservation() noexcept
     catch (...) {
     }
 }
+#else
+inline void
+detail::Managed_child_launch_attempt::rollback_windows_native_authority() noexcept
+{
+    uintptr_t raw_handle = 0;
+    bool notify_custody = false;
+
+    if (m_windows_native == Windows_native_ownership::raw_owned) {
+        raw_handle = m_windows_process_handle;
+        m_windows_process_handle = 0;
+        m_windows_native = Windows_native_ownership::absent;
+    }
+    else if (m_windows_native ==
+                 Windows_native_ownership::native_observer_pending)
+    {
+        const auto expected_handle = m_windows_process_handle;
+        try {
+            if (m_custody) {
+                std::lock_guard<std::mutex> lock(m_custody->mutex);
+                const auto exact = std::find_if(
+                    m_custody->occurrences.begin(),
+                    m_custody->occurrences.end(),
+                    [&](const Managed_child_occurrence_record& occurrence) {
+                        return occurrence.process_instance_id ==
+                                m_process_instance_id &&
+                            occurrence.occurrence == m_occurrence;
+                    });
+                if (exact != m_custody->occurrences.end()) {
+                    exact->native.cancel_exit_observer(expected_handle);
+                    notify_custody = true;
+                }
+            }
+        }
+        catch (...) {
+        }
+        // Native authority owns the original.  Disarming the launch attempt
+        // exposes that exact handle to the retained fallback without closing it.
+        m_windows_process_handle = 0;
+        m_windows_native = Windows_native_ownership::transferred;
+    }
+
+    if (notify_custody) {
+        m_custody->changed.notify_all();
+    }
+    if (raw_handle != 0) {
+        // No custody lock is held while closing launch-local raw authority.
+        CloseHandle(reinterpret_cast<HANDLE>(raw_handle));
+    }
+}
 #endif
 
 inline void detail::Managed_child_launch_attempt::rollback() noexcept
 {
 #ifndef _WIN32
     rollback_posix_reap_reservation();
+#else
+    rollback_windows_native_authority();
 #endif
     close_lifeline_read_endpoint();
     close_lifeline_write_endpoint();
@@ -4409,20 +4679,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     }
     result.failure.occurrence = s.occurrence;
 
-    auto exact_occurrence_locked = [&]() -> detail::Managed_child_occurrence_record& {
-        auto it = std::find_if(
-            custody->occurrences.begin(), custody->occurrences.end(),
-            [&](const detail::Managed_child_occurrence_record& occurrence) {
-                return occurrence.occurrence == s.occurrence &&
-                    occurrence.process_instance_id == s.piid;
-            });
-        if (it == custody->occurrences.end()) {
-            throw std::runtime_error(
-                "Managed-child exact occurrence lookup failed");
-        }
-        return *it;
-    };
-
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         if (custody->phase != detail::Custody_phase::open) {
@@ -4580,6 +4836,11 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
 
         const auto native_result =
             detail::spawn_detached_with_result(spawn_options);
+#ifdef _WIN32
+        launch_attempt.adopt_windows_process_handle(
+            reinterpret_cast<uintptr_t>(spawned_process_handle));
+        spawned_process_handle = nullptr;
+#endif
         result.success = native_result.created();
         spawned_pid = native_result.pid;
         result.os_pid = native_result.pid;
@@ -4588,18 +4849,11 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                 detail::Spawn_detached_result::State::created_reaped;
         result.os_wait_status_available = native_result.wait_status_available;
         result.os_wait_status = native_result.wait_status;
-#ifdef _WIN32
-        if (spawned_process_handle) {
-            result.os_process_handle =
-                reinterpret_cast<uintptr_t>(spawned_process_handle);
-            result.os_process_handle_owned = true;
-        }
-#endif
         result.os_process_created =
             result.success &&
             (result.os_pid > 0
 #ifdef _WIN32
-                || result.os_process_handle != 0
+                || launch_attempt.windows_process_handle() != 0
 #endif
             );
         if (result.success && !result.os_process_created) {
@@ -4610,41 +4864,15 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         }
 
 #ifdef _WIN32
-        {
-            std::lock_guard<std::mutex> lock(custody->mutex);
-            auto& occurrence = exact_occurrence_locked();
-            bool start_stamp_available = false;
-            uint64_t start_stamp = 0;
-            if (result.os_process_created && result.os_pid > 0) {
-                if (auto stamp = query_process_start_stamp(
-                        static_cast<uint32_t>(result.os_pid)))
-                {
-                    start_stamp = *stamp;
-                    start_stamp_available = true;
-                }
-            }
-            const bool native_committed = result.os_process_created
-                ? occurrence.native.commit_created(
-                    result.os_pid,
-                    start_stamp_available,
-                    start_stamp,
-                    result.os_process_already_reaped,
-                    result.os_wait_status_available,
-                    result.os_wait_status
-#ifdef _WIN32
-                    , result.os_process_handle,
-                    result.os_process_handle_owned
-#endif
-                    )
-                : occurrence.native.confirm_absent();
-            if (!native_committed) {
-                throw std::runtime_error(
-                    "Managed-child native authority commit failed");
-            }
-            if (result.os_process_created) {
-                result.os_process_handle_owned = false;
-            }
-            custody->changed.notify_all();
+        if (result.os_process_created) {
+            launch_attempt.commit_windows_native_authority(
+                result.os_pid,
+                result.os_process_already_reaped,
+                result.os_wait_status_available,
+                result.os_wait_status);
+        }
+        else {
+            launch_attempt.confirm_windows_native_absent();
         }
 #endif
     }
@@ -4658,18 +4886,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             error_msg << " (errno " << spawn_error << ": " << ec.message() << ')';
         }
         result.failure.message = error_msg.str();
-#ifdef _WIN32
-        {
-            std::lock_guard<std::mutex> lock(custody->mutex);
-            auto& occurrence = exact_occurrence_locked();
-            if (!occurrence.native.confirm_absent()) {
-                throw std::runtime_error(
-                    "Managed-child native authority was not absent after "
-                    "spawn preparation failure");
-            }
-            custody->changed.notify_all();
-        }
-#endif
     }
 
     if (result.os_process_created) {
@@ -4725,73 +4941,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             s.occurrence);
 
 #ifdef _WIN32
-        if (result.os_process_created && spawned_process_handle) {
-            const auto process_instance_id = s.piid;
-            const auto occurrence_number = s.occurrence;
-            start_child_custody_worker(
-                [custody, process_instance_id, occurrence_number,
-                 spawned_process_handle]() {
-                    const auto wait_result =
-                        WaitForSingleObject(spawned_process_handle, INFINITE);
-                    uintptr_t released_handle = 0;
-                    bool transition_valid = false;
-                    {
-                        std::lock_guard<std::mutex> lock(custody->mutex);
-                        for (auto& occurrence : custody->occurrences) {
-                            if (occurrence.process_instance_id ==
-                                    process_instance_id &&
-                                occurrence.occurrence == occurrence_number)
-                            {
-                                if (wait_result == WAIT_OBJECT_0) {
-                                    DWORD exit_code = 0;
-                                    const bool exit_code_available =
-                                        GetExitCodeProcess(
-                                            spawned_process_handle,
-                                            &exit_code) != 0;
-                                    transition_valid =
-                                        occurrence.native.note_exit(
-                                            static_cast<int>(exit_code),
-                                            exit_code_available);
-                                    if (transition_valid &&
-                                        occurrence.native.process_handle_owned())
-                                    {
-                                        transition_valid =
-                                            occurrence.native.
-                                                take_owned_process_handle(
-                                                    reinterpret_cast<uintptr_t>(
-                                                        spawned_process_handle),
-                                                    released_handle);
-                                    }
-                                }
-                                else {
-                                    occurrence.native.cancel_exit_observer();
-                                    transition_valid = true;
-                                }
-                                break;
-                            }
-                        }
-                        custody->changed.notify_all();
-                    }
-                    if (released_handle != 0) {
-                        CloseHandle(reinterpret_cast<HANDLE>(released_handle));
-                    }
-                    if (!transition_valid) {
-                        Log_stream(log_level::error)
-                            << "Managed-child native observer transition "
-                               "failed.\n";
-                    }
-                },
-                detail::test_hooks::k_managed_child_fail_native_observer_start,
-                s.piid,
-                s.occurrence);
-            std::lock_guard<std::mutex> lock(custody->mutex);
-            auto& occurrence = exact_occurrence_locked();
-            if (occurrence.native.running() &&
-                !occurrence.native.register_exit_observer())
-            {
-                throw std::runtime_error(
-                    "Managed-child native observer registration failed");
-            }
+        if (result.os_process_created) {
+            launch_attempt.start_windows_native_observer();
         }
 #else
         // POSIX uses only the central reaper. The PID was inserted into its
@@ -4806,9 +4957,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             << "spawn_swarm_process: OS spawn succeeded"
             << " process_instance_id=" << static_cast<unsigned long long>(s.piid)
             << " pid=" << result.os_pid
-#ifdef _WIN32
-            << " process_handle=" << result.os_process_handle
-#endif
             << " binary='" << s.binary_name << "'"
             << "\n";
 
@@ -4832,21 +4980,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         launch_attempt.transfer_initialization_reservation();
     }
     else {
-#ifdef _WIN32
-        if (spawned_process_handle) {
-            {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                auto& occurrence = exact_occurrence_locked();
-                if (!occurrence.native.confirm_absent()) {
-                    throw std::runtime_error(
-                        "Managed-child native authority was not absent after "
-                        "spawn failure");
-                }
-            }
-            CloseHandle(spawned_process_handle);
-            spawned_process_handle = nullptr;
-        }
-#endif
         int saved_errno = 0;
 #ifdef _WIN32
         if (result.failure.native_error != 0 || !result.failure.message.empty()) {
@@ -4878,15 +5011,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         launch_attempt.commit_posix_native_handoff(
             false, -1, false, false, 0, false);
 #else
-        {
-            std::lock_guard<std::mutex> lock(custody->mutex);
-            auto& occurrence = exact_occurrence_locked();
-            if (!occurrence.native.confirm_absent()) {
-                throw std::runtime_error(
-                    "Managed-child native authority was not absent while "
-                    "settling spawn failure");
-            }
-        }
+        launch_attempt.confirm_windows_native_absent();
 #endif
         // Log spawn failures to stderr
         if (!spawn_ready && !result.failure.message.empty()) {
