@@ -173,6 +173,41 @@ inline constexpr const char* k_external_attach_token_arg      = "--external_atta
 inline constexpr const char* k_external_attach_occurrence_arg = "--external_attach_occurrence";
 inline constexpr auto        k_external_attach_claim_timeout  = std::chrono::seconds(5);
 
+enum class Managed_child_post_spawn_stage
+{
+    public_sync_no_child,
+    join_no_child
+};
+
+namespace test_hooks {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Managed_child_post_spawn_callback = void (*)(
+    Managed_child_post_spawn_stage,
+    instance_id_type,
+    uint32_t);
+inline std::atomic<Managed_child_post_spawn_callback>
+    s_managed_child_post_spawn{nullptr};
+#endif
+} // namespace test_hooks
+
+inline void managed_child_post_spawn_for_test(
+    Managed_child_post_spawn_stage stage,
+    instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback =
+            test_hooks::s_managed_child_post_spawn.load(std::memory_order_acquire))
+    {
+        callback(stage, process_instance_id, occurrence);
+    }
+#else
+    (void)stage;
+    (void)process_instance_id;
+    (void)occurrence;
+#endif
+}
+
 class Managed_child_transport_retirement
 {
 public:
@@ -504,6 +539,123 @@ struct Managed_child_custody_record
     std::vector<Managed_child_occurrence_record> occurrences;
 };
 
+// Pins one admitted occurrence until setup becomes terminal.  This owner is
+// deliberately limited to publishing the exact occurrence's setup outcome;
+// subordinate reader/native cleanup and custody release remain with their
+// existing owners.
+class Managed_child_setup_settlement
+{
+public:
+    Managed_child_setup_settlement() noexcept = default;
+
+    Managed_child_setup_settlement(
+        std::shared_ptr<Managed_child_custody_record> custody,
+        instance_id_type process_instance_id,
+        uint32_t occurrence) noexcept
+        : m_custody(std::move(custody))
+        , m_process_instance_id(process_instance_id)
+        , m_occurrence(occurrence)
+    {}
+
+    Managed_child_setup_settlement(
+        const Managed_child_setup_settlement&) = delete;
+    Managed_child_setup_settlement& operator=(
+        const Managed_child_setup_settlement&) = delete;
+
+    Managed_child_setup_settlement(
+        Managed_child_setup_settlement&& other) noexcept
+        : m_custody(std::move(other.m_custody))
+        , m_process_instance_id(other.m_process_instance_id)
+        , m_occurrence(other.m_occurrence)
+    {
+        other.m_process_instance_id = invalid_instance_id;
+        other.m_occurrence = 0;
+    }
+
+    Managed_child_setup_settlement& operator=(
+        Managed_child_setup_settlement&& other) noexcept
+    {
+        if (this != &other) {
+            settle();
+            m_custody = std::move(other.m_custody);
+            m_process_instance_id = other.m_process_instance_id;
+            m_occurrence = other.m_occurrence;
+            other.m_process_instance_id = invalid_instance_id;
+            other.m_occurrence = 0;
+        }
+        return *this;
+    }
+
+    ~Managed_child_setup_settlement() noexcept { settle(); }
+
+    explicit operator bool() const noexcept
+    {
+        return static_cast<bool>(m_custody);
+    }
+
+    bool matches(
+        const std::shared_ptr<Managed_child_custody_record>& custody,
+        instance_id_type process_instance_id,
+        uint32_t occurrence) const noexcept
+    {
+        return m_custody == custody &&
+            m_process_instance_id == process_instance_id &&
+            m_occurrence == occurrence;
+    }
+
+    bool settle() noexcept
+    {
+        if (!m_custody) {
+            return false;
+        }
+
+        bool child_created = false;
+        bool terminal = false;
+        bool changed = false;
+        try {
+            std::lock_guard<std::mutex> lock(m_custody->mutex);
+            const auto exact = std::find_if(
+                m_custody->occurrences.begin(),
+                m_custody->occurrences.end(),
+                [&](const Managed_child_occurrence_record& candidate) {
+                    return candidate.process_instance_id ==
+                            m_process_instance_id &&
+                        candidate.occurrence == m_occurrence;
+                });
+            if (exact != m_custody->occurrences.end()) {
+                child_created = exact->native.created();
+                if (exact->setup ==
+                    Managed_child_occurrence_record::setup_state::pending)
+                {
+                    exact->setup = child_created
+                        ? Managed_child_occurrence_record::setup_state::
+                            ownership_ready
+                        : Managed_child_occurrence_record::setup_state::no_child;
+                    changed = true;
+                }
+                terminal = exact->setup !=
+                    Managed_child_occurrence_record::setup_state::pending;
+            }
+        }
+        catch (...) {
+            return false;
+        }
+
+        if (changed) {
+            m_custody->changed.notify_all();
+        }
+        if (terminal) {
+            m_custody.reset();
+        }
+        return child_created;
+    }
+
+private:
+    std::shared_ptr<Managed_child_custody_record> m_custody;
+    instance_id_type m_process_instance_id = invalid_instance_id;
+    uint32_t m_occurrence = 0;
+};
+
 } // namespace detail
 
 
@@ -708,7 +860,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uint32_t                   occurrence = 0;
         Lifetime_policy            lifetime;
         std::shared_ptr<detail::Managed_child_custody_record> custody;
-        bool                       custody_occurrence_admitted = false;
     };
 
     struct Spawn_result
@@ -755,11 +906,16 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void release_all_lifelines();
 
     Spawn_result spawn_swarm_process(const Spawn_swarm_process_args& ssp_args);
-    Spawn_result spawn_swarm_process_impl(const Spawn_swarm_process_args& ssp_args);
+    Spawn_result spawn_swarm_process(
+        const Spawn_swarm_process_args& ssp_args,
+        detail::Managed_child_setup_settlement& setup_settlement);
+    Spawn_result spawn_swarm_process_impl(
+        const Spawn_swarm_process_args& ssp_args,
+        detail::Managed_child_setup_settlement& setup_settlement);
 
     std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
-    bool admit_child_custody_occurrence(
+    detail::Managed_child_setup_settlement admit_child_custody_occurrence(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         instance_id_type process_instance_id,
         uint32_t occurrence);

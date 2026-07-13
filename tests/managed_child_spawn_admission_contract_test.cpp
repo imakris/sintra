@@ -7,11 +7,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -42,6 +44,33 @@ struct Failure_plan
 };
 
 Failure_plan* s_failure_plan = nullptr;
+
+struct Post_spawn_gate
+{
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered = false;
+    bool release = false;
+};
+
+Post_spawn_gate* s_post_spawn_gate = nullptr;
+
+void hold_public_sync_post_spawn(
+    sintra::detail::Managed_child_post_spawn_stage stage,
+    sintra::instance_id_type,
+    uint32_t)
+{
+    auto* gate = s_post_spawn_gate;
+    if (!gate || stage != sintra::detail::Managed_child_post_spawn_stage::
+            public_sync_no_child)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    gate->entered = true;
+    gate->changed.notify_all();
+    gate->changed.wait(lock, [&]() { return gate->release; });
+}
 
 bool wait_for_file(
     const std::filesystem::path& path,
@@ -297,6 +326,85 @@ bool run_native_spawn_failure(const std::filesystem::path& missing_binary)
         !released.last_failure.message.empty();
 }
 
+bool run_sync_failure_finalize_fence(
+    const std::filesystem::path& missing_binary)
+{
+    Post_spawn_gate gate;
+    s_post_spawn_gate = &gate;
+    sintra::detail::test_hooks::s_managed_child_post_spawn.store(
+        &hold_public_sync_post_spawn, std::memory_order_release);
+
+    std::atomic<bool> spawn_returned{false};
+    std::thread spawn_thread([&]() {
+        sintra::Spawn_options options;
+        options.binary_path = missing_binary.string();
+        options.lifetime.enable_lifeline = false;
+        (void)sintra::spawn_swarm_process(options);
+        spawn_returned.store(true, std::memory_order_release);
+    });
+
+    bool entered = false;
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        entered = gate.changed.wait_for(
+            lock, 5s, [&]() { return gate.entered; });
+    }
+    if (!entered) {
+        {
+            std::lock_guard<std::mutex> lock(gate.mutex);
+            gate.release = true;
+        }
+        gate.changed.notify_all();
+        spawn_thread.join();
+        sintra::detail::test_hooks::s_managed_child_post_spawn.store(
+            nullptr, std::memory_order_release);
+        s_post_spawn_gate = nullptr;
+        return false;
+    }
+
+    std::atomic<bool> watchdog_released{false};
+    std::thread watchdog([&]() {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        if (!gate.changed.wait_for(lock, 5s, [&]() { return gate.release; })) {
+            watchdog_released.store(true, std::memory_order_release);
+            gate.release = true;
+            lock.unlock();
+            gate.changed.notify_all();
+        }
+    });
+
+    const bool first_finalize = sintra::detail::finalize();
+    const bool finalized_while_held = first_finalize &&
+        !watchdog_released.load(std::memory_order_acquire);
+    if (finalized_while_held) {
+        std::fprintf(
+            stderr,
+            "A3A_SYNC_LIFETIME_RED finalize_succeeded_while_post_spawn_held=1\n");
+        std::fflush(stderr);
+        std::_Exit(1);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    spawn_thread.join();
+    watchdog.join();
+    sintra::detail::test_hooks::s_managed_child_post_spawn.store(
+        nullptr, std::memory_order_release);
+    s_post_spawn_gate = nullptr;
+
+    const bool finalized = first_finalize || settle_finalize();
+    const bool valid = spawn_returned.load(std::memory_order_acquire) && finalized;
+    if (valid) {
+        std::fprintf(
+            stdout,
+            "A3A_SYNC_LIFETIME_GREEN finalize_succeeded_while_post_spawn_held=0\n");
+    }
+    return valid;
+}
+
 bool run_worker_rejection(
     const std::string& binary_path,
     const std::filesystem::path& outcome,
@@ -393,7 +501,7 @@ int main(int argc, char* argv[])
     const bool native_spawn_reported = run_native_spawn_failure(missing_binary);
     const bool worker_rejected = run_worker_rejection(
         binary_path, worker_outcome, worker_child);
-    const bool finalized = settle_finalize();
+    const bool finalized = run_sync_failure_finalize_fence(missing_binary);
 
     std::error_code ec;
     std::filesystem::remove_all(scratch, ec);

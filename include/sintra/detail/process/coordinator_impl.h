@@ -1862,7 +1862,7 @@ instance_id_type Coordinator::join_swarm(
         return invalid_instance_id;
     }
 
-    std::lock_guard<mutex> admission_lock(detail::s_teardown_admission_mutex);
+    std::unique_lock<mutex> admission_lock(detail::s_teardown_admission_mutex);
 
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         return invalid_instance_id;
@@ -1931,9 +1931,26 @@ instance_id_type Coordinator::join_swarm(
         "--coordinator_id", std::to_string(s_coord_id)
     };
     spawn_args.custody = s_mproc->accept_child_custody();
+    detail::Managed_child_setup_settlement setup_settlement;
     Managed_process::Spawn_result result;
     try {
-        result = s_mproc->spawn_swarm_process(spawn_args);
+        setup_settlement = s_mproc->admit_child_custody_occurrence(
+            spawn_args.custody,
+            spawn_args.piid,
+            spawn_args.occurrence);
+        if (setup_settlement) {
+            admission_lock.unlock();
+            result = s_mproc->spawn_swarm_process(
+                spawn_args, setup_settlement);
+        }
+        else {
+            result.failure.kind = Managed_child_failure_kind::custody_closed;
+            result.failure.occurrence = spawn_args.occurrence;
+            result.failure.message = "Managed child custody is closed";
+            s_mproc->note_child_custody_failure(
+                spawn_args.custody, result.failure);
+            admission_lock.unlock();
+        }
     }
     catch (...) {
         s_mproc->request_child_custody_release(
@@ -1942,6 +1959,10 @@ instance_id_type Coordinator::join_swarm(
     }
 
     if (!result.success) {
+        detail::managed_child_post_spawn_for_test(
+            detail::Managed_child_post_spawn_stage::join_no_child,
+            spawn_args.piid,
+            spawn_args.occurrence);
         s_mproc->request_child_custody_release(spawn_args.custody);
         // Roll back group insertion on spawn failure.
         std::lock_guard groups_lock(m_groups_mutex);
@@ -2048,7 +2069,8 @@ void Coordinator::recover_if_required(const Crash_info& info)
 
     auto spawned = std::make_shared<std::atomic<bool>>(false);
     auto spawn_now = [this, info, should_cancel, spawned]() {
-        std::lock_guard<mutex> admission_lock(detail::s_teardown_admission_mutex);
+        std::unique_lock<mutex> admission_lock(
+            detail::s_teardown_admission_mutex);
         if (should_cancel()) {
             return;
         }
@@ -2071,7 +2093,22 @@ void Coordinator::recover_if_required(const Crash_info& info)
             }
             spawn_args = spawn_it->second;
         }
-        s_mproc->spawn_swarm_process(spawn_args);
+        auto setup_settlement = s_mproc->admit_child_custody_occurrence(
+            spawn_args.custody,
+            spawn_args.piid,
+            spawn_args.occurrence);
+        if (!setup_settlement) {
+            s_mproc->note_child_custody_failure(
+                spawn_args.custody,
+                {Managed_child_failure_kind::custody_closed,
+                 spawn_args.occurrence,
+                 0,
+                 "Managed child custody is closed"});
+            return;
+        }
+        admission_lock.unlock();
+        s_mproc->spawn_swarm_process(
+            spawn_args, setup_settlement);
     };
 
     if (!runner) {

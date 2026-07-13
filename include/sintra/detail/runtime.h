@@ -1119,6 +1119,9 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         return {};
     }
     std::shared_ptr<detail::Managed_child_custody_record> custody_record;
+    detail::Managed_child_setup_settlement setup_settlement;
+    Managed_process::Spawn_swarm_process_args spawn_args;
+    Managed_process* custody_owner = nullptr;
     Managed_process::Spawn_result spawn_result;
     bool os_process_created = false;
     auto exception_message = [](
@@ -1185,7 +1188,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             owner->retire_child_custody_if_complete(record);
         }
     };
-    auto settle_setup_exception = [](
+    auto handle_setup_exception = [](
         Managed_process* owner,
         const std::shared_ptr<detail::Managed_child_custody_record>& record,
         instance_id_type process_id,
@@ -1199,18 +1202,10 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     occurrence.occurrence == occurrence_number)
                 {
                     child_created = occurrence.native.created();
-                    if (occurrence.setup ==
-                        detail::Managed_child_occurrence_record::setup_state::pending)
-                    {
-                        occurrence.setup = child_created
-                            ? detail::Managed_child_occurrence_record::setup_state::ownership_ready
-                            : detail::Managed_child_occurrence_record::setup_state::no_child;
-                    }
                     break;
                 }
             }
         }
-        record->changed.notify_all();
         owner->request_child_custody_release(
             record,
             child_created
@@ -1285,153 +1280,53 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             "--coordinator_id", std::to_string(coord_id)
         });
 
-        Managed_process::Spawn_swarm_process_args spawn_args;
         spawn_args.binary_name   = options.binary_path;
         spawn_args.args          = args;
         spawn_args.env_overrides = options.env_overrides;
         spawn_args.lifetime      = options.lifetime;
         spawn_args.piid = piid;
-        custody_record = s_mproc->accept_child_custody();
+        custody_owner = s_mproc;
+        custody_record = custody_owner->accept_child_custody();
         spawn_args.custody = custody_record;
         readiness_coordinator = s_coord;
         custody_identity = custody_record->identity;
         if (readiness_requested) {
+            std::lock_guard<std::mutex> lock(custody_record->mutex);
+            custody_record->readiness = detail::Readiness_phase::pending;
+        }
+
+        try {
+            setup_settlement = custody_owner->admit_child_custody_occurrence(
+                custody_record, piid, spawn_args.occurrence);
+        }
+        catch (...) {
+            uint32_t admitted_failure_occurrence = 0;
             {
                 std::lock_guard<std::mutex> lock(custody_record->mutex);
-                custody_record->readiness = detail::Readiness_phase::pending;
-            }
-            bool admitted = false;
-            try {
-                admitted = s_mproc->admit_child_custody_occurrence(
-                    custody_record, piid, spawn_args.occurrence);
-            }
-            catch (...) {
-                uint32_t admitted_failure_occurrence = 0;
-                {
-                    std::lock_guard<std::mutex> lock(custody_record->mutex);
-                    const auto admitted = std::find_if(
-                        custody_record->occurrences.begin(),
-                        custody_record->occurrences.end(),
-                        [&](const detail::Managed_child_occurrence_record& occurrence) {
-                            return occurrence.process_instance_id == piid &&
-                                occurrence.occurrence == spawn_args.occurrence;
-                        });
-                    if (admitted != custody_record->occurrences.end()) {
-                        admitted_failure_occurrence = spawn_args.occurrence;
-                    }
+                const auto admitted = std::find_if(
+                    custody_record->occurrences.begin(),
+                    custody_record->occurrences.end(),
+                    [&](const detail::Managed_child_occurrence_record& occurrence) {
+                        return occurrence.process_instance_id == piid &&
+                            occurrence.occurrence == spawn_args.occurrence;
+                    });
+                if (admitted != custody_record->occurrences.end()) {
+                    admitted_failure_occurrence = spawn_args.occurrence;
                 }
-                s_mproc->note_child_custody_failure(
-                    custody_record,
-                    {Managed_child_failure_kind::occurrence_admission,
-                     admitted_failure_occurrence,
-                     0,
-                     exception_message(
-                         std::current_exception(),
-                         "Managed child occurrence admission failed")});
-                settle_setup_exception(
-                    s_mproc, custody_record, piid, spawn_args.occurrence);
-                readiness_observer(
-                    s_mproc,
-                    readiness_coordinator,
-                    custody_record,
-                    options.readiness_instance_name,
-                    false,
-                    custody_identity,
-                    piid,
-                    spawn_args.occurrence);
-                return Managed_child_custody(custody_record);
             }
-            if (!admitted) {
-                s_mproc->note_child_custody_failure(
-                    custody_record,
-                    {Managed_child_failure_kind::custody_closed,
-                     0,
-                     0,
-                     "Managed child custody closed during occurrence admission"});
-                s_mproc->request_child_custody_release(custody_record);
-                readiness_observer(
-                    s_mproc,
-                    readiness_coordinator,
-                    custody_record,
-                    options.readiness_instance_name,
-                    false,
-                    custody_identity,
-                    piid,
-                    spawn_args.occurrence);
-                return Managed_child_custody(custody_record);
-            }
-            spawn_args.custody_occurrence_admitted = true;
-            auto* custody_owner = s_mproc;
-            auto async_setup =
-                [custody_owner, readiness_coordinator, custody_record, spawn_args,
-                 custody_identity,
-                 target = options.readiness_instance_name,
-                 readiness_observer, settle_setup_exception]() mutable
-                {
-                    bool created = false;
-                    bool setup_threw = false;
-                    try {
-                        auto result = custody_owner->spawn_swarm_process(spawn_args);
-                        created = result.success && result.os_process_created;
-                        if (created) {
-                            detail::runtime_spawn_success_for_test(
-                                result.instance_id,
-                                result.os_pid,
-                                result.lifeline_enabled,
-                                result.lifeline_write_retained);
-                            detail::runtime_stage_for_test(
-                                detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
-                        }
-                    }
-                    catch (...) {
-                        setup_threw = true;
-                        created = settle_setup_exception(
-                            custody_owner,
-                            custody_record,
-                            spawn_args.piid,
-                            spawn_args.occurrence);
-                    }
-
-                    if (!created && !setup_threw) {
-                        custody_owner->request_child_custody_release(custody_record);
-                    }
-                    readiness_observer(
-                        custody_owner,
-                        readiness_coordinator,
-                        custody_record,
-                        target,
-                        created,
-                        custody_identity,
-                        spawn_args.piid,
-                        spawn_args.occurrence);
-                };
-            try {
-                custody_owner->start_child_custody_worker(std::move(async_setup));
-            }
-            catch (...) {
-                custody_owner->note_child_custody_failure(
-                    custody_record,
-                    {Managed_child_failure_kind::setup_worker_start,
-                     spawn_args.occurrence,
-                     0,
-                     exception_message(
-                         std::current_exception(),
-                         "Managed child setup worker failed to start")});
-                {
-                    std::lock_guard<std::mutex> lock(custody_record->mutex);
-                    for (auto& occurrence : custody_record->occurrences) {
-                        if (occurrence.process_instance_id == piid &&
-                            occurrence.occurrence == spawn_args.occurrence &&
-                            occurrence.setup == detail::Managed_child_occurrence_record::setup_state::pending)
-                        {
-                            occurrence.setup =
-                                detail::Managed_child_occurrence_record::setup_state::no_child;
-                            break;
-                        }
-                    }
-                }
-                custody_record->changed.notify_all();
-                custody_owner->request_child_custody_release(custody_record);
+            custody_owner->note_child_custody_failure(
+                custody_record,
+                {readiness_requested
+                     ? Managed_child_failure_kind::occurrence_admission
+                     : Managed_child_failure_kind::setup_exception,
+                 admitted_failure_occurrence,
+                 0,
+                 exception_message(
+                     std::current_exception(),
+                     "Managed child occurrence admission failed")});
+            handle_setup_exception(
+                custody_owner, custody_record, piid, spawn_args.occurrence);
+            if (readiness_requested) {
                 readiness_observer(
                     custody_owner,
                     readiness_coordinator,
@@ -1439,23 +1334,123 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     options.readiness_instance_name,
                     false,
                     custody_identity,
-                    spawn_args.piid,
+                    piid,
                     spawn_args.occurrence);
             }
+            return Managed_child_custody(custody_record);
         }
-        else {
-            try {
-                spawn_result = s_mproc->spawn_swarm_process(spawn_args);
+        if (!setup_settlement) {
+            custody_owner->note_child_custody_failure(
+                custody_record,
+                {Managed_child_failure_kind::custody_closed,
+                 0,
+                 0,
+                 "Managed child custody closed during occurrence admission"});
+            custody_owner->request_child_custody_release(custody_record);
+            if (readiness_requested) {
+                readiness_observer(
+                    custody_owner,
+                    readiness_coordinator,
+                    custody_record,
+                    options.readiness_instance_name,
+                    false,
+                    custody_identity,
+                    piid,
+                    spawn_args.occurrence);
             }
-            catch (...) {
-                os_process_created = settle_setup_exception(
-                    s_mproc, custody_record, piid, spawn_args.occurrence);
-                return Managed_child_custody(custody_record);
-            }
-            os_process_created = spawn_result.success && spawn_result.os_process_created;
-            if (!os_process_created) {
-                s_mproc->request_child_custody_release(custody_record);
-            }
+            return Managed_child_custody(custody_record);
+        }
+    }
+
+    if (readiness_requested) {
+        auto shared_setup_settlement =
+            std::make_shared<detail::Managed_child_setup_settlement>(
+                std::move(setup_settlement));
+        auto async_setup =
+            [custody_owner, readiness_coordinator, custody_record, spawn_args,
+             shared_setup_settlement, custody_identity,
+             target = options.readiness_instance_name,
+             readiness_observer, handle_setup_exception]() mutable
+            {
+                bool created = false;
+                bool setup_threw = false;
+                try {
+                    auto result = custody_owner->spawn_swarm_process(
+                        spawn_args, *shared_setup_settlement);
+                    created = result.success && result.os_process_created;
+                    if (created) {
+                        detail::runtime_spawn_success_for_test(
+                            result.instance_id,
+                            result.os_pid,
+                            result.lifeline_enabled,
+                            result.lifeline_write_retained);
+                        detail::runtime_stage_for_test(
+                            detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
+                    }
+                }
+                catch (...) {
+                    setup_threw = true;
+                    created = handle_setup_exception(
+                        custody_owner,
+                        custody_record,
+                        spawn_args.piid,
+                        spawn_args.occurrence);
+                }
+
+                if (!created && !setup_threw) {
+                    custody_owner->request_child_custody_release(custody_record);
+                }
+                readiness_observer(
+                    custody_owner,
+                    readiness_coordinator,
+                    custody_record,
+                    target,
+                    created,
+                    custody_identity,
+                    spawn_args.piid,
+                    spawn_args.occurrence);
+            };
+        try {
+            custody_owner->start_child_custody_worker(std::move(async_setup));
+        }
+        catch (...) {
+            custody_owner->note_child_custody_failure(
+                custody_record,
+                {Managed_child_failure_kind::setup_worker_start,
+                 spawn_args.occurrence,
+                 0,
+                 exception_message(
+                     std::current_exception(),
+                     "Managed child setup worker failed to start")});
+            custody_owner->request_child_custody_release(custody_record);
+            readiness_observer(
+                custody_owner,
+                readiness_coordinator,
+                custody_record,
+                options.readiness_instance_name,
+                false,
+                custody_identity,
+                spawn_args.piid,
+                spawn_args.occurrence);
+        }
+    }
+    else {
+        try {
+            spawn_result = custody_owner->spawn_swarm_process(
+                spawn_args, setup_settlement);
+        }
+        catch (...) {
+            os_process_created = handle_setup_exception(
+                custody_owner, custody_record, piid, spawn_args.occurrence);
+            return Managed_child_custody(custody_record);
+        }
+        os_process_created = spawn_result.success && spawn_result.os_process_created;
+        if (!os_process_created) {
+            detail::managed_child_post_spawn_for_test(
+                detail::Managed_child_post_spawn_stage::public_sync_no_child,
+                spawn_args.piid,
+                spawn_args.occurrence);
+            custody_owner->request_child_custody_release(custody_record);
         }
     }
     if (!readiness_requested && os_process_created) {

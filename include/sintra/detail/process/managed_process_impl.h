@@ -2188,18 +2188,19 @@ inline bool Managed_process::can_accept_child_custody(
     return existing->phase == detail::Custody_phase::released;
 }
 
-inline bool Managed_process::admit_child_custody_occurrence(
+inline detail::Managed_child_setup_settlement
+Managed_process::admit_child_custody_occurrence(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
     instance_id_type process_instance_id,
     uint32_t occurrence)
 {
     if (!custody) {
-        return false;
+        return {};
     }
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         if (custody->phase != detail::Custody_phase::open) {
-            return false;
+            return {};
         }
         const auto duplicate = std::find_if(
             custody->occurrences.begin(),
@@ -2209,7 +2210,7 @@ inline bool Managed_process::admit_child_custody_occurrence(
                     candidate.occurrence == occurrence;
             });
         if (duplicate != custody->occurrences.end()) {
-            return false;
+            return {};
         }
         detail::Managed_child_occurrence_record admitted;
         admitted.occurrence = occurrence;
@@ -2247,7 +2248,8 @@ inline bool Managed_process::admit_child_custody_occurrence(
         throw;
     }
     custody->changed.notify_all();
-    return true;
+    return detail::Managed_child_setup_settlement(
+        custody, process_instance_id, occurrence);
 }
 
 inline void Managed_process::note_child_custody_failure(
@@ -3782,6 +3784,14 @@ inline bool Managed_process::cleanup_child_native(
 inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     const Spawn_swarm_process_args& s)
 {
+    detail::Managed_child_setup_settlement setup_settlement;
+    return spawn_swarm_process(s, setup_settlement);
+}
+
+inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
+    const Spawn_swarm_process_args& s,
+    detail::Managed_child_setup_settlement& setup_settlement)
+{
     auto admitted_failure_occurrence = [&]() {
         if (!s.custody) {
             return uint32_t{0};
@@ -3800,7 +3810,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
     };
     Spawn_result result;
     try {
-        result = spawn_swarm_process_impl(s);
+        result = spawn_swarm_process_impl(s, setup_settlement);
     }
     catch (const std::exception& exception) {
         try {
@@ -3837,7 +3847,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(
 }
 
 inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
-    const Spawn_swarm_process_args& s)
+    const Spawn_swarm_process_args& s,
+    detail::Managed_child_setup_settlement& setup_settlement)
 {
     assert(s_coord);
     Spawn_result result;
@@ -3852,16 +3863,23 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     }
     auto custody = s.custody;
 
-    if (!s.custody_occurrence_admitted &&
-        !admit_child_custody_occurrence(custody, s.piid, s.occurrence))
-    {
-        result.failure.kind = Managed_child_failure_kind::custody_closed;
-        result.failure.message = "Managed child custody is closed";
+    if (!setup_settlement) {
+        setup_settlement = admit_child_custody_occurrence(
+            custody, s.piid, s.occurrence);
+        if (!setup_settlement) {
+            result.failure.kind = Managed_child_failure_kind::custody_closed;
+            result.failure.message = "Managed child custody is closed";
+            return result;
+        }
+    }
+    if (!setup_settlement.matches(custody, s.piid, s.occurrence)) {
+        result.failure.kind = Managed_child_failure_kind::setup_exception;
+        result.failure.message =
+            "Managed child setup settlement identity mismatch";
         return result;
     }
     result.failure.occurrence = s.occurrence;
 
-    bool setup_resolved = false;
     bool reader_prepared = false;
     bool initialization_reservation_acquired = false;
     bool initialization_reservation_transferred = false;
@@ -3869,32 +3887,21 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     uint64_t posix_reap_reservation = 0;
     bool posix_reap_reservation_lookup_failed = false;
 #endif
-    auto resolve_setup_on_exit = [&]() {
+    Instantiator setup_resource_guard(std::function<void()>([&]() {
         bool child_created = false;
-        std::lock_guard<std::mutex> lock(custody->mutex);
-        for (auto& occurrence : custody->occurrences) {
-            if (occurrence.occurrence == s.occurrence &&
-                occurrence.process_instance_id == s.piid &&
-                occurrence.setup ==
-                    detail::Managed_child_occurrence_record::setup_state::pending)
-            {
-                child_created = occurrence.native.created();
-                occurrence.setup = child_created
-                    ? detail::Managed_child_occurrence_record::setup_state::ownership_ready
-                    : detail::Managed_child_occurrence_record::setup_state::no_child;
-                break;
-            }
+        {
+            std::lock_guard<std::mutex> lock(custody->mutex);
+            const auto exact = std::find_if(
+                custody->occurrences.begin(), custody->occurrences.end(),
+                [&](const detail::Managed_child_occurrence_record& occurrence) {
+                    return occurrence.occurrence == s.occurrence &&
+                        occurrence.process_instance_id == s.piid;
+                });
+            child_created = exact != custody->occurrences.end() &&
+                exact->native.created();
         }
-        setup_resolved = true;
-        custody->changed.notify_all();
-        return child_created;
-    };
-    Instantiator setup_resolution_guard(std::function<void()>([&]() {
-        if (!setup_resolved) {
-            const bool child_created = resolve_setup_on_exit();
-            if (reader_prepared && !child_created) {
-                remove_process_reader(s.piid, 1.0);
-            }
+        if (reader_prepared && !child_created) {
+            remove_process_reader(s.piid, 1.0);
         }
 #ifndef _WIN32
         if (posix_reap_reservation != 0) {
@@ -4461,17 +4468,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             m_cached_spawns[s.piid] = s;
             m_cached_spawns[s.piid].custody = custody;
             m_cached_spawns[s.piid].occurrence++;
-            m_cached_spawns[s.piid].custody_occurrence_admitted = false;
         }
-        {
-            std::lock_guard<std::mutex> lock(custody->mutex);
-            auto& occurrence = exact_occurrence_locked();
-            occurrence.setup =
-                detail::Managed_child_occurrence_record::setup_state::ownership_ready;
-            setup_resolved = true;
-            initialization_reservation_transferred = true;
-            custody->changed.notify_all();
-        }
+        initialization_reservation_transferred = true;
     }
     else {
 #ifdef _WIN32
@@ -4527,12 +4525,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                     "Managed-child native authority was not absent while "
                     "settling spawn failure");
             }
-            occurrence.setup =
-                detail::Managed_child_occurrence_record::setup_state::no_child;
-            setup_resolved = true;
-            custody->changed.notify_all();
         }
-
         // Log spawn failures to stderr
         if (!spawn_ready && !result.failure.message.empty()) {
             Log_stream(log_level::error) << result.failure.message << "\n";
