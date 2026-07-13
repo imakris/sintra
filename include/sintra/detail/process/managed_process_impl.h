@@ -31,6 +31,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <variant>
 #ifdef _WIN32
 #include <errno.h>
 #endif
@@ -3265,6 +3266,150 @@ inline void Managed_process::retire_child_custody_if_complete(
     }
 }
 
+namespace detail {
+namespace managed_child_release_action {
+
+struct stop_attempt {};
+struct complete_release {};
+
+struct apply_cleanup
+{
+    Managed_child_release_roster targets;
+};
+
+struct retire_current_transport
+{
+    Managed_child_release_roster targets;
+};
+
+struct retire_historical_communication
+{
+    Managed_child_release_roster targets;
+};
+
+struct poll_windows_fallback
+{
+    instance_id_type process_instance_id = invalid_instance_id;
+    uint32_t         occurrence = 0;
+    uintptr_t        process_handle = 0;
+};
+
+struct wait_for_change {};
+
+} // namespace managed_child_release_action
+
+using Managed_child_release_action_plan = std::variant<
+    managed_child_release_action::stop_attempt,
+    managed_child_release_action::complete_release,
+    managed_child_release_action::apply_cleanup,
+    managed_child_release_action::retire_current_transport,
+    managed_child_release_action::retire_historical_communication,
+    managed_child_release_action::poll_windows_fallback,
+    managed_child_release_action::wait_for_change>;
+
+// Precondition: custody.mutex is held continuously from this selection until
+// the caller either claims the selected action or begins the condition wait.
+inline Managed_child_release_action_plan plan_managed_child_release_action_locked(
+    const Managed_child_custody_record& custody,
+    const Managed_child_release_roster& release_roster,
+    uint64_t release_attempt_generation,
+    bool cleanup_applied)
+{
+    using namespace managed_child_release_action;
+
+    if (custody.release_attempt_phase != Release_attempt_phase::running ||
+        custody.release_attempt_generation != release_attempt_generation)
+    {
+        return stop_attempt{};
+    }
+
+    const bool all_terminal = std::all_of(
+        custody.occurrences.begin(), custody.occurrences.end(),
+        [](const Managed_child_occurrence_record& occurrence) {
+            return !occurrence.initialization_reservation_active &&
+                (occurrence.setup ==
+                    Managed_child_occurrence_record::setup_state::no_child ||
+                 (occurrence.setup == Managed_child_occurrence_record::
+                        setup_state::ownership_ready &&
+                  occurrence.transport.fully_retired() &&
+                  occurrence.native.exited()));
+        });
+    if (all_terminal) {
+        return complete_release{};
+    }
+
+    if (custody.release_mode == Release_mode::cleanup && !cleanup_applied) {
+        return apply_cleanup{release_roster};
+    }
+
+    Managed_child_release_roster current_targets;
+    for (const auto& target : release_roster) {
+        if (!target.slot_current) {
+            continue;
+        }
+        const auto occurrence = std::find_if(
+            custody.occurrences.begin(), custody.occurrences.end(),
+            [&](const Managed_child_occurrence_record& candidate) {
+                return candidate.occurrence == target.occurrence &&
+                    candidate.process_instance_id == target.process_instance_id;
+            });
+        if (occurrence != custody.occurrences.end() &&
+            (cleanup_applied || occurrence->native.exited()) &&
+            !occurrence->transport.retirement_started() &&
+            (occurrence->initialization_reservation_active ||
+             !occurrence->transport.publication_retired() ||
+             !occurrence->transport.retirement_terminal()))
+        {
+            current_targets.push_back(target);
+        }
+    }
+    if (!current_targets.empty()) {
+        return retire_current_transport{std::move(current_targets)};
+    }
+
+    Managed_child_release_roster historical_targets;
+    for (const auto& target : release_roster) {
+        const auto occurrence = std::find_if(
+            custody.occurrences.begin(), custody.occurrences.end(),
+            [&](const Managed_child_occurrence_record& candidate) {
+                return candidate.process_instance_id == target.process_instance_id &&
+                    candidate.occurrence == target.occurrence;
+            });
+        if (occurrence != custody.occurrences.end() &&
+            occurrence->transport.ready_to_retire())
+        {
+            historical_targets.push_back(target);
+        }
+    }
+    if (!historical_targets.empty()) {
+        return retire_historical_communication{
+            std::move(historical_targets)};
+    }
+
+#ifdef _WIN32
+    for (const auto& target : release_roster) {
+        const auto occurrence = std::find_if(
+            custody.occurrences.begin(), custody.occurrences.end(),
+            [&](const Managed_child_occurrence_record& candidate) {
+                return candidate.process_instance_id == target.process_instance_id &&
+                    candidate.occurrence == target.occurrence;
+            });
+        if (occurrence != custody.occurrences.end() &&
+            occurrence->native.fallback_wait_available())
+        {
+            return poll_windows_fallback{
+                target.process_instance_id,
+                target.occurrence,
+                occurrence->native.process_handle()};
+        }
+    }
+#endif
+
+    return wait_for_change{};
+}
+
+} // namespace detail
+
 inline void Managed_process::request_child_custody_release(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
     detail::Release_mode release_mode)
@@ -3639,191 +3784,79 @@ inline void Managed_process::request_child_custody_release(
             return release_attempt_active();
         };
 
-        auto all_terminal_locked = [&]() {
-            return std::all_of(
-                custody->occurrences.begin(), custody->occurrences.end(),
-                [](const detail::Managed_child_occurrence_record& occurrence) {
-                    return !occurrence.initialization_reservation_active &&
-                        (occurrence.setup ==
-                            detail::Managed_child_occurrence_record::setup_state::no_child ||
-                        (occurrence.setup ==
-                            detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
-                         occurrence.transport.fully_retired() &&
-                         occurrence.native.exited()));
-                });
-        };
-
         bool cleanup_applied = false;
         bool passive_wait_reported = false;
-        auto passive_targets_locked = [&]() {
-            detail::Managed_child_release_roster targets;
-            for (const auto& target : release_roster) {
-                if (!target.slot_current) {
-                    continue;
-                }
-                auto occurrence = std::find_if(
-                    custody->occurrences.begin(),
-                    custody->occurrences.end(),
-                    [&](const detail::Managed_child_occurrence_record& candidate) {
-                        return candidate.occurrence == target.occurrence &&
-                            candidate.process_instance_id ==
-                                target.process_instance_id;
-                    });
-                if (occurrence != custody->occurrences.end() &&
-                    (cleanup_applied || occurrence->native.exited()) &&
-                    !occurrence->transport.retirement_started() &&
-                    (occurrence->initialization_reservation_active ||
-                     !occurrence->transport.publication_retired() ||
-                     !occurrence->transport.retirement_terminal()))
-                {
-                    targets.push_back(target);
-                }
-            }
-            return targets;
-        };
-        auto historical_communication_targets_locked = [&]() {
-            detail::Managed_child_release_roster targets;
-            for (const auto& target : release_roster) {
-                const auto occurrence = std::find_if(
-                    custody->occurrences.begin(), custody->occurrences.end(),
-                    [&](const detail::Managed_child_occurrence_record& candidate) {
-                        return candidate.process_instance_id ==
-                                target.process_instance_id &&
-                            candidate.occurrence == target.occurrence;
-                    });
-                if (occurrence != custody->occurrences.end() &&
-                    occurrence->transport.ready_to_retire())
-                {
-                    targets.push_back(target);
-                }
-            }
-            return targets;
-        };
-#ifdef _WIN32
-        struct Windows_fallback_target
-        {
-            instance_id_type process_instance_id = invalid_instance_id;
-            uint32_t occurrence = 0;
-            uintptr_t process_handle = 0;
-        };
-        auto windows_fallback_target_locked = [&]()
-            -> std::optional<Windows_fallback_target>
-        {
-            for (const auto& occurrence : custody->occurrences) {
-                if (occurrence.setup == detail::Managed_child_occurrence_record::
-                        setup_state::ownership_ready &&
-                    occurrence.native.fallback_wait_available())
-                {
-                    return Windows_fallback_target{
-                        occurrence.process_instance_id,
-                        occurrence.occurrence,
-                        occurrence.native.process_handle()};
-                }
-            }
-            return std::nullopt;
-        };
-#endif
+        using namespace detail::managed_child_release_action;
         while (true) {
-            bool should_cleanup = false;
-            detail::Managed_child_release_roster passive_targets;
-            detail::Managed_child_release_roster historical_targets;
-#ifdef _WIN32
-            std::optional<Windows_fallback_target> fallback_target;
-#endif
-            {
-                std::unique_lock<std::mutex> lock(custody->mutex);
-                if (custody->release_attempt_phase !=
-                        detail::Release_attempt_phase::running ||
-                    custody->release_attempt_generation !=
+            std::unique_lock<std::mutex> lock(custody->mutex);
+            auto action = detail::plan_managed_child_release_action_locked(
+                *custody,
+                release_roster,
+                release_attempt_generation,
+                cleanup_applied);
+
+            if (std::holds_alternative<stop_attempt>(action)) {
+                if (custody->release_attempt_phase ==
+                        detail::Release_attempt_phase::failing &&
+                    custody->release_attempt_generation ==
                         release_attempt_generation)
                 {
-                    if (custody->release_attempt_phase ==
-                            detail::Release_attempt_phase::failing &&
-                        custody->release_attempt_generation ==
-                            release_attempt_generation)
-                    {
-                        custody->release_attempt_phase =
-                            detail::Release_attempt_phase::retryable;
-                    }
-                    lock.unlock();
-                    custody->changed.notify_all();
-                    return;
-                }
-                if (all_terminal_locked()) {
-                    custody->phase = detail::Custody_phase::released;
                     custody->release_attempt_phase =
-                        detail::Release_attempt_phase::idle;
-                    break;
+                        detail::Release_attempt_phase::retryable;
                 }
-                should_cleanup =
-                    custody->release_mode == detail::Release_mode::cleanup &&
-                    !cleanup_applied;
-                if (!should_cleanup) {
-                    passive_targets = passive_targets_locked();
-                    historical_targets = historical_communication_targets_locked();
-                }
-                if (custody->release_mode == detail::Release_mode::passive &&
-                    !passive_wait_reported)
-                {
-                    // Observation-only test seam: at this point the single
-                    // retained worker has evaluated the monotone cleanup flag
-                    // as false and is about to wait (or poll a fallback native
-                    // handle). The callback must not re-enter custody APIs.
-                    const auto first_current = std::find_if(
-                        release_roster.begin(), release_roster.end(),
-                        [](const detail::Managed_child_release_occurrence& exact) {
-                            return exact.slot_current;
-                        });
-                    detail::managed_child_cleanup_for_test(
-                        detail::test_hooks::k_managed_child_release_waiting_passive,
-                        first_current == release_roster.end()
-                            ? invalid_instance_id
-                            : first_current->process_instance_id,
-                        first_current == release_roster.end()
-                            ? 0
-                            : first_current->occurrence);
-                    passive_wait_reported = true;
-                }
-#ifdef _WIN32
-                if (!should_cleanup) {
-                    fallback_target = windows_fallback_target_locked();
-                }
-#endif
-                if (!should_cleanup && passive_targets.empty() &&
-                    historical_targets.empty()
-#ifdef _WIN32
-                    && !fallback_target
-#endif
-                    )
-                {
-                    custody->changed.wait(lock, [&]() {
-                        return custody->release_attempt_phase !=
-                                detail::Release_attempt_phase::running ||
-                            custody->release_attempt_generation !=
-                                release_attempt_generation ||
-                            all_terminal_locked() ||
-                            (custody->release_mode ==
-                                detail::Release_mode::cleanup &&
-                             !cleanup_applied) ||
-                            !passive_targets_locked().empty() ||
-                            !historical_communication_targets_locked().empty()
-#ifdef _WIN32
-                            || windows_fallback_target_locked().has_value()
-#endif
-                            ;
-                    });
-                    continue;
-                }
+                lock.unlock();
+                custody->changed.notify_all();
+                return;
             }
 
-            if (should_cleanup) {
+            if (std::holds_alternative<complete_release>(action)) {
+                custody->phase = detail::Custody_phase::released;
+                custody->release_attempt_phase =
+                    detail::Release_attempt_phase::idle;
+                break;
+            }
+
+            if (custody->release_mode == detail::Release_mode::passive &&
+                !passive_wait_reported)
+            {
+                // Observation-only test seam: at this point the single
+                // retained worker has evaluated the monotone cleanup flag
+                // as false and is about to wait (or poll a fallback native
+                // handle). The callback must not re-enter custody APIs.
+                const auto first_current = std::find_if(
+                    release_roster.begin(), release_roster.end(),
+                    [](const detail::Managed_child_release_occurrence& exact) {
+                        return exact.slot_current;
+                    });
+                detail::managed_child_cleanup_for_test(
+                    detail::test_hooks::k_managed_child_release_waiting_passive,
+                    first_current == release_roster.end()
+                        ? invalid_instance_id
+                        : first_current->process_instance_id,
+                    first_current == release_roster.end()
+                        ? 0
+                        : first_current->occurrence);
+                passive_wait_reported = true;
+            }
+
+            if (std::holds_alternative<wait_for_change>(action)) {
+                // Selection and the unconditional wait share this lock. Any
+                // notification after planning is therefore observed before the
+                // next plan, without a second availability predicate to drift.
+                custody->changed.wait(lock);
+                continue;
+            }
+
+            lock.unlock();
+
+            if (auto cleanup = std::get_if<apply_cleanup>(&action)) {
                 if (!retire_transport(
-                        release_roster, detail::Release_mode::cleanup))
+                        cleanup->targets, detail::Release_mode::cleanup))
                 {
                     continue;
                 }
                 if (!converge_historical(
-                        release_roster, detail::Release_mode::cleanup))
+                        cleanup->targets, detail::Release_mode::cleanup))
                 {
                     continue;
                 }
@@ -3831,18 +3864,20 @@ inline void Managed_process::request_child_custody_release(
                 continue;
             }
 
-            if (!passive_targets.empty()) {
+            if (auto current = std::get_if<retire_current_transport>(&action)) {
                 if (!retire_transport(
-                        passive_targets, detail::Release_mode::passive))
+                        current->targets, detail::Release_mode::passive))
                 {
                     continue;
                 }
                 continue;
             }
 
-            if (!historical_targets.empty()) {
+            if (auto historical =
+                    std::get_if<retire_historical_communication>(&action))
+            {
                 if (!converge_historical(
-                        historical_targets, detail::Release_mode::passive))
+                        historical->targets, detail::Release_mode::passive))
                 {
                     continue;
                 }
@@ -3850,6 +3885,8 @@ inline void Managed_process::request_child_custody_release(
             }
 
 #ifdef _WIN32
+            auto fallback_target =
+                std::get_if<poll_windows_fallback>(&action);
             // A retained fallback handle must not hide a later cleanup upgrade.
             // Poll briefly in this owned worker, then re-check the release mode;
             // public deadline callers continue to wait only on custody->changed.
