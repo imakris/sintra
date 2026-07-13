@@ -44,11 +44,18 @@ using namespace std::chrono_literals;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_public_cleanup_child";
+constexpr std::string_view k_fallback_child_flag =
+    "--managed_child_public_cleanup_fallback_child";
 constexpr std::string_view k_nonce_flag = "--managed_child_public_cleanup_nonce";
 constexpr std::string_view k_ledger_file = "child_ledger.complete";
+constexpr std::string_view k_fallback_ledger_file =
+    "fallback_child_ledger.complete";
+constexpr std::string_view k_fallback_exit_file = "fallback_child_exit.complete";
 constexpr auto k_watchdog_timeout = 12s;
 constexpr sintra::instance_id_type k_child_process_iid =
     sintra::compose_instance(37u, 1ull);
+constexpr sintra::instance_id_type k_fallback_child_process_iid =
+    sintra::compose_instance(38u, 1ull);
 
 struct Ready_target : sintra::Derived_transceiver<Ready_target>
 {};
@@ -245,6 +252,100 @@ unsigned failure_hits(Failure_plan& plan)
     return plan.hits;
 }
 
+struct Windows_fallback_wake_result
+{
+    bool applicable = false;
+    bool setup_ready = false;
+    bool observer_registered = false;
+    bool passive_wait_seen = false;
+    bool wait_failed_injected = false;
+    bool fallback_available = false;
+    bool child_exited_naturally = false;
+    bool bounded_incomplete = false;
+    bool custody_retained = false;
+    bool passive_completed_without_cleanup = false;
+    bool cleanup_guard_complete = false;
+    bool handle_closed = false;
+    bool survivor_absent = false;
+
+    bool passed() const noexcept
+    {
+        return !applicable ||
+            (setup_ready && observer_registered && passive_wait_seen &&
+             wait_failed_injected && fallback_available &&
+             child_exited_naturally && passive_completed_without_cleanup &&
+             cleanup_guard_complete && handle_closed && survivor_absent);
+    }
+
+    bool causal_red() const noexcept
+    {
+        return applicable && setup_ready && observer_registered &&
+            passive_wait_seen && wait_failed_injected && fallback_available &&
+            child_exited_naturally && bounded_incomplete && custody_retained &&
+            !passive_completed_without_cleanup && cleanup_guard_complete &&
+            handle_closed && survivor_absent;
+    }
+};
+
+#ifdef _WIN32
+struct Windows_fallback_gate
+{
+    std::mutex mutex;
+    std::condition_variable changed;
+    sintra::instance_id_type expected_iid = sintra::invalid_instance_id;
+    uint32_t expected_occurrence = 0;
+    unsigned before_wait_count = 0;
+    unsigned passive_wait_count = 0;
+    unsigned fallback_available_count = 0;
+    unsigned handle_closed_count = 0;
+    bool release_observer_wait = false;
+};
+
+Windows_fallback_gate* s_windows_fallback_gate = nullptr;
+
+void observe_windows_fallback(
+    const char* stage,
+    sintra::instance_id_type process_iid,
+    uint32_t occurrence)
+{
+    auto* gate = s_windows_fallback_gate;
+    if (!gate || !stage || process_iid != gate->expected_iid ||
+        occurrence != gate->expected_occurrence)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    const std::string_view observed(stage);
+    if (observed ==
+        sintra::detail::test_hooks::k_managed_child_native_observer_before_wait)
+    {
+        ++gate->before_wait_count;
+        gate->changed.notify_all();
+        gate->changed.wait(lock, [&]() { return gate->release_observer_wait; });
+    }
+    else if (observed ==
+        sintra::detail::test_hooks::k_managed_child_release_waiting_passive)
+    {
+        ++gate->passive_wait_count;
+        gate->changed.notify_all();
+    }
+    else if (observed == sintra::detail::test_hooks::
+            k_managed_child_native_observer_fallback_available)
+    {
+        ++gate->fallback_available_count;
+        gate->changed.notify_all();
+    }
+    else if (observed == sintra::detail::test_hooks::
+            k_managed_child_windows_fallback_handle_closed ||
+        observed == sintra::detail::test_hooks::
+            k_managed_child_cleanup_native_exit_confirmed)
+    {
+        ++gate->handle_closed_count;
+        gate->changed.notify_all();
+    }
+}
+#endif
+
 #ifndef _WIN32
 struct Reap_observation
 {
@@ -265,7 +366,12 @@ void observe_reap(pid_t pid, int status) noexcept
 }
 #endif
 
-int run_child(int argc, char* argv[], const fs::path& shared_directory)
+int run_child(
+    int argc,
+    char* argv[],
+    const fs::path& shared_directory,
+    std::string_view ledger_file,
+    bool exit_naturally)
 {
     const std::string nonce = sintra::test::get_argv_value(argc, argv, k_nonce_flag);
     if (nonce.empty()) {
@@ -278,8 +384,9 @@ int run_child(int argc, char* argv[], const fs::path& shared_directory)
         return 2;
     }
 
-    // This child deliberately never performs graceful shutdown. The watchdog
-    // only bounds a broken test; successful cleanup exits through the lifeline.
+    // The original cleanup role never performs graceful shutdown and exits
+    // through the lifeline; the fallback role returns after its exit marker.
+    // The watchdog only bounds a broken test.
     std::thread([]() {
         std::this_thread::sleep_for(10s);
         std::_Exit(3);
@@ -303,12 +410,179 @@ int run_child(int argc, char* argv[], const fs::path& shared_directory)
            << "ready_name=" << ready_name << '\n'
            << "ready_iid=" << static_cast<unsigned long long>(ready.instance_id()) << '\n'
            << "complete=1\n";
-    if (!write_complete_file(marker_path(shared_directory, k_ledger_file), record.str())) {
+    if (!write_complete_file(marker_path(shared_directory, ledger_file), record.str())) {
         return 2;
+    }
+    if (exit_naturally) {
+        return sintra::test::wait_for_file(
+            marker_path(shared_directory, k_fallback_exit_file),
+            k_watchdog_timeout,
+            10ms)
+            ? 0
+            : 3;
     }
     for (;;) {
         std::this_thread::sleep_for(100ms);
     }
+}
+
+Windows_fallback_wake_result run_windows_fallback_wake(
+    const std::string& binary_path,
+    sintra::test::Shared_directory& shared)
+{
+    Windows_fallback_wake_result result;
+#ifndef _WIN32
+    (void)binary_path;
+    (void)shared;
+    return result;
+#else
+    result.applicable = true;
+    const std::string nonce =
+        "fallback_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+        "_" + std::to_string(sintra::test::get_pid());
+    const std::string ready_name =
+        "managed_child_public_cleanup_ready_" + nonce;
+    const auto ledger_path = marker_path(shared.path(), k_fallback_ledger_file);
+    const auto exit_path = marker_path(shared.path(), k_fallback_exit_file);
+    std::error_code ec;
+    fs::remove(ledger_path, ec);
+    fs::remove(exit_path, ec);
+
+    Windows_fallback_gate gate;
+    gate.expected_iid = k_fallback_child_process_iid;
+    s_windows_fallback_gate = &gate;
+    sintra::detail::test_hooks::s_managed_child_cleanup.store(
+        &observe_windows_fallback, std::memory_order_release);
+    Failure_plan failure_plan;
+    failure_plan.stage =
+        sintra::detail::test_hooks::k_managed_child_fail_native_observer_wait;
+    failure_plan.expected_iid = k_fallback_child_process_iid;
+    failure_plan.expected_occurrence = 0;
+    failure_plan.remaining = 1;
+    s_failure_plan = &failure_plan;
+    sintra::detail::test_hooks::s_managed_child_failure.store(
+        &inject_cleanup_failure, std::memory_order_release);
+
+    sintra::Spawn_options options;
+    options.binary_path = binary_path;
+    options.args = {
+        std::string(k_fallback_child_flag), std::string(k_nonce_flag), nonce};
+    options.process_instance_id = k_fallback_child_process_iid;
+    options.readiness_instance_name = ready_name;
+    options.lifetime.enable_lifeline = false;
+
+    sintra::Managed_child_custody custody;
+    sintra::Managed_child_status ready;
+    bool spawn_threw = false;
+    try {
+        custody = sintra::spawn_swarm_process(options);
+        ready = custody.wait_ready_until(
+            std::chrono::steady_clock::now() + 8s);
+    }
+    catch (...) {
+        spawn_threw = true;
+    }
+
+    const bool ledger_seen = sintra::test::wait_for_file(
+        ledger_path, k_watchdog_timeout, 10ms);
+    const auto ledger = ledger_seen ? read_ledger(ledger_path) : std::nullopt;
+    HANDLE child_handle = ledger
+        ? OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            static_cast<DWORD>(ledger->pid))
+        : nullptr;
+    bool before_wait_seen = false;
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        before_wait_seen = gate.changed.wait_for(lock, 2s, [&]() {
+            return gate.before_wait_count == 1;
+        });
+    }
+    result.setup_ready = !spawn_threw && ready.accepted &&
+        ready.readiness_reached && ready.created_occurrences == 1 && ledger &&
+        ledger->nonce == nonce &&
+        ledger->process_iid == k_fallback_child_process_iid &&
+        ledger->occurrence == 0 && child_handle &&
+        WaitForSingleObject(child_handle, 0) == WAIT_TIMEOUT &&
+        exact_child_is_live(*ledger);
+
+    sintra::Managed_child_status passive;
+    std::thread passive_caller([&]() {
+        passive = custody.release_until(
+            std::chrono::steady_clock::now() + k_watchdog_timeout);
+    });
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        result.passive_wait_seen = gate.changed.wait_for(lock, 2s, [&]() {
+            return gate.passive_wait_count == 1;
+        });
+        result.observer_registered = result.setup_ready && before_wait_seen &&
+            result.passive_wait_seen;
+        gate.release_observer_wait = true;
+        gate.changed.notify_all();
+    }
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        result.fallback_available = gate.changed.wait_for(lock, 2s, [&]() {
+            return gate.fallback_available_count == 1;
+        });
+    }
+    result.wait_failed_injected = failure_hits(failure_plan) == 1;
+
+    const bool exit_requested = write_complete_file(exit_path, "exit=1\n");
+    DWORD exit_code = STILL_ACTIVE;
+    const bool external_exit = child_handle &&
+        WaitForSingleObject(child_handle, 5000) == WAIT_OBJECT_0 &&
+        GetExitCodeProcess(child_handle, &exit_code) != 0;
+    result.child_exited_naturally = exit_requested && external_exit &&
+        exit_code == 0;
+    result.survivor_absent = result.child_exited_naturally && ledger &&
+        !exact_child_is_live(*ledger);
+
+    const auto passive_check_begin = std::chrono::steady_clock::now();
+    const auto after_exit = custody.release_until(passive_check_begin + 180ms);
+    const auto passive_check_elapsed =
+        std::chrono::steady_clock::now() - passive_check_begin;
+    result.passive_completed_without_cleanup = after_exit.accepted &&
+        after_exit.release_requested && after_exit.release_complete &&
+        after_exit.exited_occurrences == 1;
+    result.bounded_incomplete = after_exit.accepted &&
+        after_exit.release_requested && !after_exit.release_complete &&
+        passive_check_elapsed >= 120ms && passive_check_elapsed < 2s;
+    result.custody_retained = result.bounded_incomplete && custody.status().accepted;
+
+    const auto cleanup_guard = custody.terminate_until(
+        std::chrono::steady_clock::now() + 5s);
+    if (passive_caller.joinable()) {
+        passive_caller.join();
+    }
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        result.handle_closed = gate.changed.wait_for(lock, 2s, [&]() {
+            return gate.handle_closed_count == 1;
+        });
+    }
+    result.cleanup_guard_complete = cleanup_guard.accepted &&
+        cleanup_guard.release_requested && cleanup_guard.release_complete &&
+        cleanup_guard.created_occurrences == 1 &&
+        cleanup_guard.exited_occurrences == 1 && passive.accepted &&
+        passive.release_complete;
+
+    if (child_handle) {
+        CloseHandle(child_handle);
+    }
+    sintra::detail::test_hooks::s_managed_child_failure.store(
+        nullptr, std::memory_order_release);
+    s_failure_plan = nullptr;
+    sintra::detail::test_hooks::s_managed_child_cleanup.store(
+        nullptr, std::memory_order_release);
+    s_windows_fallback_gate = nullptr;
+    fs::remove(ledger_path, ec);
+    fs::remove(exit_path, ec);
+    return result;
+#endif
 }
 
 int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
@@ -323,6 +597,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     catch (...) {
         return 2;
     }
+
+    const auto windows_fallback =
+        run_windows_fallback_wake(binary_path, shared);
 
     const std::string nonce =
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
@@ -546,7 +823,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     sintra::deactivate_all_slots();
     const bool final_retry_succeeded = sintra::detail::finalize();
 
-    const bool valid = ready_valid && bounded_incomplete &&
+    const bool valid = windows_fallback.passed() &&
+        ready_valid && bounded_incomplete &&
         retained_across_finalize && complete.accepted && complete.release_requested &&
         complete.release_complete && complete.admitted_occurrences == 1 &&
         complete.created_occurrences == 1 && complete.exited_occurrences == 1 &&
@@ -561,10 +839,44 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             "passive_wait_observed=1 injected_failure_retained=1 "
             "retained_finalize=1 monotone_retry=1 lifeline_released=1 "
             "publication_retired=1 communication_retired=1 exact_exit=1 "
-            "expected_status=99 survivor_absent=1 final_retry=1\n",
-            nonce.c_str());
+            "expected_status=99 survivor_absent=1 final_retry=1 "
+            "windows_fallback_wake=%s\n",
+            nonce.c_str(), windows_fallback.applicable ? "1" : "na");
         std::fflush(stdout);
         return 0;
+    }
+
+    if (windows_fallback.causal_red()) {
+        std::fprintf(
+            stderr,
+            "WINDOWS_FALLBACK_WAKE_RED observer_registered=1 passive_wait=1 "
+            "wait_failed=1 fallback_available=1 natural_exit=1 "
+            "bounded_incomplete=1 custody_retained=1 cleanup_guard=1 "
+            "handle_closed=1 survivor_absent=1 finalization=%d "
+            "cause=release_wait_predicate_omits_fallback_availability\n",
+            final_retry_succeeded ? 1 : 0);
+    }
+    else if (windows_fallback.applicable && !windows_fallback.passed()) {
+        std::fprintf(
+            stderr,
+            "WINDOWS_FALLBACK_WAKE_INVALID setup=%d observer_registered=%d "
+            "passive_wait=%d wait_failed=%d fallback_available=%d "
+            "natural_exit=%d bounded_incomplete=%d custody_retained=%d "
+            "passive_complete=%d cleanup_guard=%d handle_closed=%d "
+            "survivor_absent=%d finalization=%d\n",
+            windows_fallback.setup_ready ? 1 : 0,
+            windows_fallback.observer_registered ? 1 : 0,
+            windows_fallback.passive_wait_seen ? 1 : 0,
+            windows_fallback.wait_failed_injected ? 1 : 0,
+            windows_fallback.fallback_available ? 1 : 0,
+            windows_fallback.child_exited_naturally ? 1 : 0,
+            windows_fallback.bounded_incomplete ? 1 : 0,
+            windows_fallback.custody_retained ? 1 : 0,
+            windows_fallback.passive_completed_without_cleanup ? 1 : 0,
+            windows_fallback.cleanup_guard_complete ? 1 : 0,
+            windows_fallback.handle_closed ? 1 : 0,
+            windows_fallback.survivor_absent ? 1 : 0,
+            final_retry_succeeded ? 1 : 0);
     }
 
     unsigned before_count = 0;
@@ -584,7 +896,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         "bounded=%d retained=%d complete=%d "
         "before_count=%u lifeline_count=%u retirement_count=%u passive_count=%u "
         "exact_exit=%d expected_status=%d "
-        "survivor_absent=%d final_retry=%d\n",
+        "survivor_absent=%d final_retry=%d fallback_passed=%d\n",
         ready_valid ? 1 : 0,
         passive_wait_seen ? 1 : 0,
         failure_hits(failure_plan),
@@ -598,7 +910,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         exact_exit ? 1 : 0,
         expected_status ? 1 : 0,
         survivor_absent ? 1 : 0,
-        final_retry_succeeded ? 1 : 0);
+        final_retry_succeeded ? 1 : 0,
+        windows_fallback.passed() ? 1 : 0);
     return 2;
 }
 
@@ -609,8 +922,12 @@ int main(int argc, char* argv[])
     sintra::test::Shared_directory shared(
         "SINTRA_MANAGED_CHILD_PUBLIC_CLEANUP_DIR",
         "managed_child_public_cleanup_contract");
+    if (sintra::test::has_argv_flag(argc, argv, k_fallback_child_flag)) {
+        return run_child(
+            argc, argv, shared.path(), k_fallback_ledger_file, true);
+    }
     if (sintra::test::has_argv_flag(argc, argv, k_child_flag)) {
-        return run_child(argc, argv, shared.path());
+        return run_child(argc, argv, shared.path(), k_ledger_file, false);
     }
     return run_root(argc, argv, shared);
 }

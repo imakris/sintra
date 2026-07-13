@@ -118,6 +118,14 @@ inline constexpr const char* k_managed_child_fail_post_native_setup =
     "managed_child_post_native_setup";
 inline constexpr const char* k_managed_child_fail_native_observer_start =
     "managed_child_native_observer_start";
+inline constexpr const char* k_managed_child_native_observer_before_wait =
+    "managed_child_native_observer_before_wait";
+inline constexpr const char* k_managed_child_fail_native_observer_wait =
+    "managed_child_native_observer_wait";
+inline constexpr const char* k_managed_child_native_observer_fallback_available =
+    "managed_child_native_observer_fallback_available";
+inline constexpr const char* k_managed_child_windows_fallback_handle_closed =
+    "managed_child_windows_fallback_handle_closed";
 inline constexpr const char* k_managed_child_fail_admission_mapping =
     "managed_child_admission_mapping";
 inline constexpr const char* k_managed_child_exact_occurrence_lookup =
@@ -179,25 +187,36 @@ inline void managed_child_reader_setup_for_test(
 #endif
 }
 
-inline void managed_child_failure_for_test(
+inline bool managed_child_failure_selected_for_test(
     const char* stage,
     instance_id_type process_instance_id,
-    uint32_t occurrence)
+    uint32_t occurrence) noexcept
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_managed_child_failure.load(
             std::memory_order_acquire))
     {
-        if (callback(stage, process_instance_id, occurrence)) {
-            throw std::runtime_error(
-                std::string("Injected managed-child failure at ") + stage);
-        }
+        return callback(stage, process_instance_id, occurrence);
     }
 #else
     (void)stage;
     (void)process_instance_id;
     (void)occurrence;
 #endif
+    return false;
+}
+
+inline void managed_child_failure_for_test(
+    const char* stage,
+    instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+    if (managed_child_failure_selected_for_test(
+            stage, process_instance_id, occurrence))
+    {
+        throw std::runtime_error(
+            std::string("Injected managed-child failure at ") + stage);
+    }
 }
 
 inline void managed_child_roster_reserved_for_test(
@@ -1528,8 +1547,16 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
     m_owner->start_child_custody_worker(
         [custody, process_instance_id, occurrence_number, process_handle,
          process_handle_value, observer_complete]() {
-            const auto wait_result =
-                WaitForSingleObject(process_handle, INFINITE);
+            managed_child_cleanup_for_test(
+                test_hooks::k_managed_child_native_observer_before_wait,
+                process_instance_id,
+                occurrence_number);
+            const auto wait_result = managed_child_failure_selected_for_test(
+                    test_hooks::k_managed_child_fail_native_observer_wait,
+                    process_instance_id,
+                    occurrence_number)
+                ? WAIT_FAILED
+                : WaitForSingleObject(process_handle, INFINITE);
             uintptr_t released_handle = 0;
             bool transition_valid = false;
             {
@@ -1567,6 +1594,13 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
             }
             if (released_handle != 0) {
                 CloseHandle(reinterpret_cast<HANDLE>(released_handle));
+            }
+            if (wait_result == WAIT_FAILED && transition_valid) {
+                managed_child_cleanup_for_test(
+                    test_hooks::
+                        k_managed_child_native_observer_fallback_available,
+                    process_instance_id,
+                    occurrence_number);
             }
             if (!transition_valid) {
                 Log_stream(log_level::error)
@@ -3664,13 +3698,36 @@ inline void Managed_process::request_child_custody_release(
             }
             return targets;
         };
+#ifdef _WIN32
+        struct Windows_fallback_target
+        {
+            instance_id_type process_instance_id = invalid_instance_id;
+            uint32_t occurrence = 0;
+            uintptr_t process_handle = 0;
+        };
+        auto windows_fallback_target_locked = [&]()
+            -> std::optional<Windows_fallback_target>
+        {
+            for (const auto& occurrence : custody->occurrences) {
+                if (occurrence.setup == detail::Managed_child_occurrence_record::
+                        setup_state::ownership_ready &&
+                    occurrence.native.fallback_wait_available())
+                {
+                    return Windows_fallback_target{
+                        occurrence.process_instance_id,
+                        occurrence.occurrence,
+                        occurrence.native.process_handle()};
+                }
+            }
+            return std::nullopt;
+        };
+#endif
         while (true) {
             bool should_cleanup = false;
             std::vector<std::pair<uint32_t, instance_id_type>> passive_targets;
             std::vector<std::pair<uint32_t, instance_id_type>> historical_targets;
 #ifdef _WIN32
-            HANDLE fallback_handle = nullptr;
-            uint32_t fallback_occurrence = 0;
+            std::optional<Windows_fallback_target> fallback_target;
 #endif
             {
                 std::unique_lock<std::mutex> lock(custody->mutex);
@@ -3719,23 +3776,13 @@ inline void Managed_process::request_child_custody_release(
                 }
 #ifdef _WIN32
                 if (!should_cleanup) {
-                    for (const auto& occurrence : custody->occurrences) {
-                        if (occurrence.setup ==
-                                detail::Managed_child_occurrence_record::setup_state::ownership_ready &&
-                            occurrence.native.fallback_wait_available())
-                        {
-                            fallback_handle = reinterpret_cast<HANDLE>(
-                                occurrence.native.process_handle());
-                            fallback_occurrence = occurrence.occurrence;
-                            break;
-                        }
-                    }
+                    fallback_target = windows_fallback_target_locked();
                 }
 #endif
                 if (!should_cleanup && passive_targets.empty() &&
                     historical_targets.empty()
 #ifdef _WIN32
-                    && !fallback_handle
+                    && !fallback_target
 #endif
                     )
                 {
@@ -3749,7 +3796,11 @@ inline void Managed_process::request_child_custody_release(
                                 detail::Release_mode::cleanup &&
                              !cleanup_applied) ||
                             !passive_targets_locked().empty() ||
-                            !historical_communication_targets_locked().empty();
+                            !historical_communication_targets_locked().empty()
+#ifdef _WIN32
+                            || windows_fallback_target_locked().has_value()
+#endif
+                            ;
                     });
                     continue;
                 }
@@ -3790,13 +3841,17 @@ inline void Managed_process::request_child_custody_release(
             // A retained fallback handle must not hide a later cleanup upgrade.
             // Poll briefly in this owned worker, then re-check the release mode;
             // public deadline callers continue to wait only on custody->changed.
+            const auto fallback_handle = reinterpret_cast<HANDLE>(
+                fallback_target->process_handle);
             const auto wait_result = WaitForSingleObject(fallback_handle, 20);
             uintptr_t released_fallback_handle = 0;
             bool fallback_transition_valid = wait_result != WAIT_OBJECT_0;
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 for (auto& occurrence : custody->occurrences) {
-                    if (occurrence.occurrence == fallback_occurrence &&
+                    if (occurrence.process_instance_id ==
+                            fallback_target->process_instance_id &&
+                        occurrence.occurrence == fallback_target->occurrence &&
                         occurrence.native.process_handle() ==
                             reinterpret_cast<uintptr_t>(fallback_handle))
                     {
@@ -3815,6 +3870,11 @@ inline void Managed_process::request_child_custody_release(
             if (released_fallback_handle != 0) {
                 CloseHandle(reinterpret_cast<HANDLE>(
                     released_fallback_handle));
+                detail::managed_child_cleanup_for_test(
+                    detail::test_hooks::
+                        k_managed_child_windows_fallback_handle_closed,
+                    fallback_target->process_instance_id,
+                    fallback_target->occurrence);
             }
             if (wait_result == WAIT_FAILED) {
                 throw std::runtime_error(
