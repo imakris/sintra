@@ -487,13 +487,25 @@ Exact_facts exact_facts(const Outcome& outcome)
             predecessor.native.exit_observer_registered() &&
             replacement.native.exit_observer_registered();
 #else
+        const bool predecessor_wait_status_available =
+            predecessor.native.wait_status_available();
+        const int predecessor_wait_status =
+            predecessor_wait_status_available
+                ? predecessor.native.wait_status()
+                : 0;
+        const bool replacement_wait_status_available =
+            replacement.native.wait_status_available();
+        const int replacement_wait_status =
+            replacement_wait_status_available
+                ? replacement.native.wait_status()
+                : 0;
         facts.predecessor_abnormal =
-            predecessor.native.wait_status_available() &&
-            WIFSIGNALED(predecessor.native.wait_status());
+            predecessor_wait_status_available &&
+            WIFSIGNALED(predecessor_wait_status);
         facts.replacement_normal =
-            replacement.native.wait_status_available() &&
-            WIFEXITED(replacement.native.wait_status()) &&
-            WEXITSTATUS(replacement.native.wait_status()) == 0;
+            replacement_wait_status_available &&
+            WIFEXITED(replacement_wait_status) &&
+            WEXITSTATUS(replacement_wait_status) == 0;
         facts.native_authority =
             s_reaps.pid_0.load() == predecessor.native.pid() &&
             s_reaps.pid_1.load() == replacement.native.pid() &&
