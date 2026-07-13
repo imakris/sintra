@@ -539,10 +539,9 @@ struct Managed_child_custody_record
     std::vector<Managed_child_occurrence_record> occurrences;
 };
 
-// Pins one admitted occurrence until setup becomes terminal.  This owner is
-// deliberately limited to publishing the exact occurrence's setup outcome;
-// subordinate reader/native cleanup and custody release remain with their
-// existing owners.
+// Pins one admitted occurrence until setup becomes terminal.  The launch
+// attempt below retains this settlement until its locally owned setup
+// resources have either transferred or rolled back.
 class Managed_child_setup_settlement
 {
 public:
@@ -654,6 +653,92 @@ private:
     std::shared_ptr<Managed_child_custody_record> m_custody;
     instance_id_type m_process_instance_id = invalid_instance_id;
     uint32_t m_occurrence = 0;
+};
+
+class Managed_child_launch_attempt
+{
+public:
+    Managed_child_launch_attempt() noexcept = default;
+    Managed_child_launch_attempt(
+        Managed_process* owner,
+        std::shared_ptr<Managed_child_custody_record> custody,
+        instance_id_type process_instance_id,
+        uint32_t occurrence) noexcept;
+
+    Managed_child_launch_attempt(const Managed_child_launch_attempt&) = delete;
+    Managed_child_launch_attempt& operator=(
+        const Managed_child_launch_attempt&) = delete;
+    Managed_child_launch_attempt(Managed_child_launch_attempt&& other) noexcept;
+    Managed_child_launch_attempt& operator=(
+        Managed_child_launch_attempt&& other) noexcept;
+    ~Managed_child_launch_attempt() noexcept;
+
+    explicit operator bool() const noexcept
+    {
+        return static_cast<bool>(m_setup_settlement);
+    }
+
+    bool matches(
+        const std::shared_ptr<Managed_child_custody_record>& custody,
+        instance_id_type process_instance_id,
+        uint32_t occurrence) const noexcept
+    {
+        return m_setup_settlement.matches(
+            custody, process_instance_id, occurrence);
+    }
+
+    void mark_reader_prepared() noexcept;
+    void transfer_reader() noexcept;
+
+    bool create_lifeline(int* error_out);
+    uintptr_t lifeline_read_endpoint() const noexcept
+    {
+        return m_lifeline_read_endpoint;
+    }
+    void close_lifeline_read_endpoint() noexcept;
+    bool transfer_lifeline_write();
+
+    bool acquire_initialization_reservation(
+        Coordinator* coordinator,
+        bool force_exact_lookup_failure);
+    void transfer_initialization_reservation() noexcept;
+
+private:
+    enum class Reader_ownership
+    {
+        absent,
+        rollback_required,
+        transferred
+    };
+
+    enum class Initialization_ownership
+    {
+        absent,
+        rollback_required,
+        transferred
+    };
+
+    static constexpr uintptr_t invalid_lifeline_endpoint =
+        static_cast<uintptr_t>(-1);
+
+    void rollback() noexcept;
+    void rollback_initialization() noexcept;
+    void rollback_reader() noexcept;
+    void close_lifeline_write_endpoint() noexcept;
+    bool lifeline_endpoint_valid(uintptr_t endpoint) const noexcept;
+
+    // Declared first so exact setup settlement is destroyed last.
+    Managed_child_setup_settlement m_setup_settlement;
+    Managed_process* m_owner = nullptr;
+    std::shared_ptr<Managed_child_custody_record> m_custody;
+    instance_id_type m_process_instance_id = invalid_instance_id;
+    uint32_t m_occurrence = 0;
+    Reader_ownership m_reader = Reader_ownership::absent;
+    Initialization_ownership m_initialization =
+        Initialization_ownership::absent;
+    Coordinator* m_initialization_coordinator = nullptr;
+    uintptr_t m_lifeline_read_endpoint = invalid_lifeline_endpoint;
+    uintptr_t m_lifeline_write_endpoint = invalid_lifeline_endpoint;
 };
 
 } // namespace detail
@@ -908,14 +993,14 @@ struct Managed_process: Derived_transceiver<Managed_process>
     Spawn_result spawn_swarm_process(const Spawn_swarm_process_args& ssp_args);
     Spawn_result spawn_swarm_process(
         const Spawn_swarm_process_args& ssp_args,
-        detail::Managed_child_setup_settlement& setup_settlement);
+        detail::Managed_child_launch_attempt& launch_attempt);
     Spawn_result spawn_swarm_process_impl(
         const Spawn_swarm_process_args& ssp_args,
-        detail::Managed_child_setup_settlement& setup_settlement);
+        detail::Managed_child_launch_attempt& launch_attempt);
 
     std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
-    detail::Managed_child_setup_settlement admit_child_custody_occurrence(
+    detail::Managed_child_launch_attempt admit_child_custody_occurrence(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         instance_id_type process_instance_id,
         uint32_t occurrence);
@@ -943,6 +1028,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uint32_t         occurrence) const;
     void note_child_initialization_complete(
         const detail::Managed_child_occurrence_token& token);
+    void mark_child_coordinator_initialization_complete(
+        Coordinator* coordinator,
+        instance_id_type process_instance_id);
     void note_child_publication_retired(
         const detail::Managed_child_occurrence_token& token);
     bool capture_child_communication_retirement_authority(

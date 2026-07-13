@@ -1931,17 +1931,17 @@ instance_id_type Coordinator::join_swarm(
         "--coordinator_id", std::to_string(s_coord_id)
     };
     spawn_args.custody = s_mproc->accept_child_custody();
-    detail::Managed_child_setup_settlement setup_settlement;
+    detail::Managed_child_launch_attempt launch_attempt;
     Managed_process::Spawn_result result;
     try {
-        setup_settlement = s_mproc->admit_child_custody_occurrence(
+        launch_attempt = s_mproc->admit_child_custody_occurrence(
             spawn_args.custody,
             spawn_args.piid,
             spawn_args.occurrence);
-        if (setup_settlement) {
+        if (launch_attempt) {
             admission_lock.unlock();
             result = s_mproc->spawn_swarm_process(
-                spawn_args, setup_settlement);
+                spawn_args, launch_attempt);
         }
         else {
             result.failure.kind = Managed_child_failure_kind::custody_closed;
@@ -2093,11 +2093,11 @@ void Coordinator::recover_if_required(const Crash_info& info)
             }
             spawn_args = spawn_it->second;
         }
-        auto setup_settlement = s_mproc->admit_child_custody_occurrence(
+        auto launch_attempt = s_mproc->admit_child_custody_occurrence(
             spawn_args.custody,
             spawn_args.piid,
             spawn_args.occurrence);
-        if (!setup_settlement) {
+        if (!launch_attempt) {
             s_mproc->note_child_custody_failure(
                 spawn_args.custody,
                 {Managed_child_failure_kind::custody_closed,
@@ -2108,7 +2108,7 @@ void Coordinator::recover_if_required(const Crash_info& info)
         }
         admission_lock.unlock();
         s_mproc->spawn_swarm_process(
-            spawn_args, setup_settlement);
+            spawn_args, launch_attempt);
     };
 
     if (!runner) {

@@ -1119,7 +1119,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         return {};
     }
     std::shared_ptr<detail::Managed_child_custody_record> custody_record;
-    detail::Managed_child_setup_settlement setup_settlement;
+    detail::Managed_child_launch_attempt launch_attempt;
     Managed_process::Spawn_swarm_process_args spawn_args;
     Managed_process* custody_owner = nullptr;
     Managed_process::Spawn_result spawn_result;
@@ -1296,7 +1296,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         }
 
         try {
-            setup_settlement = custody_owner->admit_child_custody_occurrence(
+            launch_attempt = custody_owner->admit_child_custody_occurrence(
                 custody_record, piid, spawn_args.occurrence);
         }
         catch (...) {
@@ -1339,7 +1339,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             }
             return Managed_child_custody(custody_record);
         }
-        if (!setup_settlement) {
+        if (!launch_attempt) {
             custody_owner->note_child_custody_failure(
                 custody_record,
                 {Managed_child_failure_kind::custody_closed,
@@ -1363,12 +1363,12 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     }
 
     if (readiness_requested) {
-        auto shared_setup_settlement =
-            std::make_shared<detail::Managed_child_setup_settlement>(
-                std::move(setup_settlement));
+        auto shared_launch_attempt =
+            std::make_shared<detail::Managed_child_launch_attempt>(
+                std::move(launch_attempt));
         auto async_setup =
             [custody_owner, readiness_coordinator, custody_record, spawn_args,
-             shared_setup_settlement, custody_identity,
+             shared_launch_attempt, custody_identity,
              target = options.readiness_instance_name,
              readiness_observer, handle_setup_exception]() mutable
             {
@@ -1376,7 +1376,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 bool setup_threw = false;
                 try {
                     auto result = custody_owner->spawn_swarm_process(
-                        spawn_args, *shared_setup_settlement);
+                        spawn_args, *shared_launch_attempt);
                     created = result.success && result.os_process_created;
                     if (created) {
                         detail::runtime_spawn_success_for_test(
@@ -1437,7 +1437,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     else {
         try {
             spawn_result = custody_owner->spawn_swarm_process(
-                spawn_args, setup_settlement);
+                spawn_args, launch_attempt);
         }
         catch (...) {
             os_process_created = handle_setup_exception(
