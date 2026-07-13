@@ -3331,7 +3331,7 @@ inline void Managed_process::request_child_custody_release(
                 failure_iid,
                 failure_occurrence);
 
-        std::vector<std::pair<uint32_t, instance_id_type>> admitted;
+        detail::Managed_child_release_roster release_roster;
         {
             std::unique_lock<std::mutex> lock(custody->mutex);
             custody->changed.wait(lock, [&]() {
@@ -3346,36 +3346,35 @@ inline void Managed_process::request_child_custody_release(
                 if (occurrence.setup ==
                     detail::Managed_child_occurrence_record::setup_state::ownership_ready)
                 {
-                    admitted.emplace_back(
+                    release_roster.push_back({
+                        occurrence.process_instance_id,
                         occurrence.occurrence,
-                        occurrence.process_instance_id);
+                        false});
                 }
             }
         }
 
-        std::vector<std::pair<uint32_t, instance_id_type>> active;
-        for (const auto& [occurrence, process_iid] : admitted) {
-            bool exact_active_occurrence = false;
+        for (auto& exact : release_roster) {
             {
                 std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-                auto it = m_child_custody_by_process.find(process_iid);
+                auto it = m_child_custody_by_process.find(
+                    exact.process_instance_id);
                 if (it != m_child_custody_by_process.end()) {
-                    exact_active_occurrence =
+                    exact.slot_current =
                         it->second.custody.lock() == custody &&
-                        it->second.occurrence == occurrence;
+                        it->second.occurrence == exact.occurrence;
                 }
             }
-            if (!exact_active_occurrence) {
+            if (!exact.slot_current) {
                 continue;
             }
-            active.emplace_back(occurrence, process_iid);
 
             {
                 std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
-                auto cached = m_cached_spawns.find(process_iid);
+                auto cached = m_cached_spawns.find(exact.process_instance_id);
                 if (cached != m_cached_spawns.end() &&
                     cached->second.custody == custody &&
-                    cached->second.occurrence == occurrence + 1)
+                    cached->second.occurrence == exact.occurrence + 1)
                 {
                     m_cached_spawns.erase(cached);
                 }
@@ -3392,18 +3391,28 @@ inline void Managed_process::request_child_custody_release(
 
         auto retire_transport = [this, &custody, release_attempt_generation,
                                  &release_attempt_active](
-            const std::vector<std::pair<uint32_t, instance_id_type>>& targets,
+            const detail::Managed_child_release_roster& targets,
             detail::Release_mode release_mode) -> bool
         {
+            const auto first_current = std::find_if(
+                targets.begin(), targets.end(),
+                [](const detail::Managed_child_release_occurrence& target) {
+                    return target.slot_current;
+                });
             if (release_mode == detail::Release_mode::cleanup &&
-                !targets.empty())
+                first_current != targets.end())
             {
                 detail::managed_child_failure_for_test(
                     detail::test_hooks::k_managed_child_fail_cleanup_actions,
-                    targets.front().second,
-                    targets.front().first);
+                    first_current->process_instance_id,
+                    first_current->occurrence);
             }
-            for (const auto& [occurrence, process_iid] : targets) {
+            for (const auto& target : targets) {
+                if (!target.slot_current) {
+                    continue;
+                }
+                const auto occurrence = target.occurrence;
+                const auto process_iid = target.process_instance_id;
                 if (!release_attempt_active()) {
                     return false;
                 }
@@ -3561,10 +3570,12 @@ inline void Managed_process::request_child_custody_release(
         auto converge_historical =
             [this, &custody, release_attempt_generation,
              &release_attempt_active](
-                const std::vector<std::pair<uint32_t, instance_id_type>>& targets,
+                const detail::Managed_child_release_roster& targets,
                 detail::Release_mode release_mode) -> bool
         {
-            for (const auto& [occurrence_number, process_iid] : targets) {
+            for (const auto& target : targets) {
+                const auto occurrence_number = target.occurrence;
+                const auto process_iid = target.process_instance_id;
                 if (!release_attempt_active()) {
                     return false;
                 }
@@ -3645,14 +3656,18 @@ inline void Managed_process::request_child_custody_release(
         bool cleanup_applied = false;
         bool passive_wait_reported = false;
         auto passive_targets_locked = [&]() {
-            std::vector<std::pair<uint32_t, instance_id_type>> targets;
-            for (const auto& [occurrence_number, process_iid] : active) {
+            detail::Managed_child_release_roster targets;
+            for (const auto& target : release_roster) {
+                if (!target.slot_current) {
+                    continue;
+                }
                 auto occurrence = std::find_if(
                     custody->occurrences.begin(),
                     custody->occurrences.end(),
                     [&](const detail::Managed_child_occurrence_record& candidate) {
-                        return candidate.occurrence == occurrence_number &&
-                            candidate.process_instance_id == process_iid;
+                        return candidate.occurrence == target.occurrence &&
+                            candidate.process_instance_id ==
+                                target.process_instance_id;
                     });
                 if (occurrence != custody->occurrences.end() &&
                     (cleanup_applied || occurrence->native.exited()) &&
@@ -3661,39 +3676,25 @@ inline void Managed_process::request_child_custody_release(
                      !occurrence->transport.publication_retired() ||
                      !occurrence->transport.retirement_terminal()))
                 {
-                    targets.emplace_back(occurrence_number, process_iid);
+                    targets.push_back(target);
                 }
             }
             return targets;
         };
         auto historical_communication_targets_locked = [&]() {
-            std::vector<std::pair<uint32_t, instance_id_type>> targets;
-            for (const auto& occurrence : custody->occurrences) {
-                bool current_successor_live = false;
-                for (const auto& [active_occurrence, active_process_iid] : active) {
-                    if (active_process_iid != occurrence.process_instance_id ||
-                        active_occurrence == occurrence.occurrence)
-                    {
-                        continue;
-                    }
-                    const auto successor = std::find_if(
-                        custody->occurrences.begin(), custody->occurrences.end(),
-                        [&](const detail::Managed_child_occurrence_record& candidate) {
-                            return candidate.process_instance_id == active_process_iid &&
-                                candidate.occurrence == active_occurrence;
-                        });
-                    current_successor_live =
-                        successor != custody->occurrences.end() &&
-                        !successor->native.exited();
-                    break;
-                }
-                if (occurrence.setup == detail::Managed_child_occurrence_record::
-                        setup_state::ownership_ready &&
-                    !current_successor_live &&
-                    occurrence.transport.ready_to_retire())
+            detail::Managed_child_release_roster targets;
+            for (const auto& target : release_roster) {
+                const auto occurrence = std::find_if(
+                    custody->occurrences.begin(), custody->occurrences.end(),
+                    [&](const detail::Managed_child_occurrence_record& candidate) {
+                        return candidate.process_instance_id ==
+                                target.process_instance_id &&
+                            candidate.occurrence == target.occurrence;
+                    });
+                if (occurrence != custody->occurrences.end() &&
+                    occurrence->transport.ready_to_retire())
                 {
-                    targets.emplace_back(
-                        occurrence.occurrence, occurrence.process_instance_id);
+                    targets.push_back(target);
                 }
             }
             return targets;
@@ -3724,8 +3725,8 @@ inline void Managed_process::request_child_custody_release(
 #endif
         while (true) {
             bool should_cleanup = false;
-            std::vector<std::pair<uint32_t, instance_id_type>> passive_targets;
-            std::vector<std::pair<uint32_t, instance_id_type>> historical_targets;
+            detail::Managed_child_release_roster passive_targets;
+            detail::Managed_child_release_roster historical_targets;
 #ifdef _WIN32
             std::optional<Windows_fallback_target> fallback_target;
 #endif
@@ -3768,10 +3769,19 @@ inline void Managed_process::request_child_custody_release(
                     // retained worker has evaluated the monotone cleanup flag
                     // as false and is about to wait (or poll a fallback native
                     // handle). The callback must not re-enter custody APIs.
+                    const auto first_current = std::find_if(
+                        release_roster.begin(), release_roster.end(),
+                        [](const detail::Managed_child_release_occurrence& exact) {
+                            return exact.slot_current;
+                        });
                     detail::managed_child_cleanup_for_test(
                         detail::test_hooks::k_managed_child_release_waiting_passive,
-                        active.empty() ? invalid_instance_id : active.front().second,
-                        active.empty() ? 0 : active.front().first);
+                        first_current == release_roster.end()
+                            ? invalid_instance_id
+                            : first_current->process_instance_id,
+                        first_current == release_roster.end()
+                            ? 0
+                            : first_current->occurrence);
                     passive_wait_reported = true;
                 }
 #ifdef _WIN32
@@ -3807,11 +3817,13 @@ inline void Managed_process::request_child_custody_release(
             }
 
             if (should_cleanup) {
-                if (!retire_transport(active, detail::Release_mode::cleanup)) {
+                if (!retire_transport(
+                        release_roster, detail::Release_mode::cleanup))
+                {
                     continue;
                 }
                 if (!converge_historical(
-                        admitted, detail::Release_mode::cleanup))
+                        release_roster, detail::Release_mode::cleanup))
                 {
                     continue;
                 }

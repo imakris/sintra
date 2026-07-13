@@ -482,6 +482,19 @@ struct Managed_child_occurrence_record
                                native;
 };
 
+// Immutable exact identity captured by a release attempt after setup settles.
+// slot_current is only process-slot authority; exact historical convergence
+// and terminal accounting retain every roster entry regardless of its value.
+struct Managed_child_release_occurrence
+{
+    instance_id_type process_instance_id = invalid_instance_id;
+    uint32_t         occurrence = 0;
+    bool             slot_current = false;
+};
+
+using Managed_child_release_roster =
+    std::vector<Managed_child_release_occurrence>;
+
 struct Managed_child_custody_record;
 
 struct Managed_child_active_occurrence
