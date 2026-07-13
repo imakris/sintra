@@ -517,8 +517,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     const auto launch_observation = custody.status();
     const bool pre_retirement_valid =
-        !spawn_threw && launch_observation.accepted &&
-        launch_observation.readiness_reached &&
+        !spawn_threw && custody &&
+        launch_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::reached &&
         launch_observation.created_occurrences == 1 && ledger_identity_valid &&
         start_stamp_verified && native_alive_before &&
         initial_publications_valid && initial_communication_live;
@@ -598,9 +599,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const auto held_release_observation = custody.release_until(
         std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
     const bool release_incomplete_at_witness =
-        held_release_observation.accepted &&
-        held_release_observation.release_requested &&
-        !held_release_observation.release_complete;
+        custody && held_release_observation.release_state ==
+            sintra::Managed_child_release_state::requested;
 
     const bool release_written = write_complete_file(
         marker_path(shared.path(), k_release_file),
@@ -710,7 +710,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     const bool cleanup_valid =
         release_incomplete_at_witness && release_written && release_seen && child_finalized &&
-        released_observation.release_complete &&
+        released_observation.release_state ==
+            sintra::Managed_child_release_state::complete &&
         later_retirements_seen &&
         events.requested_unpublished.load(std::memory_order_acquire) == 1 &&
         events.participation_unpublished.load(std::memory_order_acquire) == 1 &&
@@ -767,7 +768,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         output_occurrence,
         output_pid,
         output_stamp.c_str(),
-        launch_observation.accepted ? 1 : 0,
+        custody ? 1 : 0,
         spawn_threw ? 1 : 0,
         ledger_identity_valid ? 1 : 0,
         events.requested_published.load(std::memory_order_acquire),

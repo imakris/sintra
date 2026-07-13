@@ -360,26 +360,26 @@ int main(int argc, char* argv[])
 
     const unsigned hook_hits = s_failure_hits.load(std::memory_order_acquire);
     const bool red =
-        hook_hits == 1 && accepted_status.accepted &&
+        hook_hits == 1 && custody &&
         accepted_status.admitted_occurrences == 2 && ledger_valid &&
         crash_requested && recovery_seen && recovery_finished && exact_crash &&
         facts.record_found && facts.exact_two_occurrences &&
         facts.predecessor_owned && facts.predecessor_exited &&
         facts.failed_occurrence_pending && facts.failed_occurrence_no_child &&
         facts.active_map_predecessor && predecessor_absent &&
-        replacement_marker_absent && terminated.release_requested &&
-        !terminated.release_complete && terminate_bounded &&
+        replacement_marker_absent && terminated.release_state ==
+            sintra::Managed_child_release_state::requested && terminate_bounded &&
         !finalized && finalize_bounded;
 
     const bool green =
-        hook_hits == 1 && accepted_status.accepted &&
+        hook_hits == 1 && custody &&
         accepted_status.admitted_occurrences == 1 && ledger_valid &&
         crash_requested && recovery_seen && recovery_finished && exact_crash &&
         facts.record_found && facts.exact_one_occurrence &&
         facts.predecessor_owned && facts.predecessor_exited &&
         facts.active_map_predecessor && predecessor_absent &&
-        replacement_marker_absent && terminated.release_requested &&
-        terminated.release_complete && terminate_bounded && finalized &&
+        replacement_marker_absent && terminated.release_state ==
+            sintra::Managed_child_release_state::complete && terminate_bounded && finalized &&
         finalize_bounded;
 
     if (green) {
@@ -411,7 +411,7 @@ int main(int argc, char* argv[])
         "release_requested=%d release_complete=%d terminate_bounded=%d finalized=%d "
         "finalize_bounded=%d\n",
         hook_hits,
-        accepted_status.accepted ? 1 : 0,
+        custody ? 1 : 0,
         accepted_status.admitted_occurrences,
         ledger_valid ? 1 : 0,
         crash_requested ? 1 : 0,
@@ -429,8 +429,8 @@ int main(int argc, char* argv[])
         facts.active_map_predecessor ? 1 : 0,
         predecessor_absent ? 1 : 0,
         replacement_marker_absent ? 1 : 0,
-        terminated.release_requested ? 1 : 0,
-        terminated.release_complete ? 1 : 0,
+        terminated.release_state != sintra::Managed_child_release_state::open ? 1 : 0,
+        terminated.release_state == sintra::Managed_child_release_state::complete ? 1 : 0,
         terminate_bounded ? 1 : 0,
         finalized ? 1 : 0,
         finalize_bounded ? 1 : 0);

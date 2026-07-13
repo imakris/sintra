@@ -864,12 +864,14 @@ bool run_deadline_setup_shutdown_retry(
     const auto elapsed = std::chrono::steady_clock::now() - started;
     const bool setup_held = wait_for_gate(gate);
     const bool caller_bounded =
-        elapsed >= 150ms && elapsed <= 1000ms && observation.accepted &&
+        elapsed >= 150ms && elapsed <= 1000ms && custody &&
         observation.admitted_occurrences == 1 &&
         observation.created_occurrences == 0 &&
+        observation.readiness_state ==
+            sintra::Managed_child_readiness_state::pending &&
         observation.last_failure.kind ==
             sintra::Managed_child_failure_kind::none &&
-        !observation.release_requested && !observation.release_complete;
+        observation.release_state == sintra::Managed_child_release_state::open;
 
     bool first_shutdown = true;
     bool second_shutdown = true;
@@ -899,7 +901,8 @@ bool run_deadline_setup_shutdown_retry(
     std::filesystem::remove(marker, ec);
 
     return setup_held && caller_bounded && retained_while_held &&
-        released.release_complete && final_shutdown && !shutdown_threw &&
+        released.release_state == sintra::Managed_child_release_state::complete &&
+        final_shutdown && !shutdown_threw &&
         sintra::s_mproc == nullptr && no_child_after;
 }
 
@@ -986,10 +989,10 @@ bool run_pre_create_exception(
     const bool failure_stage_match =
         released.last_failure.message.find(plan.stage) != std::string::npos;
     const bool valid = !threw && hook_seen && hook_wait_bounded &&
-        readiness_bounded && release_bounded && released.accepted &&
+        readiness_bounded && release_bounded && custody &&
         released.admitted_occurrences == 1 &&
-        released.created_occurrences == 0 && released.release_requested &&
-        released.release_complete && failure_kind_match &&
+        released.created_occurrences == 0 && released.release_state ==
+            sintra::Managed_child_release_state::complete && failure_kind_match &&
         failure_occurrence_match && failure_native_error_match &&
         failure_stage_match && observed_setup_exception(released, plan.stage) &&
         hits == 1 && marker_missing && finalized;
@@ -1008,11 +1011,13 @@ bool run_pre_create_exception(
             hook_wait_bounded ? 1 : 0,
             readiness_bounded ? 1 : 0,
             release_bounded ? 1 : 0,
-            released.accepted ? 1 : 0,
+            custody ? 1 : 0,
             released.admitted_occurrences,
             released.created_occurrences,
-            released.release_requested ? 1 : 0,
-            released.release_complete ? 1 : 0,
+            released.release_state !=
+                sintra::Managed_child_release_state::open ? 1 : 0,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             static_cast<int>(released.last_failure.kind),
             failure_kind_match ? 1 : 0,
             released.last_failure.occurrence,
@@ -1132,9 +1137,9 @@ bool run_owned_native_exception(
     std::filesystem::remove(release, ec);
 
     return !threw && hits == 1 && identity && release_written &&
-        released.accepted && released.admitted_occurrences == 1 &&
+        custody && released.admitted_occurrences == 1 &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
-        released.release_requested && released.release_complete &&
+        released.release_state == sintra::Managed_child_release_state::complete &&
         observed_setup_exception(released, failure_stage) &&
         initialization_retired && unrelated_delivered && survivor_absent &&
         reap_seen && reap_normal && finalized;
@@ -1224,10 +1229,11 @@ Release_worker_retry_result run_release_worker_retry(
     std::filesystem::remove(release, ec);
 
     const bool unaffected_prefix = identity && hits_after_first == 1 &&
-        first.accepted &&
-        first.release_requested && !first.release_complete &&
-        release_written && second.accepted && second.release_requested &&
-        second.release_complete && second.created_occurrences == 1 &&
+        custody &&
+        first.release_state == sintra::Managed_child_release_state::requested &&
+        release_written &&
+        second.release_state == sintra::Managed_child_release_state::complete &&
+        second.created_occurrences == 1 &&
         second.exited_occurrences == 1 &&
         survivor_absent && reap_seen && reap_normal && finalized;
 
@@ -1307,8 +1313,9 @@ bool run_prepublication_exit_convergence(
     std::filesystem::remove(marker, ec);
 
     const bool valid = identity && exited.created_occurrences == 1 &&
-        exited.exited_occurrences == 1 && released.release_requested &&
-        released.release_complete && released.admitted_occurrences == 1 &&
+        exited.exited_occurrences == 1 && released.release_state ==
+            sintra::Managed_child_release_state::complete &&
+        released.admitted_occurrences == 1 &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         initialization_retired && survivor_absent && reap_seen && reap_normal &&
         finalized;
@@ -1320,8 +1327,10 @@ bool run_prepublication_exit_convergence(
             identity ? 1 : 0,
             released.created_occurrences,
             released.exited_occurrences,
-            released.release_requested ? 1 : 0,
-            released.release_complete ? 1 : 0,
+            released.release_state !=
+                sintra::Managed_child_release_state::open ? 1 : 0,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             initialization_retired ? 1 : 0,
             survivor_absent ? 1 : 0,
             reap_seen ? 1 : 0,
@@ -1402,7 +1411,8 @@ bool run_split_transport_retirement(
         !(*first_attempt)[0] && (*first_attempt)[1] &&
         !(*first_attempt)[2] && !(*first_attempt)[3] && held_facts &&
         !(*held_facts)[0] && (*held_facts)[1] && !(*held_facts)[2] &&
-        !first_release.release_complete && stop_deadline_bounded;
+        first_release.release_state ==
+            sintra::Managed_child_release_state::requested && stop_deadline_bounded;
 
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
@@ -1586,7 +1596,8 @@ bool run_split_transport_retirement(
     const bool worker_transport_not_started = retry_first_attempt &&
         !(*retry_first_attempt)[2];
     const bool worker_first_release_incomplete = retry_first_attempt &&
-        !(*retry_first_attempt)[3] && !retry_first_release.release_complete;
+        !(*retry_first_attempt)[3] && retry_first_release.release_state ==
+            sintra::Managed_child_release_state::requested;
     const bool worker_first_pass_ended =
         worker_attempt_started && worker_parked && worker_attempt_failing &&
         worker_park_released && !worker_park_watchdog_released &&
@@ -1620,7 +1631,7 @@ bool run_split_transport_retirement(
     const bool retry_reap_normal = true;
 #endif
     const bool worker_retry_completed =
-        retried.release_complete &&
+        retried.release_state == sintra::Managed_child_release_state::complete &&
         retried.created_occurrences == 1 && retried.exited_occurrences == 1;
     const bool worker_retry_valid = retry_identity && retry_release_written &&
         retry_exit_written &&
@@ -1636,7 +1647,8 @@ bool run_split_transport_retirement(
     std::filesystem::remove(retry_exit, ec);
 
     const bool valid = identity && release_written && first_pass_ended && after_join &&
-        released.release_complete && released.created_occurrences == 1 &&
+        released.release_state == sintra::Managed_child_release_state::complete &&
+        released.created_occurrences == 1 &&
         released.exited_occurrences == 1 && survivor_absent && reap_seen &&
         reap_normal && worker_retry_valid && finalized;
     if (!valid) {
@@ -1663,7 +1675,8 @@ bool run_split_transport_retirement(
             first_pass_ended ? 1 : 0,
             stop_deadline_bounded ? 1 : 0,
             after_join ? 1 : 0,
-            released.release_complete ? 1 : 0,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             released.created_occurrences,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
@@ -1809,8 +1822,10 @@ bool run_prepublication_publish_race(
     std::filesystem::remove(release, ec);
 
     const bool valid = first_miss && reader_terminal && publish_held &&
-        !held_observation.release_complete && publish_result == piid &&
-        release_written && released.release_complete && canonical_absence &&
+        held_observation.release_state ==
+            sintra::Managed_child_release_state::requested && publish_result == piid &&
+        release_written && released.release_state ==
+            sintra::Managed_child_release_state::complete && canonical_absence &&
         survivor_absent && reap_seen && reap_normal && finalized;
     if (!valid) {
         std::fprintf(stderr,
@@ -1819,9 +1834,12 @@ bool run_prepublication_publish_race(
             "canonical_absence=%d survivor_absent=%d reap_seen=%d reap_normal=%d "
             "finalized=%d\n",
             first_miss ? 1 : 0, reader_terminal ? 1 : 0, publish_held ? 1 : 0,
-            !held_observation.release_complete ? 1 : 0,
+            held_observation.release_state !=
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             publish_result == piid ? 1 : 0, release_written ? 1 : 0,
-            released.release_complete ? 1 : 0, canonical_absence ? 1 : 0,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
+            canonical_absence ? 1 : 0,
             survivor_absent ? 1 : 0, reap_seen ? 1 : 0,
             reap_normal ? 1 : 0, finalized ? 1 : 0);
     }
@@ -1936,7 +1954,7 @@ bool run_unrelated_readiness_rejection(
             ? read_child_identity(marker)
             : std::nullopt;
         identity_written = identity.has_value();
-        spawn_observed = identity && observed.accepted &&
+        spawn_observed = identity && custody &&
             observed.admitted_occurrences == 1 &&
             observed.created_occurrences == 1 &&
             observed_spawn_count.load(std::memory_order_acquire) == 1 &&
@@ -1990,7 +2008,8 @@ bool run_unrelated_readiness_rejection(
 
     const bool valid = unrelated_assigned && unrelated_resolved &&
         exact_identity_rejected && spawn_observed && identity_written &&
-        start_stamp_matched && release_written && released.release_complete &&
+        start_stamp_matched && release_written && released.release_state ==
+            sintra::Managed_child_release_state::complete &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         survivor_absent && reap_seen && reap_normal && finalized;
     if (!valid) {
@@ -2006,7 +2025,8 @@ bool run_unrelated_readiness_rejection(
             identity_written ? 1 : 0,
             start_stamp_matched ? 1 : 0,
             release_written ? 1 : 0,
-            released.release_complete ? 1 : 0,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             released.created_occurrences,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
@@ -2074,9 +2094,11 @@ bool run_exact_readiness_acceptance(
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
 
-    const bool valid = observed.accepted && observed.readiness_reached &&
+    const bool valid = custody && observed.readiness_state ==
+            sintra::Managed_child_readiness_state::reached &&
         observed.created_occurrences == 1 && exact_publication && identity &&
-        release_written && released.release_complete &&
+        release_written && released.release_state ==
+            sintra::Managed_child_release_state::complete &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         survivor_absent && reap_seen && reap_normal && finalized;
     if (!valid) {
@@ -2085,13 +2107,15 @@ bool run_exact_readiness_acceptance(
             "exact_publication=%d identity=%d release_written=%d "
             "release_complete=%d exited=%zu survivor_absent=%d reap_seen=%d "
             "reap_normal=%d finalized=%d\n",
-            observed.accepted ? 1 : 0,
-            observed.readiness_reached ? 1 : 0,
+            custody ? 1 : 0,
+            observed.readiness_state ==
+                sintra::Managed_child_readiness_state::reached ? 1 : 0,
             observed.created_occurrences,
             exact_publication ? 1 : 0,
             identity ? 1 : 0,
             release_written ? 1 : 0,
-            released.release_complete ? 1 : 0,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
             reap_seen ? 1 : 0,
@@ -2165,10 +2189,13 @@ bool run_unbounded_readiness_cancellation(
             "created=%zu exited=%zu all_custodies_released=%d "
             "coordinator_sole=%d runtime_present=%d coordinator_present=%d\n",
             caller_returned ? 1 : 0,
-            observed.accepted ? 1 : 0,
-            observed.readiness_reached ? 1 : 0,
-            observed.release_requested ? 1 : 0,
-            observed.release_complete ? 1 : 0,
+            custody ? 1 : 0,
+            observed.readiness_state ==
+                sintra::Managed_child_readiness_state::reached ? 1 : 0,
+            observed.release_state !=
+                sintra::Managed_child_release_state::open ? 1 : 0,
+            observed.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             observed.created_occurrences,
             observed.exited_occurrences,
             all_custodies_released ? 1 : 0,
@@ -2199,8 +2226,9 @@ bool run_unbounded_readiness_cancellation(
 
     const bool valid = blocked_before_finalize && finalized &&
         finalize_elapsed < 5s && spawn_returned.load(std::memory_order_acquire) &&
-        released.accepted && !released.readiness_reached &&
-        released.release_requested && released.release_complete &&
+        custody && released.readiness_state ==
+            sintra::Managed_child_readiness_state::observation_stopped &&
+        released.release_state == sintra::Managed_child_release_state::complete &&
         released.created_occurrences == 1 && released.exited_occurrences == 1 &&
         survivor_absent && reap_seen && reap_normal && sintra::s_mproc == nullptr;
     if (!valid) {
@@ -2213,10 +2241,13 @@ bool run_unbounded_readiness_cancellation(
             finalized ? 1 : 0,
             finalize_elapsed < 5s ? 1 : 0,
             spawn_returned.load(std::memory_order_acquire) ? 1 : 0,
-            released.accepted ? 1 : 0,
-            released.readiness_reached ? 1 : 0,
-            released.release_requested ? 1 : 0,
-            released.release_complete ? 1 : 0,
+            custody ? 1 : 0,
+            released.readiness_state ==
+                sintra::Managed_child_readiness_state::reached ? 1 : 0,
+            released.release_state !=
+                sintra::Managed_child_release_state::open ? 1 : 0,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             released.created_occurrences,
             released.exited_occurrences,
             survivor_absent ? 1 : 0,
@@ -2451,11 +2482,11 @@ bool run_immediate_reaped_classification(
 
     return
         s_immediate_exit_observed.load(std::memory_order_acquire) &&
-        observed.accepted                                         &&
+        custody                                                   &&
         observed.created_occurrences == 1                         &&
         observed.exited_occurrences  == 1                         &&
-        !observed.release_complete                                &&
-        released.release_complete                                 &&
+        observed.release_state == sintra::Managed_child_release_state::open &&
+        released.release_state == sintra::Managed_child_release_state::complete &&
         released.created_occurrences == 1                         &&
         released.exited_occurrences  == 1                         &&
         roster_unchanged                                          &&
@@ -2577,7 +2608,8 @@ bool run_concurrent_posix_roster_reservations(
                     std::chrono::steady_clock::now() + 250ms);
                 released[i] = custodies[i].release_until(attempt_deadline);
             }
-            while (!released[i].release_complete &&
+            while (released[i].release_state !=
+                       sintra::Managed_child_release_state::complete &&
                 std::chrono::steady_clock::now() < release_deadline);
         });
     }
@@ -2585,7 +2617,8 @@ bool run_concurrent_posix_roster_reservations(
         caller.join();
     }
     const bool releases_terminal =
-        released[0].release_complete && released[1].release_complete;
+        released[0].release_state == sintra::Managed_child_release_state::complete &&
+        released[1].release_state == sintra::Managed_child_release_state::complete;
 
     bool survivors_absent = releases_terminal;
     for (size_t i = 0; i < 2; ++i) {
@@ -2617,7 +2650,8 @@ bool run_concurrent_posix_roster_reservations(
     }
 
     return exact_placeholders && releases_written &&
-        released[0].release_complete && released[1].release_complete &&
+        released[0].release_state == sintra::Managed_child_release_state::complete &&
+        released[1].release_state == sintra::Managed_child_release_state::complete &&
         released[0].created_occurrences == 1 &&
         released[1].created_occurrences == 1 &&
         released[0].exited_occurrences == 1 &&

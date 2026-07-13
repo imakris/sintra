@@ -296,12 +296,27 @@ struct Spawn_options
     Lifetime_policy            lifetime;
 };
 
+enum class Managed_child_readiness_state
+{
+    not_requested,
+    pending,
+    reached,
+    observation_stopped
+};
+
+enum class Managed_child_release_state
+{
+    open,
+    requested,
+    complete
+};
+
 struct Managed_child_status
 {
-    bool        accepted = false;
-    bool        readiness_reached = false;
-    bool        release_requested = false;
-    bool        release_complete = false;
+    Managed_child_readiness_state readiness_state =
+        Managed_child_readiness_state::not_requested;
+    Managed_child_release_state release_state =
+        Managed_child_release_state::open;
     std::size_t admitted_occurrences = 0;
     std::size_t created_occurrences = 0;
     std::size_t exited_occurrences = 0;
@@ -1473,14 +1488,27 @@ inline Managed_child_status Managed_child_custody::status() const
     if (!m_record) {
         return result;
     }
-    result.accepted = true;
     std::lock_guard<std::mutex> lock(m_record->mutex);
-    result.readiness_reached =
-        m_record->readiness == detail::Readiness_phase::reached;
-    result.release_requested =
-        !m_record->release_state.open();
-    result.release_complete =
-        m_record->release_state.released();
+    switch (m_record->readiness) {
+    case detail::Readiness_phase::not_requested:
+        result.readiness_state = Managed_child_readiness_state::not_requested;
+        break;
+    case detail::Readiness_phase::pending:
+        result.readiness_state = Managed_child_readiness_state::pending;
+        break;
+    case detail::Readiness_phase::reached:
+        result.readiness_state = Managed_child_readiness_state::reached;
+        break;
+    case detail::Readiness_phase::stopped:
+        result.readiness_state =
+            Managed_child_readiness_state::observation_stopped;
+        break;
+    }
+    result.release_state = m_record->release_state.released()
+        ? Managed_child_release_state::complete
+        : m_record->release_state.open()
+            ? Managed_child_release_state::open
+            : Managed_child_release_state::requested;
     result.last_failure = m_record->last_failure;
     result.admitted_occurrences = m_record->occurrences.size();
     for (const auto& occurrence : m_record->occurrences) {

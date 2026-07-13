@@ -314,7 +314,11 @@ if (!custody) {
 
 auto launch = custody.wait_ready_until(
     std::chrono::steady_clock::now() + std::chrono::seconds(5));
-// An incomplete deadline result retains custody and reports confirmed facts only.
+if (launch.readiness_state == sintra::Managed_child_readiness_state::pending) {
+    // The deadline only bounded this observation. Custody remains open.
+    auto cleanup = custody.terminate_until(
+        std::chrono::steady_clock::now() + std::chrono::seconds(5));
+}
 ```
 
 Environment overrides merge with the inherited environment in order; a later
@@ -322,7 +326,10 @@ duplicate wins. Variable names are case-insensitive on Windows and
 case-sensitive on POSIX, and recovery occurrences reuse the same overrides.
 Entries are not syntax-validated, so provide `NAME=VALUE` strings. Custody
 status also retains occurrence-qualified `last_failure` diagnostics. Deadline
-expiry does not itself create a failure, and
+expiry does not request release or cleanup and does not itself create a failure.
+Use `terminate_until()` to request cleanup explicitly. The custody handle's
+boolean conversion is the validity and acceptance fact; status reports typed
+readiness and release states. A
 `last_failure.kind == Managed_child_failure_kind::none` means only that no
 failure report has been recorded—not that readiness or release succeeded.
 

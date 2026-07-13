@@ -55,12 +55,27 @@ struct Managed_child_failure
     std::string message;
 };
 
+enum class Managed_child_readiness_state
+{
+    not_requested,
+    pending,
+    reached,
+    observation_stopped
+};
+
+enum class Managed_child_release_state
+{
+    open,
+    requested,
+    complete
+};
+
 struct Managed_child_status
 {
-    bool accepted = false;
-    bool readiness_reached = false;
-    bool release_requested = false;
-    bool release_complete = false;
+    Managed_child_readiness_state readiness_state =
+        Managed_child_readiness_state::not_requested;
+    Managed_child_release_state release_state =
+        Managed_child_release_state::open;
     std::size_t admitted_occurrences = 0;
     std::size_t created_occurrences = 0;
     std::size_t exited_occurrences = 0;
@@ -110,8 +125,8 @@ Contract:
   readiness resolution run as Sintra-owned work and `spawn_swarm_process`
   returns the accepted handle immediately. `wait_ready_until()` waits only on
   the custody record's monotone notification through its absolute steady-clock
-  deadline. Deadline expiry returns accepted, incomplete custody and requests
-  adverse cleanup after leaving the record lock.
+  deadline. Deadline expiry returns an incomplete snapshot; it does not request
+  release or adverse cleanup.
 - `lifetime` controls the lifeline policy applied to the child (see
   `Lifetime_policy`).
 - A return handle that converts to `true` means Sintra accepted durable logical
@@ -135,8 +150,17 @@ Threading and lifecycle:
 - Successful spawns participate in subsequent barriers and coordinator
   membership once setup completes. `wait_ready_until()` is the way to gate
   later code on the exact participant having published its readiness name.
-- `readiness_reached` means the coordinator observed the requested name; it
-  does not imply release or any later retirement fact.
+- The custody handle's boolean conversion is the sole validity and durable
+  acceptance fact. Status does not duplicate it. An empty handle's default
+  status is `not_requested` / `open`.
+- `readiness_state` is `not_requested` when no readiness name was configured,
+  `pending` while the exact target may still be observed, `reached` once the
+  coordinator observed it, and `observation_stopped` when the target can no
+  longer be reached. Readiness does not imply release or any later retirement
+  fact.
+- `release_state` is `open` before release is requested, `requested` while
+  retirement remains incomplete, and `complete` only after every admitted
+  occurrence has reached the complete-release contract.
 - `status()` is an immediate snapshot. `wait_ready_until()`, `release_until()`,
   and `terminate_until()` return the same status shape after waiting only until
   their absolute steady-clock deadlines. An incomplete snapshot reports only
@@ -167,11 +191,12 @@ Failures:
 - Resource exceptions before durable acceptance may propagate; no OS creation
   authority has been granted at that point.
 - A readiness deadline reached while the requested instance is still absent
-  returns accepted custody with `readiness_reached == false`; it does not by
-  itself record a managed-child failure. Release or termination deadline expiry
-  likewise returns incomplete confirmed facts without minting a failure. An
-  exception in readiness observation may instead be recorded as
-  `readiness_observation`.
+  returns a valid custody handle with `readiness_state == pending` and leaves
+  `release_state == open`; it does not request cleanup or by itself record a
+  managed-child failure. Call `terminate_until()` to request cleanup explicitly.
+  Release or termination deadline expiry likewise returns incomplete confirmed
+  facts without minting a failure. An exception in readiness observation may
+  instead be recorded as `readiness_observation`.
 - `last_failure` is a retained historical diagnostic, not the current custody
   state. Its `occurrence` identifies the recovery occurrence to which `kind`,
   `native_error`, and `message` apply. Later successful progress, including
@@ -182,7 +207,7 @@ Failures:
   termination call to retry with the same authority.
 - `Managed_child_failure_kind::none` means no managed-child failure report has
   been recorded. It is not an independent success result; use the other status
-  fields to decide whether the requested milestone is confirmed.
+  states to decide whether the requested milestone is confirmed.
 
 Example source:
 

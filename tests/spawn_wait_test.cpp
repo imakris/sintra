@@ -282,11 +282,15 @@ int run_coordinator(const std::string& binary_path)
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
         std::fprintf(stderr, "[COORDINATOR] Test 1: custody ready=%d after %lldms\n",
-            launch.readiness_reached ? 1 : 0, (long long)elapsed_ms);
+            launch.readiness_state == sintra::Managed_child_readiness_state::reached
+                ? 1 : 0,
+            (long long)elapsed_ms);
 
-        if (!accepted.accepted || accepted.release_requested ||
-            !launch.accepted || launch.created_occurrences != 1 ||
-            launch.readiness_reached || launch.release_requested)
+        if (!custody ||
+            accepted.release_state != sintra::Managed_child_release_state::open ||
+            launch.created_occurrences != 1 ||
+            launch.readiness_state != sintra::Managed_child_readiness_state::pending ||
+            launch.release_state != sintra::Managed_child_release_state::open)
         {
             std::fprintf(stderr, "[COORDINATOR] Test 1: Invalid incomplete custody snapshot\n");
             record_failure(
@@ -314,8 +318,8 @@ int run_coordinator(const std::string& binary_path)
 
         const auto cleanup = custody.terminate_until(
             std::chrono::steady_clock::now() + std::chrono::seconds(5));
-        if (!cleanup.accepted || !cleanup.release_requested ||
-            !cleanup.release_complete)
+        if (!custody || cleanup.release_state !=
+            sintra::Managed_child_release_state::complete)
         {
             record_failure(
                 all_tests_passed,
@@ -384,10 +388,13 @@ int run_coordinator(const std::string& binary_path)
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
         std::fprintf(stderr, "[COORDINATOR] Test 2: custody ready=%d after %lldms\n",
-            launch.readiness_reached ? 1 : 0, (long long)elapsed_ms);
+            launch.readiness_state == sintra::Managed_child_readiness_state::reached
+                ? 1 : 0,
+            (long long)elapsed_ms);
 
-        if (!accepted.accepted || accepted.release_requested ||
-            !launch.accepted || !launch.readiness_reached ||
+        if (!custody ||
+            accepted.release_state != sintra::Managed_child_release_state::open ||
+            launch.readiness_state != sintra::Managed_child_readiness_state::reached ||
             launch.created_occurrences != 1)
         {
             std::fprintf(stderr, "[COORDINATOR] Test 2: Expected ready child custody\n");

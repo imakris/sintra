@@ -459,9 +459,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const auto accepted_observation = custody.status();
     const bool accepted_like_hold =
         spawn_hold_entered && spawn_returned_while_readiness_held &&
-        !spawn_threw && accepted_observation.accepted &&
-        !accepted_observation.readiness_reached &&
-        !accepted_observation.release_requested &&
+        !spawn_threw && custody &&
+        accepted_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::pending &&
+        accepted_observation.release_state ==
+            sintra::Managed_child_release_state::open &&
         ledger_identity_valid && start_stamp_verified && native_alive_before &&
         publication_confirmed && no_lifeline_entry &&
         exact_process_unpublished.load(std::memory_order_acquire) == 0;
@@ -481,7 +483,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         sintra::s_mproc != nullptr && sintra::s_coord != nullptr &&
         s_destroy_publication_count.load(std::memory_order_acquire) == 0;
     const bool returned_custody_retained_after_finalize =
-        spawn_finished.load(std::memory_order_acquire) && custody.status().accepted;
+        spawn_finished.load(std::memory_order_acquire) && custody;
     const bool finalize_incomplete = !root_finalized && runtime_state_retained;
 
     bool platform_hold_valid = false;
@@ -506,8 +508,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const auto held_observation = custody.status();
     const bool caller_returned_retained_custody =
         spawn_finished.load(std::memory_order_acquire) && !spawn_threw &&
-        held_observation.accepted && held_observation.created_occurrences == 1 &&
-        held_observation.release_requested && !held_observation.release_complete;
+        custody && held_observation.created_occurrences == 1 &&
+        held_observation.release_state ==
+            sintra::Managed_child_release_state::requested;
 
     const bool release_written = write_complete_file(
         marker_path(shared.path(), k_release_child_file),
@@ -560,14 +563,17 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const auto released_observation = custody.release_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
     bool final_retry_succeeded = false;
-    if (released_observation.release_complete) {
+    if (released_observation.release_state ==
+        sintra::Managed_child_release_state::complete)
+    {
         try {
             final_retry_succeeded = sintra::detail::finalize();
         }
         catch (...) {
         }
     }
-    cleanup_valid = cleanup_valid && released_observation.release_complete &&
+    cleanup_valid = cleanup_valid && released_observation.release_state ==
+        sintra::Managed_child_release_state::complete &&
         final_retry_succeeded && sintra::s_mproc == nullptr;
 
     sintra::detail::test_hooks::s_runtime_spawn_success.store(nullptr, std::memory_order_release);
@@ -636,7 +642,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         exact_process_unpublished.load(std::memory_order_acquire),
         returned_custody_retained_after_finalize ? 1 : 0,
         platform_hold_valid ? 1 : 0,
-        held_observation.accepted ? 1 : 0,
+        custody ? 1 : 0,
         spawn_threw ? 1 : 0,
         cleanup_valid ? 1 : 0,
         forced_cleanup ? 1 : 0);

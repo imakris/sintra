@@ -759,9 +759,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     if (spawn_call_completed) {
         std::lock_guard<std::mutex> lock(call.mutex);
         const auto observation = call.custody.status();
-        spawn_result_invalid = call.threw || !observation.accepted ||
-            observation.created_occurrences != 1 || observation.readiness_reached ||
-            !observation.release_requested;
+        spawn_result_invalid = call.threw || !call.custody ||
+            observation.created_occurrences != 1 ||
+            observation.readiness_state !=
+                sintra::Managed_child_readiness_state::observation_stopped ||
+            observation.release_state !=
+                sintra::Managed_child_release_state::requested;
     }
     if (spawn_result_invalid) {
         std::fprintf(stderr, "managed_child_failed_readiness: spawn result contract invalid\n");
@@ -782,9 +785,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     const auto launch_observation = call.custody.status();
     const bool custody_retained = spawn_call_completed && !call.threw &&
-        launch_observation.accepted && launch_observation.created_occurrences == 1 &&
-        !launch_observation.readiness_reached && launch_observation.release_requested &&
-        !launch_observation.release_complete;
+        call.custody && launch_observation.created_occurrences == 1 &&
+        launch_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::observation_stopped &&
+        launch_observation.release_state ==
+            sintra::Managed_child_release_state::requested;
     bool managed_name_absent_after = false;
     bool requested_target_absent_after = false;
     bool native_alive_after = false;
@@ -974,7 +979,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         release_seen &&
         child_finalized &&
         natural_exit_before_cleanup_release &&
-        released_observation.release_complete &&
+        released_observation.release_state ==
+            sintra::Managed_child_release_state::complete &&
         native_exit_confirmed &&
         native_normal_exit &&
         survivor_absent &&

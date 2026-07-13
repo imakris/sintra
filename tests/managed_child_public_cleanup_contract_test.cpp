@@ -500,8 +500,9 @@ Windows_fallback_wake_result run_windows_fallback_wake(
             return gate.before_wait_count == 1;
         });
     }
-    result.setup_ready = !spawn_threw && ready.accepted &&
-        ready.readiness_reached && ready.created_occurrences == 1 && ledger &&
+    result.setup_ready = !spawn_threw && custody &&
+        ready.readiness_state == sintra::Managed_child_readiness_state::reached &&
+        ready.created_occurrences == 1 && ledger &&
         ledger->nonce == nonce &&
         ledger->process_iid == k_fallback_child_process_iid &&
         ledger->occurrence == 0 && child_handle &&
@@ -545,13 +546,13 @@ Windows_fallback_wake_result run_windows_fallback_wake(
     const auto after_exit = custody.release_until(passive_check_begin + 180ms);
     const auto passive_check_elapsed =
         std::chrono::steady_clock::now() - passive_check_begin;
-    result.passive_completed_without_cleanup = after_exit.accepted &&
-        after_exit.release_requested && after_exit.release_complete &&
+    result.passive_completed_without_cleanup = custody &&
+        after_exit.release_state == sintra::Managed_child_release_state::complete &&
         after_exit.exited_occurrences == 1;
-    result.bounded_incomplete = after_exit.accepted &&
-        after_exit.release_requested && !after_exit.release_complete &&
+    result.bounded_incomplete = custody &&
+        after_exit.release_state == sintra::Managed_child_release_state::requested &&
         passive_check_elapsed >= 120ms && passive_check_elapsed < 2s;
-    result.custody_retained = result.bounded_incomplete && custody.status().accepted;
+    result.custody_retained = result.bounded_incomplete && custody;
 
     const auto cleanup_guard = custody.terminate_until(
         std::chrono::steady_clock::now() + 5s);
@@ -564,11 +565,11 @@ Windows_fallback_wake_result run_windows_fallback_wake(
             return gate.handle_closed_count == 1;
         });
     }
-    result.cleanup_guard_complete = cleanup_guard.accepted &&
-        cleanup_guard.release_requested && cleanup_guard.release_complete &&
+    result.cleanup_guard_complete = custody && cleanup_guard.release_state ==
+        sintra::Managed_child_release_state::complete &&
         cleanup_guard.created_occurrences == 1 &&
-        cleanup_guard.exited_occurrences == 1 && passive.accepted &&
-        passive.release_complete;
+        cleanup_guard.exited_occurrences == 1 &&
+        passive.release_state == sintra::Managed_child_release_state::complete;
 
     if (child_handle) {
         CloseHandle(child_handle);
@@ -690,8 +691,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         ledger->process_iid == k_child_process_iid && ledger->occurrence == 0 &&
         ledger->ready_name == ready_name &&
         sintra::process_of(ledger->ready_iid) == k_child_process_iid;
-    const bool ready_valid = !spawn_threw && launch.accepted &&
-        launch.readiness_reached && launch.created_occurrences == 1 &&
+    const bool ready_valid = !spawn_threw && custody &&
+        launch.readiness_state == sintra::Managed_child_readiness_state::reached &&
+        launch.created_occurrences == 1 &&
         identity_valid && ledger && exact_child_is_live(*ledger) &&
 #ifdef _WIN32
         child_handle && WaitForSingleObject(child_handle, 0) == WAIT_TIMEOUT &&
@@ -729,8 +731,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         resolve_publicly(ready_name) ==
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
     bool failed_bounded_incomplete = passive_wait_seen && failure_seen &&
-        failed_cleanup.accepted && failed_cleanup.release_requested &&
-        !failed_cleanup.release_complete && failed_elapsed >= 80ms &&
+        custody && failed_cleanup.release_state ==
+            sintra::Managed_child_release_state::requested && failed_elapsed >= 80ms &&
         failed_elapsed < 2s && retained_after_failure;
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
@@ -754,7 +756,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         resolve_publicly(ready_name) ==
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
     const bool bounded_incomplete = failed_bounded_incomplete &&
-        held.accepted && held.release_requested && !held.release_complete &&
+        held.release_state == sintra::Managed_child_release_state::requested &&
         cleanup_elapsed >= 80ms && cleanup_elapsed < 2s && cleanup_entered &&
         child_retained_while_held &&
         ready_unpublished.load(std::memory_order_acquire) == 0 &&
@@ -763,8 +765,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool first_finalize_succeeded = sintra::detail::finalize();
     const auto retry = custody.release_until(
         std::chrono::steady_clock::now() + 80ms);
-    const bool retained_across_finalize = !first_finalize_succeeded && retry.accepted &&
-        retry.release_requested && !retry.release_complete && ledger &&
+    const bool retained_across_finalize = !first_finalize_succeeded && custody &&
+        retry.release_state == sintra::Managed_child_release_state::requested && ledger &&
         exact_child_is_live(*ledger);
 
     {
@@ -825,10 +827,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     const bool valid = windows_fallback.passed() &&
         ready_valid && bounded_incomplete &&
-        retained_across_finalize && complete.accepted && complete.release_requested &&
-        complete.release_complete && complete.admitted_occurrences == 1 &&
+        retained_across_finalize && complete.release_state ==
+            sintra::Managed_child_release_state::complete &&
+        complete.admitted_occurrences == 1 &&
         complete.created_occurrences == 1 && complete.exited_occurrences == 1 &&
-        passive.accepted && passive.release_requested && passive.release_complete &&
+        passive.release_state == sintra::Managed_child_release_state::complete &&
         failure_hits(failure_plan) == 1 &&
         authoritative_cleanup_once && exact_exit &&
         expected_status && survivor_absent && final_retry_succeeded;
@@ -902,7 +905,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         failure_hits(failure_plan),
         bounded_incomplete ? 1 : 0,
         retained_across_finalize ? 1 : 0,
-        complete.release_complete ? 1 : 0,
+        complete.release_state == sintra::Managed_child_release_state::complete ? 1 : 0,
         before_count,
         lifeline_count,
         retirement_count,

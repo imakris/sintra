@@ -317,12 +317,27 @@ Signature:
 ```cpp
 Managed_child_custody spawn_swarm_process(const Spawn_options& options);
 
+enum class Managed_child_readiness_state
+{
+    not_requested,
+    pending,
+    reached,
+    observation_stopped
+};
+
+enum class Managed_child_release_state
+{
+    open,
+    requested,
+    complete
+};
+
 struct Managed_child_status
 {
-    bool accepted = false;
-    bool readiness_reached = false;
-    bool release_requested = false;
-    bool release_complete = false;
+    Managed_child_readiness_state readiness_state =
+        Managed_child_readiness_state::not_requested;
+    Managed_child_release_state release_state =
+        Managed_child_release_state::open;
     std::size_t admitted_occurrences = 0;
     std::size_t created_occurrences = 0;
     std::size_t exited_occurrences = 0;
@@ -352,12 +367,19 @@ A readiness-configured spawn returns its accepted handle immediately; call
 `wait_ready_until()` with an absolute steady-clock deadline to observe that
 exact occurrence. The opaque handle also supports compact `status()`
 observation and bounded `release_until()` and `terminate_until()` operations.
-Test handle validity through its explicit boolean conversion.
+Test handle validity and durable acceptance through its explicit boolean
+conversion; status does not duplicate that fact. `readiness_state` distinguishes
+an unrequested observation, a pending target, an observed target, and an
+observation that can no longer reach the target. `release_state` distinguishes
+open custody, requested release that is still incomplete, and complete release.
+An empty handle's default status is `not_requested` / `open`.
 Graceful release is idempotent, so another call waits on the same retained
 custody through a new absolute deadline. It remains passive; explicit cleanup
 monotonically escalates the retained custody owner to lifeline release and
 authoritative retirement. Readiness, release, or termination deadline expiry
-never discards custody.
+never discards custody. In particular, `wait_ready_until()` is observation-only:
+its deadline does not request release or cleanup. Call `terminate_until()` to
+request adverse cleanup explicitly.
 A synchronous setup failure after acceptance returns the retained handle and
 settles a no-child occurrence or continues active cleanup for an already-created
 child.

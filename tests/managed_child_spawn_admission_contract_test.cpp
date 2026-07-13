@@ -251,11 +251,11 @@ bool run_pre_create_exception(
         std::chrono::steady_clock::now() + 5s);
     return
         !threw                                              &&
-        released.accepted                                   &&
+        custody                                             &&
         released.admitted_occurrences == 1                  &&
         released.created_occurrences  == 0                  &&
-        released.release_requested                          &&
-        released.release_complete                           &&
+        released.release_state ==
+            sintra::Managed_child_release_state::complete   &&
         observed_setup_exception(released, plan.stage)      &&
         plan.remaining.load(std::memory_order_acquire) == 0 &&
         marker_absent(marker);
@@ -297,12 +297,12 @@ bool run_post_native_exception(
     return
         !threw                                              &&
         identity                                            &&
-        released.accepted                                   &&
+        custody                                             &&
         released.admitted_occurrences == 1                  &&
         released.created_occurrences  == 1                  &&
         released.exited_occurrences   == 1                  &&
-        released.release_requested                          &&
-        released.release_complete                           &&
+        released.release_state ==
+            sintra::Managed_child_release_state::complete   &&
         observed_setup_exception(released, plan.stage)      &&
         plan.remaining.load(std::memory_order_acquire) == 0 &&
         survivor_absent;
@@ -317,9 +317,10 @@ bool run_native_spawn_failure(const std::filesystem::path& missing_binary)
     const auto custody = sintra::spawn_swarm_process(options);
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 5s);
-    return released.accepted && released.admitted_occurrences == 1 &&
-        released.created_occurrences == 0 && released.release_requested &&
-        released.release_complete && released.last_failure.kind ==
+    return custody && released.admitted_occurrences == 1 &&
+        released.created_occurrences == 0 && released.release_state ==
+            sintra::Managed_child_release_state::complete &&
+        released.last_failure.kind ==
             sintra::Managed_child_failure_kind::native_spawn &&
         released.last_failure.occurrence == 0 &&
         released.last_failure.native_error != 0 &&
@@ -425,7 +426,7 @@ bool run_worker_rejection(
     }
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 15s);
-    if (!released.release_complete) {
+    if (released.release_state != sintra::Managed_child_release_state::complete) {
         custody.terminate_until(std::chrono::steady_clock::now() + 15s);
     }
     return
@@ -433,7 +434,8 @@ bool run_worker_rejection(
         outcome_written                   &&
         nested_accepted    == 0           &&
         worker_finalized   == 1           &&
-        released.release_complete         &&
+        released.release_state ==
+            sintra::Managed_child_release_state::complete &&
         released.created_occurrences == 1 &&
         released.exited_occurrences  == 1 &&
         marker_absent(unexpected_child);

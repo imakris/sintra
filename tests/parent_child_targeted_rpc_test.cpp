@@ -242,7 +242,9 @@ int run_coordinator(const std::string& binary_path)
     const auto launch = custody.wait_ready_until(
         std::chrono::steady_clock::now() + std::chrono::milliseconds(15000));
     if (!sintra::test::assert_true(
-            launch.accepted && launch.readiness_reached && launch.created_occurrences == 1,
+            custody && launch.readiness_state ==
+                sintra::Managed_child_readiness_state::reached &&
+                launch.created_occurrences == 1,
             "[COORD] ", "spawn_swarm_process should return ready child custody"))
     {
         return 1;

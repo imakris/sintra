@@ -670,8 +670,9 @@ int run_owner(
         ? custody.status()
         : custody.wait_ready_until(readiness_deadline);
     if (test_case == k_case_wait_timeout) {
-        if (!launch.accepted || launch.created_occurrences != 1 ||
-            launch.readiness_reached || launch.release_requested)
+        if (!custody || launch.created_occurrences != 1 ||
+            launch.readiness_state != sintra::Managed_child_readiness_state::pending ||
+            launch.release_state != sintra::Managed_child_release_state::open)
         {
             std::fprintf(stderr, "[owner] wait-timeout custody observation invalid\n");
             std::_Exit(6);
@@ -693,8 +694,9 @@ int run_owner(
         std::_Exit(0);
     }
 
-    if (!launch.accepted || launch.created_occurrences != 1 ||
-        (!spawn_options.readiness_instance_name.empty() && !launch.readiness_reached))
+    if (!custody || launch.created_occurrences != 1 ||
+        (!spawn_options.readiness_instance_name.empty() &&
+         launch.readiness_state != sintra::Managed_child_readiness_state::reached))
     {
         std::fprintf(stderr, "[owner] failed to spawn child\n");
         std::_Exit(2);
@@ -765,7 +767,7 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
         const auto custody = sintra::spawn_swarm_process(spawn_options);
         const auto launch = custody.status();
-        if (!launch.accepted || launch.created_occurrences != 1) {
+        if (!custody || launch.created_occurrences != 1) {
             std::fprintf(stderr, "[leak_owner] failed to spawn child %d\n", i);
             std::_Exit(1);
         }
@@ -878,7 +880,7 @@ int run_respawn_owner(const std::filesystem::path& dir, int argc, char* argv[])
 
     const auto custody = sintra::spawn_swarm_process(spawn_options);
     const auto launch = custody.status();
-    if (!launch.accepted || launch.created_occurrences != 1) {
+    if (!custody || launch.created_occurrences != 1) {
         std::fprintf(stderr, "[respawn_owner] failed to spawn child\n");
         std::_Exit(2);
     }

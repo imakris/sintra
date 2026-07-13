@@ -660,17 +660,17 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         returned_by_deadline &&
         spawn_call_completed &&
         custody_retained_at_observation &&
-        deadline_observation.accepted &&
         deadline_observation.created_occurrences == 1 &&
-        !deadline_observation.readiness_reached &&
-        !deadline_observation.release_requested &&
-        !deadline_observation.release_complete &&
-        progressed_observation.accepted &&
-        progressed_observation.readiness_reached &&
-        !progressed_observation.release_requested &&
-        !progressed_observation.release_complete &&
-        terminated_observation.release_requested &&
-        terminated_observation.release_complete &&
+        deadline_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::pending &&
+        deadline_observation.release_state ==
+            sintra::Managed_child_release_state::open &&
+        progressed_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::reached &&
+        progressed_observation.release_state ==
+            sintra::Managed_child_release_state::open &&
+        terminated_observation.release_state ==
+            sintra::Managed_child_release_state::complete &&
         !call_threw &&
         child_release_written &&
         child_finalized &&
@@ -729,15 +729,22 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         native_identity_verified ? 1 : 0,
         child_alive_during_hold ? 1 : 0,
         child_alive_at_observation ? 1 : 0,
-        deadline_observation.accepted ? 1 : 0,
-        deadline_observation.readiness_reached ? 1 : 0,
-        deadline_observation.release_requested ? 1 : 0,
-        deadline_observation.release_complete ? 1 : 0,
+        static_cast<bool>(call.custody) ? 1 : 0,
+        deadline_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::reached ? 1 : 0,
+        deadline_observation.release_state !=
+            sintra::Managed_child_release_state::open ? 1 : 0,
+        deadline_observation.release_state ==
+            sintra::Managed_child_release_state::complete ? 1 : 0,
         custody_retained_at_observation ? 1 : 0,
-        progressed_observation.readiness_reached ? 1 : 0,
-        progressed_observation.release_requested ? 1 : 0,
-        terminated_observation.release_requested ? 1 : 0,
-        terminated_observation.release_complete ? 1 : 0,
+        progressed_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::reached ? 1 : 0,
+        progressed_observation.release_state !=
+            sintra::Managed_child_release_state::open ? 1 : 0,
+        terminated_observation.release_state !=
+            sintra::Managed_child_release_state::open ? 1 : 0,
+        terminated_observation.release_state ==
+            sintra::Managed_child_release_state::complete ? 1 : 0,
         child_release_written ? 1 : 0,
         child_finalized ? 1 : 0,
         native_exit_confirmed ? 1 : 0,

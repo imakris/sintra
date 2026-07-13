@@ -722,10 +722,12 @@ bool run_native_escalation_phase(
     fs::remove(native_child_ledger_path(shared_dir), ignored);
 
     const bool valid = caller_bounded && ledger_valid && live_after_caller &&
-        first.accepted && first.created_occurrences == 1 &&
-        !first.readiness_reached && !first.release_requested &&
-        !first.release_complete && completed.release_complete &&
-        completed.exited_occurrences == 1 && retried.release_complete &&
+        custody && first.created_occurrences == 1 &&
+        first.readiness_state == sintra::Managed_child_readiness_state::pending &&
+        first.release_state == sintra::Managed_child_release_state::open &&
+        completed.release_state == sintra::Managed_child_release_state::complete &&
+        completed.exited_occurrences == 1 &&
+        retried.release_state == sintra::Managed_child_release_state::complete &&
         soft_count == 1 && hard_count == 1 && exit_count == 1 &&
         exact_status && survivor_absent && finalized;
     if (!valid) {
@@ -738,9 +740,12 @@ bool run_native_escalation_phase(
             caller_bounded ? 1 : 0,
             ledger_valid ? 1 : 0,
             live_after_caller ? 1 : 0,
-            (first.accepted && !first.release_complete) ? 1 : 0,
-            completed.release_complete ? 1 : 0,
-            retried.release_complete ? 1 : 0,
+            (custody && first.release_state !=
+                sintra::Managed_child_release_state::complete) ? 1 : 0,
+            completed.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
+            retried.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             static_cast<unsigned>(soft_count),
             static_cast<unsigned>(hard_count),
             static_cast<unsigned>(exit_count),
@@ -915,13 +920,15 @@ Native_retry_result run_native_retry_phase(
 #endif
     fs::remove(native_retry_child_ledger_path(shared_dir), ignored);
 
-    const bool valid = before_cleanup.accepted &&
+    const bool valid = custody &&
         before_cleanup.created_occurrences == 1 &&
-        !before_cleanup.release_requested && first_bounded &&
-        first.accepted && first.created_occurrences == 1 &&
-        first.exited_occurrences == 0 && first.release_requested &&
-        !first.release_complete && failure_hits == 1 && hard_hook_bounded &&
-        retained_after_first && second.release_complete &&
+        before_cleanup.release_state == sintra::Managed_child_release_state::open &&
+        first_bounded && first.created_occurrences == 1 &&
+        first.exited_occurrences == 0 &&
+        first.release_state == sintra::Managed_child_release_state::requested &&
+        failure_hits == 1 && hard_hook_bounded &&
+        retained_after_first &&
+        second.release_state == sintra::Managed_child_release_state::complete &&
         second.exited_occurrences == 1 && soft_count == 2 &&
         hard_count == 1 && exit_count == 1 && exact_status &&
         survivor_absent && !forced_cleanup && finalized;
@@ -935,15 +942,16 @@ Native_retry_result run_native_retry_phase(
             "reap_status=%d finalized=%d first_elapsed_ms=%lld "
             "hard_hook_elapsed_ms=%lld return_margin_ms=%lld "
             "hard_hook_deadline_ms=%lld\n",
-            (before_cleanup.accepted &&
-                before_cleanup.created_occurrences == 1) ? 1 : 0,
+            (custody && before_cleanup.created_occurrences == 1) ? 1 : 0,
             first_bounded ? 1 : 0,
-            (first.accepted && !first.release_complete &&
+            (custody && first.release_state !=
+                sintra::Managed_child_release_state::complete &&
                 first.exited_occurrences == 0) ? 1 : 0,
             static_cast<unsigned>(failure_hits),
             hard_hook_bounded ? 1 : 0,
             retained_after_first ? 1 : 0,
-            second.release_complete ? 1 : 0,
+            second.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
             static_cast<unsigned>(soft_count),
             static_cast<unsigned>(hard_count),
             static_cast<unsigned>(exit_count),
@@ -1287,15 +1295,17 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         lifeline_absent_at_seam &&
         requested_target_never_published &&
         spawn_call_completed &&
-        launch_observation.accepted &&
+        call.custody &&
         launch_observation.created_occurrences == 1 &&
-        !launch_observation.readiness_reached &&
-        launch_observation.release_requested &&
-        !launch_observation.release_complete &&
+        launch_observation.readiness_state ==
+            sintra::Managed_child_readiness_state::observation_stopped &&
+        launch_observation.release_state ==
+            sintra::Managed_child_release_state::requested &&
         !call_threw &&
         child_release_written &&
         child_finalized &&
-        released_observation.release_complete &&
+        released_observation.release_state ==
+            sintra::Managed_child_release_state::complete &&
         native_exit_confirmed &&
         native_normal_exit &&
         survivor_absent &&
@@ -1379,8 +1389,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         lifeline_absent_at_seam ? 1 : 0,
         requested_target_never_published ? 1 : 0,
         spawn_call_completed ? 1 : 0,
-        (launch_observation.accepted && launch_observation.release_requested &&
-         released_observation.release_complete) ? 1 : 0,
+        (call.custody && launch_observation.release_state !=
+            sintra::Managed_child_release_state::open &&
+         released_observation.release_state ==
+            sintra::Managed_child_release_state::complete) ? 1 : 0,
         call_threw ? 1 : 0,
         child_release_written ? 1 : 0,
         child_finalized ? 1 : 0,

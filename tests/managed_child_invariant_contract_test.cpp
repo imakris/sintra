@@ -277,9 +277,11 @@ Case_result run_case(
             s_cleanup_release.store(true, std::memory_order_release);
             released = custody.status();
             automatic_cleanup_requested =
-                automatic_cleanup_entered && released.release_requested;
+                automatic_cleanup_entered && released.release_state !=
+                    sintra::Managed_child_release_state::open;
             const auto automatic_deadline = cleanup_started + 6s;
-            while (!released.release_complete &&
+            while (released.release_state !=
+                       sintra::Managed_child_release_state::complete &&
                    std::chrono::steady_clock::now() < automatic_deadline)
             {
                 std::this_thread::sleep_for(5ms);
@@ -309,8 +311,8 @@ Case_result run_case(
                 sintra::s_coord->m_processes_in_initialization.count(process_iid) == 0;
         }
 
-        const bool common = cleanup_bounded && released.accepted &&
-            released.release_requested && released.release_complete &&
+        const bool common = cleanup_bounded && custody &&
+            released.release_state == sintra::Managed_child_release_state::complete &&
             exact_absent && roster_empty && init_clear;
         const char* expected_failure_stage =
             target == Target::exact_occurrence
