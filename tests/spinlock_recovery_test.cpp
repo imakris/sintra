@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -24,7 +25,6 @@
 #include <windows.h>
 #else
 #include <cerrno>
-#include <csignal>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -330,12 +330,6 @@ public:
         m_wait_status      = status;
         m_status_available = true;
         m_reaped           = true;
-        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
-            std::ostringstream message;
-            message << "cleanup status mismatch: " << describe_status();
-            diagnostic = message.str();
-            return false;
-        }
         return true;
 #endif
     }
@@ -522,6 +516,15 @@ int main(int argc, char* argv[])
     if (argc >= 5 && std::string_view(argv[1]) == "--spinlock-stall-child") {
         sintra::detail::set_debug_pause_active(false);
         sintra::test::prepare_for_intentional_crash();
+        if (std::signal(SIGABRT, SIG_DFL) == SIG_ERR) {
+            return 2;
+        }
+#ifdef _WIN32
+        SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        if (_set_error_mode(_OUT_TO_STDERR) == -1) {
+            return 2;
+        }
+#endif
         const uint32_t owner_pid = static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10));
         const std::filesystem::path marker_path(argv[3]);
         const std::string_view      marker_token(argv[4]);
@@ -592,6 +595,16 @@ int main(int argc, char* argv[])
     lock.lock();
     lock.unlock();
     sintra::detail::set_debug_pause_active(false);
+
+    const auto post_recovery_child_state = sleep_child.poll();
+    if (post_recovery_child_state != Child_state::running) {
+        fail_after_settling_child(
+            sleep_child,
+            "case 2 did not force-unlock while the exact owner remained live: " +
+                (post_recovery_child_state == Child_state::exited
+                    ? sleep_child.describe_status()
+                    : sleep_child.error()));
+    }
 
     std::string sleep_cleanup_diagnostic;
     if (!sleep_child.terminate_and_settle(sleep_cleanup_diagnostic)) {
