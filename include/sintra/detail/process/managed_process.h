@@ -703,6 +703,27 @@ public:
         bool force_exact_lookup_failure);
     void transfer_initialization_reservation() noexcept;
 
+#ifndef _WIN32
+    struct Posix_native_handoff_result
+    {
+        bool reservation_lookup_failed = false;
+        bool child_reaped = false;
+    };
+
+    void reserve_posix_reap_slot();
+    uint64_t posix_reap_reservation_id() const noexcept
+    {
+        return m_posix_reap_reservation_id;
+    }
+    Posix_native_handoff_result commit_posix_native_handoff(
+        bool process_created,
+        int pid,
+        bool already_reaped,
+        bool wait_status_available,
+        int wait_status,
+        bool force_reservation_lookup_failure);
+#endif
+
 private:
     enum class Reader_ownership
     {
@@ -718,12 +739,24 @@ private:
         transferred
     };
 
+#ifndef _WIN32
+    enum class Posix_reap_ownership
+    {
+        absent,
+        reserved,
+        transferred
+    };
+#endif
+
     static constexpr uintptr_t invalid_lifeline_endpoint =
         static_cast<uintptr_t>(-1);
 
     void rollback() noexcept;
     void rollback_initialization() noexcept;
     void rollback_reader() noexcept;
+#ifndef _WIN32
+    void rollback_posix_reap_reservation() noexcept;
+#endif
     void close_lifeline_write_endpoint() noexcept;
     bool lifeline_endpoint_valid(uintptr_t endpoint) const noexcept;
 
@@ -737,6 +770,10 @@ private:
     Initialization_ownership m_initialization =
         Initialization_ownership::absent;
     Coordinator* m_initialization_coordinator = nullptr;
+#ifndef _WIN32
+    Posix_reap_ownership m_posix_reap = Posix_reap_ownership::absent;
+    uint64_t m_posix_reap_reservation_id = 0;
+#endif
     uintptr_t m_lifeline_read_endpoint = invalid_lifeline_endpoint;
     uintptr_t m_lifeline_write_endpoint = invalid_lifeline_endpoint;
 };

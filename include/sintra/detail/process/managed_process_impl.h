@@ -974,6 +974,10 @@ inline detail::Managed_child_launch_attempt::Managed_child_launch_attempt(
     , m_reader(other.m_reader)
     , m_initialization(other.m_initialization)
     , m_initialization_coordinator(other.m_initialization_coordinator)
+#ifndef _WIN32
+    , m_posix_reap(other.m_posix_reap)
+    , m_posix_reap_reservation_id(other.m_posix_reap_reservation_id)
+#endif
     , m_lifeline_read_endpoint(other.m_lifeline_read_endpoint)
     , m_lifeline_write_endpoint(other.m_lifeline_write_endpoint)
 {
@@ -983,6 +987,10 @@ inline detail::Managed_child_launch_attempt::Managed_child_launch_attempt(
     other.m_reader = Reader_ownership::absent;
     other.m_initialization = Initialization_ownership::absent;
     other.m_initialization_coordinator = nullptr;
+#ifndef _WIN32
+    other.m_posix_reap = Posix_reap_ownership::absent;
+    other.m_posix_reap_reservation_id = 0;
+#endif
     other.m_lifeline_read_endpoint = invalid_lifeline_endpoint;
     other.m_lifeline_write_endpoint = invalid_lifeline_endpoint;
 }
@@ -1001,6 +1009,11 @@ detail::Managed_child_launch_attempt::operator=(
         m_reader = other.m_reader;
         m_initialization = other.m_initialization;
         m_initialization_coordinator = other.m_initialization_coordinator;
+#ifndef _WIN32
+        m_posix_reap = other.m_posix_reap;
+        m_posix_reap_reservation_id =
+            other.m_posix_reap_reservation_id;
+#endif
         m_lifeline_read_endpoint = other.m_lifeline_read_endpoint;
         m_lifeline_write_endpoint = other.m_lifeline_write_endpoint;
 
@@ -1010,6 +1023,10 @@ detail::Managed_child_launch_attempt::operator=(
         other.m_reader = Reader_ownership::absent;
         other.m_initialization = Initialization_ownership::absent;
         other.m_initialization_coordinator = nullptr;
+#ifndef _WIN32
+        other.m_posix_reap = Posix_reap_ownership::absent;
+        other.m_posix_reap_reservation_id = 0;
+#endif
         other.m_lifeline_read_endpoint = invalid_lifeline_endpoint;
         other.m_lifeline_write_endpoint = invalid_lifeline_endpoint;
     }
@@ -1174,6 +1191,184 @@ detail::Managed_child_launch_attempt::transfer_initialization_reservation() noex
     }
 }
 
+#ifndef _WIN32
+inline void detail::Managed_child_launch_attempt::reserve_posix_reap_slot()
+{
+    if (!m_owner || !m_custody ||
+        m_posix_reap != Posix_reap_ownership::absent)
+    {
+        throw std::runtime_error(
+            "Managed-child POSIX reap reservation is not available");
+    }
+
+    uint64_t reservation_id = 0;
+    {
+        std::lock_guard<std::mutex> roster_lock(
+            m_owner->m_spawned_child_pids_mutex);
+        reservation_id = m_owner->m_next_spawned_child_reservation++;
+        m_owner->m_spawned_child_pids.push_back(
+            {reservation_id,
+             0,
+             0,
+             false,
+             {m_custody, m_process_instance_id, m_occurrence}});
+        m_posix_reap = Posix_reap_ownership::reserved;
+        m_posix_reap_reservation_id = reservation_id;
+    }
+
+    managed_child_roster_reserved_for_test(
+        m_process_instance_id, m_occurrence, reservation_id);
+}
+
+inline detail::Managed_child_launch_attempt::Posix_native_handoff_result
+detail::Managed_child_launch_attempt::commit_posix_native_handoff(
+    bool process_created,
+    int pid,
+    bool already_reaped,
+    bool wait_status_available,
+    int wait_status,
+    bool force_reservation_lookup_failure)
+{
+    if (!m_owner || !m_custody ||
+        m_posix_reap != Posix_reap_ownership::reserved ||
+        m_posix_reap_reservation_id == 0)
+    {
+        throw std::runtime_error(
+            "Managed-child POSIX reap reservation is not owned");
+    }
+    if (process_created && pid <= 0) {
+        throw std::runtime_error(
+            "Managed-child POSIX native identity is invalid");
+    }
+
+    bool start_stamp_available = false;
+    uint64_t start_stamp = 0;
+    if (process_created && !already_reaped) {
+        try {
+            if (auto stamp = query_process_start_stamp(
+                    static_cast<uint32_t>(pid)))
+            {
+                start_stamp = *stamp;
+                start_stamp_available = true;
+            }
+        }
+        catch (...) {
+            // Native ownership is more important than an optional start stamp.
+        }
+    }
+
+    Posix_native_handoff_result result;
+    const auto reservation_id = m_posix_reap_reservation_id;
+
+    {
+        // The roster is always acquired before custody so the central reaper
+        // cannot observe a filled slot until exact native state is committed.
+        std::lock_guard<std::mutex> roster_lock(
+            m_owner->m_spawned_child_pids_mutex);
+        std::lock_guard<std::mutex> custody_lock(m_custody->mutex);
+
+        auto occurrence = std::find_if(
+            m_custody->occurrences.begin(), m_custody->occurrences.end(),
+            [&](const Managed_child_occurrence_record& candidate) {
+                return candidate.process_instance_id == m_process_instance_id &&
+                    candidate.occurrence == m_occurrence;
+            });
+        if (occurrence == m_custody->occurrences.end()) {
+            throw std::runtime_error(
+                "Managed-child exact occurrence lookup failed");
+        }
+
+        auto slot = force_reservation_lookup_failure
+            ? m_owner->m_spawned_child_pids.end()
+            : std::find_if(
+                m_owner->m_spawned_child_pids.begin(),
+                m_owner->m_spawned_child_pids.end(),
+                [&](const Managed_process::Spawned_child_reap_slot& candidate) {
+                    return candidate.reservation_id == reservation_id;
+                });
+        result.reservation_lookup_failed =
+            slot == m_owner->m_spawned_child_pids.end();
+
+        if (result.reservation_lookup_failed && process_created) {
+            slot = std::find_if(
+                m_owner->m_spawned_child_pids.begin(),
+                m_owner->m_spawned_child_pids.end(),
+                [&](const Managed_process::Spawned_child_reap_slot& candidate) {
+                    return candidate.occurrence.custody.lock() == m_custody &&
+                        candidate.occurrence.process_instance_id ==
+                            m_process_instance_id &&
+                        candidate.occurrence.occurrence == m_occurrence;
+                });
+            if (slot == m_owner->m_spawned_child_pids.end()) {
+                throw std::runtime_error(
+                    "Managed-child POSIX reap reservation reconstruction failed");
+            }
+        }
+
+        if (process_created && !occurrence->native.confirm_absent()) {
+            throw std::runtime_error(
+                "Managed-child native authority was not absent");
+        }
+
+        if (!process_created) {
+            if (!occurrence->native.confirm_absent()) {
+                throw std::runtime_error(
+                    "Managed-child native authority was not absent");
+            }
+            if (slot != m_owner->m_spawned_child_pids.end()) {
+                m_owner->m_spawned_child_pids.erase(slot);
+            }
+            m_posix_reap = Posix_reap_ownership::absent;
+            m_posix_reap_reservation_id = 0;
+        }
+        else if (already_reaped) {
+            if (!occurrence->native.commit_created(
+                    pid,
+                    false,
+                    0,
+                    true,
+                    wait_status_available,
+                    wait_status))
+            {
+                throw std::runtime_error(
+                    "Managed-child native authority commit failed");
+            }
+            if (slot != m_owner->m_spawned_child_pids.end()) {
+                m_owner->m_spawned_child_pids.erase(slot);
+            }
+            m_posix_reap = Posix_reap_ownership::absent;
+            m_posix_reap_reservation_id = 0;
+            result.child_reaped = wait_status_available;
+        }
+        else {
+            if (slot == m_owner->m_spawned_child_pids.end()) {
+                throw std::runtime_error(
+                    "Managed-child POSIX reap reservation reconstruction failed");
+            }
+            slot->reservation_id = reservation_id;
+            slot->pid = static_cast<pid_t>(pid);
+            slot->start_stamp = start_stamp;
+            slot->start_stamp_available = start_stamp_available;
+            if (!occurrence->native.commit_created(
+                    pid,
+                    start_stamp_available,
+                    start_stamp,
+                    false,
+                    false,
+                    0))
+            {
+                throw std::runtime_error(
+                    "Managed-child native authority commit failed");
+            }
+            m_posix_reap = Posix_reap_ownership::transferred;
+        }
+    }
+
+    m_custody->changed.notify_all();
+    return result;
+}
+#endif
+
 inline void
 detail::Managed_child_launch_attempt::rollback_initialization() noexcept
 {
@@ -1236,8 +1431,41 @@ inline void detail::Managed_child_launch_attempt::rollback_reader() noexcept
     deferred_settlement.reset();
 }
 
+#ifndef _WIN32
+inline void
+detail::Managed_child_launch_attempt::rollback_posix_reap_reservation() noexcept
+{
+    if (m_posix_reap != Posix_reap_ownership::reserved || !m_owner ||
+        m_posix_reap_reservation_id == 0)
+    {
+        return;
+    }
+
+    const auto reservation_id = m_posix_reap_reservation_id;
+    m_posix_reap = Posix_reap_ownership::absent;
+    m_posix_reap_reservation_id = 0;
+    try {
+        std::lock_guard<std::mutex> roster_lock(
+            m_owner->m_spawned_child_pids_mutex);
+        m_owner->m_spawned_child_pids.erase(
+            std::remove_if(
+                m_owner->m_spawned_child_pids.begin(),
+                m_owner->m_spawned_child_pids.end(),
+                [&](const Managed_process::Spawned_child_reap_slot& slot) {
+                    return slot.reservation_id == reservation_id;
+                }),
+            m_owner->m_spawned_child_pids.end());
+    }
+    catch (...) {
+    }
+}
+#endif
+
 inline void detail::Managed_child_launch_attempt::rollback() noexcept
 {
+#ifndef _WIN32
+    rollback_posix_reap_reservation();
+#endif
     close_lifeline_read_endpoint();
     close_lifeline_write_endpoint();
     rollback_initialization();
@@ -4181,26 +4409,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     }
     result.failure.occurrence = s.occurrence;
 
-#ifndef _WIN32
-    uint64_t posix_reap_reservation = 0;
-    bool posix_reap_reservation_lookup_failed = false;
-    Instantiator posix_reap_reservation_guard(std::function<void()>([&]() {
-        if (posix_reap_reservation != 0) {
-            std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
-            m_spawned_child_pids.erase(
-                std::remove_if(
-                    m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
-                    [&](const Spawned_child_reap_slot& slot) {
-                        return slot.reservation_id == posix_reap_reservation;
-                    }),
-                m_spawned_child_pids.end());
-        }
-    }));
-#endif
-    const detail::Managed_child_occurrence_token occurrence_token{
-        custody,
-        s.piid,
-        s.occurrence};
     auto exact_occurrence_locked = [&]() -> detail::Managed_child_occurrence_record& {
         auto it = std::find_if(
             custody->occurrences.begin(), custody->occurrences.end(),
@@ -4255,30 +4463,24 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         s.occurrence);
 
 #ifndef _WIN32
-    // Insert an actual per-attempt placeholder before OS creation. Concurrent
-    // setups therefore own distinct roster slots; filling the exact PID after
-    // creation is allocation-free and cannot strand a child outside Sintra's
-    // sole waitpid authority.
-    {
-        std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
-        posix_reap_reservation = m_next_spawned_child_reservation++;
-        m_spawned_child_pids.push_back(
-            {posix_reap_reservation, 0, 0, false, occurrence_token});
-    }
-    detail::managed_child_roster_reserved_for_test(
-        s.piid,
-        s.occurrence,
-        posix_reap_reservation);
+    launch_attempt.reserve_posix_reap_slot();
 #endif
 
+    bool custody_closed_before_creation = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
-        if (custody->phase != detail::Custody_phase::open) {
-            result.failure.kind = Managed_child_failure_kind::custody_closed;
-            result.failure.message =
-                "Managed child custody closed before OS creation";
-            return result;
-        }
+        custody_closed_before_creation =
+            custody->phase != detail::Custody_phase::open;
+    }
+    if (custody_closed_before_creation) {
+#ifndef _WIN32
+        launch_attempt.commit_posix_native_handoff(
+            false, -1, false, false, 0, false);
+#endif
+        result.failure.kind = Managed_child_failure_kind::custody_closed;
+        result.failure.message =
+            "Managed child custody closed before OS creation";
+        return result;
     }
 
     bool spawn_ready = true;
@@ -4357,6 +4559,10 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     if (!launch_attempt.acquire_initialization_reservation(
             s_coord, exact_occurrence_lookup_failed))
     {
+#ifndef _WIN32
+        launch_attempt.commit_posix_native_handoff(
+            false, -1, false, false, 0, false);
+#endif
         result.failure.kind = Managed_child_failure_kind::setup_exception;
         result.failure.message =
             detail::test_hooks::k_managed_child_exact_occurrence_lookup;
@@ -4403,6 +4609,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                 "OS process creation returned without a bindable native identity";
         }
 
+#ifdef _WIN32
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
@@ -4434,13 +4641,12 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                 throw std::runtime_error(
                     "Managed-child native authority commit failed");
             }
-#ifdef _WIN32
             if (result.os_process_created) {
                 result.os_process_handle_owned = false;
             }
-#endif
             custody->changed.notify_all();
         }
+#endif
     }
     else {
         result.success = false;
@@ -4452,6 +4658,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             error_msg << " (errno " << spawn_error << ": " << ec.message() << ')';
         }
         result.failure.message = error_msg.str();
+#ifdef _WIN32
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
@@ -4462,6 +4669,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             }
             custody->changed.notify_all();
         }
+#endif
     }
 
     if (result.os_process_created) {
@@ -4471,84 +4679,30 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
 
     if (result.success) {
 #ifndef _WIN32
-        if (result.os_process_already_reaped) {
-            {
-                std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
-                m_spawned_child_pids.erase(
-                    std::remove_if(
-                        m_spawned_child_pids.begin(),
-                        m_spawned_child_pids.end(),
-                        [&](const Spawned_child_reap_slot& slot) {
-                            return slot.reservation_id == posix_reap_reservation;
-                        }),
-                    m_spawned_child_pids.end());
-                posix_reap_reservation = 0;
-            }
-            if (result.os_wait_status_available) {
-                detail::child_reaped_for_test(
-                    static_cast<pid_t>(spawned_pid),
-                    result.os_wait_status);
-            }
+        const bool forced_reservation_lookup_failure =
+            detail::managed_child_invariant_for_test(
+                detail::test_hooks::
+                    k_managed_child_posix_reap_reservation_lookup,
+                s.piid,
+                s.occurrence,
+                launch_attempt.posix_reap_reservation_id());
+        const auto posix_handoff =
+            launch_attempt.commit_posix_native_handoff(
+                result.os_process_created,
+                spawned_pid,
+                result.os_process_already_reaped,
+                result.os_wait_status_available,
+                result.os_wait_status,
+                forced_reservation_lookup_failure);
+        if (posix_handoff.child_reaped) {
+            detail::child_reaped_for_test(
+                static_cast<pid_t>(spawned_pid),
+                result.os_wait_status);
         }
-        else if (spawned_pid > 0) {
-            uint64_t spawned_start_stamp = 0;
-            bool spawned_start_stamp_available = false;
-            {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                const auto& occurrence = exact_occurrence_locked();
-                spawned_start_stamp = occurrence.native.start_stamp();
-                spawned_start_stamp_available =
-                    occurrence.native.start_stamp_available();
-            }
-            {
-                const bool forced_reservation_lookup_failure =
-                    detail::managed_child_invariant_for_test(
-                        detail::test_hooks::
-                            k_managed_child_posix_reap_reservation_lookup,
-                        s.piid,
-                        s.occurrence,
-                        posix_reap_reservation);
-                std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
-                auto slot = forced_reservation_lookup_failure
-                    ? m_spawned_child_pids.end()
-                    : std::find_if(
-                        m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
-                        [&](const Spawned_child_reap_slot& candidate) {
-                            return candidate.reservation_id ==
-                                posix_reap_reservation;
-                        });
-                posix_reap_reservation_lookup_failed =
-                    slot == m_spawned_child_pids.end();
-                if (posix_reap_reservation_lookup_failed) {
-                    slot = std::find_if(
-                        m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
-                        [&](const Spawned_child_reap_slot& candidate) {
-                            return candidate.occurrence.custody.lock() == custody &&
-                                candidate.occurrence.process_instance_id == s.piid &&
-                                candidate.occurrence.occurrence == s.occurrence;
-                        });
-                    if (slot == m_spawned_child_pids.end()) {
-                        m_spawned_child_pids.push_back(
-                            {posix_reap_reservation,
-                             static_cast<pid_t>(spawned_pid),
-                             spawned_start_stamp,
-                             spawned_start_stamp_available,
-                             occurrence_token});
-                        slot = m_spawned_child_pids.end();
-                        --slot;
-                    }
-                    else {
-                        slot->reservation_id = posix_reap_reservation;
-                    }
-                }
-                slot->pid = static_cast<pid_t>(spawned_pid);
-                slot->start_stamp = spawned_start_stamp;
-                slot->start_stamp_available = spawned_start_stamp_available;
-                posix_reap_reservation = 0;
-            }
+        else if (!result.os_process_already_reaped && spawned_pid > 0) {
             // A very short-lived child may exit before the SIGCHLD dispatcher
-            // observes the newly tracked PID. Reap once after registration so
-            // the authoritative exact-exit fact cannot be lost in that race.
+            // observes the newly tracked PID. Reap once after handoff so the
+            // authoritative exact-exit fact cannot be lost in that race.
             reap_finished_children();
         }
 #endif
@@ -4556,7 +4710,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             launch_attempt.transfer_lifeline_write();
 
 #ifndef _WIN32
-        if (posix_reap_reservation_lookup_failed) {
+        if (posix_handoff.reservation_lookup_failed) {
             throw std::runtime_error(
                 detail::test_hooks::
                     k_managed_child_posix_reap_reservation_lookup);
@@ -4720,6 +4874,10 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             result.failure.message = error_msg.str();
         }
 
+#ifndef _WIN32
+        launch_attempt.commit_posix_native_handoff(
+            false, -1, false, false, 0, false);
+#else
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto& occurrence = exact_occurrence_locked();
@@ -4729,6 +4887,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                     "settling spawn failure");
             }
         }
+#endif
         // Log spawn failures to stderr
         if (!spawn_ready && !result.failure.message.empty()) {
             Log_stream(log_level::error) << result.failure.message << "\n";
