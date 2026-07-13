@@ -3644,181 +3644,6 @@ inline void Managed_process::request_child_custody_release(
                 custody->release_attempt_generation == release_attempt_generation;
         };
 
-        auto retire_transport = [this, &custody, release_attempt_generation,
-                                 &release_attempt_active](
-            const detail::Managed_child_release_roster& targets,
-            detail::Release_mode release_mode) -> bool
-        {
-            const auto first_current = std::find_if(
-                targets.begin(), targets.end(),
-                [](const detail::Managed_child_release_occurrence& target) {
-                    return target.slot_current;
-                });
-            if (release_mode == detail::Release_mode::cleanup &&
-                first_current != targets.end())
-            {
-                detail::managed_child_failure_for_test(
-                    detail::test_hooks::k_managed_child_fail_cleanup_actions,
-                    first_current->process_instance_id,
-                    first_current->occurrence);
-            }
-            for (const auto& target : targets) {
-                if (!target.slot_current) {
-                    continue;
-                }
-                const auto occurrence = target.occurrence;
-                const auto process_iid = target.process_instance_id;
-                if (!release_attempt_active()) {
-                    return false;
-                }
-                const detail::Managed_child_occurrence_token token{
-                    custody,
-                    process_iid,
-                    occurrence};
-                auto converge_native = [&]() -> bool {
-                    if (release_mode == detail::Release_mode::passive ||
-                        cleanup_child_native(token))
-                    {
-                        return true;
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(custody->mutex);
-                        if (custody->release_attempt_phase ==
-                                detail::Release_attempt_phase::running &&
-                            custody->release_attempt_generation ==
-                                release_attempt_generation)
-                        {
-                            custody->release_attempt_phase =
-                                detail::Release_attempt_phase::failing;
-                        }
-                    }
-                    custody->changed.notify_all();
-                    return false;
-                };
-                if (release_mode == detail::Release_mode::cleanup) {
-                    detail::managed_child_cleanup_for_test(
-                        detail::test_hooks::k_managed_child_cleanup_before_actions,
-                        process_iid,
-                        occurrence);
-                }
-                if (s_coord && s_coord->set_draining_state(process_iid, 1)) {
-                    s_coord->note_draining_state_change();
-                }
-                if (release_mode == detail::Release_mode::cleanup) {
-                    release_lifeline(process_iid);
-                    detail::managed_child_cleanup_for_test(
-                        detail::test_hooks::k_managed_child_cleanup_lifeline_released,
-                        process_iid,
-                        occurrence);
-                }
-                if (s_coord && !s_coord->unpublish_transceiver(process_iid)) {
-                    std::shared_ptr<Process_message_reader> retiring_reader;
-                    {
-                        Dispatch_shared_lock readers_lock(m_readers_mutex);
-                        auto reader = m_readers.find(process_iid);
-                        if (reader != m_readers.end()) {
-                            retiring_reader = reader->second;
-                        }
-                    }
-                    const bool authority_captured =
-                        capture_child_communication_retirement_authority(
-                            token, retiring_reader);
-                    if (!authority_captured) {
-                        std::lock_guard<std::mutex> lock(custody->mutex);
-                        if (custody->release_attempt_generation ==
-                                release_attempt_generation)
-                        {
-                            custody->release_attempt_phase =
-                                detail::Release_attempt_phase::failing;
-                        }
-                        custody->changed.notify_all();
-                        return false;
-                    }
-                    uint64_t claimed_release_attempt_generation = 0;
-                    std::shared_ptr<Process_message_reader> claimed_reader;
-                    const bool communication_claimed =
-                        begin_child_communication_retirement(
-                            token,
-                            release_attempt_generation,
-                            claimed_release_attempt_generation,
-                            claimed_reader);
-                    if (!communication_claimed) {
-                        if (!release_attempt_active()) {
-                            converge_native();
-                            return false;
-                        }
-                    }
-                    else {
-                    // A first miss is provisional: a publish RPC may already
-                    // be in flight. Stop and terminally join the exact reader,
-                    // then re-enter coordinator publication authority. The
-                    // second canonical unpublish blocks behind any in-flight
-                    // publisher and either removes it or confirms absence after
-                    // no reader remains able to deliver another publication.
-                    detail::managed_child_prepublication_cleanup_for_test(
-                        detail::test_hooks::k_managed_child_prepublication_first_miss,
-                        process_iid,
-                        occurrence);
-                    try {
-                        if (!join_child_communication(token, claimed_reader)) {
-                            reset_child_communication_retirement(
-                                token, claimed_release_attempt_generation);
-                            converge_native();
-                            return false;
-                        }
-                    }
-                    catch (...) {
-                        reset_child_communication_retirement(
-                            token, claimed_release_attempt_generation);
-                        converge_native();
-                        throw;
-                    }
-                    detail::managed_child_prepublication_cleanup_for_test(
-                        detail::test_hooks::k_managed_child_prepublication_reader_terminal,
-                        process_iid,
-                        occurrence);
-                    if (!s_coord->unpublish_transceiver(process_iid)) {
-                        note_child_publication_retired(token);
-                    }
-                    s_coord->mark_initialization_complete(process_iid);
-                    note_child_initialization_complete(token);
-                    }
-                }
-                if (!release_attempt_active()) {
-                    converge_native();
-                    return false;
-                }
-                if (release_mode == detail::Release_mode::cleanup && s_coord) {
-                    // Observation-only test seam. The coordinator publication
-                    // transaction has retired the process name and transport
-                    // retirement has been started for the exact occurrence;
-                    // native convergence has not started yet. The callback must
-                    // not re-enter custody APIs.
-                    detail::managed_child_cleanup_for_test(
-                        detail::test_hooks::
-                            k_managed_child_cleanup_before_native_convergence,
-                        process_iid,
-                        occurrence);
-                }
-                if (release_mode == detail::Release_mode::cleanup &&
-                    !converge_native())
-                {
-                    return false;
-                }
-                if (release_mode == detail::Release_mode::cleanup && s_coord) {
-                    // The coordinator path above either reported the exact
-                    // occurrence's publication/communication retirement, or
-                    // the canonical second miss confirmed both after its
-                    // reader became terminal.
-                    detail::managed_child_cleanup_for_test(
-                        detail::test_hooks::k_managed_child_cleanup_retirement_confirmed,
-                        process_iid,
-                        occurrence);
-                }
-            }
-            return release_attempt_active();
-        };
-
         bool cleanup_applied = false;
         bool passive_wait_reported = false;
         using namespace detail::managed_child_release_action;
@@ -3885,8 +3710,11 @@ inline void Managed_process::request_child_custody_release(
             lock.unlock();
 
             if (auto cleanup = std::get_if<apply_cleanup>(&action)) {
-                if (!retire_transport(
-                        cleanup->targets, detail::Release_mode::cleanup))
+                if (!execute_current_slot_child_retirement(
+                        custody,
+                        cleanup->targets,
+                        release_attempt_generation,
+                        detail::Release_mode::cleanup))
                 {
                     continue;
                 }
@@ -3955,8 +3783,11 @@ inline void Managed_process::request_child_custody_release(
             }
 
             if (auto current = std::get_if<retire_current_transport>(&action)) {
-                if (!retire_transport(
-                        current->targets, detail::Release_mode::passive))
+                if (!execute_current_slot_child_retirement(
+                        custody,
+                        current->targets,
+                        release_attempt_generation,
+                        detail::Release_mode::passive))
                 {
                     continue;
                 }
@@ -4463,6 +4294,188 @@ inline bool Managed_process::join_child_communication(
         token.process_instance_id,
         token.occurrence);
     return true;
+}
+
+inline bool Managed_process::execute_current_slot_child_retirement(
+    const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+    const detail::Managed_child_release_roster& targets,
+    uint64_t release_attempt_generation,
+    detail::Release_mode release_mode)
+{
+    auto release_attempt_active = [&]() {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        return custody->release_attempt_phase ==
+                detail::Release_attempt_phase::running &&
+            custody->release_attempt_generation == release_attempt_generation;
+    };
+    const auto first_current = std::find_if(
+        targets.begin(), targets.end(),
+        [](const detail::Managed_child_release_occurrence& target) {
+            return target.slot_current;
+        });
+    if (release_mode == detail::Release_mode::cleanup &&
+        first_current != targets.end())
+    {
+        detail::managed_child_failure_for_test(
+            detail::test_hooks::k_managed_child_fail_cleanup_actions,
+            first_current->process_instance_id,
+            first_current->occurrence);
+    }
+    for (const auto& target : targets) {
+        if (!target.slot_current) {
+            continue;
+        }
+        const auto occurrence = target.occurrence;
+        const auto process_iid = target.process_instance_id;
+        if (!release_attempt_active()) {
+            return false;
+        }
+        const detail::Managed_child_occurrence_token token{
+            custody,
+            process_iid,
+            occurrence};
+        auto converge_native = [&]() -> bool {
+            if (release_mode == detail::Release_mode::passive ||
+                cleanup_child_native(token))
+            {
+                return true;
+            }
+            {
+                std::lock_guard<std::mutex> lock(custody->mutex);
+                if (custody->release_attempt_phase ==
+                        detail::Release_attempt_phase::running &&
+                    custody->release_attempt_generation ==
+                        release_attempt_generation)
+                {
+                    custody->release_attempt_phase =
+                        detail::Release_attempt_phase::failing;
+                }
+            }
+            custody->changed.notify_all();
+            return false;
+        };
+        if (release_mode == detail::Release_mode::cleanup) {
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::k_managed_child_cleanup_before_actions,
+                process_iid,
+                occurrence);
+        }
+        if (s_coord && s_coord->set_draining_state(process_iid, 1)) {
+            s_coord->note_draining_state_change();
+        }
+        if (release_mode == detail::Release_mode::cleanup) {
+            release_lifeline(process_iid);
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::k_managed_child_cleanup_lifeline_released,
+                process_iid,
+                occurrence);
+        }
+        if (s_coord && !s_coord->unpublish_transceiver(process_iid)) {
+            std::shared_ptr<Process_message_reader> retiring_reader;
+            {
+                Dispatch_shared_lock readers_lock(m_readers_mutex);
+                auto reader = m_readers.find(process_iid);
+                if (reader != m_readers.end()) {
+                    retiring_reader = reader->second;
+                }
+            }
+            const bool authority_captured =
+                capture_child_communication_retirement_authority(
+                    token, retiring_reader);
+            if (!authority_captured) {
+                std::lock_guard<std::mutex> lock(custody->mutex);
+                if (custody->release_attempt_generation ==
+                        release_attempt_generation)
+                {
+                    custody->release_attempt_phase =
+                        detail::Release_attempt_phase::failing;
+                }
+                custody->changed.notify_all();
+                return false;
+            }
+            uint64_t claimed_release_attempt_generation = 0;
+            std::shared_ptr<Process_message_reader> claimed_reader;
+            const bool communication_claimed =
+                begin_child_communication_retirement(
+                    token,
+                    release_attempt_generation,
+                    claimed_release_attempt_generation,
+                    claimed_reader);
+            if (!communication_claimed) {
+                if (!release_attempt_active()) {
+                    converge_native();
+                    return false;
+                }
+            }
+            else {
+            // A first miss is provisional: a publish RPC may already
+            // be in flight. Stop and terminally join the exact reader,
+            // then re-enter coordinator publication authority. The
+            // second canonical unpublish blocks behind any in-flight
+            // publisher and either removes it or confirms absence after
+            // no reader remains able to deliver another publication.
+            detail::managed_child_prepublication_cleanup_for_test(
+                detail::test_hooks::k_managed_child_prepublication_first_miss,
+                process_iid,
+                occurrence);
+            try {
+                if (!join_child_communication(token, claimed_reader)) {
+                    reset_child_communication_retirement(
+                        token, claimed_release_attempt_generation);
+                    converge_native();
+                    return false;
+                }
+            }
+            catch (...) {
+                reset_child_communication_retirement(
+                    token, claimed_release_attempt_generation);
+                converge_native();
+                throw;
+            }
+            detail::managed_child_prepublication_cleanup_for_test(
+                detail::test_hooks::k_managed_child_prepublication_reader_terminal,
+                process_iid,
+                occurrence);
+            if (!s_coord->unpublish_transceiver(process_iid)) {
+                note_child_publication_retired(token);
+            }
+            s_coord->mark_initialization_complete(process_iid);
+            note_child_initialization_complete(token);
+            }
+        }
+        if (!release_attempt_active()) {
+            converge_native();
+            return false;
+        }
+        if (release_mode == detail::Release_mode::cleanup && s_coord) {
+            // Observation-only test seam. The coordinator publication
+            // transaction has retired the process name and transport
+            // retirement has been started for the exact occurrence;
+            // native convergence has not started yet. The callback must
+            // not re-enter custody APIs.
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::
+                    k_managed_child_cleanup_before_native_convergence,
+                process_iid,
+                occurrence);
+        }
+        if (release_mode == detail::Release_mode::cleanup &&
+            !converge_native())
+        {
+            return false;
+        }
+        if (release_mode == detail::Release_mode::cleanup && s_coord) {
+            // The coordinator path above either reported the exact
+            // occurrence's publication/communication retirement, or
+            // the canonical second miss confirmed both after its
+            // reader became terminal.
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::k_managed_child_cleanup_retirement_confirmed,
+                process_iid,
+                occurrence);
+        }
+    }
+    return release_attempt_active();
 }
 
 inline bool Managed_process::execute_exact_historical_child_communication(
