@@ -35,6 +35,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 
@@ -512,13 +513,6 @@ struct Managed_child_occurrence_token
     explicit operator bool() const noexcept { return !custody.expired(); }
 };
 
-enum class Custody_phase
-{
-    open,
-    releasing,
-    released
-};
-
 enum class Readiness_phase
 {
     not_requested,
@@ -533,12 +527,171 @@ enum class Release_mode
     cleanup
 };
 
-enum class Release_attempt_phase
+// The sole authority for custody release lifecycle state.  Its private tags
+// make invalid cross-products unrepresentable: open and released carry no
+// attempt, while releasing always carries a monotone mode, a nonzero
+// generation, and exactly one attempt phase.
+class Managed_child_release_state
 {
-    idle,
-    running,
-    failing,
-    retryable
+public:
+    uint64_t request(Release_mode command) noexcept
+    {
+        if (auto releasing = std::get_if<Releasing>(&m_state)) {
+            if (command == Release_mode::cleanup) {
+                releasing->cleanup_requested = true;
+            }
+            if (releasing->attempt != Attempt::retryable) {
+                return 0;
+            }
+            releasing->generation = next_generation(releasing->generation);
+            releasing->attempt = Attempt::running;
+            return releasing->generation;
+        }
+        if (!std::holds_alternative<Open>(m_state)) {
+            return 0;
+        }
+        const auto generation = next_generation(0);
+        m_state = Releasing{
+            command == Release_mode::cleanup,
+            generation,
+            Attempt::running};
+        return generation;
+    }
+
+    bool open() const noexcept
+    {
+        return std::holds_alternative<Open>(m_state);
+    }
+
+    bool releasing() const noexcept
+    {
+        return std::holds_alternative<Releasing>(m_state);
+    }
+
+    bool released() const noexcept
+    {
+        return std::holds_alternative<Released>(m_state);
+    }
+
+    bool cleanup_requested() const noexcept
+    {
+        const auto releasing = std::get_if<Releasing>(&m_state);
+        return releasing && releasing->cleanup_requested;
+    }
+
+    bool running() const noexcept
+    {
+        return has_attempt(Attempt::running);
+    }
+
+    bool failing() const noexcept
+    {
+        return has_attempt(Attempt::failing);
+    }
+
+    bool retryable() const noexcept
+    {
+        return has_attempt(Attempt::retryable);
+    }
+
+    bool active() const noexcept
+    {
+        return running() || failing();
+    }
+
+    uint64_t generation() const noexcept
+    {
+        const auto releasing = std::get_if<Releasing>(&m_state);
+        return releasing ? releasing->generation : 0;
+    }
+
+    bool running(uint64_t expected_generation) const noexcept
+    {
+        return expected_generation != 0 && running() &&
+            generation() == expected_generation;
+    }
+
+    bool active(uint64_t expected_generation) const noexcept
+    {
+        return expected_generation != 0 && active() &&
+            generation() == expected_generation;
+    }
+
+    bool mark_failing(uint64_t expected_generation) noexcept
+    {
+        auto releasing = exact_releasing(expected_generation);
+        if (!releasing || releasing->attempt != Attempt::running) {
+            return false;
+        }
+        releasing->attempt = Attempt::failing;
+        return true;
+    }
+
+    bool mark_retryable(uint64_t expected_generation) noexcept
+    {
+        auto releasing = exact_releasing(expected_generation);
+        if (!releasing ||
+            (releasing->attempt != Attempt::running &&
+             releasing->attempt != Attempt::failing))
+        {
+            return false;
+        }
+        releasing->attempt = Attempt::retryable;
+        return true;
+    }
+
+    bool mark_released(uint64_t expected_generation) noexcept
+    {
+        if (!running(expected_generation)) {
+            return false;
+        }
+        m_state = Released{};
+        return true;
+    }
+
+private:
+    struct Open {};
+    struct Released {};
+
+    enum class Attempt
+    {
+        running,
+        failing,
+        retryable
+    };
+
+    struct Releasing
+    {
+        bool        cleanup_requested = false;
+        uint64_t    generation = 1;
+        Attempt     attempt = Attempt::running;
+    };
+
+    static uint64_t next_generation(uint64_t generation) noexcept
+    {
+        ++generation;
+        if (generation == 0) {
+            ++generation;
+        }
+        return generation;
+    }
+
+    bool has_attempt(Attempt expected) const noexcept
+    {
+        const auto releasing = std::get_if<Releasing>(&m_state);
+        return releasing && releasing->attempt == expected;
+    }
+
+    Releasing* exact_releasing(uint64_t expected_generation) noexcept
+    {
+        auto releasing = std::get_if<Releasing>(&m_state);
+        return expected_generation != 0 && releasing &&
+                releasing->generation == expected_generation
+            ? releasing
+            : nullptr;
+    }
+
+    std::variant<Open, Releasing, Released> m_state{Open{}};
 };
 
 // One retained logical custody record.  Subsystems remain authoritative for
@@ -549,12 +702,8 @@ struct Managed_child_custody_record
     std::condition_variable                    changed;
     uint64_t                                   identity = 0;
     Readiness_phase                            readiness = Readiness_phase::not_requested;
-    Custody_phase                              phase = Custody_phase::open;
     std::atomic<bool>                          readiness_cancelled{false};
-    Release_mode                               release_mode = Release_mode::passive;
-    Release_attempt_phase                      release_attempt_phase =
-        Release_attempt_phase::idle;
-    uint64_t                                   release_attempt_generation = 0;
+    Managed_child_release_state                release_state;
     Managed_child_failure                      last_failure;
     std::vector<Managed_child_occurrence_record> occurrences;
 };

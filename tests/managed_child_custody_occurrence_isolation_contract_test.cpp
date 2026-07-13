@@ -689,7 +689,7 @@ int main(int argc, char* argv[])
     if (custody_record) {
         std::lock_guard<std::mutex> lock(custody_record->mutex);
         custody_release_closed_all_occurrences =
-            custody_record->phase == sintra::detail::Custody_phase::released &&
+            custody_record->release_state.released() &&
             std::all_of(
                 custody_record->occurrences.begin(), custody_record->occurrences.end(),
                 [](const auto& occurrence) {

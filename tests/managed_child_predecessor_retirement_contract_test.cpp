@@ -463,7 +463,7 @@ Exact_facts exact_facts(const Outcome& outcome)
         facts.predecessor_exit = predecessor.native.exited();
         facts.replacement_terminal = replacement.transport.fully_retired() &&
             replacement.native.exited();
-        facts.release_complete = custody->phase == sintra::detail::Custody_phase::released;
+        facts.release_complete = custody->release_state.released();
         facts.survivors_absent = facts.identities &&
             !sintra::test::managed_child::exact_process_is_live(
                 predecessor.native.pid(),

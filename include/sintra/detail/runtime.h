@@ -1152,7 +1152,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         bool release_requested = false;
         {
             std::lock_guard<std::mutex> lock(record->mutex);
-            release_requested = record->phase != detail::Custody_phase::open;
+            release_requested = !record->release_state.open();
         }
         try {
             if (child_created && !release_requested) {
@@ -1478,9 +1478,9 @@ inline Managed_child_status Managed_child_custody::status() const
     result.readiness_reached =
         m_record->readiness == detail::Readiness_phase::reached;
     result.release_requested =
-        m_record->phase != detail::Custody_phase::open;
+        !m_record->release_state.open();
     result.release_complete =
-        m_record->phase == detail::Custody_phase::released;
+        m_record->release_state.released();
     result.last_failure = m_record->last_failure;
     result.admitted_occurrences = m_record->occurrences.size();
     for (const auto& occurrence : m_record->occurrences) {
@@ -1534,7 +1534,7 @@ inline Managed_child_status Managed_child_custody::wait_until_released(
     }
     std::unique_lock<std::mutex> lock(m_record->mutex);
     m_record->changed.wait_until(lock, deadline, [&]() {
-        return m_record->phase == detail::Custody_phase::released;
+        return m_record->release_state.released();
     });
     lock.unlock();
     return status();
