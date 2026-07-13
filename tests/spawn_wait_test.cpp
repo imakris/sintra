@@ -263,7 +263,7 @@ int run_coordinator(const std::string& binary_path)
 
     // Test 1: an explicit readiness deadline for a nonexistent instance.
     // The child writes a PID marker but never publishes the requested instance.
-    // The returned status is incomplete and retained cleanup must leave no survivor.
+    // The returned status is incomplete and open; explicit cleanup leaves no survivor.
     {
         std::fprintf(stderr, "[COORDINATOR] Test 1: Testing incomplete readiness at a short deadline\n");
         const auto start = std::chrono::steady_clock::now();
@@ -286,7 +286,7 @@ int run_coordinator(const std::string& binary_path)
 
         if (!accepted.accepted || accepted.release_requested ||
             !launch.accepted || launch.created_occurrences != 1 ||
-            launch.readiness_reached || !launch.release_requested)
+            launch.readiness_reached || launch.release_requested)
         {
             std::fprintf(stderr, "[COORDINATOR] Test 1: Invalid incomplete custody snapshot\n");
             record_failure(
@@ -310,6 +310,17 @@ int run_coordinator(const std::string& binary_path)
             std::fprintf(stderr,
                 "[COORDINATOR] Test 1: Readiness wait duration unusually long: %lldms\n",
                 (long long)elapsed_ms);
+        }
+
+        const auto cleanup = custody.terminate_until(
+            std::chrono::steady_clock::now() + std::chrono::seconds(5));
+        if (!cleanup.accepted || !cleanup.release_requested ||
+            !cleanup.release_complete)
+        {
+            record_failure(
+                all_tests_passed,
+                failure_reason,
+                "Test 1: explicit cleanup did not complete");
         }
 
         const bool child_marker_written = sintra::test::wait_for_file(

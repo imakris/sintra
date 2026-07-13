@@ -723,7 +723,7 @@ bool run_native_escalation_phase(
 
     const bool valid = caller_bounded && ledger_valid && live_after_caller &&
         first.accepted && first.created_occurrences == 1 &&
-        !first.readiness_reached && first.release_requested &&
+        !first.readiness_reached && !first.release_requested &&
         !first.release_complete && completed.release_complete &&
         completed.exited_occurrences == 1 && retried.release_complete &&
         soft_count == 1 && hard_count == 1 && exit_count == 1 &&
@@ -1051,6 +1051,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         try {
             call.custody = sintra::spawn_swarm_process(options);
             call.custody.wait_ready_until(
+                call.started_at + k_requested_wait_timeout);
+            call.custody.terminate_until(
                 call.started_at + k_requested_wait_timeout);
         }
         catch (...) {

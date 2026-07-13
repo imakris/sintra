@@ -69,6 +69,9 @@ struct Deadline_gate
     std::chrono::steady_clock::time_point       resolution_entered_at;
 };
 
+struct Readiness_service : sintra::Derived_transceiver<Readiness_service>
+{};
+
 struct Spawn_call
 {
     std::mutex               mutex;
@@ -79,6 +82,7 @@ struct Spawn_call
     std::chrono::steady_clock::time_point started_at{};
     std::chrono::steady_clock::time_point spawn_completed_at{};
     std::chrono::steady_clock::time_point completed_at{};
+    sintra::Managed_child_status deadline_observation;
     bool                     threw = false;
 };
 
@@ -336,6 +340,14 @@ int run_child(int argc, char* argv[], const fs::path& shared_dir)
         return 2;
     }
 
+    Readiness_service readiness_service;
+    if (!readiness_service.assign_name(
+            "managed_child_deadline_target_" + nonce))
+    {
+        sintra::detail::finalize();
+        return 2;
+    }
+
     const bool released = sintra::test::wait_for_file(
         child_release_path(shared_dir),
         std::chrono::seconds(30),
@@ -424,8 +436,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
                 call.spawn_completed_at = std::chrono::steady_clock::now();
             }
             call.cv.notify_all();
-            call.custody.wait_ready_until(
+            const auto deadline_observation = call.custody.wait_ready_until(
                 call.started_at + k_requested_wait_timeout);
+            {
+                std::lock_guard<std::mutex> lock(call.mutex);
+                call.deadline_observation = deadline_observation;
+            }
         }
         catch (...) {
             call.threw = true;
@@ -504,11 +520,15 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     }
 
     bool caller_done_at_observation = false;
+    bool custody_retained_at_observation = false;
+    sintra::Managed_child_status deadline_observation;
     std::chrono::steady_clock::time_point caller_completed_at;
     {
         std::lock_guard<std::mutex> lock(call.mutex);
         caller_done_at_observation = call.done;
         caller_completed_at = call.completed_at;
+        custody_retained_at_observation = static_cast<bool>(call.custody);
+        deadline_observation = call.deadline_observation;
     }
     const auto observed_at = std::chrono::steady_clock::now();
     const bool resolution_entered_before_deadline =
@@ -532,6 +552,14 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     }
     spawn_thread.join();
 
+    {
+        std::lock_guard<std::mutex> lock(call.mutex);
+        deadline_observation = call.deadline_observation;
+    }
+
+    const auto progressed_observation = call.custody.wait_ready_until(
+        std::chrono::steady_clock::now() + k_watchdog_timeout);
+
     sintra::detail::test_hooks::s_coordinator_resolve_instance.store(
         nullptr,
         std::memory_order_release);
@@ -540,11 +568,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::memory_order_release);
     s_deadline_gate = nullptr;
 
-    sintra::Managed_child_status launch_observation;
     bool call_threw = false;
     {
         std::lock_guard<std::mutex> lock(call.mutex);
-        launch_observation = call.custody.status();
         call_threw = call.threw;
     }
 
@@ -555,7 +581,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         child_finalized_path(shared.path()),
         k_watchdog_timeout,
         std::chrono::milliseconds(10));
-    const auto released_observation = call.custody.release_until(
+    const auto terminated_observation = call.custody.terminate_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     bool native_exit_confirmed = false;
@@ -633,11 +659,18 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         child_alive_during_hold &&
         returned_by_deadline &&
         spawn_call_completed &&
-        launch_observation.accepted &&
-        launch_observation.created_occurrences == 1 &&
-        !launch_observation.readiness_reached &&
-        launch_observation.release_requested &&
-        released_observation.release_complete &&
+        custody_retained_at_observation &&
+        deadline_observation.accepted &&
+        deadline_observation.created_occurrences == 1 &&
+        !deadline_observation.readiness_reached &&
+        !deadline_observation.release_requested &&
+        !deadline_observation.release_complete &&
+        progressed_observation.accepted &&
+        progressed_observation.readiness_reached &&
+        !progressed_observation.release_requested &&
+        !progressed_observation.release_complete &&
+        terminated_observation.release_requested &&
+        terminated_observation.release_complete &&
         !call_threw &&
         child_release_written &&
         child_finalized &&
@@ -653,7 +686,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             "R1_GREEN_VALID wait_timeout_ms=%lld tolerance_ms=%lld overrun_ms=%lld "
             "spawn_returned_before_wait=1 resolve_entered_before_deadline=1 caller_done_at_observation=1 "
             "native_identity_verified=1 child_alive_during_hold=1 custody_accepted=1 "
-            "readiness=0 release_requested=1 release_complete=1 "
+            "readiness_pending=1 timeout_release_requested=0 readiness_progressed=1 "
+            "explicit_terminate=1 release_complete=1 "
             "child_finalized=1 native_exit_confirmed=1 normal_status=1 "
             "survivor_absent=1 reap_count=%s\n",
             static_cast<long long>(k_requested_wait_timeout.count()),
@@ -672,10 +706,13 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     std::fprintf(
         stderr,
         "R1_INVALID resolution_entered=%d spawn_returned_before_wait=%d entered_before_deadline=%d returned_by_deadline=%d "
-        "caller_done_at_observation=%d overrun_ms=%lld spawn_completed=%d custody_valid=%d "
-        "call_threw=%d ledger=%d ledger_identity=%d start_stamp_verified=%d "
+        "caller_done_at_observation=%d overrun_ms=%lld spawn_completed=%d call_threw=%d "
+        "ledger=%d ledger_identity=%d start_stamp_verified=%d "
         "native_identity_verified=%d child_alive_during_hold=%d child_alive_at_observation=%d "
-        "child_release=%d child_finalized=%d native_exit_confirmed=%d normal_status=%d "
+        "timeout_accepted=%d timeout_readiness=%d timeout_release_requested=%d timeout_release_complete=%d "
+        "custody_retained=%d progress_readiness=%d progress_release_requested=%d "
+        "terminate_release_requested=%d terminate_release_complete=%d child_release=%d "
+        "child_finalized=%d native_exit_confirmed=%d normal_status=%d "
         "survivor_absent=%d reap_count=%u reap_status=%d forced_cleanup=%d "
         "child_reap_hook_cleared=%d root_finalized=%d\n",
         resolution_entered ? 1 : 0,
@@ -685,8 +722,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         caller_done_at_observation ? 1 : 0,
         static_cast<long long>(overrun_ms),
         spawn_call_completed ? 1 : 0,
-        (launch_observation.accepted && launch_observation.release_requested &&
-         released_observation.release_complete) ? 1 : 0,
         call_threw ? 1 : 0,
         ledger ? 1 : 0,
         ledger_identity_valid ? 1 : 0,
@@ -694,6 +729,15 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         native_identity_verified ? 1 : 0,
         child_alive_during_hold ? 1 : 0,
         child_alive_at_observation ? 1 : 0,
+        deadline_observation.accepted ? 1 : 0,
+        deadline_observation.readiness_reached ? 1 : 0,
+        deadline_observation.release_requested ? 1 : 0,
+        deadline_observation.release_complete ? 1 : 0,
+        custody_retained_at_observation ? 1 : 0,
+        progressed_observation.readiness_reached ? 1 : 0,
+        progressed_observation.release_requested ? 1 : 0,
+        terminated_observation.release_requested ? 1 : 0,
+        terminated_observation.release_complete ? 1 : 0,
         child_release_written ? 1 : 0,
         child_finalized ? 1 : 0,
         native_exit_confirmed ? 1 : 0,

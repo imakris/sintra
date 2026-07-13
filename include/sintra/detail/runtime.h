@@ -1497,7 +1497,6 @@ inline Managed_child_status Managed_child_custody::wait_ready_until(
         return {};
     }
 
-    bool readiness_deadline_expired = false;
     {
         std::unique_lock<std::mutex> lock(m_record->mutex);
         if (m_record->readiness == detail::Readiness_phase::pending) {
@@ -1507,7 +1506,7 @@ inline Managed_child_status Managed_child_custody::wait_ready_until(
                 });
             }
             else {
-                readiness_deadline_expired = !m_record->changed.wait_until(
+                m_record->changed.wait_until(
                     lock,
                     deadline,
                     [&]() {
@@ -1515,13 +1514,6 @@ inline Managed_child_status Managed_child_custody::wait_ready_until(
                     });
             }
         }
-    }
-
-    if (readiness_deadline_expired && s_mproc) {
-        Log_stream(log_level::warning)
-            << "Managed child readiness incomplete at deadline; custody retained\n";
-        s_mproc->request_child_custody_release(
-            m_record, detail::Release_mode::cleanup);
     }
     return status();
 }

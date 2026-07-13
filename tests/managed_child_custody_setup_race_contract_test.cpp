@@ -869,7 +869,7 @@ bool run_deadline_setup_shutdown_retry(
         observation.created_occurrences == 0 &&
         observation.last_failure.kind ==
             sintra::Managed_child_failure_kind::none &&
-        observation.release_requested && !observation.release_complete;
+        !observation.release_requested && !observation.release_complete;
 
     bool first_shutdown = true;
     bool second_shutdown = true;

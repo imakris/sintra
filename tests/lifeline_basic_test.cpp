@@ -671,7 +671,7 @@ int run_owner(
         : custody.wait_ready_until(readiness_deadline);
     if (test_case == k_case_wait_timeout) {
         if (!launch.accepted || launch.created_occurrences != 1 ||
-            launch.readiness_reached || !launch.release_requested)
+            launch.readiness_reached || launch.release_requested)
         {
             std::fprintf(stderr, "[owner] wait-timeout custody observation invalid\n");
             std::_Exit(6);
@@ -1145,10 +1145,15 @@ bool run_wait_timeout_cleanup_case(
     }
 
     int child_exit = 0;
-    if (ok && !child_already_exited &&
-        !wait_for_exit(child, k_hung_child_exit_timeout_ms, child_exit))
+    if (ok && child_already_exited)
     {
-        std::fprintf(stderr, "[test] wait-timeout child did not exit while owner was alive\n");
+        std::fprintf(stderr, "[test] wait-timeout child exited before observation completed\n");
+        ok = false;
+    }
+    else
+    if (ok && wait_for_exit(child, k_hung_child_exit_timeout_ms, child_exit))
+    {
+        std::fprintf(stderr, "[test] wait-timeout child exited while owner was alive\n");
         ok = false;
     }
 
@@ -1170,6 +1175,21 @@ bool run_wait_timeout_cleanup_case(
         std::fprintf(stderr, "[test] wait-timeout owner exited with code %d\n", owner_exit);
         ok = false;
     }
+
+    if (ok && !wait_for_exit(child, k_child_exit_timeout_ms, child_exit)) {
+        std::fprintf(stderr, "[test] wait-timeout child did not exit after owner release\n");
+        ok = false;
+    }
+#ifdef _WIN32
+    else
+    if (ok && child_exit != 99) {
+        std::fprintf(
+            stderr,
+            "[test] wait-timeout child exited with code %d (expected 99)\n",
+            child_exit);
+        ok = false;
+    }
+#endif
 
     if (has_process_reference(child) && !child.exited && is_running(child)) {
         terminate_process(child);

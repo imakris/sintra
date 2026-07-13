@@ -623,6 +623,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             call.custody = sintra::spawn_swarm_process(options);
             call.custody.wait_ready_until(
                 std::chrono::steady_clock::now() + k_requested_wait_timeout);
+            call.custody.terminate_until(std::chrono::steady_clock::now());
         }
         catch (...) {
             call.threw = true;
