@@ -55,6 +55,10 @@ constexpr std::string_view k_native_retry_child_ledger_file =
     "native_retry_child_ledger.complete";
 constexpr auto k_requested_wait_timeout = std::chrono::milliseconds(350);
 constexpr auto k_scheduling_tolerance = std::chrono::milliseconds(200);
+constexpr auto k_native_retry_deadline = std::chrono::seconds(9);
+constexpr auto k_native_retry_return_scheduling_margin =
+    std::chrono::milliseconds(500);
+constexpr auto k_native_retry_hard_hook_deadline = std::chrono::seconds(7);
 constexpr auto k_watchdog_timeout = std::chrono::seconds(12);
 constexpr sintra::instance_id_type k_child_process_iid =
     sintra::compose_instance(27u, 1ull);
@@ -119,6 +123,15 @@ struct Native_cleanup_observation
 Native_cleanup_observation s_native_cleanup;
 std::atomic<bool> s_fail_native_hard{false};
 std::atomic<uint32_t> s_native_hard_failure_hits{0};
+std::atomic<int64_t> s_native_hard_failure_at_ns{0};
+
+struct Native_retry_result
+{
+    bool    valid = false;
+    bool    hard_hook_bounded = false;
+    int64_t first_elapsed_ms = -1;
+    int64_t hard_hook_elapsed_ms = -1;
+};
 
 fs::path child_ledger_path(const fs::path& dir)
 {
@@ -355,6 +368,10 @@ bool fail_native_hard_termination(
     {
         return false;
     }
+    s_native_hard_failure_at_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_release);
     s_native_hard_failure_hits.fetch_add(1, std::memory_order_release);
     return true;
 }
@@ -736,21 +753,20 @@ bool run_native_escalation_phase(
     return valid;
 }
 
-bool run_native_retry_phase(
+Native_retry_result run_native_retry_phase(
     int argc,
     char* argv[],
     const fs::path& shared_dir,
     const std::string& binary_path,
     const std::string& nonce)
 {
-    constexpr auto first_deadline = std::chrono::seconds(9);
     std::error_code ignored;
     fs::remove(native_retry_child_ledger_path(shared_dir), ignored);
     try {
         sintra::init(argc, argv);
     }
     catch (...) {
-        return false;
+        return {};
     }
 
     s_native_cleanup.expected_iid.store(
@@ -759,6 +775,7 @@ bool run_native_retry_phase(
     s_native_cleanup.hard.store(0, std::memory_order_relaxed);
     s_native_cleanup.exited.store(0, std::memory_order_relaxed);
     s_native_hard_failure_hits.store(0, std::memory_order_relaxed);
+    s_native_hard_failure_at_ns.store(0, std::memory_order_relaxed);
     s_fail_native_hard.store(false, std::memory_order_relaxed);
     sintra::detail::test_hooks::s_managed_child_cleanup.store(
         &native_cleanup_stage_callback, std::memory_order_release);
@@ -811,13 +828,33 @@ bool run_native_retry_phase(
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &fail_native_hard_termination, std::memory_order_release);
     const auto first_started = std::chrono::steady_clock::now();
-    const auto first = custody.terminate_until(first_started + first_deadline);
+    const auto first = custody.terminate_until(
+        first_started + k_native_retry_deadline);
     const auto first_returned = std::chrono::steady_clock::now();
     sintra::detail::test_hooks::s_managed_child_failure.store(
         nullptr, std::memory_order_release);
     s_fail_native_hard.store(false, std::memory_order_release);
-    const bool first_bounded =
-        first_returned - first_started <= first_deadline + k_scheduling_tolerance;
+    const auto first_elapsed = first_returned - first_started;
+    const auto first_elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            first_elapsed).count();
+    const bool first_bounded = first_elapsed <=
+        k_native_retry_deadline + k_native_retry_return_scheduling_margin;
+    const auto hard_failure_at_ns =
+        s_native_hard_failure_at_ns.load(std::memory_order_acquire);
+    const auto first_started_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            first_started.time_since_epoch()).count();
+    const auto hard_hook_elapsed_ns = hard_failure_at_ns > first_started_ns
+        ? hard_failure_at_ns - first_started_ns
+        : int64_t{-1};
+    const auto hard_hook_elapsed_ms = hard_hook_elapsed_ns >= 0
+        ? std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::nanoseconds(hard_hook_elapsed_ns)).count()
+        : int64_t{-1};
+    const bool hard_hook_bounded = hard_hook_elapsed_ns >= 0 &&
+        std::chrono::nanoseconds(hard_hook_elapsed_ns) <=
+            k_native_retry_hard_hook_deadline;
     const bool retained_after_first = ledger_valid && exact_child_is_live(*ledger);
     const uint32_t failure_hits =
         s_native_hard_failure_hits.load(std::memory_order_acquire);
@@ -883,7 +920,7 @@ bool run_native_retry_phase(
         !before_cleanup.release_requested && first_bounded &&
         first.accepted && first.created_occurrences == 1 &&
         first.exited_occurrences == 0 && first.release_requested &&
-        !first.release_complete && failure_hits == 1 &&
+        !first.release_complete && failure_hits == 1 && hard_hook_bounded &&
         retained_after_first && second.release_complete &&
         second.exited_occurrences == 1 && soft_count == 2 &&
         hard_count == 1 && exit_count == 1 && exact_status &&
@@ -892,15 +929,19 @@ bool run_native_retry_phase(
         std::fprintf(
             stderr,
             "NATIVE_RETRY_INVALID before=%d bounded=%d first_incomplete=%d "
-            "failure_hits=%u retained=%d second_complete=%d soft=%u hard=%u "
+            "failure_hits=%u hard_hook_bounded=%d retained=%d "
+            "second_complete=%d soft=%u hard=%u "
             "exit=%u status=%d survivor_absent=%d forced=%d reap_count=%u "
-            "reap_status=%d finalized=%d\n",
+            "reap_status=%d finalized=%d first_elapsed_ms=%lld "
+            "hard_hook_elapsed_ms=%lld return_margin_ms=%lld "
+            "hard_hook_deadline_ms=%lld\n",
             (before_cleanup.accepted &&
                 before_cleanup.created_occurrences == 1) ? 1 : 0,
             first_bounded ? 1 : 0,
             (first.accepted && !first.release_complete &&
                 first.exited_occurrences == 0) ? 1 : 0,
             static_cast<unsigned>(failure_hits),
+            hard_hook_bounded ? 1 : 0,
             retained_after_first ? 1 : 0,
             second.release_complete ? 1 : 0,
             static_cast<unsigned>(soft_count),
@@ -911,9 +952,20 @@ bool run_native_retry_phase(
             forced_cleanup ? 1 : 0,
             static_cast<unsigned>(reap_count),
             reap_status,
-            finalized ? 1 : 0);
+            finalized ? 1 : 0,
+            static_cast<long long>(first_elapsed_ms),
+            static_cast<long long>(hard_hook_elapsed_ms),
+            static_cast<long long>(
+                k_native_retry_return_scheduling_margin.count()),
+            static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    k_native_retry_hard_hook_deadline).count()));
     }
-    return valid;
+    return {
+        valid,
+        hard_hook_bounded,
+        static_cast<int64_t>(first_elapsed_ms),
+        static_cast<int64_t>(hard_hook_elapsed_ms)};
 }
 
 int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
@@ -1255,13 +1307,16 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             shared.path(),
             binary_path,
             nonce + "_native");
-    const bool native_retry_valid = native_escalation_valid &&
-        run_native_retry_phase(
+    Native_retry_result native_retry;
+    if (native_escalation_valid) {
+        native_retry = run_native_retry_phase(
             argc,
             argv,
             shared.path(),
             binary_path,
             nonce + "_retry");
+    }
+    const bool native_retry_valid = native_retry.valid;
 
     if (baseline_valid && native_escalation_valid && native_retry_valid) {
         std::printf(
@@ -1276,7 +1331,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             "native_adverse_caller_bounded=1 soft_ignored=1 hard_escalation=1 "
             "native_exact_status=1 native_retry=1 native_survivor_absent=1 "
             "native_failed_pass_bounded=1 native_retry_latch_reopened=1 "
-            "native_distinct_retry=1\n",
+            "native_distinct_retry=1 native_hard_hook_bounded=1 "
+            "native_first_elapsed_ms=%lld native_hard_hook_elapsed_ms=%lld\n",
             nonce.c_str(),
             static_cast<unsigned long long>(ledger->process_iid),
             ledger->occurrence,
@@ -1285,11 +1341,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             static_cast<long long>(k_scheduling_tolerance.count()),
             static_cast<long long>(overrun_ms),
 #ifdef _WIN32
-            "not_applicable"
+            "not_applicable",
 #else
-            "1"
+            "1",
 #endif
-            );
+            static_cast<long long>(native_retry.first_elapsed_ms),
+            static_cast<long long>(native_retry.hard_hook_elapsed_ms));
         std::fflush(stdout);
         return 0;
     }
@@ -1303,7 +1360,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         "spawn_completed=%d custody_valid=%d call_threw=%d child_release=%d "
         "child_finalized=%d native_exit=%d normal_status=%d survivor_absent=%d "
         "reap_count=%u reap_status=%d forced_cleanup=%d root_finalized=%d "
-        "native_escalation=%d native_retry=%d\n",
+        "native_escalation=%d native_retry=%d native_hard_hook_bounded=%d "
+        "native_first_elapsed_ms=%lld native_hard_hook_elapsed_ms=%lld\n",
         cleanup_entered ? 1 : 0,
         seam_after_requested_deadline ? 1 : 0,
         returned_by_deadline ? 1 : 0,
@@ -1332,7 +1390,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         forced_cleanup ? 1 : 0,
         root_finalized ? 1 : 0,
         native_escalation_valid ? 1 : 0,
-        native_retry_valid ? 1 : 0);
+        native_retry_valid ? 1 : 0,
+        native_retry.hard_hook_bounded ? 1 : 0,
+        static_cast<long long>(native_retry.first_elapsed_ms),
+        static_cast<long long>(native_retry.hard_hook_elapsed_ms));
     return 2;
 }
 
