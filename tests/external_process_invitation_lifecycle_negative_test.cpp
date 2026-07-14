@@ -19,6 +19,15 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <sintra/detail/sintra_windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -42,6 +51,15 @@ bool                    g_create_invitation_hook_armed    = false;
 bool                    g_create_invitation_hook_reached  = false;
 bool                    g_create_invitation_hook_released = false;
 bool                    g_create_invitation_reserve_seen  = false;
+
+#ifdef _WIN32
+HANDLE g_abort_ack_handle = INVALID_HANDLE_VALUE;
+using Abort_signal_handler = void (*)(int);
+Abort_signal_handler g_previous_abort_handler = SIG_DFL;
+#else
+int              g_abort_ack_fd = -1;
+struct sigaction g_previous_abort_action {};
+#endif
 
 struct Runtime_guard
 {
@@ -112,6 +130,123 @@ std::filesystem::path marker_path(
     const std::string&             marker)
 {
     return dir / (marker + ".txt");
+}
+
+#ifdef _WIN32
+void acknowledge_abort_signal(int signal_number)
+{
+    constexpr char acknowledgement[] = "caught\n";
+    DWORD written = 0;
+    (void)WriteFile(
+        g_abort_ack_handle,
+        acknowledgement,
+        static_cast<DWORD>(sizeof(acknowledgement) - 1),
+        &written,
+        nullptr);
+    g_previous_abort_handler(signal_number);
+}
+#else
+void acknowledge_abort_signal(int signal_number, siginfo_t* info, void* context)
+{
+    constexpr char acknowledgement[] = "caught\n";
+    (void)::write(g_abort_ack_fd, acknowledgement, sizeof(acknowledgement) - 1);
+
+    const auto previous = g_previous_abort_action;
+    if (previous.sa_flags & SA_SIGINFO) {
+        previous.sa_sigaction(signal_number, info, context);
+    }
+    else {
+        previous.sa_handler(signal_number);
+    }
+}
+#endif
+
+bool install_abort_signal_acknowledgement(
+    const std::filesystem::path& dir,
+    const std::string&           marker)
+{
+    const auto path = marker_path(dir, marker);
+
+#ifdef _WIN32
+    g_abort_ack_handle = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (g_abort_ack_handle == INVALID_HANDLE_VALUE) {
+        std::fprintf(
+            stderr,
+            "%scould not create abort acknowledgement marker (error %lu)\n",
+            k_failure_prefix,
+            static_cast<unsigned long>(GetLastError()));
+        return false;
+    }
+
+    // Keep Sintra's signal dispatcher (and its optional debug-pause predecessor)
+    // in the chain while recording that abort actually raised SIGABRT.
+    const auto previous = std::signal(SIGABRT, acknowledge_abort_signal);
+    if (previous == SIG_ERR || previous == SIG_DFL || previous == SIG_IGN) {
+        std::signal(SIGABRT, previous == SIG_ERR ? SIG_DFL : previous);
+        CloseHandle(g_abort_ack_handle);
+        g_abort_ack_handle = INVALID_HANDLE_VALUE;
+        std::fprintf(stderr, "%scould not chain Sintra's abort handler\n", k_failure_prefix);
+        return false;
+    }
+    g_previous_abort_handler = previous;
+#else
+    g_abort_ack_fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (g_abort_ack_fd == -1) {
+        std::fprintf(
+            stderr,
+            "%scould not create abort acknowledgement marker (errno %d)\n",
+            k_failure_prefix,
+            errno);
+        return false;
+    }
+
+    struct sigaction previous {};
+    if (sigaction(SIGABRT, nullptr, &previous) != 0) {
+        std::fprintf(
+            stderr,
+            "%scould not read the installed abort handler (errno %d)\n",
+            k_failure_prefix,
+            errno);
+        ::close(g_abort_ack_fd);
+        g_abort_ack_fd = -1;
+        return false;
+    }
+    const bool has_sintra_handler =
+        (previous.sa_flags & SA_SIGINFO)
+            ? previous.sa_sigaction != nullptr
+            : previous.sa_handler != nullptr &&
+                previous.sa_handler != SIG_DFL &&
+                previous.sa_handler != SIG_IGN;
+    if (!has_sintra_handler) {
+        std::fprintf(stderr, "%scould not chain Sintra's abort handler\n", k_failure_prefix);
+        ::close(g_abort_ack_fd);
+        g_abort_ack_fd = -1;
+        return false;
+    }
+
+    g_previous_abort_action = previous;
+    auto acknowledgement_action = previous;
+    acknowledgement_action.sa_sigaction = acknowledge_abort_signal;
+    acknowledgement_action.sa_flags |= SA_SIGINFO;
+    if (sigaction(SIGABRT, &acknowledgement_action, nullptr) != 0) {
+        std::fprintf(
+            stderr,
+            "%scould not install abort acknowledgement handler (errno %d)\n",
+            k_failure_prefix,
+            errno);
+        ::close(g_abort_ack_fd);
+        g_abort_ack_fd = -1;
+        return false;
+    }
+#endif
+    return true;
 }
 
 std::filesystem::path control_path(
@@ -240,7 +375,9 @@ bool wait_for_expected_exit(
             }
             else {
 #ifdef _WIN32
-                expected_status = child.exited_with_code(1);
+                // Sintra terminates with 1 when it owns the end of the chain;
+                // the harness's disabled debug-pause handler re-raises to UCRT's 3.
+                expected_status = child.exited_with_code(1) || child.exited_with_code(3);
 #else
                 expected_status = child.exited_from_signal(SIGABRT);
 #endif
@@ -464,6 +601,10 @@ int run_crash_after_init_helper(int argc, char* argv[])
     const auto marker = sintra::test::get_argv_value(argc, argv, k_marker_arg);
 
     sintra::init(argc, argv);
+    if (!install_abort_signal_acknowledgement(dir, marker + "_abort_signal")) {
+        sintra::detail::finalize();
+        return 2;
+    }
     const auto occurrence = sintra::s_recovery_occurrence;
     write_marker(dir, marker + "_entry_" + std::to_string(occurrence), "ready");
 
@@ -491,6 +632,10 @@ int run_enable_recovery_after_init_helper(int argc, char* argv[])
     const auto marker = sintra::test::get_argv_value(argc, argv, k_marker_arg);
 
     sintra::init(argc, argv);
+    if (!install_abort_signal_acknowledgement(dir, marker + "_abort_signal")) {
+        sintra::detail::finalize();
+        return 2;
+    }
     const auto occurrence = sintra::s_recovery_occurrence;
     write_marker(dir, marker + "_entry_" + std::to_string(occurrence), "ready");
 
@@ -804,6 +949,7 @@ bool run_crash_after_init_case(
         5s,
         "external helper should exit after intentional crash");
     ok &= wait_for_marker(dir, "crash_abort_reached", "reached", 1s);
+    ok &= wait_for_marker(dir, "crash_abort_signal", "caught", 1s);
 
     std::this_thread::sleep_for(500ms);
     ok &= sintra::test::assert_true(
@@ -858,6 +1004,7 @@ bool run_enable_recovery_after_admission_case(
         5s,
         "external enable-recovery helper should exit after intentional crash");
     ok &= wait_for_marker(dir, "recover_abort_reached", "reached", 1s);
+    ok &= wait_for_marker(dir, "recover_abort_signal", "caught", 1s);
 
     std::this_thread::sleep_for(700ms);
     ok &= sintra::test::assert_true(
