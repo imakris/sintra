@@ -26,6 +26,9 @@ constexpr const char* k_dir_arg        = "--ring-lifecycle-attachment-dir";
 constexpr const char* k_role_arg       = "--ring-lifecycle-attachment-role";
 constexpr const char* k_failure_prefix = "ring_lifecycle_attachment_recovery_process_test: ";
 constexpr const char* k_ring_name      = "ring_data";
+#ifdef _WIN32
+constexpr std::uint32_t k_exact_child_cleanup_exit_code = 0x53434c4b;
+#endif
 
 std::filesystem::path marker_path(
     const std::filesystem::path& directory,
@@ -75,6 +78,7 @@ bool terminate_expected(
     sintra::test::Exact_child& child,
     const char*                role)
 {
+    const auto before = child.poll();
     std::string diagnostic;
     const bool settled = child.terminate_and_settle(diagnostic);
     const auto status  = child.describe_status();
@@ -91,9 +95,13 @@ bool terminate_expected(
     }
 
 #ifdef _WIN32
-    const bool expected_termination = !child.exited_with_code(0);
+    const bool expected_termination =
+        before == sintra::test::Exact_child_state::running &&
+        child.exited_with_code(k_exact_child_cleanup_exit_code);
 #else
-    const bool expected_termination = child.exited_from_signal(SIGKILL);
+    const bool expected_termination =
+        before == sintra::test::Exact_child_state::running &&
+        child.exited_from_signal(SIGKILL);
 #endif
 
     if (!expected_termination) {

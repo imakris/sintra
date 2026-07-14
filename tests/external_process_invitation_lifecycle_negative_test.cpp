@@ -240,7 +240,7 @@ bool wait_for_expected_exit(
             }
             else {
 #ifdef _WIN32
-                expected_status = !child.exited_with_code(0);
+                expected_status = child.exited_with_code(1);
 #else
                 expected_status = child.exited_from_signal(SIGABRT);
 #endif
@@ -481,6 +481,7 @@ int run_crash_after_init_helper(int argc, char* argv[])
 
     sintra::disable_debug_pause_for_current_process();
     sintra::test::prepare_for_intentional_crash("external-negative-crash");
+    write_marker(dir, marker + "_abort_reached", "reached");
     std::abort();
 }
 
@@ -515,6 +516,7 @@ int run_enable_recovery_after_init_helper(int argc, char* argv[])
 
     sintra::disable_debug_pause_for_current_process();
     sintra::test::prepare_for_intentional_crash("external-negative-recovery");
+    write_marker(dir, marker + "_abort_reached", "reached");
     std::abort();
 }
 
@@ -801,6 +803,7 @@ bool run_crash_after_init_case(
         Expected_child_exit::intentional_crash,
         5s,
         "external helper should exit after intentional crash");
+    ok &= wait_for_marker(dir, "crash_abort_reached", "reached", 1s);
 
     std::this_thread::sleep_for(500ms);
     ok &= sintra::test::assert_true(
@@ -854,6 +857,7 @@ bool run_enable_recovery_after_admission_case(
         Expected_child_exit::intentional_crash,
         5s,
         "external enable-recovery helper should exit after intentional crash");
+    ok &= wait_for_marker(dir, "recover_abort_reached", "reached", 1s);
 
     std::this_thread::sleep_for(700ms);
     ok &= sintra::test::assert_true(
