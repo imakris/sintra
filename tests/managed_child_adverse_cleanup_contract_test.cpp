@@ -6,6 +6,7 @@
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/runtime.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -39,6 +40,7 @@
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_adverse_cleanup_child";
 constexpr std::string_view k_native_child_flag =
@@ -156,31 +158,6 @@ fs::path native_child_ledger_path(const fs::path& dir)
 fs::path native_retry_child_ledger_path(const fs::path& dir)
 {
     return dir / std::string(k_native_retry_child_ledger_file);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& contents)
-{
-    const auto temporary = path.string() + ".tmp";
-    try {
-        {
-            std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-            if (!out) {
-                return false;
-            }
-            out << contents;
-            out.flush();
-            if (!out) {
-                return false;
-            }
-        }
-        fs::rename(temporary, path);
-        return true;
-    }
-    catch (...) {
-        std::error_code ignored;
-        fs::remove(temporary, ignored);
-        return false;
-    }
 }
 
 std::optional<Child_ledger> read_child_ledger(const fs::path& path)

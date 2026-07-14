@@ -6,6 +6,7 @@
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/runtime.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -33,12 +34,12 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <thread>
 
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_readiness_deadline_child";
 constexpr std::string_view k_nonce_flag = "--managed_child_readiness_deadline_nonce";
@@ -107,31 +108,6 @@ fs::path child_release_path(const fs::path& dir)
 fs::path child_finalized_path(const fs::path& dir)
 {
     return dir / std::string(k_child_finalized_file);
-}
-
-bool write_complete_file(const fs::path& path, const std::string& contents)
-{
-    const auto temporary_path = path.string() + ".tmp";
-    try {
-        {
-            std::ofstream out(temporary_path, std::ios::binary | std::ios::trunc);
-            if (!out) {
-                return false;
-            }
-            out << contents;
-            out.flush();
-            if (!out) {
-                return false;
-            }
-        }
-        fs::rename(temporary_path, path);
-        return true;
-    }
-    catch (...) {
-        std::error_code ignored;
-        fs::remove(temporary_path, ignored);
-        return false;
-    }
 }
 
 std::optional<Child_ledger> read_child_ledger(const fs::path& path)
