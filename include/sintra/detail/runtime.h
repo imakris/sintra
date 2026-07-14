@@ -331,7 +331,7 @@ public:
     explicit operator bool() const noexcept { return static_cast<bool>(m_record); }
 
     Managed_child_status status() const;
-    Managed_child_status wait_ready_until(
+    Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
@@ -1518,7 +1518,7 @@ inline Managed_child_status Managed_child_custody::status() const
     return result;
 }
 
-inline Managed_child_status Managed_child_custody::wait_ready_until(
+inline Managed_child_status Managed_child_custody::wait_for_readiness_until(
     std::chrono::steady_clock::time_point deadline) const
 {
     if (!m_record) {

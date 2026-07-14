@@ -641,7 +641,7 @@ bool run_native_escalation_phase(
 
     const auto started = std::chrono::steady_clock::now();
     auto custody = sintra::spawn_swarm_process(options);
-    const auto first = custody.wait_ready_until(started + k_requested_wait_timeout);
+    const auto first = custody.wait_for_readiness_until(started + k_requested_wait_timeout);
     const auto returned = std::chrono::steady_clock::now();
     const bool ledger_seen = sintra::test::wait_for_file(
         native_child_ledger_path(shared_dir),
@@ -1058,7 +1058,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         }
         try {
             call.custody = sintra::spawn_swarm_process(options);
-            call.custody.wait_ready_until(
+            call.custody.wait_for_readiness_until(
                 call.started_at + k_requested_wait_timeout);
             call.custody.terminate_until(
                 call.started_at + k_requested_wait_timeout);

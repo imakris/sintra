@@ -668,7 +668,7 @@ int run_owner(
     const auto custody = sintra::spawn_swarm_process(spawn_options);
     const auto launch = spawn_options.readiness_instance_name.empty()
         ? custody.status()
-        : custody.wait_ready_until(readiness_deadline);
+        : custody.wait_for_readiness_until(readiness_deadline);
     if (test_case == k_case_wait_timeout) {
         if (!custody || launch.created_occurrences != 1 ||
             launch.readiness_state != sintra::Managed_child_readiness_state::pending ||

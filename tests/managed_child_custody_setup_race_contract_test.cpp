@@ -860,7 +860,7 @@ bool run_deadline_setup_shutdown_retry(
 
     const auto started = std::chrono::steady_clock::now();
     auto custody = sintra::spawn_swarm_process(options);
-    const auto observation = custody.wait_ready_until(started + 200ms);
+    const auto observation = custody.wait_for_readiness_until(started + 200ms);
     const auto elapsed = std::chrono::steady_clock::now() - started;
     const bool setup_held = wait_for_gate(gate);
     const bool caller_bounded =
@@ -958,7 +958,7 @@ bool run_pre_create_exception(
     const auto readiness_started = std::chrono::steady_clock::now();
     try {
         if (custody) {
-            custody.wait_ready_until(readiness_started + 300ms);
+            custody.wait_for_readiness_until(readiness_started + 300ms);
         }
     }
     catch (...) {
@@ -1089,7 +1089,7 @@ bool run_owned_native_exception(
     sintra::Managed_child_custody custody;
     try {
         custody = sintra::spawn_swarm_process(options);
-        custody.wait_ready_until(std::chrono::steady_clock::now() + 500ms);
+        custody.wait_for_readiness_until(std::chrono::steady_clock::now() + 500ms);
     }
     catch (...) {
         threw = true;
@@ -1753,7 +1753,7 @@ bool run_prepublication_publish_race(
     options.readiness_instance_name = "managed_child_prepublication_never_published";
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
-    custody.wait_ready_until(std::chrono::steady_clock::now() + 500ms);
+    custody.wait_for_readiness_until(std::chrono::steady_clock::now() + 500ms);
 
     bool first_miss = false;
     {
@@ -2064,7 +2064,7 @@ bool run_exact_readiness_acceptance(
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
 
-    const auto observed = custody.wait_ready_until(
+    const auto observed = custody.wait_for_readiness_until(
         std::chrono::steady_clock::now() + 5s);
     const auto resolved = sintra::Coordinator::rpc_resolve_instance(
         sintra::s_coord_id, target_name);
@@ -2149,7 +2149,7 @@ bool run_unbounded_readiness_cancellation(
         options.lifetime.enable_lifeline = false;
         custody = sintra::spawn_swarm_process(options);
         spawn_returned.store(true, std::memory_order_release);
-        custody.wait_ready_until(std::chrono::steady_clock::time_point::max());
+        custody.wait_for_readiness_until(std::chrono::steady_clock::time_point::max());
         readiness_wait_returned.store(true, std::memory_order_release);
     });
 

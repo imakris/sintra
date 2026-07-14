@@ -88,7 +88,7 @@ public:
     explicit operator bool() const noexcept;
 
     Managed_child_status status() const;
-    Managed_child_status wait_ready_until(
+    Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
@@ -123,7 +123,7 @@ Contract:
   and ids with unresolved child custody are rejected before acceptance.
 - `readiness_instance_name` is optional. When configured, occurrence setup and
   readiness resolution run as Sintra-owned work and `spawn_swarm_process`
-  returns the accepted handle immediately. `wait_ready_until()` waits only on
+  returns the accepted handle immediately. `wait_for_readiness_until()` waits only on
   the custody record's monotone notification through its absolute steady-clock
   deadline. Deadline expiry returns an incomplete snapshot; it does not request
   release or adverse cleanup.
@@ -145,10 +145,10 @@ Threading and lifecycle:
 
 - Call from a top-level user thread in the coordinator process. Worker-process
   calls are rejected before acceptance and cannot create a child. Acceptance
-  takes the teardown admission lock; `wait_ready_until()` does not enter
+  takes the teardown admission lock; `wait_for_readiness_until()` does not enter
   coordinator work and waits only on custody notifications.
 - Successful spawns participate in subsequent barriers and coordinator
-  membership once setup completes. `wait_ready_until()` is the way to gate
+  membership once setup completes. `wait_for_readiness_until()` is the way to gate
   later code on the exact participant having published its readiness name.
 - The custody handle's boolean conversion is the sole validity and durable
   acceptance fact. Status does not duplicate it. An empty handle's default
@@ -161,7 +161,7 @@ Threading and lifecycle:
 - `release_state` is `open` before release is requested, `requested` while
   retirement remains incomplete, and `complete` only after every admitted
   occurrence has reached the complete-release contract.
-- `status()` is an immediate snapshot. `wait_ready_until()`, `release_until()`,
+- `status()` is an immediate snapshot. `wait_for_readiness_until()`, `release_until()`,
   and `terminate_until()` return the same status shape after waiting only until
   their absolute steady-clock deadlines. An incomplete snapshot reports only
   confirmed facts; it does not invent a lifecycle milestone.

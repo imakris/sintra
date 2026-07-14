@@ -239,7 +239,7 @@ int run_coordinator(const std::string& binary_path)
     spawn_options.readiness_instance_name = k_child_service_name;
 
     const auto custody = sintra::spawn_swarm_process(spawn_options);
-    const auto launch = custody.wait_ready_until(
+    const auto launch = custody.wait_for_readiness_until(
         std::chrono::steady_clock::now() + std::chrono::milliseconds(15000));
     if (!sintra::test::assert_true(
             custody && launch.readiness_state ==

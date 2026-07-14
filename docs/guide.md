@@ -349,7 +349,7 @@ class Managed_child_custody
 public:
     explicit operator bool() const noexcept;
     Managed_child_status status() const;
-    Managed_child_status wait_ready_until(
+    Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
@@ -364,7 +364,7 @@ coordinator; worker calls and malformed explicit process ids are rejected
 before acceptance. Use `Spawn_options` to select the binary, arguments,
 environment overrides, optional readiness instance name, and lifeline policy.
 A readiness-configured spawn returns its accepted handle immediately; call
-`wait_ready_until()` with an absolute steady-clock deadline to observe that
+`wait_for_readiness_until()` with an absolute steady-clock deadline to observe that
 exact occurrence. The opaque handle also supports compact `status()`
 observation and bounded `release_until()` and `terminate_until()` operations.
 Test handle validity and durable acceptance through its explicit boolean
@@ -377,7 +377,7 @@ Graceful release is idempotent, so another call waits on the same retained
 custody through a new absolute deadline. It remains passive; explicit cleanup
 monotonically escalates the retained custody owner to lifeline release and
 authoritative retirement. Readiness, release, or termination deadline expiry
-never discards custody. In particular, `wait_ready_until()` is observation-only:
+never discards custody. In particular, `wait_for_readiness_until()` is observation-only:
 its deadline does not request release or cleanup. Call `terminate_until()` to
 request adverse cleanup explicitly.
 A synchronous setup failure after acceptance returns the retained handle and

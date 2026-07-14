@@ -436,7 +436,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
                 call.spawn_completed_at = std::chrono::steady_clock::now();
             }
             call.cv.notify_all();
-            const auto deadline_observation = call.custody.wait_ready_until(
+            const auto deadline_observation = call.custody.wait_for_readiness_until(
                 call.started_at + k_requested_wait_timeout);
             {
                 std::lock_guard<std::mutex> lock(call.mutex);
@@ -557,7 +557,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         deadline_observation = call.deadline_observation;
     }
 
-    const auto progressed_observation = call.custody.wait_ready_until(
+    const auto progressed_observation = call.custody.wait_for_readiness_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
 
     sintra::detail::test_hooks::s_coordinator_resolve_instance.store(

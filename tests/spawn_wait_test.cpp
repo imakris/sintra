@@ -5,7 +5,7 @@
 //
 // The test verifies:
 // - spawn_swarm_process returns accepted custody before readiness completes
-// - wait_ready_until reports readiness through an absolute caller deadline
+// - wait_for_readiness_until reports readiness through an absolute caller deadline
 // - Deadline expiry returns retained incomplete custody and requests cleanup
 // - The deadline case proves child launch and cleanup when the requested name never publishes
 //
@@ -275,7 +275,7 @@ int run_coordinator(const std::string& binary_path)
 
         const auto custody = sintra::spawn_swarm_process(spawn_options);
         const auto accepted = custody.status();
-        const auto launch = custody.wait_ready_until(
+        const auto launch = custody.wait_for_readiness_until(
             start + std::chrono::milliseconds(1500));
 
         const auto elapsed    = std::chrono::steady_clock::now() - start;
@@ -381,7 +381,7 @@ int run_coordinator(const std::string& binary_path)
 
         const auto custody = sintra::spawn_swarm_process(spawn_options);
         const auto accepted = custody.status();
-        const auto launch = custody.wait_ready_until(
+        const auto launch = custody.wait_for_readiness_until(
             start + std::chrono::milliseconds(10000));
 
         const auto elapsed    = std::chrono::steady_clock::now() - start;
@@ -401,7 +401,7 @@ int run_coordinator(const std::string& binary_path)
             record_failure(
                 all_tests_passed,
                 failure_reason,
-                "Test 2: wait_ready_until should confirm the requested readiness instance");
+                "Test 2: wait_for_readiness_until should confirm the requested readiness instance");
         }
         else {
             // Verify the instance is actually resolvable

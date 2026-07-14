@@ -436,7 +436,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool spawn_threw = false;
     try {
         custody = sintra::spawn_swarm_process(options);
-        custody.wait_ready_until(
+        custody.wait_for_readiness_until(
             std::chrono::steady_clock::now() + std::chrono::seconds(8));
     }
     catch (...) {

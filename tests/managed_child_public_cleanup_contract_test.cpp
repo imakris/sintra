@@ -477,7 +477,7 @@ Windows_fallback_wake_result run_windows_fallback_wake(
     bool spawn_threw = false;
     try {
         custody = sintra::spawn_swarm_process(options);
-        ready = custody.wait_ready_until(
+        ready = custody.wait_for_readiness_until(
             std::chrono::steady_clock::now() + 8s);
     }
     catch (...) {
@@ -664,7 +664,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool spawn_threw = false;
     try {
         custody = sintra::spawn_swarm_process(options);
-        custody.wait_ready_until(std::chrono::steady_clock::now() + 8s);
+        custody.wait_for_readiness_until(std::chrono::steady_clock::now() + 8s);
     }
     catch (...) {
         spawn_threw = true;

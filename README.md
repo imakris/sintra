@@ -312,7 +312,7 @@ if (!custody) {
     throw std::runtime_error("managed-child request rejected");
 }
 
-auto launch = custody.wait_ready_until(
+auto launch = custody.wait_for_readiness_until(
     std::chrono::steady_clock::now() + std::chrono::seconds(5));
 if (launch.readiness_state == sintra::Managed_child_readiness_state::pending) {
     // The deadline only bounded this observation. Custody remains open.
