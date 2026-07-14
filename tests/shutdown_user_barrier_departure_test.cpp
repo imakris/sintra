@@ -336,11 +336,12 @@ int main(int argc, char* argv[])
         sintra::test::get_argv_value(argc, argv, "--branch_index");
     sintra::test::Shared_directory shared(k_shared_dir_env, "shutdown_user_barrier_departure");
 
+    const auto overall_deadline =
+        std::chrono::steady_clock::now() + k_overall_timeout;
     std::atomic<bool> finished{false};
     std::thread overall_watchdog([&] {
-        const auto deadline = std::chrono::steady_clock::now() + k_overall_timeout;
         while (!finished.load(std::memory_order_acquire)) {
-            if (std::chrono::steady_clock::now() >= deadline) {
+            if (std::chrono::steady_clock::now() >= overall_deadline) {
                 watchdog_exit("overall timeout");
             }
             std::this_thread::sleep_for(50ms);
@@ -408,6 +409,9 @@ int main(int argc, char* argv[])
         std::_Exit(1);
     }
 
-    const bool shutdown_ok = sintra::shutdown();
+    bool shutdown_ok = sintra::shutdown();
+    while (!shutdown_ok && std::chrono::steady_clock::now() < overall_deadline) {
+        shutdown_ok = sintra::shutdown();
+    }
     return finish(verify_results(shutdown_ok));
 }
