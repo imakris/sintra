@@ -46,7 +46,9 @@ constexpr std::string_view k_child_ledger_file = "child_ledger.complete";
 constexpr std::string_view k_child_release_file = "child_release.complete";
 constexpr std::string_view k_child_finalized_file = "child_finalized.complete";
 constexpr auto k_requested_wait_timeout = std::chrono::milliseconds(1500);
-constexpr auto k_scheduling_tolerance = std::chrono::milliseconds(150);
+// Deliberately exceeds the removed 150 ms caller-scheduling tolerance. This is
+// a pre-call test stimulus, not a permitted deadline overrun.
+constexpr auto k_expired_deadline_probe_delay = std::chrono::milliseconds(300);
 constexpr auto k_watchdog_timeout = std::chrono::seconds(10);
 constexpr sintra::instance_id_type k_child_process_iid = sintra::compose_instance(30u, 1ull);
 
@@ -77,12 +79,16 @@ struct Spawn_call
     std::mutex               mutex;
     std::condition_variable  cv;
     bool                     spawn_returned = false;
+    bool                     deadline_call_allowed = false;
+    bool                     wait_called = false;
     bool                     done = false;
     sintra::Managed_child_custody custody;
     std::chrono::steady_clock::time_point started_at{};
     std::chrono::steady_clock::time_point spawn_completed_at{};
-    std::chrono::steady_clock::time_point completed_at{};
+    std::chrono::steady_clock::time_point wait_called_at{};
+    std::chrono::steady_clock::time_point wait_returned_at{};
     sintra::Managed_child_status deadline_observation;
+    bool                     wait_returned = false;
     bool                     threw = false;
 };
 
@@ -436,11 +442,23 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
                 call.spawn_completed_at = std::chrono::steady_clock::now();
             }
             call.cv.notify_all();
+
+            {
+                std::unique_lock<std::mutex> lock(call.mutex);
+                call.cv.wait(lock, [&]() {
+                    return call.deadline_call_allowed;
+                });
+                call.wait_called = true;
+                call.wait_called_at = std::chrono::steady_clock::now();
+            }
             const auto deadline_observation = call.custody.wait_for_readiness_until(
                 call.started_at + k_requested_wait_timeout);
+            const auto wait_returned_at = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(call.mutex);
                 call.deadline_observation = deadline_observation;
+                call.wait_returned_at = wait_returned_at;
+                call.wait_returned = true;
             }
         }
         catch (...) {
@@ -449,7 +467,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         {
             std::lock_guard<std::mutex> lock(call.mutex);
             call.done = true;
-            call.completed_at = std::chrono::steady_clock::now();
         }
         call.cv.notify_all();
     });
@@ -514,39 +531,58 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #endif
 
     const auto requested_deadline = call_started_at + k_requested_wait_timeout;
-    const auto observation_time = requested_deadline + k_scheduling_tolerance;
-    if (resolution_entered && std::chrono::steady_clock::now() < observation_time) {
-        std::this_thread::sleep_until(observation_time);
+    const auto permit_deadline_call_at =
+        requested_deadline + k_expired_deadline_probe_delay;
+    if (std::chrono::steady_clock::now() < permit_deadline_call_at) {
+        std::this_thread::sleep_until(permit_deadline_call_at);
     }
+    {
+        std::lock_guard<std::mutex> lock(call.mutex);
+        call.deadline_call_allowed = true;
+    }
+    call.cv.notify_all();
+
+    // The public call receives an already-expired deadline while the readiness
+    // resolver remains blocked. Completion therefore proves that deadline
+    // expiry performs no nested readiness work; the watchdog is cleanup only.
+    const bool returned_while_resolution_blocked =
+        wait_for_spawn_call(call, k_watchdog_timeout);
 
     bool caller_done_at_observation = false;
     bool custody_retained_at_observation = false;
+    bool wait_called = false;
+    bool wait_returned = false;
     sintra::Managed_child_status deadline_observation;
-    std::chrono::steady_clock::time_point caller_completed_at;
+    std::chrono::steady_clock::time_point wait_called_at;
+    std::chrono::steady_clock::time_point wait_returned_at;
     {
         std::lock_guard<std::mutex> lock(call.mutex);
         caller_done_at_observation = call.done;
-        caller_completed_at = call.completed_at;
+        wait_called = call.wait_called;
+        wait_called_at = call.wait_called_at;
+        wait_returned = call.wait_returned;
+        wait_returned_at = call.wait_returned_at;
         custody_retained_at_observation = static_cast<bool>(call.custody);
         deadline_observation = call.deadline_observation;
     }
-    const auto observed_at = std::chrono::steady_clock::now();
     const bool resolution_entered_before_deadline =
         resolution_entered && resolution_entered_at < requested_deadline;
     const bool child_alive_at_observation =
         ledger && start_stamp_verified && exact_child_is_live(*ledger);
-    const bool returned_by_deadline =
-        resolution_entered &&
-        caller_done_at_observation &&
-        caller_completed_at <= observation_time &&
-        child_alive_at_observation;
-    const auto overrun_ms = resolution_entered
+    const bool deadline_expired_before_call =
+        wait_called && wait_called_at > requested_deadline;
+    const auto call_started_after_deadline_ms = wait_called
         ? std::chrono::duration_cast<std::chrono::milliseconds>(
-            observed_at - requested_deadline).count()
+            wait_called_at - requested_deadline).count()
+        : -1;
+    const auto call_duration_us = wait_called && wait_returned
+        ? std::chrono::duration_cast<std::chrono::microseconds>(
+            wait_returned_at - wait_called_at).count()
         : -1;
 
     release_resolution(gate);
-    const bool spawn_call_completed = wait_for_spawn_call(call, k_watchdog_timeout);
+    const bool spawn_call_completed = returned_while_resolution_blocked ||
+        wait_for_spawn_call(call, k_watchdog_timeout);
     if (!spawn_call_completed) {
         write_complete_file(child_release_path(shared.path()), "release=1\ncomplete=1\n");
     }
@@ -657,7 +693,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         start_stamp_verified &&
         native_identity_verified &&
         child_alive_during_hold &&
-        returned_by_deadline &&
+        deadline_expired_before_call &&
+        returned_while_resolution_blocked &&
+        caller_done_at_observation &&
+        child_alive_at_observation &&
         spawn_call_completed &&
         custody_retained_at_observation &&
         deadline_observation.created_occurrences == 1 &&
@@ -683,16 +722,17 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     if (baseline_valid) {
         std::printf(
-            "R1_GREEN_VALID wait_timeout_ms=%lld tolerance_ms=%lld overrun_ms=%lld "
-            "spawn_returned_before_wait=1 resolve_entered_before_deadline=1 caller_done_at_observation=1 "
+            "R1_GREEN_VALID wait_timeout_ms=%lld call_started_after_deadline_ms=%lld call_duration_us=%lld "
+            "spawn_returned_before_wait=1 resolve_entered_before_deadline=1 "
+            "deadline_expired_before_call=1 returned_while_resolution_blocked=1 "
             "native_identity_verified=1 child_alive_during_hold=1 custody_accepted=1 "
             "readiness_pending=1 timeout_release_requested=0 readiness_progressed=1 "
             "explicit_terminate=1 release_complete=1 "
             "child_finalized=1 native_exit_confirmed=1 normal_status=1 "
             "survivor_absent=1 reap_count=%s\n",
             static_cast<long long>(k_requested_wait_timeout.count()),
-            static_cast<long long>(k_scheduling_tolerance.count()),
-            static_cast<long long>(overrun_ms),
+            static_cast<long long>(call_started_after_deadline_ms),
+            static_cast<long long>(call_duration_us),
 #ifdef _WIN32
             "not_applicable"
 #else
@@ -705,8 +745,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     std::fprintf(
         stderr,
-        "R1_INVALID resolution_entered=%d spawn_returned_before_wait=%d entered_before_deadline=%d returned_by_deadline=%d "
-        "caller_done_at_observation=%d overrun_ms=%lld spawn_completed=%d call_threw=%d "
+        "R1_INVALID resolution_entered=%d spawn_returned_before_wait=%d entered_before_deadline=%d "
+        "deadline_expired_before_call=%d returned_while_resolution_blocked=%d "
+        "caller_done_at_observation=%d call_started_after_deadline_ms=%lld call_duration_us=%lld "
+        "spawn_completed=%d call_threw=%d "
         "ledger=%d ledger_identity=%d start_stamp_verified=%d "
         "native_identity_verified=%d child_alive_during_hold=%d child_alive_at_observation=%d "
         "timeout_accepted=%d timeout_readiness=%d timeout_release_requested=%d timeout_release_complete=%d "
@@ -718,9 +760,11 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         resolution_entered ? 1 : 0,
         spawn_returned_before_wait_deadline ? 1 : 0,
         resolution_entered_before_deadline ? 1 : 0,
-        returned_by_deadline ? 1 : 0,
+        deadline_expired_before_call ? 1 : 0,
+        returned_while_resolution_blocked ? 1 : 0,
         caller_done_at_observation ? 1 : 0,
-        static_cast<long long>(overrun_ms),
+        static_cast<long long>(call_started_after_deadline_ms),
+        static_cast<long long>(call_duration_us),
         spawn_call_completed ? 1 : 0,
         call_threw ? 1 : 0,
         ledger ? 1 : 0,
