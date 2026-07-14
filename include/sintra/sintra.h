@@ -211,6 +211,12 @@ struct shutdown_options
 ///
 /// Ordinary callers should not pair `shutdown()` with extra final
 /// `_sintra_all_processes` barriers or a direct subsequent `detail::finalize()`.
+/// A `false` return means either that no runtime was active or that managed-child
+/// custody did not settle during the bounded final custody join.  In the latter
+/// case the runtime and teardown state remain valid: settle or terminate the
+/// retained custody, then call `shutdown()` again sequentially.  That retry
+/// resumes finalization without repeating completed collective or hook phases.
+/// Concurrent, nested, or reentrant shutdown calls remain unsupported.
 bool shutdown();
 
 ///\brief Perform a clean local departure without entering collective shutdown.
@@ -235,6 +241,10 @@ bool leave();
 /// The hook runs at a defined point within shutdown before raw teardown
 /// begins.  It is coordinator-local and must not initiate new peer
 /// coordination.
+/// If it throws, Sintra attempts finalization and then rethrows.
+/// An incomplete managed-child custody join retains runtime state for a later
+/// sequential shutdown retry, but Sintra does not retain and rethrow the hook
+/// exception on that retry.
 bool shutdown(const shutdown_options& options);
 
 

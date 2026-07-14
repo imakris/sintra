@@ -411,6 +411,14 @@ expected to finish together. It first performs the library's standard
 all-process shutdown handoff, making sure earlier interprocess work has been
 fully processed, and then tears down the local runtime.
 
+A `false` return means that no runtime was active or that the final
+managed-child custody join was bounded-incomplete. In the latter case Sintra
+retains the runtime and teardown state: settle or terminate the retained
+custody, then retry `shutdown()` sequentially.
+The retry skips collective and coordinator-hook phases that already completed.
+Concurrent, nested, and reentrant shutdown calls are unsupported. The 250 ms
+custody-join bound is not a deadline for the complete shutdown protocol.
+
 If one process is intentionally departing while peers continue running, use
 `sintra::leave()`. If the coordinator must run a bounded final local action before
 raw teardown, use `sintra::shutdown(options)`.

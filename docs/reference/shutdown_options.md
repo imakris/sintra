@@ -41,10 +41,13 @@ Contract:
 - The hook must be coordinator-local. It must not initiate new peer
   coordination, additional barriers, or extra custom protocol steps; the
   runtime owns the surrounding synchronisation.
-- If the hook throws, `shutdown(options)` still finalises local state and
-  then rethrows the exception to the caller. Workers complete the
-  hook-done rendezvous via the catch-all path so the protocol does not
-  hang.
+- If the hook throws, `shutdown(options)` attempts local finalisation and
+  then rethrows the exception to the caller. Workers complete the hook-done
+  rendezvous via the catch-all path so the protocol does not hang. If
+  managed-child custody keeps finalisation incomplete, runtime state is
+  retained: settle or terminate the retained custody and retry `shutdown`
+  sequentially. The retry skips the completed hook phase; Sintra does not
+  retain and rethrow the original hook exception.
 - An empty `coordinator_shutdown_hook` (default-constructed) means no
   coordinator-side action runs; workers still enter the same hook-done
   rendezvous so cardinality stays consistent.
@@ -64,8 +67,9 @@ Threading and lifecycle:
 
 Failures:
 
-- Exceptions thrown by the hook are surfaced to the caller of
-  `shutdown(options)` after local finalisation.
+- Exceptions thrown by the hook are surfaced after a local finalisation
+  attempt. They are not deferred until managed-child custody settles and are
+  not stored for a later shutdown retry.
 
 Example source:
 

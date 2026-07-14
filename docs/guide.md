@@ -922,7 +922,18 @@ standard shutdown path. The hook must not start new peer coordination, extra
 barriers, or custom protocol steps.
 
 If the hook throws, the runtime still enters the hook-done/finalize path and
-then rethrows to the caller.
+then rethrows to the caller. This is a finalization attempt, not a guarantee
+that managed-child custody has already settled. If custody keeps finalization
+incomplete, the runtime remains retained; settle or terminate the retained
+custody and retry `shutdown()` sequentially. The retry skips completed
+collective and hook phases, and Sintra does not rethrow the already surfaced
+hook exception.
+
+`shutdown()` otherwise returns `false` when no runtime is active or when its
+final managed-child custody join is bounded-incomplete. In the latter case,
+runtime and teardown state remain available for that sequential retry. The
+250 ms bound applies only to the custody join, not to the complete shutdown
+protocol. Concurrent, nested, and reentrant shutdown calls remain unsupported.
 
 Compiled tests:
 - [`tests/shutdown_options_test.cpp`](../tests/shutdown_options_test.cpp)

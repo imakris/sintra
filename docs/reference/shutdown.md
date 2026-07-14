@@ -25,14 +25,17 @@ lets the coordinator run a bounded side effect inside the protocol.
 ## Returns
 
 - `true` when teardown completed locally.
-- `false` when no managed process was active to tear down.
+- `false` when no managed process was active to tear down, or when the final
+  managed-child custody join was bounded-incomplete. In the latter case the
+  runtime and teardown state are retained for a sequential retry.
 
 ## Throws
 
-- `std::logic_error` — when called while another lifecycle teardown is
-  already in progress.
+- `std::logic_error` — for a detectable, non-resumable lifecycle phase
+  conflict. Detection is phase-dependent; callers must serialize teardown
+  rather than use this exception as an overlap guard.
 - Exceptions thrown by `coordinator_shutdown_hook` propagate to the caller
-  of `shutdown(options)` after the local process is finalised.
+  of `shutdown(options)` after Sintra attempts local finalisation.
 
 ## Use when
 
@@ -53,11 +56,17 @@ lets the coordinator run a bounded side effect inside the protocol.
      non-coordinator participants wait inside the protocol.
   3. The coordinator drain-waits for peers to exit the group, then every
      participant tears down its local managed process.
-- A second `shutdown` call must not be issued while a teardown is already
-  in progress.
+- If the final managed-child custody join is incomplete, `shutdown` returns
+  `false` without destroying the runtime. Allow retained
+  `Managed_child_custody` handles to settle, or request their termination,
+  then call `shutdown` again sequentially. The retry resumes finalisation and
+  skips collective and coordinator-hook phases that already completed.
+- Concurrent, nested, and reentrant shutdown calls are unsupported and must be
+  serialized by the caller. A sequential retry after a completed
+  bounded-incomplete return is the only supported repeated call within one
+  teardown.
 - Ordinary callers must not pair `shutdown` with extra final
-  `_sintra_all_processes` user barriers, additional finalisation calls, or
-  duplicated `shutdown` invocations.
+  `_sintra_all_processes` user barriers or additional finalisation calls.
 - After successful return, the local Sintra runtime is torn down; facade
   APIs are no longer usable until a new [`sintra::init`](init.md) is
   performed.
@@ -70,13 +79,19 @@ lets the coordinator run a bounded side effect inside the protocol.
 - The collective barrier blocks until every live participant arrives.
   Participants that have already left via [`sintra::leave`](leave.md) or
   have exited abnormally are excluded from the membership snapshot.
-- If the coordinator hook throws, the runtime still finalises the local
-  process before rethrowing the exception.
+- If the coordinator hook throws, Sintra attempts local finalisation and then
+  rethrows the exception. If unresolved custody still prevents finalisation,
+  runtime state remains retained for settlement and a later sequential
+  `shutdown` retry. The hook exception has already been surfaced; Sintra does
+  not retain it or rethrow it on the retry.
 
 ## Notes
 
 - A barrier RPC failure inside the protocol is treated as satisfied during
   shutdown handling and does not abort teardown.
+- The 250 ms bound applies only to the final managed-child custody join. It is
+  not a deadline for the complete `shutdown` call, which can also include
+  collective barriers, the coordinator hook, and peer draining.
 
 ## Example source
 

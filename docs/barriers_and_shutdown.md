@@ -43,6 +43,25 @@ inside the standard shutdown path. The runtime owns the necessary internal
 synchronization. The hook is coordinator-local and must not initiate new peer
 coordination, extra barriers, or additional custom protocol steps.
 
+If the hook throws, Sintra attempts local finalization and then rethrows. If
+managed-child custody remains unresolved, the runtime is retained for a later
+sequential shutdown retry, but the hook exception is not retained or rethrown
+by that retry.
+
+### Return value and managed-child retry
+
+`shutdown()` returns `true` after local teardown completes. It returns `false`
+when no runtime was active or when the final managed-child custody join is
+bounded-incomplete. An incomplete join does not erase custody or runtime state.
+Allow each retained `Managed_child_custody` to settle, or request termination,
+then call `shutdown()` again sequentially. The retry resumes finalization after
+the already completed collective and coordinator-hook phases.
+
+The managed-child custody join waits for at most 250 ms on each finalization
+attempt. That bound is not a deadline for the entire `shutdown()` operation;
+collective barriers, a coordinator hook, and coordinator drain-waiting have
+their own duration.
+
 ## `sintra::leave()`
 
 `leave()` is the public API for a clean local departure when this process is
@@ -86,13 +105,17 @@ The runtime tracks the active lifecycle teardown state (in
 - `coordinator_hook_completed` - hook finished, awaiting peer synchronization
 - `finalizing` - raw teardown in progress
 
-Illegal compositions are rejected immediately:
+Lifecycle teardown entry points are not concurrency primitives. Concurrent,
+nested, or reentrant calls to `shutdown()`, `leave()`, or
+`detail::finalize()` are unsupported and must be serialized by the caller.
+The runtime rejects detectable, non-resumable phase conflicts, but detection
+is phase-dependent and is not a synchronization guarantee. User-facing
+barriers on `_sintra_all_processes` are also rejected while teardown is
+active.
 
-- Calling `shutdown()` while another shutdown is already in progress
-- Calling `leave()` while another lifecycle teardown is already in progress
-- Calling `detail::finalize()` while a lifecycle teardown is active
-- Calling a user-facing barrier on `_sintra_all_processes` while a lifecycle
-  teardown is active
+A sequential `shutdown()` retry after a completed bounded-incomplete return is
+not a concurrent composition. It is the supported way to finish retained
+managed-child custody finalization.
 
 ### Notes
 
