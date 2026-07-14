@@ -41,6 +41,13 @@ using std::unordered_map;
 using std::unordered_set;
 
 
+enum class Barrier_scope
+{
+    all,
+    user_only
+};
+
+
 struct Process_group: Derived_transceiver<Process_group>
 {
 
@@ -94,7 +101,7 @@ public:
     void drop_from_inflight_barriers(
         instance_id_type                   process_iid,
         std::vector<Barrier_completion>&   completions,
-        bool                               user_barriers_only = false);
+        Barrier_scope                      scope = Barrier_scope::all);
     // Emit barrier completion messages for the recorded recipients (per-recipient
     // reply tokens are computed at write time).
     void emit_barrier_completions(
@@ -610,14 +617,14 @@ public:
     std::vector<Pending_completion> collect_pending_barrier_completions(
         instance_id_type   process_iid,
         bool               remove_process,
-        bool               user_barriers_only = false);
+        Barrier_scope      scope = Barrier_scope::all);
 
     // Same as collect_pending_barrier_completions, for callers that already
     // hold m_groups_mutex.
     std::vector<Pending_completion> collect_pending_barrier_completions_unlocked(
         instance_id_type   process_iid,
         bool               remove_process,
-        bool               user_barriers_only = false);
+        Barrier_scope      scope = Barrier_scope::all);
 
     void emit_pending_barrier_completions(
         const std::vector<Pending_completion>& pending_completions);

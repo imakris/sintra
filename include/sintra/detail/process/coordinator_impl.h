@@ -298,12 +298,14 @@ sequence_counter_type Process_group::barrier(
 inline void Process_group::drop_from_inflight_barriers(
     instance_id_type                   process_iid,
     std::vector<Barrier_completion>&   completions,
-    bool                               user_barriers_only)
+    Barrier_scope                      scope)
 {
     std::lock_guard basic_lock(m_call_mutex);
 
     for (auto barrier_it = m_barriers.begin(); barrier_it != m_barriers.end(); ) {
-        if (user_barriers_only && is_lifecycle_internal_barrier_name(barrier_it->first)) {
+        if (scope == Barrier_scope::user_only &&
+            is_lifecycle_internal_barrier_name(barrier_it->first))
+        {
             ++barrier_it;
             continue;
         }
@@ -1599,7 +1601,7 @@ inline sequence_counter_type Coordinator::begin_collective_shutdown(instance_id_
     auto pending_completions = collect_pending_barrier_completions(
         process_iid,
         false,
-        true);
+        Barrier_scope::user_only);
     emit_pending_barrier_completions(pending_completions);
 
     return s_mproc ? s_mproc->m_out_rep_c->get_leading_sequence() : invalid_sequence;
@@ -2247,7 +2249,7 @@ std::vector<Coordinator::Pending_completion>
 Coordinator::collect_pending_barrier_completions_unlocked(
     instance_id_type   process_iid,
     bool               remove_process,
-    bool               user_barriers_only)
+    Barrier_scope      scope)
 {
     // Caller must hold m_groups_mutex.
     std::vector<Pending_completion> pending_completions;
@@ -2258,7 +2260,7 @@ Coordinator::collect_pending_barrier_completions_unlocked(
         group.drop_from_inflight_barriers(
             process_iid,
             completions,
-            user_barriers_only);
+            scope);
         if (!completions.empty()) {
             pending_completions.push_back({name, std::move(completions)});
         }
@@ -2279,13 +2281,13 @@ std::vector<Coordinator::Pending_completion>
 Coordinator::collect_pending_barrier_completions(
     instance_id_type   process_iid,
     bool               remove_process,
-    bool               user_barriers_only)
+    Barrier_scope      scope)
 {
     std::lock_guard groups_lock(m_groups_mutex);
     return collect_pending_barrier_completions_unlocked(
         process_iid,
         remove_process,
-        user_barriers_only);
+        scope);
 }
 
 inline
