@@ -1,5 +1,6 @@
 #include <sintra/sintra.h>
 
+#include "exact_child_test_support.h"
 #include "test_utils.h"
 
 #include <chrono>
@@ -13,13 +14,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#ifdef _WIN32
-#include <sintra/detail/sintra_windows.h>
-#else
-#include <cerrno>
-#include <signal.h>
-#include <sys/wait.h>
-#endif
 
 namespace {
 
@@ -33,15 +27,6 @@ constexpr const char* k_failure_prefix = "external_process_invitation_admission_
 
 constexpr const char* k_external_attach_rejected_message =
     "Sintra external process invitation was rejected.";
-
-struct launched_process_t
-{
-    bool   launched = false;
-    int    pid      = -1;
-#ifdef _WIN32
-    HANDLE process_handle = nullptr;
-#endif
-};
 
 void write_marker(
     const std::filesystem::path&   dir,
@@ -181,9 +166,10 @@ bool wait_for_marker(
     return false;
 }
 
-launched_process_t launch_direct_process(
+bool launch_direct_process(
     const std::string&                 binary_path,
-    const std::vector<std::string>&    args)
+    const std::vector<std::string>&    args,
+    sintra::test::Exact_child&         child)
 {
     std::vector<std::string> all_args;
     all_args.reserve(args.size() + 1);
@@ -191,125 +177,66 @@ launched_process_t launch_direct_process(
     all_args.insert(all_args.end(), args.begin(), args.end());
 
     sintra::C_string_vector cargs(all_args);
-    sintra::Spawn_detached_options options;
-    int child_pid = -1;
-    options.prog          = binary_path.c_str();
-    options.argv          = cargs.v();
-    options.child_pid_out = &child_pid;
-
-    launched_process_t result;
-    result.launched = sintra::spawn_detached(options);
-    result.pid      = child_pid;
-#ifdef _WIN32
-    if (result.launched && result.pid > 0) {
-        result.process_handle = OpenProcess(
-            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-            FALSE,
-            static_cast<DWORD>(result.pid));
-    }
-#endif
-    return result;
+    return child.spawn(binary_path.c_str(), cargs.v());
 }
 
-bool wait_for_process_exit(launched_process_t& process, std::chrono::milliseconds timeout)
+bool wait_for_clean_exit(
+    sintra::test::Exact_child& child,
+    std::chrono::milliseconds  timeout,
+    const char*                message)
 {
-    if (process.pid <= 0) {
-        return false;
-    }
-#ifdef _WIN32
-    HANDLE handle = process.process_handle;
-    process.process_handle = nullptr;
-    if (!handle) {
-        handle = OpenProcess(
-            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-            FALSE,
-            static_cast<DWORD>(process.pid));
-    }
-    if (!handle) {
-        return false;
-    }
-    const DWORD wait_ms = static_cast<DWORD>(timeout.count());
-    const DWORD result  = WaitForSingleObject(handle, wait_ms);
-    if (result == WAIT_OBJECT_0) {
-        DWORD exit_code = 1;
-        if (!GetExitCodeProcess(handle, &exit_code)) {
-            std::fprintf(stderr,
-                "%sprocess %d exited but GetExitCodeProcess failed\n",
-                k_failure_prefix,
-                process.pid);
-            CloseHandle(handle);
-            return false;
-        }
-        if (exit_code != 0) {
-            std::fprintf(stderr,
-                "%sprocess %d exited with code %lu\n",
-                k_failure_prefix,
-                process.pid,
-                static_cast<unsigned long>(exit_code));
-        }
-        CloseHandle(handle);
-        return exit_code == 0;
-    }
-    if (result == WAIT_TIMEOUT) {
-        std::fprintf(stderr,
-            "%sprocess %d did not exit within %lld ms\n",
-            k_failure_prefix,
-            process.pid,
-            static_cast<long long>(timeout.count()));
-        HANDLE terminate_handle = OpenProcess(
-            PROCESS_TERMINATE | SYNCHRONIZE,
-            FALSE,
-            static_cast<DWORD>(process.pid));
-        if (terminate_handle) {
-            TerminateProcess(terminate_handle, 1);
-            WaitForSingleObject(terminate_handle, 2000);
-            CloseHandle(terminate_handle);
-        }
-        CloseHandle(handle);
-        return false;
-    }
-    CloseHandle(handle);
-    return false;
-#else
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        int         status = 0;
-        const pid_t result = ::waitpid(static_cast<pid_t>(process.pid), &status, WNOHANG);
-        if (result == static_cast<pid_t>(process.pid)) {
-            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        const auto state = child.poll();
+        if (state == sintra::test::Exact_child_state::exited) {
+            const bool clean_exit = child.exited_with_code(0);
+            const auto status     = child.describe_status();
+            std::string settle_diagnostic;
+            const bool settled = child.settle_observed_exit(settle_diagnostic);
+            if (!clean_exit || !settled) {
+                std::fprintf(
+                    stderr,
+                    "%s%s: %s%s%s\n",
+                    k_failure_prefix,
+                    message,
+                    status.c_str(),
+                    settled ? "" : "; settlement failed: ",
+                    settled ? "" : settle_diagnostic.c_str());
+            }
+            return sintra::test::assert_true(
+                clean_exit && settled,
+                k_failure_prefix,
+                message);
         }
-        if (result == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        if (errno != EINTR) {
-            return true;
+        if (state == sintra::test::Exact_child_state::error) {
+            const auto observation = child.describe_status();
+            std::string cleanup_diagnostic;
+            const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+            std::fprintf(
+                stderr,
+                "%s%s: observation failed: %s; cleanup %s%s%s\n",
+                k_failure_prefix,
+                message,
+                observation.c_str(),
+                cleaned ? "settled" : "failed",
+                cleanup_diagnostic.empty() ? "" : ": ",
+                cleanup_diagnostic.c_str());
+            return sintra::test::assert_true(false, k_failure_prefix, message);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    const auto child_pid = static_cast<pid_t>(process.pid);
-    if (::kill(child_pid, SIGTERM) == -1 && errno == ESRCH) {
-        return false;
-    }
-
-    const auto reap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (std::chrono::steady_clock::now() < reap_deadline) {
-        int         status = 0;
-        const pid_t result = ::waitpid(child_pid, &status, WNOHANG);
-        if (result == child_pid)            { return false; }
-        if (result == -1 && errno != EINTR) { return false; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    if (::kill(child_pid, SIGKILL) == 0) {
-        int status = 0;
-        while (::waitpid(child_pid, &status, 0) == -1 && errno == EINTR) {
-            continue;
-        }
-    }
-    return false;
-#endif
+    std::string cleanup_diagnostic;
+    const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+    std::fprintf(
+        stderr,
+        "%s%s: timed out; cleanup %s%s%s\n",
+        k_failure_prefix,
+        message,
+        cleaned ? "settled" : "failed",
+        cleanup_diagnostic.empty() ? "" : ": ",
+        cleanup_diagnostic.c_str());
+    return sintra::test::assert_true(false, k_failure_prefix, message);
 }
 
 bool replace_arg_value(
@@ -454,15 +381,17 @@ bool launch_valid_helper_and_stop(
     const std::string&                         marker,
     const sintra::External_process_invitation& invitation)
 {
-    auto helper_launch = launch_direct_process(
+    sintra::test::Exact_child helper(std::chrono::seconds(2));
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_helper, marker, invitation));
+        helper_args(dir, k_role_helper, marker, invitation),
+        helper);
     bool ok = sintra::test::assert_true(
-        helper_launch.launched,
+        helper_launched,
         k_failure_prefix,
         "valid direct helper launch should succeed");
 
-    if (helper_launch.launched) {
+    if (helper_launched) {
         const auto service_name = service_name_for_marker(marker);
         const auto service_iid  = resolve_until(service_name.c_str(), std::chrono::seconds(8));
         ok &= sintra::test::assert_true(
@@ -479,10 +408,9 @@ bool launch_valid_helper_and_stop(
         }
 
         write_control_file(dir, marker, ".release");
-        const bool exited = wait_for_process_exit(helper_launch, std::chrono::seconds(8));
-        ok &= sintra::test::assert_true(
-            exited,
-            k_failure_prefix,
+        const bool exited = wait_for_clean_exit(
+            helper,
+            std::chrono::seconds(8),
             "valid helper process should exit");
         if (exited) {
             ok &= wait_for_marker(dir, marker + "_left", "left", std::chrono::seconds(1));
@@ -493,16 +421,16 @@ bool launch_valid_helper_and_stop(
 }
 
 bool wait_for_helper_exit_and_left_marker(
-    launched_process_t&            process,
+    sintra::test::Exact_child&     child,
     const std::filesystem::path&   dir,
     const std::string&             marker,
     const char*                    exit_message)
 {
-    const bool exited = wait_for_process_exit(process, std::chrono::seconds(8));
-    bool ok = sintra::test::assert_true(
-        exited,
-        k_failure_prefix,
+    const bool exited = wait_for_clean_exit(
+        child,
+        std::chrono::seconds(8),
         exit_message);
+    bool ok = exited;
     if (exited) {
         ok &= wait_for_marker(dir, marker + "_left", "left", std::chrono::seconds(1));
     }
@@ -515,16 +443,17 @@ bool launch_rejected_helper(
     const std::string&                 marker,
     const std::vector<std::string>&    args)
 {
-    auto helper_launch = launch_direct_process(binary_path, args);
+    sintra::test::Exact_child helper(std::chrono::seconds(2));
+    const bool helper_launched = launch_direct_process(binary_path, args, helper);
     bool ok = sintra::test::assert_true(
-        helper_launch.launched,
+        helper_launched,
         k_failure_prefix,
         "rejected direct helper launch should succeed");
-    if (helper_launch.launched) {
+    if (helper_launched) {
         ok &= wait_for_marker(dir, marker, "rejected", std::chrono::seconds(8));
-        ok &= sintra::test::assert_true(
-            wait_for_process_exit(helper_launch, std::chrono::seconds(8)),
-            k_failure_prefix,
+        ok &= wait_for_clean_exit(
+            helper,
+            std::chrono::seconds(8),
             "rejected helper process should exit");
     }
     return ok;
@@ -648,15 +577,17 @@ bool run_duplicate_explicit_ids_rejected_while_pending_and_admitted_case(
         k_failure_prefix,
         "duplicate explicit invitation id should be rejected while pending");
 
-    auto helper_launch = launch_direct_process(
+    sintra::test::Exact_child helper(std::chrono::seconds(2));
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_helper, "div", invitation));
+        helper_args(dir, k_role_helper, "div", invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper_launch.launched,
+        helper_launched,
         k_failure_prefix,
         "duplicate-id valid helper launch should succeed");
 
-    if (helper_launch.launched) {
+    if (helper_launched) {
         const auto service_name = service_name_for_marker("div");
         const auto service_iid  = resolve_until(service_name.c_str(), std::chrono::seconds(8));
         ok &= sintra::test::assert_true(
@@ -672,7 +603,7 @@ bool run_duplicate_explicit_ids_rejected_while_pending_and_admitted_case(
 
         write_control_file(dir, "div", ".release");
         ok &= wait_for_helper_exit_and_left_marker(
-            helper_launch,
+            helper,
             dir,
             "div",
             "duplicate-id helper process should exit");
