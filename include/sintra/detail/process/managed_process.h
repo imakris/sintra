@@ -209,6 +209,13 @@ inline void managed_child_post_spawn_for_test(
 #endif
 }
 
+enum class Managed_child_communication_authority_capture
+{
+    captured,
+    already_terminal,
+    conflict
+};
+
 class Managed_child_transport_retirement
 {
 public:
@@ -1258,7 +1265,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type process_instance_id);
     void note_child_publication_retired(
         const detail::Managed_child_occurrence_token& token);
-    bool capture_child_communication_retirement_authority(
+    detail::Managed_child_communication_authority_capture
+        capture_child_communication_retirement_authority(
         const detail::Managed_child_occurrence_token& token,
         const std::shared_ptr<Process_message_reader>& reader);
     bool capture_replaced_child_communication_authority(

@@ -117,6 +117,81 @@ struct Transport_retirement_gate
 
 Transport_retirement_gate* s_transport_retirement_gate = nullptr;
 
+struct Release_worker_start_retry_gate
+{
+    std::mutex                  mutex;
+    std::condition_variable     changed;
+    sintra::instance_id_type    expected_iid = sintra::invalid_instance_id;
+    bool                        unpublish_parked = false;
+    bool                        release_unpublish = false;
+    bool                        cleanup_parked = false;
+    bool                        release_cleanup = false;
+    bool                        communication_terminal_parked = false;
+    bool                        release_communication = false;
+    bool                        communication_resumed = false;
+};
+
+Release_worker_start_retry_gate* s_release_worker_start_retry_gate = nullptr;
+
+void hold_release_worker_start_unpublish(const char* stage)
+{
+    auto* gate = s_release_worker_start_retry_gate;
+    if (!gate || !stage || std::string_view(stage) !=
+            sintra::detail::test_hooks::k_stage_unpublish_pre_barrier_collection)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    gate->unpublish_parked = true;
+    gate->changed.notify_all();
+    gate->changed.wait_for(lock, 10s, [&]() {
+        return gate->release_unpublish;
+    });
+}
+
+void hold_release_worker_start_cleanup(
+    const char* stage,
+    sintra::instance_id_type process_iid,
+    uint32_t occurrence)
+{
+    auto* gate = s_release_worker_start_retry_gate;
+    if (!gate || !stage || process_iid != gate->expected_iid ||
+        occurrence != 0 || std::string_view(stage) !=
+            sintra::detail::test_hooks::k_managed_child_cleanup_before_actions)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    gate->cleanup_parked = true;
+    gate->changed.notify_all();
+    gate->changed.wait_for(lock, 10s, [&]() {
+        return gate->release_cleanup;
+    });
+}
+
+void hold_release_worker_start_communication(
+    const char* stage,
+    sintra::instance_id_type process_iid,
+    uint32_t occurrence)
+{
+    auto* gate = s_release_worker_start_retry_gate;
+    if (!gate || !stage || process_iid != gate->expected_iid ||
+        occurrence != 0 || std::string_view(stage) !=
+            sintra::detail::test_hooks::
+                k_managed_child_communication_terminal_before_reader_erase)
+    {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    gate->communication_terminal_parked = true;
+    gate->changed.notify_all();
+    gate->changed.wait_for(lock, 10s, [&]() {
+        return gate->release_communication;
+    });
+    gate->communication_resumed = true;
+    gate->changed.notify_all();
+}
+
 #ifndef _WIN32
 struct Roster_reservation_gate
 {
@@ -1181,10 +1256,21 @@ Release_worker_retry_result run_release_worker_retry(
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
 
+    const bool force_terminal_capture_race =
+        expected_failure_kind ==
+            sintra::Managed_child_failure_kind::release_worker_start;
+    const auto finalized_signal = finalized_marker(marker);
+    const auto exit = exit_marker(marker);
+    std::filesystem::remove(finalized_signal, ec);
+    std::filesystem::remove(exit, ec);
+
     const auto piid = sintra::make_process_instance_id();
     sintra::Spawn_options options;
     options.binary_path = binary_path;
     options.args = {k_owned_child_flag, marker.string()};
+    if (force_terminal_capture_race) {
+        options.args.push_back(k_hold_after_finalize_flag);
+    }
     options.process_instance_id = piid;
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
@@ -1211,9 +1297,110 @@ Release_worker_retry_result run_release_worker_retry(
     const auto first = custody.release_until(
         std::chrono::steady_clock::now() + 250ms);
     const auto hits_after_first = failure_hits(plan);
-    const bool release_written = write_release_marker(marker);
-    const auto second = custody.release_until(
-        std::chrono::steady_clock::now() + 5s);
+    bool release_written = false;
+    bool retry_window_valid = !force_terminal_capture_race;
+    sintra::Managed_child_status second;
+    if (!force_terminal_capture_race) {
+        release_written = write_release_marker(marker);
+        second = custody.release_until(
+            std::chrono::steady_clock::now() + 5s);
+    }
+    else {
+        Release_worker_start_retry_gate gate;
+        gate.expected_iid = piid;
+        s_release_worker_start_retry_gate = &gate;
+        sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+            &hold_release_worker_start_unpublish,
+            std::memory_order_release);
+        sintra::detail::test_hooks::s_managed_child_cleanup.store(
+            &hold_release_worker_start_cleanup,
+            std::memory_order_release);
+        sintra::detail::test_hooks::s_managed_child_transport_retirement.store(
+            &hold_release_worker_start_communication,
+            std::memory_order_release);
+
+        release_written = write_release_marker(marker);
+        bool unpublish_parked = false;
+        {
+            std::unique_lock<std::mutex> lock(gate.mutex);
+            unpublish_parked = gate.changed.wait_for(lock, 5s, [&]() {
+                return gate.unpublish_parked;
+            });
+        }
+
+        std::thread retry_caller;
+        if (unpublish_parked) {
+            retry_caller = std::thread([&]() {
+                second = custody.terminate_until(
+                    std::chrono::steady_clock::now() + 5s);
+            });
+        }
+
+        bool cleanup_parked = false;
+        {
+            std::unique_lock<std::mutex> lock(gate.mutex);
+            cleanup_parked = gate.changed.wait_for(lock, 5s, [&]() {
+                return gate.cleanup_parked;
+            });
+            gate.release_unpublish = true;
+            gate.changed.notify_all();
+        }
+
+        bool communication_terminal_parked = false;
+        {
+            std::unique_lock<std::mutex> lock(gate.mutex);
+            communication_terminal_parked = gate.changed.wait_for(
+                lock, 5s, [&]() {
+                    return gate.communication_terminal_parked;
+                });
+        }
+        const bool child_finalized = wait_for_file(finalized_signal, 5s);
+        const bool exit_written = child_finalized &&
+            write_signal_marker(exit, "exit");
+        bool native_exit_confirmed = false;
+        const auto exit_deadline = std::chrono::steady_clock::now() + 5s;
+        do {
+            native_exit_confirmed = custody.status().exited_occurrences == 1;
+            if (!native_exit_confirmed) {
+                std::this_thread::sleep_for(10ms);
+            }
+        } while (!native_exit_confirmed &&
+            std::chrono::steady_clock::now() < exit_deadline);
+
+        {
+            std::lock_guard<std::mutex> lock(gate.mutex);
+            gate.release_cleanup = true;
+            gate.changed.notify_all();
+        }
+        if (retry_caller.joinable()) {
+            retry_caller.join();
+        }
+        {
+            std::unique_lock<std::mutex> lock(gate.mutex);
+            gate.release_communication = true;
+            gate.changed.notify_all();
+            gate.changed.wait_for(lock, 5s, [&]() {
+                return gate.communication_resumed;
+            });
+        }
+
+        sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+            nullptr, std::memory_order_release);
+        sintra::detail::test_hooks::s_managed_child_cleanup.store(
+            nullptr, std::memory_order_release);
+        sintra::detail::test_hooks::s_managed_child_transport_retirement.store(
+            nullptr, std::memory_order_release);
+        s_release_worker_start_retry_gate = nullptr;
+        retry_window_valid = unpublish_parked && cleanup_parked &&
+            communication_terminal_parked && child_finalized && exit_written &&
+            native_exit_confirmed && gate.communication_resumed;
+
+        if (second.release_state !=
+            sintra::Managed_child_release_state::complete)
+        {
+            custody.terminate_until(std::chrono::steady_clock::now() + 5s);
+        }
+    }
     const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
     reset_failure_hook();
 #ifndef _WIN32
@@ -1227,9 +1414,11 @@ Release_worker_retry_result run_release_worker_retry(
     const bool finalized = settle_detail_finalize(phase);
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
+    std::filesystem::remove(finalized_signal, ec);
+    std::filesystem::remove(exit, ec);
 
     const bool unaffected_prefix = identity && hits_after_first == 1 &&
-        custody &&
+        custody && retry_window_valid &&
         first.release_state == sintra::Managed_child_release_state::requested &&
         release_written &&
         second.release_state == sintra::Managed_child_release_state::complete &&

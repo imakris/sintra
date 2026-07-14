@@ -182,6 +182,9 @@ inline constexpr const char* k_managed_child_communication_before_join =
     "managed_child_communication_before_join";
 inline constexpr const char* k_managed_child_communication_after_join =
     "managed_child_communication_after_join";
+inline constexpr const char*
+    k_managed_child_communication_terminal_before_reader_erase =
+        "managed_child_communication_terminal_before_reader_erase";
 inline constexpr const char* k_managed_child_communication_join_incomplete =
     "managed_child_communication_join_incomplete";
 
@@ -4123,13 +4126,15 @@ inline void Managed_process::note_child_publication_retired(
     custody->changed.notify_all();
 }
 
-inline bool Managed_process::capture_child_communication_retirement_authority(
+inline detail::Managed_child_communication_authority_capture
+Managed_process::capture_child_communication_retirement_authority(
     const detail::Managed_child_occurrence_token& token,
     const std::shared_ptr<Process_message_reader>& reader)
 {
+    using detail::Managed_child_communication_authority_capture;
     auto custody = token.custody.lock();
     if (!custody) {
-        return false;
+        return Managed_child_communication_authority_capture::conflict;
     }
     if (reader &&
         (reader->get_process_instance_id() != token.process_instance_id ||
@@ -4138,7 +4143,7 @@ inline bool Managed_process::capture_child_communication_retirement_authority(
     {
         Log_stream(log_level::error)
             << "Managed-child communication authority identity mismatch.\n";
-        return false;
+        return Managed_child_communication_authority_capture::conflict;
     }
 
     std::lock_guard<std::mutex> lock(custody->mutex);
@@ -4148,15 +4153,23 @@ inline bool Managed_process::capture_child_communication_retirement_authority(
         {
             continue;
         }
+        // The release action was planned outside this lock. Coordinator-side
+        // retirement may have completed meanwhile, before its exact reader is
+        // erased from m_readers. That terminal transition satisfies the stale
+        // action; it is not a loss or replacement of authority.
+        if (occurrence.transport.fully_retired()) {
+            return Managed_child_communication_authority_capture::
+                already_terminal;
+        }
         if (!occurrence.transport.capture_authority(reader)) {
             Log_stream(log_level::error)
                 << "Managed-child communication authority changed for an exact occurrence.\n";
-            return false;
+            return Managed_child_communication_authority_capture::conflict;
         }
         custody->changed.notify_all();
-        return true;
+        return Managed_child_communication_authority_capture::captured;
     }
-    return false;
+    return Managed_child_communication_authority_capture::conflict;
 }
 
 inline bool Managed_process::capture_replaced_child_communication_authority(
@@ -4198,8 +4211,9 @@ inline bool Managed_process::capture_replaced_child_communication_authority(
         return true;
     }
     return capture_child_communication_retirement_authority(
-        {custody, reader->get_process_instance_id(), reader->get_occurrence()},
-        reader);
+            {custody, reader->get_process_instance_id(), reader->get_occurrence()},
+            reader) !=
+        detail::Managed_child_communication_authority_capture::conflict;
 }
 
 inline bool Managed_process::begin_child_communication_retirement(
@@ -4269,6 +4283,12 @@ inline bool Managed_process::complete_child_communication_retirement(
         }
     }
     custody->changed.notify_all();
+
+    detail::managed_child_transport_retirement_for_test(
+        detail::test_hooks::
+            k_managed_child_communication_terminal_before_reader_erase,
+        token.process_instance_id,
+        token.occurrence);
 
     if (reader) {
         Dispatch_unique_lock readers_lock(m_readers_mutex);
@@ -4413,10 +4433,12 @@ inline bool Managed_process::execute_current_slot_child_retirement(
                     retiring_reader = reader->second;
                 }
             }
-            const bool authority_captured =
+            const auto authority_capture =
                 capture_child_communication_retirement_authority(
                     token, retiring_reader);
-            if (!authority_captured) {
+            if (authority_capture == detail::
+                    Managed_child_communication_authority_capture::conflict)
+            {
                 record_release_attempt_blocker(
                     custody,
                     release_attempt_generation,
@@ -4428,18 +4450,26 @@ inline bool Managed_process::execute_current_slot_child_retirement(
             uint64_t claimed_release_attempt_generation = 0;
             std::shared_ptr<Process_message_reader> claimed_reader;
             const bool communication_claimed =
+                authority_capture == detail::
+                    Managed_child_communication_authority_capture::captured &&
                 begin_child_communication_retirement(
                     token,
                     release_attempt_generation,
                     claimed_release_attempt_generation,
                     claimed_reader);
-            if (!communication_claimed) {
+            // already_terminal falls through: coordinator-side retirement
+            // satisfied this stale action without a new retirement claim.
+            if (authority_capture == detail::
+                    Managed_child_communication_authority_capture::captured &&
+                !communication_claimed)
+            {
                 if (!release_attempt_active()) {
                     converge_native();
                     return false;
                 }
             }
-            else {
+            else
+            if (communication_claimed) {
             // A first miss is provisional: a publish RPC may already
             // be in flight. Stop and terminally join the exact reader,
             // then re-enter coordinator publication authority. The
@@ -4572,8 +4602,13 @@ inline void Managed_process::retire_child_communication(
     const detail::Managed_child_occurrence_token& token,
     std::shared_ptr<Process_message_reader> reader)
 {
-    if (!token ||
-        !capture_child_communication_retirement_authority(token, reader))
+    if (!token) {
+        return;
+    }
+    const auto authority_capture =
+        capture_child_communication_retirement_authority(token, reader);
+    if (authority_capture != detail::
+            Managed_child_communication_authority_capture::captured)
     {
         return;
     }
