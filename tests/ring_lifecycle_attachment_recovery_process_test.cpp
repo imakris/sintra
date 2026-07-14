@@ -1,5 +1,6 @@
 #include <sintra/sintra.h>
 
+#include "exact_child_test_support.h"
 #include "test_ring_utils.h"
 #include "test_utils.h"
 
@@ -14,12 +15,8 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <sintra/detail/sintra_windows.h>
-#else
-#include <cerrno>
-#include <signal.h>
-#include <sys/wait.h>
+#ifndef _WIN32
+#include <csignal>
 #endif
 
 namespace {
@@ -29,12 +26,6 @@ constexpr const char* k_dir_arg        = "--ring-lifecycle-attachment-dir";
 constexpr const char* k_role_arg       = "--ring-lifecycle-attachment-role";
 constexpr const char* k_failure_prefix = "ring_lifecycle_attachment_recovery_process_test: ";
 constexpr const char* k_ring_name      = "ring_data";
-
-struct launched_process_t
-{
-    bool launched = false;
-    int  pid      = -1;
-};
 
 std::filesystem::path marker_path(
     const std::filesystem::path& directory,
@@ -61,10 +52,11 @@ void write_text(const std::filesystem::path& path, const std::string& text)
     out << text << '\n';
 }
 
-launched_process_t launch_child(
+bool launch_child(
     const std::string&           binary_path,
     const std::filesystem::path& directory,
-    std::string_view             role)
+    std::string_view             role,
+    sintra::test::Exact_child&   child)
 {
     std::vector<std::string> args = {
         binary_path,
@@ -76,64 +68,43 @@ launched_process_t launch_child(
     };
 
     sintra::C_string_vector cargs(args);
-    sintra::Spawn_detached_options options;
-    int child_pid = -1;
-    options.prog          = binary_path.c_str();
-    options.argv          = cargs.v();
-    options.child_pid_out = &child_pid;
-    return {sintra::spawn_detached(options), child_pid};
+    return child.spawn(binary_path.c_str(), cargs.v());
 }
 
-bool terminate_process_and_wait(int pid)
+bool terminate_expected(
+    sintra::test::Exact_child& child,
+    const char*                role)
 {
-    if (pid <= 0) {
+    std::string diagnostic;
+    const bool settled = child.terminate_and_settle(diagnostic);
+    const auto status  = child.describe_status();
+    if (!settled) {
+        std::fprintf(stderr,
+            "%sfailed to terminate and settle %s child pid %d: %s%s%s\n",
+            k_failure_prefix,
+            role,
+            child.pid(),
+            status.c_str(),
+            diagnostic.empty() ? "" : "; ",
+            diagnostic.c_str());
         return false;
     }
 
 #ifdef _WIN32
-    HANDLE handle = OpenProcess(
-        SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
-        FALSE,
-        static_cast<DWORD>(pid));
-    if (!handle) {
-        return false;
-    }
-
-    const BOOL terminated = TerminateProcess(handle, 77);
-    const DWORD waited = WaitForSingleObject(handle, 5000);
-    DWORD exit_code = STILL_ACTIVE;
-    (void)GetExitCodeProcess(handle, &exit_code);
-    CloseHandle(handle);
-    return terminated != 0 && waited == WAIT_OBJECT_0 && exit_code != STILL_ACTIVE;
+    const bool expected_termination = !child.exited_with_code(0);
 #else
-    const auto child_pid = static_cast<pid_t>(pid);
-    if (::kill(child_pid, SIGKILL) != 0 && errno != ESRCH) {
-        return false;
-    }
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (std::chrono::steady_clock::now() < deadline) {
-        int status = 0;
-        const pid_t result = ::waitpid(child_pid, &status, WNOHANG);
-        if (result == child_pid) {
-            return true;
-        }
-        if (result == -1 && errno == ECHILD) {
-            while (std::chrono::steady_clock::now() < deadline) {
-                if (!sintra::is_process_alive(static_cast<std::uint32_t>(pid))) {
-                    return true;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            return !sintra::is_process_alive(static_cast<std::uint32_t>(pid));
-        }
-        if (result == -1 && errno != EINTR) {
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return false;
+    const bool expected_termination = child.exited_from_signal(SIGKILL);
 #endif
+
+    if (!expected_termination) {
+        std::fprintf(stderr,
+            "%s%s child pid %d did not have the required termination status: %s\n",
+            k_failure_prefix,
+            role,
+            child.pid(),
+            status.c_str());
+    }
+    return expected_termination;
 }
 
 bool read_control_attached(
@@ -338,20 +309,21 @@ bool run_killed_reader_with_live_writer_case(const std::string& binary_path)
             temp.path.string(),
             k_ring_name,
             ring_elements);
+        sintra::test::Exact_child reader(std::chrono::seconds(5));
 
-        auto reader = launch_child(binary_path, temp.path, "reader");
-        if (!reader.launched) {
-            std::fprintf(stderr, "%sfailed to launch reader child\n", k_failure_prefix);
+        if (!launch_child(binary_path, temp.path, "reader", reader)) {
+            std::fprintf(stderr,
+                "%sfailed to launch reader child: %s\n",
+                k_failure_prefix,
+                reader.error().c_str());
             return false;
         }
-
         if (!sintra::test::wait_for_file(
                 marker_path(temp.path, "reader_attached"),
                 std::chrono::seconds(10),
                 std::chrono::milliseconds(5)))
         {
             std::fprintf(stderr, "%sreader child did not attach\n", k_failure_prefix);
-            (void)terminate_process_and_wait(reader.pid);
             return false;
         }
 
@@ -364,7 +336,7 @@ bool run_killed_reader_with_live_writer_case(const std::string& binary_path)
             ok = false;
         }
 
-        if (!terminate_process_and_wait(reader.pid)) {
+        if (!terminate_expected(reader, "reader")) {
             std::fprintf(stderr, "%sfailed to terminate reader child\n", k_failure_prefix);
             ok = false;
         }
@@ -383,9 +355,12 @@ bool run_killed_sole_writer_second_generation_case(const std::string& binary_pat
     const auto control_file   = temp.path / (std::string(k_ring_name) + "_control");
     const auto lifecycle_file = temp.path / (std::string(k_ring_name) + "_lifecycle");
 
-    auto writer = launch_child(binary_path, temp.path, "writer");
-    if (!writer.launched) {
-        std::fprintf(stderr, "%sfailed to launch writer child\n", k_failure_prefix);
+    sintra::test::Exact_child writer(std::chrono::seconds(5));
+    if (!launch_child(binary_path, temp.path, "writer", writer)) {
+        std::fprintf(stderr,
+            "%sfailed to launch writer child: %s\n",
+            k_failure_prefix,
+            writer.error().c_str());
         return false;
     }
 
@@ -395,11 +370,10 @@ bool run_killed_sole_writer_second_generation_case(const std::string& binary_pat
             std::chrono::milliseconds(5)))
     {
         std::fprintf(stderr, "%swriter child did not attach\n", k_failure_prefix);
-        (void)terminate_process_and_wait(writer.pid);
         return false;
     }
 
-    if (!terminate_process_and_wait(writer.pid)) {
+    if (!terminate_expected(writer, "writer")) {
         std::fprintf(stderr, "%sfailed to terminate writer child\n", k_failure_prefix);
         return false;
     }
@@ -465,5 +439,14 @@ int main(int argc, char* argv[])
         return run_child(argc, argv);
     }
 
-    return run_parent(sintra::test::get_binary_path(argc, argv));
+    try {
+        return run_parent(sintra::test::get_binary_path(argc, argv));
+    }
+    catch (const std::exception& e) {
+        std::fprintf(stderr, "%sparent exception: %s\n", k_failure_prefix, e.what());
+    }
+    catch (...) {
+        std::fprintf(stderr, "%sparent exception: unknown\n", k_failure_prefix);
+    }
+    return 1;
 }
