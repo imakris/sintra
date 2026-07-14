@@ -6,6 +6,7 @@
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/runtime.h>
 
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #ifdef _WIN32
@@ -43,6 +44,7 @@
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::exact_process_is_live;
 
 constexpr std::string_view k_child_flag = "--managed_child_failed_readiness_child";
 constexpr std::string_view k_nonce_flag = "--managed_child_failed_readiness_nonce";
@@ -445,18 +447,9 @@ bool wait_for_posix_reap(std::chrono::milliseconds timeout)
     return s_posix_reap.count.load(std::memory_order_acquire) != 0;
 }
 
-bool exact_posix_child_is_live(int pid, uint64_t start_stamp)
-{
-    if (pid <= 0 || !sintra::is_process_alive(static_cast<uint32_t>(pid))) {
-        return false;
-    }
-    const auto observed_stamp = sintra::query_process_start_stamp(static_cast<uint32_t>(pid));
-    return observed_stamp && *observed_stamp == start_stamp;
-}
-
 bool signal_exact_posix_child(int pid, uint64_t start_stamp, int signal)
 {
-    if (!exact_posix_child_is_live(pid, start_stamp)) {
+    if (!exact_process_is_live(pid, start_stamp)) {
         return false;
     }
     return ::kill(static_cast<pid_t>(pid), signal) == 0;
@@ -704,7 +697,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             *observed_start_stamp == ledger->start_stamp;
         native_identity_verified =
             start_stamp_verified &&
-            exact_posix_child_is_live(ledger->pid, ledger->start_stamp);
+            exact_process_is_live(ledger->pid, ledger->start_stamp);
         native_alive_before_release = native_identity_verified;
 #endif
 
@@ -804,7 +797,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             sintra::query_process_start_stamp(static_cast<uint32_t>(ledger->pid)) ==
                 std::optional<uint64_t>(ledger->start_stamp);
 #else
-        native_alive_after = exact_posix_child_is_live(ledger->pid, ledger->start_stamp);
+        native_alive_after = exact_process_is_live(ledger->pid, ledger->start_stamp);
 #endif
     }
 
@@ -874,7 +867,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             WEXITSTATUS(observed_reap_status) == 0;
         survivor_absent =
             native_exit_confirmed &&
-            !exact_posix_child_is_live(ledger->pid, ledger->start_stamp);
+            !exact_process_is_live(ledger->pid, ledger->start_stamp);
 #endif
     }
 
@@ -951,7 +944,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         survivor_absent =
             native_exit_confirmed &&
             ledger &&
-            !exact_posix_child_is_live(ledger->pid, ledger->start_stamp);
+            !exact_process_is_live(ledger->pid, ledger->start_stamp);
 
         sintra::detail::test_hooks::s_child_reaped.store(nullptr, std::memory_order_release);
         s_posix_reap.expected_pid.store(-1, std::memory_order_release);

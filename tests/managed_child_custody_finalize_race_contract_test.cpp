@@ -38,6 +38,7 @@
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_custody_finalize_race_child";
@@ -217,18 +218,9 @@ void observe_posix_reap(pid_t pid, int status) noexcept
     s_posix_reap.count.fetch_add(1, std::memory_order_release);
 }
 
-bool exact_posix_child_is_live(int pid, uint64_t start_stamp)
-{
-    if (pid <= 0 || !sintra::is_process_alive(static_cast<uint32_t>(pid))) {
-        return false;
-    }
-    const auto observed = sintra::query_process_start_stamp(static_cast<uint32_t>(pid));
-    return observed && *observed == start_stamp;
-}
-
 bool signal_exact_posix_child(int pid, uint64_t start_stamp, int signal_number)
 {
-    return exact_posix_child_is_live(pid, start_stamp) &&
+    return exact_process_is_live(pid, start_stamp) &&
         ::kill(static_cast<pid_t>(pid), signal_number) == 0;
 }
 #endif
@@ -440,7 +432,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #else
         s_posix_reap.expected_pid.store(static_cast<pid_t>(ledger->pid), std::memory_order_release);
         native_alive_before = start_stamp_verified &&
-            exact_posix_child_is_live(ledger->pid, ledger->start_stamp);
+            exact_process_is_live(ledger->pid, ledger->start_stamp);
 #endif
         publication_confirmed = wait_until([&]() {
             return exact_process_published.load(std::memory_order_acquire) == 1;
@@ -489,7 +481,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     bool platform_hold_valid = false;
 #ifndef _WIN32
     const bool native_live_after_finalize = ledger &&
-        exact_posix_child_is_live(ledger->pid, ledger->start_stamp) &&
+        exact_process_is_live(ledger->pid, ledger->start_stamp) &&
         s_posix_reap.count.load(std::memory_order_acquire) == 0;
     platform_hold_valid = finalize_incomplete && returned_custody_retained_after_finalize &&
         native_live_after_finalize;
@@ -556,7 +548,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         s_posix_reap.count.load(std::memory_order_acquire) == 1 &&
         WIFEXITED(posix_reap_status) && WEXITSTATUS(posix_reap_status) == 0;
     cleanup_valid = release_written && posix_normal_exit &&
-        ledger && !exact_posix_child_is_live(ledger->pid, ledger->start_stamp) &&
+        ledger && !exact_process_is_live(ledger->pid, ledger->start_stamp) &&
         !forced_cleanup;
 #endif
 
