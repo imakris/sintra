@@ -1,9 +1,11 @@
 #include <sintra/sintra.h>
 
+#include "exact_child_test_support.h"
 #include "test_utils.h"
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -16,15 +18,6 @@
 #include <string_view>
 #include <thread>
 #include <vector>
-
-#ifdef _WIN32
-#include <sintra/detail/sintra_windows.h>
-#else
-#include <cerrno>
-#include <csignal>
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
 
 namespace {
 
@@ -49,12 +42,6 @@ bool                    g_create_invitation_hook_armed    = false;
 bool                    g_create_invitation_hook_reached  = false;
 bool                    g_create_invitation_hook_released = false;
 bool                    g_create_invitation_reserve_seen  = false;
-
-struct launched_process_t
-{
-    bool   launched = false;
-    int    pid      = -1;
-};
 
 struct Runtime_guard
 {
@@ -217,9 +204,10 @@ bool wait_for_control_file(
     return sintra::test::wait_for_file(control_path(dir, marker, suffix), timeout, 20ms);
 }
 
-launched_process_t launch_direct_process(
+bool launch_direct_process(
     const std::string&                 binary_path,
-    const std::vector<std::string>&    args)
+    const std::vector<std::string>&    args,
+    sintra::test::Exact_child&         child)
 {
     std::vector<std::string> all_args;
     all_args.reserve(args.size() + 1);
@@ -227,82 +215,84 @@ launched_process_t launch_direct_process(
     all_args.insert(all_args.end(), args.begin(), args.end());
 
     sintra::C_string_vector cargs(all_args);
-    sintra::Spawn_detached_options options;
-    int child_pid = -1;
-    options.prog          = binary_path.c_str();
-    options.argv          = cargs.v();
-    options.child_pid_out = &child_pid;
-    return {sintra::spawn_detached(options), child_pid};
+    return child.spawn(binary_path.c_str(), cargs.v());
 }
 
-bool wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
+enum class Expected_child_exit
 {
-    if (pid <= 0) {
-        return true;
-    }
+    clean,
+    intentional_crash
+};
 
-#ifdef _WIN32
-    HANDLE handle = OpenProcess(
-        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
-        FALSE,
-        static_cast<DWORD>(pid));
-    if (!handle) {
-        return true;
-    }
-
-    const DWORD result = WaitForSingleObject(handle, static_cast<DWORD>(timeout.count()));
-    if (result == WAIT_OBJECT_0) {
-        CloseHandle(handle);
-        return true;
-    }
-    if (result == WAIT_TIMEOUT) {
-        TerminateProcess(handle, 1);
-        WaitForSingleObject(handle, 2000);
-        CloseHandle(handle);
-        return false;
-    }
-
-    CloseHandle(handle);
-    return false;
-#else
+bool wait_for_expected_exit(
+    sintra::test::Exact_child& child,
+    Expected_child_exit       expected,
+    std::chrono::milliseconds timeout,
+    const char*               message)
+{
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        int         status = 0;
-        const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
-        if (result == static_cast<pid_t>(pid)) {
-            return true;
-        }
-        if (result == 0) {
-            std::this_thread::sleep_for(20ms);
-            continue;
-        }
-        if (errno != EINTR) {
-            return true;
-        }
-    }
+        const auto state = child.poll();
+        if (state == sintra::test::Exact_child_state::exited) {
+            bool expected_status = false;
+            if (expected == Expected_child_exit::clean) {
+                expected_status = child.exited_with_code(0);
+            }
+            else {
+#ifdef _WIN32
+                expected_status = !child.exited_with_code(0);
+#else
+                expected_status = child.exited_from_signal(SIGABRT);
+#endif
+            }
 
-    const auto child_pid = static_cast<pid_t>(pid);
-    if (::kill(child_pid, SIGTERM) == -1 && errno == ESRCH) {
-        return false;
-    }
-
-    const auto reap_deadline = std::chrono::steady_clock::now() + 2s;
-    while (std::chrono::steady_clock::now() < reap_deadline) {
-        int         status = 0;
-        const pid_t result = ::waitpid(child_pid, &status, WNOHANG);
-        if (result == child_pid)            { return false; }
-        if (result == -1 && errno != EINTR) { return false; }
+            const auto status = child.describe_status();
+            std::string settle_diagnostic;
+            const bool settled = child.settle_observed_exit(settle_diagnostic);
+            if (!expected_status || !settled) {
+                std::fprintf(
+                    stderr,
+                    "%s%s: %s%s%s\n",
+                    k_failure_prefix,
+                    message,
+                    status.c_str(),
+                    settled ? "" : "; settlement failed: ",
+                    settled ? "" : settle_diagnostic.c_str());
+            }
+            return sintra::test::assert_true(
+                expected_status && settled,
+                k_failure_prefix,
+                message);
+        }
+        if (state == sintra::test::Exact_child_state::error) {
+            const auto observation = child.describe_status();
+            std::string cleanup_diagnostic;
+            const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+            std::fprintf(
+                stderr,
+                "%s%s: observation failed: %s; cleanup %s%s%s\n",
+                k_failure_prefix,
+                message,
+                observation.c_str(),
+                cleaned ? "settled" : "failed",
+                cleanup_diagnostic.empty() ? "" : ": ",
+                cleanup_diagnostic.c_str());
+            return sintra::test::assert_true(false, k_failure_prefix, message);
+        }
         std::this_thread::sleep_for(20ms);
     }
 
-    if (::kill(child_pid, SIGKILL) == 0) {
-        int status = 0;
-        while (::waitpid(child_pid, &status, 0) == -1 && errno == EINTR) {
-            continue;
-        }
-    }
-    return false;
-#endif
+    std::string cleanup_diagnostic;
+    const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+    std::fprintf(
+        stderr,
+        "%s%s: timed out; cleanup %s%s%s\n",
+        k_failure_prefix,
+        message,
+        cleaned ? "settled" : "failed",
+        cleanup_diagnostic.empty() ? "" : ": ",
+        cleanup_diagnostic.c_str());
+    return sintra::test::assert_true(false, k_failure_prefix, message);
 }
 
 bool has_argv_flag_or_value(int argc, char* argv[], std::string_view flag)
@@ -562,11 +552,13 @@ bool run_shutdown_before_claim_case(
         k_failure_prefix,
         "shutdown-before-claim should create an invitation");
 
-    const auto helper = launch_direct_process(
+    sintra::test::Exact_child helper(2s);
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_delayed, "delayed", invitation));
+        helper_args(dir, k_role_delayed, "delayed", invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper.launched,
+        helper_launched,
         k_failure_prefix,
         "shutdown-before-claim helper should launch");
     ok &= wait_for_marker(dir, "delayed", "before_init", 5s);
@@ -583,9 +575,10 @@ bool run_shutdown_before_claim_case(
 
     write_control_file(dir, "delayed", ".go");
     ok &= wait_for_marker_in(dir, "delayed", {"init_failed", "rejected"}, 5s);
-    ok &= sintra::test::assert_true(
-        wait_for_process_exit(helper.pid, 5s),
-        k_failure_prefix,
+    ok &= wait_for_expected_exit(
+        helper,
+        Expected_child_exit::clean,
+        5s,
         "delayed helper should exit after coordinator shutdown rejects init");
 
     return ok;
@@ -607,11 +600,13 @@ bool run_shutdown_hook_claim_rejection_preserves_invitation_case(
         "shutdown-hook claim-rejection should create an invitation");
 
     constexpr const char* marker = "hook_delayed";
-    const auto helper = launch_direct_process(
+    sintra::test::Exact_child helper(2s);
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_delayed, marker, invitation));
+        helper_args(dir, k_role_delayed, marker, invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper.launched,
+        helper_launched,
         k_failure_prefix,
         "shutdown-hook claim-rejection helper should launch");
     ok &= wait_for_marker(dir, marker, "before_init", 5s);
@@ -649,9 +644,10 @@ bool run_shutdown_hook_claim_rejection_preserves_invitation_case(
         invitation_preserved,
         k_failure_prefix,
         "shutdown-hook rejected claim should leave the original invitation cancelable");
-    ok &= sintra::test::assert_true(
-        wait_for_process_exit(helper.pid, 5s),
-        k_failure_prefix,
+    ok &= wait_for_expected_exit(
+        helper,
+        Expected_child_exit::clean,
+        5s,
         "shutdown-hook delayed helper should exit after rejected init");
 
     return ok;
@@ -741,11 +737,13 @@ bool run_shutdown_with_admitted_alive_case(
         k_failure_prefix,
         "admitted-alive should create an invitation");
 
-    const auto helper = launch_direct_process(
+    sintra::test::Exact_child helper(2s);
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_alive, "alive", invitation));
+        helper_args(dir, k_role_alive, "alive", invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper.launched,
+        helper_launched,
         k_failure_prefix,
         "admitted-alive helper should launch");
     ok &= wait_for_marker(dir, "alive", "ready", 5s);
@@ -762,9 +760,10 @@ bool run_shutdown_with_admitted_alive_case(
 
     write_control_file(dir, "alive", ".release");
     ok &= wait_for_marker(dir, "alive_done", "released", 5s);
-    ok &= sintra::test::assert_true(
-        wait_for_process_exit(helper.pid, 12s),
-        k_failure_prefix,
+    ok &= wait_for_expected_exit(
+        helper,
+        Expected_child_exit::clean,
+        12s,
         "admitted-alive helper should exit after cooperative release");
 
     return ok;
@@ -785,19 +784,22 @@ bool run_crash_after_init_case(
         k_failure_prefix,
         "crash-after-init should create an invitation");
 
-    const auto helper = launch_direct_process(
+    sintra::test::Exact_child helper(2s);
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_crash, "crash", invitation));
+        helper_args(dir, k_role_crash, "crash", invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper.launched,
+        helper_launched,
         k_failure_prefix,
         "crash-after-init helper should launch");
     ok &= wait_for_marker(dir, "crash_entry_0", "ready", 5s);
 
     write_control_file(dir, "crash", ".crash");
-    ok &= sintra::test::assert_true(
-        wait_for_process_exit(helper.pid, 5s),
-        k_failure_prefix,
+    ok &= wait_for_expected_exit(
+        helper,
+        Expected_child_exit::intentional_crash,
+        5s,
         "external helper should exit after intentional crash");
 
     std::this_thread::sleep_for(500ms);
@@ -834,20 +836,23 @@ bool run_enable_recovery_after_admission_case(
         k_failure_prefix,
         "external enable-recovery should create an invitation");
 
-    const auto helper = launch_direct_process(
+    sintra::test::Exact_child helper(2s);
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_recover, "recover", invitation));
+        helper_args(dir, k_role_recover, "recover", invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper.launched,
+        helper_launched,
         k_failure_prefix,
         "external enable-recovery helper should launch");
     ok &= wait_for_marker(dir, "recover_entry_0", "ready", 5s);
     ok &= wait_for_marker_in(dir, "recover_enable_recovery", {"returned", "threw"}, 5s);
 
     write_control_file(dir, "recover", ".crash");
-    ok &= sintra::test::assert_true(
-        wait_for_process_exit(helper.pid, 5s),
-        k_failure_prefix,
+    ok &= wait_for_expected_exit(
+        helper,
+        Expected_child_exit::intentional_crash,
+        5s,
         "external enable-recovery helper should exit after intentional crash");
 
     std::this_thread::sleep_for(700ms);
@@ -875,19 +880,22 @@ bool attach_and_release_for_reuse(
     const sintra::External_process_invitation& invitation)
 {
     bool ok = true;
-    const auto helper = launch_direct_process(
+    sintra::test::Exact_child helper(2s);
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_reuse, marker, invitation));
+        helper_args(dir, k_role_reuse, marker, invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper.launched,
+        helper_launched,
         k_failure_prefix,
         "reuse helper should launch");
     ok &= wait_for_marker(dir, marker, "ready", 5s);
     write_control_file(dir, marker, ".release");
     ok &= wait_for_marker(dir, marker + "_done", "left", 5s);
-    ok &= sintra::test::assert_true(
-        wait_for_process_exit(helper.pid, 5s),
-        k_failure_prefix,
+    ok &= wait_for_expected_exit(
+        helper,
+        Expected_child_exit::clean,
+        5s,
         "reuse helper should exit after leave");
     return ok;
 }
