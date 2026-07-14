@@ -48,8 +48,6 @@ namespace test_hooks {
 
 inline constexpr const char* k_stage_create_invitation_pre_admission_lock =
     "create_external_process_invitation/pre_admission_lock";
-inline constexpr const char* k_stage_spawn_success_before_readiness_wait =
-    "spawn_swarm_process/success_before_readiness_wait";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Runtime_stage_callback = void (*)(const char*);
@@ -1399,8 +1397,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                             result.os_pid,
                             result.lifeline_enabled,
                             result.lifeline_write_retained);
-                        detail::runtime_stage_for_test(
-                            detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
                     }
                 }
                 catch (...) {
@@ -1474,8 +1470,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             spawn_result.os_pid,
             spawn_result.lifeline_enabled,
             spawn_result.lifeline_write_retained);
-        detail::runtime_stage_for_test(
-            detail::test_hooks::k_stage_spawn_success_before_readiness_wait);
     }
 
     Managed_child_custody custody(custody_record);

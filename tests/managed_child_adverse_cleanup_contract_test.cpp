@@ -217,25 +217,6 @@ std::optional<Child_ledger> read_child_ledger(const fs::path& path)
     return ledger;
 }
 
-void runtime_stage_callback(const char* stage)
-{
-    if (!stage ||
-        std::string_view(stage) !=
-            sintra::detail::test_hooks::k_stage_spawn_success_before_readiness_wait)
-    {
-        return;
-    }
-
-    Cleanup_gate* gate = s_cleanup_gate;
-    if (!gate) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(gate->mutex);
-    gate->readiness_started = true;
-    gate->cv.notify_all();
-}
-
 void runtime_spawn_success_callback(
     sintra::instance_id_type process_iid,
     int                      os_pid,
@@ -252,6 +233,15 @@ void runtime_spawn_success_callback(
     s_spawn_observation.lifeline_write_retained.store(
         lifeline_write_retained, std::memory_order_relaxed);
     s_spawn_observation.count.fetch_add(1, std::memory_order_release);
+
+    Cleanup_gate* gate = s_cleanup_gate;
+    if (!gate) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->readiness_started = true;
+    gate->cv.notify_all();
 }
 
 void name_retired_callback(
@@ -1001,8 +991,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     s_spawn_observation.lifeline_write_retained.store(
         true, std::memory_order_relaxed);
     s_spawn_observation.count.store(0, std::memory_order_relaxed);
-    sintra::detail::test_hooks::s_runtime_stage.store(
-        &runtime_stage_callback, std::memory_order_release);
     sintra::detail::test_hooks::s_runtime_spawn_success.store(
         &runtime_spawn_success_callback, std::memory_order_release);
     sintra::detail::test_hooks::s_coordinator_name_retired.store(
@@ -1170,8 +1158,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     sintra::detail::test_hooks::s_coordinator_name_retired.store(
         nullptr, std::memory_order_release);
     sintra::detail::test_hooks::s_runtime_spawn_success.store(
-        nullptr, std::memory_order_release);
-    sintra::detail::test_hooks::s_runtime_stage.store(
         nullptr, std::memory_order_release);
     s_cleanup_gate = nullptr;
 

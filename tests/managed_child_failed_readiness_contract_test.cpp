@@ -214,16 +214,12 @@ bool write_complete_file(const fs::path& path, const std::string& contents)
 #endif
 }
 
-void spawn_stage_callback(const char* stage)
+void spawn_success_callback(
+    sintra::instance_id_type,
+    int,
+    bool,
+    bool)
 {
-    if (!stage ||
-        std::strcmp(
-            stage,
-            sintra::detail::test_hooks::k_stage_spawn_success_before_readiness_wait) != 0)
-    {
-        return;
-    }
-
     Spawn_gate* gate = s_spawn_gate;
     if (!gate) {
         return;
@@ -592,8 +588,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         s_cleanup_gate.released = false;
         s_cleanup_gate.watchdog_expired = false;
     }
-    sintra::detail::test_hooks::s_runtime_stage.store(
-        &spawn_stage_callback,
+    sintra::detail::test_hooks::s_runtime_spawn_success.store(
+        &spawn_success_callback,
         std::memory_order_release);
     sintra::detail::test_hooks::s_managed_child_cleanup.store(
         &cleanup_stage_callback,
@@ -773,7 +769,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 
     spawn_thread.join();
     spawn_call_completed = call.done;
-    sintra::detail::test_hooks::s_runtime_stage.store(nullptr, std::memory_order_release);
+    sintra::detail::test_hooks::s_runtime_spawn_success.store(
+        nullptr, std::memory_order_release);
     s_spawn_gate = nullptr;
 
     const bool cleanup_stage_seen = spawn_call_completed &&

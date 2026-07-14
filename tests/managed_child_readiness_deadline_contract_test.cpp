@@ -159,15 +159,12 @@ std::optional<Child_ledger> read_child_ledger(const fs::path& path)
     return ledger;
 }
 
-void runtime_stage_callback(const char* stage)
+void runtime_spawn_success_callback(
+    sintra::instance_id_type,
+    int,
+    bool,
+    bool)
 {
-    if (!stage ||
-        std::string_view(stage) !=
-            sintra::detail::test_hooks::k_stage_spawn_success_before_readiness_wait)
-    {
-        return;
-    }
-
     Deadline_gate* gate = s_deadline_gate;
     if (!gate) {
         return;
@@ -379,8 +376,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     gate.requested_target = "managed_child_deadline_target_" + nonce;
     Spawn_call call;
     s_deadline_gate = &gate;
-    sintra::detail::test_hooks::s_runtime_stage.store(
-        &runtime_stage_callback,
+    sintra::detail::test_hooks::s_runtime_spawn_success.store(
+        &runtime_spawn_success_callback,
         std::memory_order_release);
     sintra::detail::test_hooks::s_coordinator_resolve_instance.store(
         &resolve_instance_callback,
@@ -575,7 +572,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     sintra::detail::test_hooks::s_coordinator_resolve_instance.store(
         nullptr,
         std::memory_order_release);
-    sintra::detail::test_hooks::s_runtime_stage.store(
+    sintra::detail::test_hooks::s_runtime_spawn_success.store(
         nullptr,
         std::memory_order_release);
     s_deadline_gate = nullptr;
