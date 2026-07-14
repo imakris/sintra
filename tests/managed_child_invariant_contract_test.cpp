@@ -24,6 +24,8 @@ namespace {
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
+using Managed_child_invariant =
+    sintra::detail::test_hooks::Managed_child_invariant;
 
 constexpr std::string_view k_child_flag = "--f03-invariant-child";
 
@@ -65,20 +67,18 @@ std::optional<Child_identity> read_identity(const fs::path& path)
 }
 
 bool force_invariant_miss(
-    const char* stage,
+    Managed_child_invariant invariant,
     sintra::instance_id_type process_iid,
     uint32_t occurrence,
     uint64_t reservation) noexcept
 {
-    if (!stage || occurrence != 0 ||
+    if (occurrence != 0 ||
         process_iid != s_expected_iid.load(std::memory_order_acquire))
     {
         return false;
     }
-    const std::string_view observed(stage);
     if (s_target.load(std::memory_order_acquire) == Target::exact_occurrence &&
-        observed == sintra::detail::test_hooks::
-            k_managed_child_exact_occurrence_lookup)
+        invariant == Managed_child_invariant::exact_occurrence_lookup)
     {
         s_exact_hits.fetch_add(1, std::memory_order_release);
         return true;
@@ -86,8 +86,8 @@ bool force_invariant_miss(
 #ifndef _WIN32
     if (s_target.load(std::memory_order_acquire) ==
             Target::posix_reap_reservation &&
-        observed == sintra::detail::test_hooks::
-            k_managed_child_posix_reap_reservation_lookup)
+        invariant ==
+            Managed_child_invariant::posix_reap_reservation_lookup)
     {
         const auto deadline = std::chrono::steady_clock::now() + 3s;
         std::error_code error;
@@ -279,13 +279,21 @@ Case_result run_case(
             automatic_cleanup_requested =
                 automatic_cleanup_entered && released.release_state !=
                     sintra::Managed_child_release_state::open;
-            const auto automatic_deadline = cleanup_started + 6s;
-            while (released.release_state !=
-                       sintra::Managed_child_release_state::complete &&
-                   std::chrono::steady_clock::now() < automatic_deadline)
-            {
-                std::this_thread::sleep_for(5ms);
-                released = custody.status();
+            if (automatic_cleanup_requested) {
+                const auto automatic_deadline = cleanup_started + 6s;
+                while (released.release_state !=
+                           sintra::Managed_child_release_state::complete &&
+                       std::chrono::steady_clock::now() < automatic_deadline)
+                {
+                    std::this_thread::sleep_for(5ms);
+                    released = custody.status();
+                }
+            }
+            else {
+                // A missed invariant injection leaves a live, open custody.
+                // Retire it explicitly so the RED oracle proves the missed
+                // injection without leaking a child or timing out.
+                released = custody.terminate_until(cleanup_started + 6s);
             }
         }
         else {
@@ -315,10 +323,10 @@ Case_result run_case(
             released.release_state == sintra::Managed_child_release_state::complete &&
             exact_absent && roster_empty && init_clear;
         const char* expected_failure_stage =
-            target == Target::exact_occurrence
-            ? sintra::detail::test_hooks::k_managed_child_exact_occurrence_lookup
-            : sintra::detail::test_hooks::
-                k_managed_child_posix_reap_reservation_lookup;
+            sintra::detail::test_hooks::managed_child_invariant_name(
+                target == Target::exact_occurrence
+                    ? Managed_child_invariant::exact_occurrence_lookup
+                    : Managed_child_invariant::posix_reap_reservation_lookup);
         const bool typed_failure =
             released.last_failure.kind ==
                 sintra::Managed_child_failure_kind::setup_exception &&

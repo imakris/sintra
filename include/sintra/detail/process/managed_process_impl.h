@@ -80,6 +80,24 @@ inline void child_reaped_for_test(pid_t pid, int status) noexcept
 namespace detail {
 namespace test_hooks {
 
+enum class Managed_child_invariant
+{
+    exact_occurrence_lookup,
+    posix_reap_reservation_lookup
+};
+
+inline constexpr const char* managed_child_invariant_name(
+    Managed_child_invariant invariant) noexcept
+{
+    switch (invariant) {
+    case Managed_child_invariant::exact_occurrence_lookup:
+        return "managed_child_exact_occurrence_lookup";
+    case Managed_child_invariant::posix_reap_reservation_lookup:
+        return "managed_child_posix_reap_reservation_lookup";
+    }
+    return "managed_child_unknown_invariant";
+}
+
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Managed_child_setup_callback = void (*)(instance_id_type, uint32_t);
 inline std::atomic<Managed_child_setup_callback> s_managed_child_reader_setup{nullptr};
@@ -93,7 +111,8 @@ inline std::atomic<Managed_child_roster_reserved_callback>
     s_managed_child_roster_reserved{nullptr};
 
 using Managed_child_invariant_callback =
-    bool (*)(const char*, instance_id_type, uint32_t, uint64_t) noexcept;
+    bool (*)(Managed_child_invariant, instance_id_type, uint32_t, uint64_t)
+        noexcept;
 inline std::atomic<Managed_child_invariant_callback>
     s_managed_child_invariant{nullptr};
 
@@ -129,10 +148,6 @@ inline constexpr const char* k_managed_child_windows_fallback_handle_closed =
     "managed_child_windows_fallback_handle_closed";
 inline constexpr const char* k_managed_child_fail_admission_mapping =
     "managed_child_admission_mapping";
-inline constexpr const char* k_managed_child_exact_occurrence_lookup =
-    "managed_child_exact_occurrence_lookup";
-inline constexpr const char* k_managed_child_posix_reap_reservation_lookup =
-    "managed_child_posix_reap_reservation_lookup";
 inline constexpr const char* k_managed_child_fail_release_worker =
     "managed_child_release_worker";
 inline constexpr const char* k_managed_child_fail_release_worker_start =
@@ -239,7 +254,7 @@ inline void managed_child_roster_reserved_for_test(
 }
 
 inline bool managed_child_invariant_for_test(
-    const char* stage,
+    test_hooks::Managed_child_invariant invariant,
     instance_id_type process_instance_id,
     uint32_t occurrence,
     uint64_t reservation_id = 0) noexcept
@@ -249,10 +264,10 @@ inline bool managed_child_invariant_for_test(
             std::memory_order_acquire))
     {
         return callback(
-            stage, process_instance_id, occurrence, reservation_id);
+            invariant, process_instance_id, occurrence, reservation_id);
     }
 #else
-    (void)stage;
+    (void)invariant;
     (void)process_instance_id;
     (void)occurrence;
     (void)reservation_id;
@@ -1162,14 +1177,19 @@ inline bool detail::Managed_child_launch_attempt::transfer_lifeline_write()
 
 inline bool
 detail::Managed_child_launch_attempt::acquire_initialization_reservation(
-    Coordinator* coordinator,
-    bool force_exact_lookup_failure)
+    Coordinator* coordinator)
 {
     if (!m_owner || !m_custody ||
         m_initialization != Initialization_ownership::absent)
     {
         return false;
     }
+
+    const bool inject_exact_occurrence_lookup_failure =
+        managed_child_invariant_for_test(
+            test_hooks::Managed_child_invariant::exact_occurrence_lookup,
+            m_process_instance_id,
+            m_occurrence);
 
     bool coordinator_reserved = false;
     if (coordinator) {
@@ -1188,7 +1208,7 @@ detail::Managed_child_launch_attempt::acquire_initialization_reservation(
                 return occurrence.occurrence == m_occurrence &&
                     occurrence.process_instance_id == m_process_instance_id;
             });
-        if (!force_exact_lookup_failure &&
+        if (!inject_exact_occurrence_lookup_failure &&
             exact != m_custody->occurrences.end())
         {
             exact->initialization_reservation_active = true;
@@ -1304,8 +1324,7 @@ detail::Managed_child_launch_attempt::commit_posix_native_handoff(
     int pid,
     bool already_reaped,
     bool wait_status_available,
-    int wait_status,
-    bool force_reservation_lookup_failure)
+    int wait_status)
 {
     if (!m_owner || !m_custody ||
         m_posix_reap != Posix_reap_ownership::reserved ||
@@ -1318,6 +1337,14 @@ detail::Managed_child_launch_attempt::commit_posix_native_handoff(
         throw std::runtime_error(
             "Managed-child POSIX native identity is invalid");
     }
+
+    const bool inject_reservation_lookup_failure =
+        managed_child_invariant_for_test(
+            test_hooks::Managed_child_invariant::
+                posix_reap_reservation_lookup,
+            m_process_instance_id,
+            m_occurrence,
+            m_posix_reap_reservation_id);
 
     bool start_stamp_available = false;
     uint64_t start_stamp = 0;
@@ -1356,7 +1383,7 @@ detail::Managed_child_launch_attempt::commit_posix_native_handoff(
                 "Managed-child exact occurrence lookup failed");
         }
 
-        auto slot = force_reservation_lookup_failure
+        auto slot = inject_reservation_lookup_failure
             ? m_owner->m_spawned_child_pids.end()
             : std::find_if(
                 m_owner->m_spawned_child_pids.begin(),
@@ -5057,20 +5084,16 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     C_string_vector cargs(std::move(args));
     spawn_options.argv = cargs.v();
 
-    const bool exact_occurrence_lookup_failed =
-        detail::managed_child_invariant_for_test(
-            detail::test_hooks::k_managed_child_exact_occurrence_lookup,
-            s.piid,
-            s.occurrence);
-    if (!launch_attempt.acquire_initialization_reservation(
-            s_coord, exact_occurrence_lookup_failed))
+    if (!launch_attempt.acquire_initialization_reservation(s_coord))
     {
 #ifndef _WIN32
         launch_attempt.cancel_posix_native_handoff();
 #endif
         result.failure.kind = Managed_child_failure_kind::setup_exception;
         result.failure.message =
-            detail::test_hooks::k_managed_child_exact_occurrence_lookup;
+            detail::test_hooks::managed_child_invariant_name(
+                detail::test_hooks::Managed_child_invariant::
+                    exact_occurrence_lookup);
         return result;
     }
 
@@ -5142,20 +5165,12 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
 
     if (result.success) {
 #ifndef _WIN32
-        const bool forced_reservation_lookup_failure =
-            detail::managed_child_invariant_for_test(
-                detail::test_hooks::
-                    k_managed_child_posix_reap_reservation_lookup,
-                s.piid,
-                s.occurrence,
-                launch_attempt.posix_reap_reservation_id());
         const auto posix_handoff =
             launch_attempt.commit_posix_native_handoff(
                 spawned_pid,
                 spawned_process_already_reaped,
                 spawned_wait_status_available,
-                spawned_wait_status,
-                forced_reservation_lookup_failure);
+                spawned_wait_status);
         if (posix_handoff.child_reaped) {
             detail::child_reaped_for_test(
                 static_cast<pid_t>(spawned_pid),
@@ -5174,8 +5189,9 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
 #ifndef _WIN32
         if (posix_handoff.reservation_lookup_failed) {
             throw std::runtime_error(
-                detail::test_hooks::
-                    k_managed_child_posix_reap_reservation_lookup);
+                detail::test_hooks::managed_child_invariant_name(
+                    detail::test_hooks::Managed_child_invariant::
+                        posix_reap_reservation_lookup));
         }
 #endif
 

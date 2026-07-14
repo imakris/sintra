@@ -867,9 +867,7 @@ public:
     void close_lifeline_read_endpoint() noexcept;
     bool transfer_lifeline_write();
 
-    bool acquire_initialization_reservation(
-        Coordinator* coordinator,
-        bool force_exact_lookup_failure);
+    bool acquire_initialization_reservation(Coordinator* coordinator);
     void transfer_initialization_reservation() noexcept;
 
 #ifndef _WIN32
@@ -880,17 +878,12 @@ public:
     };
 
     void reserve_posix_reap_slot();
-    uint64_t posix_reap_reservation_id() const noexcept
-    {
-        return m_posix_reap_reservation_id;
-    }
     void cancel_posix_native_handoff();
     Posix_native_handoff_result commit_posix_native_handoff(
         int pid,
         bool already_reaped,
         bool wait_status_available,
-        int wait_status,
-        bool force_reservation_lookup_failure);
+        int wait_status);
 #else
     void adopt_windows_process_handle(uintptr_t process_handle) noexcept;
     uintptr_t windows_process_handle() const noexcept
