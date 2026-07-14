@@ -22,6 +22,7 @@ Options:
 import argparse
 import contextlib
 import hashlib
+import json
 from functools import partial
 import math
 import os
@@ -576,6 +577,57 @@ class TestRunner:
 
         self._record_scratch_cleanup(size_estimate)
 
+    @staticmethod
+    def _write_preserved_failure_evidence(
+        scratch_dir: Path,
+        invocation: TestInvocation,
+        run_id: str,
+        result_kind: str,
+        exit_code: Optional[int],
+        duration: float,
+        timeout: float,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        """Best-effort write of uploadable diagnostics for a failed invocation."""
+
+        capture = (
+            "=== captured stdout ===\n"
+            f"{stdout}"
+            "\n=== captured stderr ===\n"
+            f"{stderr}"
+        )
+        if not capture.endswith("\n"):
+            capture += "\n"
+
+        try:
+            (scratch_dir / "harness_capture.txt").write_text(capture, encoding="utf-8")
+        except Exception as exc:
+            print(
+                f"{Color.YELLOW}Warning: Failed to preserve harness capture for "
+                f"{invocation.name}: {exc}{Color.RESET}"
+            )
+
+        result = {
+            "test_name": invocation.name,
+            "command": invocation.command(),
+            "run_id": run_id,
+            "result_kind": result_kind,
+            "exit_code": exit_code,
+            "duration": round(duration, 6),
+            "timeout": timeout,
+        }
+        try:
+            (scratch_dir / "harness_result.json").write_text(
+                json.dumps(result, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(
+                f"{Color.YELLOW}Warning: Failed to preserve harness result for "
+                f"{invocation.name}: {exc}{Color.RESET}"
+            )
+
     def _core_dump_search_directories(self, invocation: TestInvocation) -> List[Path]:
         """Return directories that may contain core dumps for ``invocation``."""
 
@@ -1027,6 +1079,11 @@ class TestRunner:
         core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
         result_success: Optional[bool] = None
+        evidence_stdout = ""
+        evidence_stderr = ""
+        evidence_result_kind = "harness_error"
+        evidence_exit_code: Optional[int] = None
+        evidence_duration = 0.0
         instrumentation_active = self.instrumentation_active()
         instrument = partial(self._instrument_step, disk_path=self.build_dir)
         with self._stack_capture_history_lock:
@@ -1077,10 +1134,13 @@ class TestRunner:
             manual_capture_thread: Optional[threading.Thread] = None
             manual_signal_handlers: Dict[int, object] = {}
             manual_signal_module: Optional[object] = None
+            manual_signal_registered = False
             stop_signal_desc: Optional[str] = None
             posix_signal: Optional[int] = None
             heartbeat_stop = threading.Event()
             heartbeat_thread: Optional[threading.Thread] = None
+            hard_watchdog_stop: Optional[threading.Event] = None
+            hard_watchdog_thread: Optional[threading.Thread] = None
 
             @contextlib.contextmanager
             def stack_capture_context(mark_failure: bool) -> Iterator[bool]:
@@ -1407,8 +1467,6 @@ class TestRunner:
                 elif error and not live_stack_traces:
                     with capture_lock:
                         live_stack_error = error
-
-            manual_signal_registered = False
 
             manual_signal_info: Optional[ManualSignalSupport] = self.platform.manual_signal_support()
             if manual_signal_info is not None:
@@ -1998,6 +2056,16 @@ class TestRunner:
                     else:
                         error_msg = capture_note
 
+                evidence_stdout = stdout
+                evidence_stderr = stderr
+                evidence_exit_code = process.returncode
+                evidence_duration = duration
+                if hang_detected:
+                    evidence_result_kind = "hang"
+                elif not success:
+                    evidence_result_kind = (
+                        "nonzero_exit" if process.returncode != 0 else "harness_failure"
+                    )
                 result_success = success
                 return TestResult(
                     success=success,
@@ -2068,6 +2136,11 @@ class TestRunner:
 
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
+                evidence_stdout = stdout
+                evidence_stderr = stderr
+                evidence_result_kind = "timeout"
+                evidence_exit_code = process.returncode if process is not None else None
+                evidence_duration = duration
 
                 if stack_traces:
                     stderr = f"{stderr}\n\n=== Captured stack traces ===\n{stack_traces}"
@@ -2092,6 +2165,11 @@ class TestRunner:
             error_msg = f"Exception: {str(e)}"
             if stderr:
                 error_msg = f"{error_msg}\n{stderr}"
+            evidence_stdout = stdout
+            evidence_stderr = stderr
+            evidence_result_kind = "launch_error" if process is None else "harness_error"
+            evidence_exit_code = process.returncode if process is not None else None
+            evidence_duration = max(time.time() - start_time, 0.0)
             result_success = False
             return TestResult(
                 success=False,
@@ -2101,8 +2179,10 @@ class TestRunner:
                 result_kind="fail",
             )
         finally:
-            hard_watchdog_stop.set()
-            hard_watchdog_thread.join(timeout=1.0)
+            if hard_watchdog_stop is not None:
+                hard_watchdog_stop.set()
+            if hard_watchdog_thread is not None:
+                hard_watchdog_thread.join(timeout=1.0)
             heartbeat_stop.set()
             if heartbeat_thread is not None:
                 heartbeat_thread.join(timeout=1.0)
@@ -2129,6 +2209,19 @@ class TestRunner:
                 print(
                     f"\n{Color.YELLOW}Preserving scratch for hang ({invocation.name}): "
                     f"{scratch_dir}{Color.RESET}"
+                )
+
+            if preserve_failure or hang_detected:
+                self._write_preserved_failure_evidence(
+                    scratch_dir=scratch_dir,
+                    invocation=invocation,
+                    run_id=run_id,
+                    result_kind=evidence_result_kind,
+                    exit_code=evidence_exit_code,
+                    duration=evidence_duration,
+                    timeout=timeout,
+                    stdout=evidence_stdout,
+                    stderr=evidence_stderr,
                 )
 
             if cleanup_scratch_dir:
