@@ -1,5 +1,6 @@
 #include <sintra/sintra.h>
 
+#include "exact_child_test_support.h"
 #include "test_utils.h"
 
 #include <chrono>
@@ -15,13 +16,6 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
-#ifdef _WIN32
-#include <sintra/detail/sintra_windows.h>
-#else
-#include <cerrno>
-#include <signal.h>
-#include <sys/wait.h>
-#endif
 
 namespace {
 
@@ -39,19 +33,6 @@ constexpr const char* k_external_attach_rejected_message =
     "Sintra external process invitation was rejected.";
 
 struct done_signal_t {};
-
-struct launched_process_t
-{
-    bool   launched = false;
-    int    pid      = -1;
-};
-
-struct process_exit_t
-{
-    bool   exited   = false;
-    bool   normal   = false;
-    int    code     = -1;
-};
 
 struct Cleanup_probe_service : sintra::Derived_transceiver<Cleanup_probe_service>
 {
@@ -141,9 +122,10 @@ bool wait_for_marker(
     return false;
 }
 
-launched_process_t launch_direct_process(
+bool launch_direct_process(
     const std::string&                 binary_path,
-    const std::vector<std::string>&    args)
+    const std::vector<std::string>&    args,
+    sintra::test::Exact_child&         child)
 {
     std::vector<std::string> all_args;
     all_args.reserve(args.size() + 1);
@@ -151,104 +133,66 @@ launched_process_t launch_direct_process(
     all_args.insert(all_args.end(), args.begin(), args.end());
 
     sintra::C_string_vector cargs(all_args);
-    sintra::Spawn_detached_options options;
-    int child_pid = -1;
-    options.prog          = binary_path.c_str();
-    options.argv          = cargs.v();
-    options.child_pid_out = &child_pid;
-    return {sintra::spawn_detached(options), child_pid};
-}
-
-process_exit_t wait_for_process_exit(int pid, std::chrono::milliseconds timeout)
-{
-    if (pid <= 0) {
-        return {true, true, 0};
-    }
-#ifdef _WIN32
-    HANDLE handle = OpenProcess(
-        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
-        FALSE,
-        static_cast<DWORD>(pid));
-    if (!handle) {
-        return {true, true, 0};
-    }
-
-    const DWORD wait_ms = static_cast<DWORD>(timeout.count());
-    const DWORD result  = WaitForSingleObject(handle, wait_ms);
-    if (result == WAIT_OBJECT_0) {
-        DWORD      exit_code      = 1;
-        const bool have_exit_code = GetExitCodeProcess(handle, &exit_code) != 0;
-        CloseHandle(handle);
-        return {true, have_exit_code && exit_code == 0, static_cast<int>(exit_code)};
-    }
-    if (result == WAIT_TIMEOUT) {
-        TerminateProcess(handle, 1);
-        WaitForSingleObject(handle, 2000);
-        CloseHandle(handle);
-        return {false, false, -1};
-    }
-    CloseHandle(handle);
-    return {false, false, -1};
-#else
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        int         status = 0;
-        const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
-        if (result == static_cast<pid_t>(pid)) {
-            return {
-                true,
-                WIFEXITED(status) && WEXITSTATUS(status) == 0,
-                WIFEXITED(status) ? WEXITSTATUS(status) : -1
-            };
-        }
-        if (result == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-        if (errno != EINTR) {
-            return {true, false, -1};
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    const auto child_pid = static_cast<pid_t>(pid);
-    if (::kill(child_pid, SIGTERM) == -1 && errno == ESRCH) {
-        return {false, false, -1};
-    }
-
-    const auto reap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (std::chrono::steady_clock::now() < reap_deadline) {
-        int         status = 0;
-        const pid_t result = ::waitpid(child_pid, &status, WNOHANG);
-        if (result == child_pid) {
-            return {false, false, -1};
-        }
-        if (result == -1 && errno != EINTR) {
-            return {false, false, -1};
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    if (::kill(child_pid, SIGKILL) == 0) {
-        int status = 0;
-        while (::waitpid(child_pid, &status, 0) == -1 && errno == EINTR) {
-            continue;
-        }
-    }
-    return {false, false, -1};
-#endif
+    return child.spawn(binary_path.c_str(), cargs.v());
 }
 
 bool assert_clean_exit(
-    const launched_process_t&  process,
+    sintra::test::Exact_child& child,
     std::chrono::milliseconds  timeout,
     const char*                message)
 {
-    const auto exit = wait_for_process_exit(process.pid, timeout);
-    return sintra::test::assert_true(
-        exit.exited && exit.normal,
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto state = child.poll();
+        if (state == sintra::test::Exact_child_state::exited) {
+            const bool clean_exit = child.exited_with_code(0);
+            const auto status     = child.describe_status();
+            std::string settle_diagnostic;
+            const bool settled = child.settle_observed_exit(settle_diagnostic);
+            if (!clean_exit || !settled) {
+                std::fprintf(
+                    stderr,
+                    "%s%s: %s%s%s\n",
+                    k_failure_prefix,
+                    message,
+                    status.c_str(),
+                    settled ? "" : "; settlement failed: ",
+                    settled ? "" : settle_diagnostic.c_str());
+            }
+            return sintra::test::assert_true(
+                clean_exit && settled,
+                k_failure_prefix,
+                message);
+        }
+        if (state == sintra::test::Exact_child_state::error) {
+            const auto observation = child.describe_status();
+            std::string cleanup_diagnostic;
+            const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+            std::fprintf(
+                stderr,
+                "%s%s: observation failed: %s; cleanup %s%s%s\n",
+                k_failure_prefix,
+                message,
+                observation.c_str(),
+                cleaned ? "settled" : "failed",
+                cleanup_diagnostic.empty() ? "" : ": ",
+                cleanup_diagnostic.c_str());
+            return sintra::test::assert_true(false, k_failure_prefix, message);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::string cleanup_diagnostic;
+    const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+    std::fprintf(
+        stderr,
+        "%s%s: timed out; cleanup %s%s%s\n",
         k_failure_prefix,
-        message);
+        message,
+        cleaned ? "settled" : "failed",
+        cleanup_diagnostic.empty() ? "" : ": ",
+        cleanup_diagnostic.c_str());
+    return sintra::test::assert_true(false, k_failure_prefix, message);
 }
 
 bool replace_external_attach_token(
@@ -633,14 +577,15 @@ bool launch_rejected_status_helper(
             "wrong-token helper should replace the invitation token argument");
     }
 
-    const auto helper_launch = launch_direct_process(binary_path, args);
+    sintra::test::Exact_child helper(std::chrono::seconds(2));
+    const bool helper_launched = launch_direct_process(binary_path, args, helper);
     ok &= sintra::test::assert_true(
-        helper_launch.launched,
+        helper_launched,
         k_failure_prefix,
         "rejected helper launch should succeed");
     ok &= wait_for_marker(dir, marker, "rejected", std::chrono::seconds(8));
     ok &= assert_clean_exit(
-        helper_launch,
+        helper,
         std::chrono::seconds(8),
         "rejected helper should exit normally after the expected rejection");
     return ok;
@@ -654,11 +599,13 @@ bool admit_valid_helper(
     bool ok = true;
 
     const std::string marker = "valid_after_rejections";
-    const auto helper_launch = launch_direct_process(
+    sintra::test::Exact_child helper(std::chrono::seconds(2));
+    const bool helper_launched = launch_direct_process(
         binary_path,
-        helper_args(dir, k_role_valid, marker, invitation));
+        helper_args(dir, k_role_valid, marker, invitation),
+        helper);
     ok &= sintra::test::assert_true(
-        helper_launch.launched,
+        helper_launched,
         k_failure_prefix,
         "valid helper launch should succeed after rejected attempts");
     ok &= wait_for_marker(dir, marker, "ready", std::chrono::seconds(8));
@@ -680,7 +627,7 @@ bool admit_valid_helper(
     sintra::world() << done_signal_t{};
     ok &= wait_for_marker(dir, marker + "_left", "left", std::chrono::seconds(8));
     ok &= assert_clean_exit(
-        helper_launch,
+        helper,
         std::chrono::seconds(8),
         "valid helper should exit cleanly after receiving done");
     return ok;
@@ -709,9 +656,10 @@ bool run_wrong_token_cleanup_case(
         k_failure_prefix,
         "wrong-token cleanup case should replace the invitation token argument");
 
-    const auto helper_launch = launch_direct_process(binary_path, args);
+    sintra::test::Exact_child helper(std::chrono::seconds(2));
+    const bool helper_launched = launch_direct_process(binary_path, args, helper);
     ok &= sintra::test::assert_true(
-        helper_launch.launched,
+        helper_launched,
         k_failure_prefix,
         "wrong-token cleanup helper launch should succeed");
     ok &= wait_for_marker(
@@ -720,7 +668,7 @@ bool run_wrong_token_cleanup_case(
         "rejected_clean",
         std::chrono::seconds(8));
     ok &= assert_clean_exit(
-        helper_launch,
+        helper,
         std::chrono::seconds(8),
         "wrong-token cleanup helper should exit normally");
 
@@ -897,9 +845,10 @@ bool run_rejected_helper_cannot_affect_coordinator_case(
         k_failure_prefix,
         "coordinator-isolation case should replace the invitation token argument");
 
-    const auto helper_launch = launch_direct_process(binary_path, args);
+    sintra::test::Exact_child helper(std::chrono::seconds(2));
+    const bool helper_launched = launch_direct_process(binary_path, args, helper);
     ok &= sintra::test::assert_true(
-        helper_launch.launched,
+        helper_launched,
         k_failure_prefix,
         "coordinator-isolation helper launch should succeed");
     ok &= wait_for_marker(
@@ -908,7 +857,7 @@ bool run_rejected_helper_cannot_affect_coordinator_case(
         "rejected_isolated",
         std::chrono::seconds(8));
     ok &= assert_clean_exit(
-        helper_launch,
+        helper,
         std::chrono::seconds(8),
         "coordinator-isolation helper should exit normally");
 
