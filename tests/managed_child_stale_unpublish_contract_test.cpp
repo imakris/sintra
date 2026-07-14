@@ -90,19 +90,6 @@ Publication_snapshot publication_snapshot(
     return snapshot;
 }
 
-bool ensure_synthetic_registry_cell_absent(
-    sintra::instance_id_type process_iid,
-    sintra::instance_id_type instance_iid)
-{
-    std::lock_guard lock(sintra::s_coord->m_publish_mutex);
-    const auto process = sintra::s_coord->m_transceiver_registry.find(process_iid);
-    if (process == sintra::s_coord->m_transceiver_registry.end()) {
-        return true;
-    }
-    process->second.erase(instance_iid);
-    return process->second.count(instance_iid) == 0;
-}
-
 sintra::instance_id_type resolve_ordinary(const std::string& assigned_name)
 {
     return sintra::Coordinator::rpc_resolve_instance(
@@ -231,15 +218,12 @@ int main(int argc, char* argv[])
         stale_exact_after_stale == sintra::invalid_instance_id &&
         after_stale.registry_present && tls_restored && hook_restored;
 
-    // GREEN still owns the replacement name/identity; RED has already erased
-    // them. Ordinary unpublish intentionally leaves the raw registry cell, so
-    // remove that synthetic helper residue explicitly after the semantic cleanup.
+    // GREEN still owns the replacement publication; RED has already damaged
+    // it. Successful cleanup must retire the complete owning registry record.
     const bool cleanup_result = sintra::Coordinator::rpc_unpublish_transceiver(
         sintra::s_coord_id, replacement_iid);
-    const bool registry_cell_absent =
-        ensure_synthetic_registry_cell_absent(process_iid, replacement_iid);
     const auto after_cleanup = publication_snapshot(process_iid, replacement_iid);
-    const bool cleanup_valid = cleanup_result && registry_cell_absent &&
+    const bool cleanup_valid = cleanup_result && !after_cleanup.registry_present &&
         resolve_ordinary(replacement_name) == sintra::invalid_instance_id &&
         resolve_exact(
             replacement_name, process_iid, k_replacement_occurrence) ==
@@ -302,7 +286,7 @@ int main(int argc, char* argv[])
         fixed_green ? 1 : 0,
         current_red ? 1 : 0,
         cleanup_result ? 1 : 0,
-        registry_cell_absent ? 1 : 0,
+        !after_cleanup.registry_present ? 1 : 0,
         cleanup_valid ? 1 : 0,
         finalized ? 1 : 0,
         runtime_gone ? 1 : 0);

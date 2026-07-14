@@ -1052,9 +1052,16 @@ inline instance_id_type Coordinator::resolve_managed_child_instance_locked(
     if (iid == invalid_instance_id || process_of(iid) != process_iid) {
         return invalid_instance_id;
     }
-    const auto identity = m_managed_child_publication_identities.find(iid);
-    if (identity == m_managed_child_publication_identities.end() ||
-        !identity->second.matches(custody_identity, process_iid, occurrence))
+    const auto process = m_transceiver_registry.find(process_iid);
+    if (process == m_transceiver_registry.end()) {
+        return invalid_instance_id;
+    }
+    const auto publication = process->second.find(iid);
+    if (publication == process->second.end() ||
+        !publication->second.managed_child_identity.matches(
+            custody_identity,
+            process_iid,
+            occurrence))
     {
         return invalid_instance_id;
     }
@@ -1158,17 +1165,13 @@ inline instance_id_type Coordinator::publish_transceiver_with_managed_child_iden
         return invalid_instance_id;
     }
 
-    auto pr_it       = m_transceiver_registry.find(process_iid);
-    auto entry       = Tn_type{ tid, assigned_name };
+    auto pr_it = m_transceiver_registry.find(process_iid);
+    auto entry = Transceiver_publication{
+        tid,
+        assigned_name,
+        managed_child_identity};
 
-    auto commit_managed_child_identity = [&]() {
-        if (managed_child_identity) {
-            m_managed_child_publication_identities.insert_or_assign(
-                iid, managed_child_identity);
-        }
-        else {
-            m_managed_child_publication_identities.erase(iid);
-        }
+    auto notify_publication_changed = [&]() {
         m_managed_child_publication_changed.notify_all();
     };
 
@@ -1231,8 +1234,8 @@ inline instance_id_type Coordinator::publish_transceiver_with_managed_child_iden
         }
 
         s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
-        pr[iid] = entry;
-        commit_managed_child_identity();
+        pr.emplace(iid, entry);
+        notify_publication_changed();
 
         // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
         // not when publishing a regular transceiver. Resetting here could interfere with shutdown.
@@ -1248,8 +1251,10 @@ inline instance_id_type Coordinator::publish_transceiver_with_managed_child_iden
         }
 
         s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
-        m_transceiver_registry[iid][iid] = entry;
-        commit_managed_child_identity();
+        map<instance_id_type, Transceiver_publication> process_registry;
+        process_registry.emplace(iid, entry);
+        m_transceiver_registry.emplace(iid, std::move(process_registry));
+        notify_publication_changed();
 
         // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
         // This handles recovery/restart scenarios where the process slot might still be marked as draining.
@@ -1292,23 +1297,51 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             s_tl_current_message->managed_child_occurrence;
     }
 
-    // Resolve exact custody authority without nesting m_child_custody_mutex
-    // under m_publish_mutex. It becomes authoritative only after the stored
-    // publication identity is compared under the publication lock below.
-    detail::Managed_child_occurrence_token exact_custody_occurrence;
-    if (has_incoming_managed_child_context &&
-        incoming_managed_child_identity && iid == process_iid && s_mproc)
-    {
-        exact_custody_occurrence =
-            s_mproc->child_custody_occurrence_token_exact(
-                incoming_managed_child_identity.custody_identity,
-                incoming_managed_child_identity.process_iid,
-                incoming_managed_child_identity.occurrence);
+    // Read the process publication identity before taking m_groups_mutex so
+    // exact custody lookup never nests m_child_custody_mutex under either
+    // coordinator lock. The publication is revalidated under m_publish_mutex
+    // immediately before it is extracted below.
+    Managed_child_publication_identity process_publication_identity;
+    detail::Managed_child_occurrence_token custody_occurrence;
+    if (iid == process_iid) {
+        {
+            std::lock_guard publish_lock(m_publish_mutex);
+            const auto process = m_transceiver_registry.find(process_iid);
+            if (process == m_transceiver_registry.end()) {
+                return false;
+            }
+            const auto publication = process->second.find(iid);
+            if (publication == process->second.end()) {
+                return false;
+            }
+            process_publication_identity =
+                publication->second.managed_child_identity;
+            if (has_incoming_managed_child_context &&
+                !process_publication_identity.matches(
+                    incoming_managed_child_identity.custody_identity,
+                    incoming_managed_child_identity.process_iid,
+                    incoming_managed_child_identity.occurrence))
+            {
+                return false;
+            }
+        }
+
+        if (process_publication_identity && s_mproc) {
+            custody_occurrence =
+                s_mproc->child_custody_occurrence_token_exact(
+                    process_publication_identity.custody_identity,
+                    process_publication_identity.process_iid,
+                    process_publication_identity.occurrence);
+            if (!custody_occurrence) {
+                return false;
+            }
+        }
+        else
+        if (!has_incoming_managed_child_context && s_mproc) {
+            custody_occurrence =
+                s_mproc->child_custody_occurrence_token(process_iid);
+        }
     }
-    auto custody_occurrence =
-        !has_incoming_managed_child_context && s_mproc
-            ? s_mproc->child_custody_occurrence_token(process_iid)
-            : detail::Managed_child_occurrence_token{};
 
     std::unique_lock groups_lock(m_groups_mutex, std::defer_lock);
     if (iid == process_iid) {
@@ -1330,23 +1363,20 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         return false;
     }
 
+    const auto& stored_identity = it->second.managed_child_identity;
     if (has_incoming_managed_child_context) {
-        const auto stored_identity =
-            m_managed_child_publication_identities.find(iid);
-        if (stored_identity == m_managed_child_publication_identities.end() ||
-            !stored_identity->second.matches(
+        if (!stored_identity.matches(
                 incoming_managed_child_identity.custody_identity,
                 incoming_managed_child_identity.process_iid,
                 incoming_managed_child_identity.occurrence))
         {
             return false;
         }
-        if (iid == process_iid) {
-            if (!exact_custody_occurrence) {
-                return false;
-            }
-            custody_occurrence = exact_custody_occurrence;
-        }
+    }
+    if (iid == process_iid &&
+        stored_identity != process_publication_identity)
+    {
+        return false;
     }
 
     // the transceiver is assumed to have a name, not an empty string
@@ -1359,9 +1389,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         scoped_map.get().erase(it->second.name);
     }
 
-    // keep a copy of the assigned name before deleting it
-    auto tn = it->second;
-    m_managed_child_publication_identities.erase(iid);
+    // Extract the complete publication record. Exact identity cannot outlive
+    // or disappear independently from the publication it authorizes.
+    auto publication = pr.extract(it);
+    auto tn = std::move(publication.mapped());
 
     coordinator_name_retired_for_test(iid, tn.name);
 
@@ -1407,11 +1438,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             }
         }
 
-        // remove the unpublished process's registry entry
-        for (const auto& [published_iid, published] : pr) {
-            (void)published;
-            m_managed_child_publication_identities.erase(published_iid);
-        }
+        // remove the unpublished process's remaining registry entries
         m_transceiver_registry.erase(pr_it);
         m_external_attached_processes.erase(process_iid);
         if (s_mproc) {

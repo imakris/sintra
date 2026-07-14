@@ -279,6 +279,41 @@ private:
             return custody_identity != 0 &&
                 process_iid != invalid_instance_id;
         }
+
+        bool operator==(const Managed_child_publication_identity&) const = default;
+    };
+
+    struct Transceiver_publication
+    {
+        type_id_type                       type_id = 0;
+        string                             name;
+        Managed_child_publication_identity managed_child_identity;
+
+        Transceiver_publication() = default;
+
+        Transceiver_publication(
+            type_id_type                              published_type_id,
+            const string&                             assigned_name,
+            const Managed_child_publication_identity& identity)
+            : type_id(published_type_id),
+              name(assigned_name),
+              managed_child_identity(identity)
+        {
+        }
+
+        Transceiver_publication(const Tn_type& publication)
+            : type_id(publication.type_id),
+              name(publication.name)
+        {
+        }
+
+        Transceiver_publication& operator=(const Tn_type& publication)
+        {
+            type_id = publication.type_id;
+            name = publication.name;
+            managed_child_identity = {};
+            return *this;
+        }
     };
 
     instance_id_type resolve_managed_child_instance_locked(
@@ -384,9 +419,6 @@ private:
     void unpublish_process_group(Process_group& group);
     bool add_external_process_to_standard_groups(instance_id_type process_iid);
 
-    // Access only after acquiring m_publish_mutex.
-    map<instance_id_type, Managed_child_publication_identity>
-                                                m_managed_child_publication_identities;
     detail::Coordinator_condition_variable      m_managed_child_publication_changed;
 
 public:
@@ -499,7 +531,7 @@ public:
         instance_id_type,                       // process instance id
         map<
             instance_id_type,                   // transceiver instance id (within the process)
-            Tn_type                             // type id and assigned name
+            Transceiver_publication             // publication and exact managed-child identity
         >
     >                                              m_transceiver_registry;
     // access only after acquiring m_groups_mutex
