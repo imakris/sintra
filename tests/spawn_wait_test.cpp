@@ -6,8 +6,8 @@
 // The test verifies:
 // - spawn_swarm_process returns accepted custody before readiness completes
 // - wait_for_readiness_until reports readiness through an absolute caller deadline
-// - Deadline expiry returns retained incomplete custody and requests cleanup
-// - The deadline case proves child launch and cleanup when the requested name never publishes
+// - Deadline observation returns readiness pending and release open without requesting cleanup
+// - A later explicit terminate_until call cleans up the child when the requested name never publishes
 //
 
 #include <sintra/sintra.h>
