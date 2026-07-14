@@ -1,5 +1,6 @@
 #include <sintra/sintra.h>
 
+#include "exact_child_test_support.h"
 #include "test_ring_utils.h"
 #include "test_utils.h"
 
@@ -10,6 +11,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -17,10 +19,6 @@
 
 #ifdef _WIN32
 #include <sintra/detail/sintra_windows.h>
-#else
-#include <cerrno>
-#include <signal.h>
-#include <sys/wait.h>
 #endif
 
 namespace {
@@ -30,19 +28,6 @@ constexpr const char* k_dir_arg        = "--ring-lifecycle-anchor-dir";
 constexpr const char* k_role_arg       = "--ring-lifecycle-anchor-role";
 constexpr const char* k_failure_prefix = "ring_lifecycle_anchor_race_process_test: ";
 constexpr const char* k_ring_name      = "ring_data";
-
-struct launched_process_t
-{
-    bool launched = false;
-    int  pid      = -1;
-};
-
-struct process_exit_t
-{
-    bool exited = false;
-    bool normal = false;
-    int  code   = -1;
-};
 
 std::filesystem::path marker_path(
     const std::filesystem::path& directory,
@@ -98,10 +83,11 @@ void unset_env_var(const char* name)
 #endif
 }
 
-launched_process_t launch_child(
+bool launch_child(
     const std::string&           binary_path,
     const std::filesystem::path& directory,
-    std::string_view             role)
+    std::string_view             role,
+    sintra::test::Exact_child&   child)
 {
     std::vector<std::string> args = {
         binary_path,
@@ -113,94 +99,150 @@ launched_process_t launch_child(
     };
 
     sintra::C_string_vector cargs(args);
-    sintra::Spawn_detached_options options;
-    int child_pid = -1;
-    options.prog          = binary_path.c_str();
-    options.argv          = cargs.v();
-    options.child_pid_out = &child_pid;
-    return {sintra::spawn_detached(options), child_pid};
+    return child.spawn(binary_path.c_str(), cargs.v());
 }
 
-process_exit_t wait_for_process_exit(
-    int                       pid,
-    std::chrono::milliseconds timeout,
-    bool                      terminate_on_timeout)
+bool settle_after_failure(
+    sintra::test::Exact_child& child,
+    const char*                role)
 {
-    if (pid <= 0) {
-        return {true, true, 0};
+    std::string diagnostic;
+    const bool settled = child.terminate_and_settle(diagnostic);
+    if (!settled) {
+        std::fprintf(stderr,
+            "%sfailed to settle %s child: %s\n",
+            k_failure_prefix,
+            role,
+            diagnostic.c_str());
     }
+    return settled;
+}
 
-#ifdef _WIN32
-    HANDLE handle = OpenProcess(
-        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
-        FALSE,
-        static_cast<DWORD>(pid));
-    if (!handle) {
-        return {true, true, 0};
-    }
+class child_settlement_guard
+{
+public:
+    child_settlement_guard(
+        sintra::test::Exact_child& holder,
+        sintra::test::Exact_child& joiner) noexcept
+        : m_holder(holder)
+        , m_joiner(joiner)
+    {}
 
-    const DWORD result = WaitForSingleObject(handle, static_cast<DWORD>(timeout.count()));
-    if (result == WAIT_OBJECT_0) {
-        DWORD      exit_code      = 1;
-        const bool have_exit_code = GetExitCodeProcess(handle, &exit_code) != 0;
-        CloseHandle(handle);
-        return {true, have_exit_code && exit_code == 0, static_cast<int>(exit_code)};
-    }
-    if (result == WAIT_TIMEOUT) {
-        if (terminate_on_timeout) {
-            TerminateProcess(handle, 1);
-            WaitForSingleObject(handle, 2000);
+    ~child_settlement_guard()
+    {
+        if (!m_active) {
+            return;
         }
-        CloseHandle(handle);
-        return {false, false, -1};
+        try {
+            (void)settle_after_failure(m_joiner, "joiner");
+            (void)settle_after_failure(m_holder, "holder");
+        }
+        catch (...) {
+            std::fprintf(stderr,
+                "%sexception while settling children during parent unwind\n",
+                k_failure_prefix);
+        }
     }
-    CloseHandle(handle);
-    return {false, false, -1};
-#else
+
+    void dismiss() noexcept { m_active = false; }
+
+private:
+    sintra::test::Exact_child& m_holder;
+    sintra::test::Exact_child& m_joiner;
+    bool                       m_active = true;
+};
+
+bool remains_running_for(
+    sintra::test::Exact_child& child,
+    std::chrono::milliseconds  duration,
+    const char*                role)
+{
+    const auto deadline = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto state = child.poll();
+        if (state == sintra::test::Exact_child_state::exited) {
+            const auto status = child.describe_status();
+            std::string settle_diagnostic;
+            const bool settled = child.settle_observed_exit(settle_diagnostic);
+            std::fprintf(stderr,
+                "%s%s child exited during required-running window: %s%s%s\n",
+                k_failure_prefix,
+                role,
+                status.c_str(),
+                settled ? "" : "; settlement failed: ",
+                settled ? "" : settle_diagnostic.c_str());
+            return false;
+        }
+        if (state == sintra::test::Exact_child_state::error) {
+            const auto observation = child.describe_status();
+            std::string cleanup_diagnostic;
+            const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+            std::fprintf(stderr,
+                "%s%s child observation failed during required-running window: %s; cleanup %s%s%s\n",
+                k_failure_prefix,
+                role,
+                observation.c_str(),
+                cleaned ? "settled" : "failed",
+                cleanup_diagnostic.empty() ? "" : ": ",
+                cleanup_diagnostic.c_str());
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return true;
+}
+
+bool wait_for_clean_child_exit(
+    sintra::test::Exact_child& child,
+    std::chrono::milliseconds  timeout,
+    const char*                role)
+{
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        int         status = 0;
-        const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
-        if (result == static_cast<pid_t>(pid)) {
-            return {
-                true,
-                WIFEXITED(status) && WEXITSTATUS(status) == 0,
-                WIFEXITED(status) ? WEXITSTATUS(status) : -1
-            };
+        const auto state = child.poll();
+        if (state == sintra::test::Exact_child_state::exited) {
+            const bool clean_exit = child.exited_with_code(0);
+            const auto status     = child.describe_status();
+            std::string settle_diagnostic;
+            const bool settled = child.settle_observed_exit(settle_diagnostic);
+            if (!clean_exit || !settled) {
+                std::fprintf(stderr,
+                    "%s%s child did not exit cleanly: %s%s%s\n",
+                    k_failure_prefix,
+                    role,
+                    status.c_str(),
+                    settled ? "" : "; settlement failed: ",
+                    settled ? "" : settle_diagnostic.c_str());
+            }
+            return clean_exit && settled;
         }
-        if (result == 0 || errno == EINTR) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
+        if (state == sintra::test::Exact_child_state::error) {
+            const auto observation = child.describe_status();
+            std::string cleanup_diagnostic;
+            const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+            std::fprintf(stderr,
+                "%s%s child observation failed: %s; cleanup %s%s%s\n",
+                k_failure_prefix,
+                role,
+                observation.c_str(),
+                cleaned ? "settled" : "failed",
+                cleanup_diagnostic.empty() ? "" : ": ",
+                cleanup_diagnostic.c_str());
+            return false;
         }
-        return {true, false, -1};
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    if (!terminate_on_timeout) {
-        return {false, false, -1};
-    }
-
-    const auto child_pid = static_cast<pid_t>(pid);
-    if (::kill(child_pid, SIGTERM) == 0) {
-        const auto reap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (std::chrono::steady_clock::now() < reap_deadline) {
-            int         status = 0;
-            const pid_t result = ::waitpid(child_pid, &status, WNOHANG);
-            if (result == child_pid) {
-                return {false, false, -1};
-            }
-            if (result == -1 && errno != EINTR) {
-                return {false, false, -1};
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        (void)::kill(child_pid, SIGKILL);
-        int status = 0;
-        while (::waitpid(child_pid, &status, 0) == -1 && errno == EINTR) {
-            continue;
-        }
-    }
-    return {false, false, -1};
-#endif
+    std::string cleanup_diagnostic;
+    const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
+    std::fprintf(stderr,
+        "%s%s child timed out; cleanup %s%s%s\n",
+        k_failure_prefix,
+        role,
+        cleaned ? "settled" : "failed",
+        cleanup_diagnostic.empty() ? "" : ": ",
+        cleanup_diagnostic.c_str());
+    return false;
 }
 
 bool read_control_attached(
@@ -385,6 +427,10 @@ int run_parent(const std::string& binary_path)
         marker_path(temp.path, "holder_locked_lifecycle");
 
     bool ok = true;
+    bool holder_requires_final_wait = true;
+    sintra::test::Exact_child holder(std::chrono::seconds(2));
+    sintra::test::Exact_child joiner(std::chrono::seconds(2));
+    child_settlement_guard    settlement_guard(holder, joiner);
 
     const std::string hook_data_file = temp.path.string() + "/" + k_ring_name;
     ok = set_env_var("SINTRA_RING_LIFECYCLE_RELEASE_DATA_FILE", hook_data_file) && ok;
@@ -395,14 +441,24 @@ int run_parent(const std::string& binary_path)
         "SINTRA_RING_LIFECYCLE_RELEASE_LOCKED_FILE",
         release_locked_file.string()) && ok;
 
-    auto holder = launch_child(binary_path, temp.path, "holder");
+    const bool holder_launched = launch_child(
+        binary_path,
+        temp.path,
+        "holder",
+        holder);
 
     unset_env_var("SINTRA_RING_LIFECYCLE_RELEASE_DATA_FILE");
     unset_env_var("SINTRA_RING_LIFECYCLE_RELEASE_WAITING_FILE");
     unset_env_var("SINTRA_RING_LIFECYCLE_RELEASE_LOCKED_FILE");
 
-    if (!holder.launched) {
-        std::fprintf(stderr, "%sfailed to launch holder\n", k_failure_prefix);
+    if (!holder_launched) {
+        const auto spawn_error = holder.error();
+        (void)settle_after_failure(holder, "holder");
+        settlement_guard.dismiss();
+        std::fprintf(stderr,
+            "%sfailed to launch holder: %s\n",
+            k_failure_prefix,
+            spawn_error.c_str());
         return 1;
     }
 
@@ -419,15 +475,26 @@ int run_parent(const std::string& binary_path)
     ok = set_env_var("SINTRA_RING_LIFECYCLE_PAUSED_FILE", paused_file.string()) && ok;
     ok = set_env_var("SINTRA_RING_LIFECYCLE_RESUME_FILE", resume_file.string()) && ok;
 
-    auto joiner = launch_child(binary_path, temp.path, "joiner");
+    const bool joiner_launched = launch_child(
+        binary_path,
+        temp.path,
+        "joiner",
+        joiner);
 
     unset_env_var("SINTRA_RING_LIFECYCLE_PAUSE_DATA_FILE");
     unset_env_var("SINTRA_RING_LIFECYCLE_PAUSED_FILE");
     unset_env_var("SINTRA_RING_LIFECYCLE_RESUME_FILE");
 
-    if (!joiner.launched) {
-        std::fprintf(stderr, "%sfailed to launch joiner\n", k_failure_prefix);
-        ok = false;
+    if (!joiner_launched) {
+        const auto spawn_error = joiner.error();
+        (void)settle_after_failure(joiner, "joiner");
+        (void)settle_after_failure(holder, "holder");
+        settlement_guard.dismiss();
+        std::fprintf(stderr,
+            "%sfailed to launch joiner: %s\n",
+            k_failure_prefix,
+            spawn_error.c_str());
+        return 1;
     }
 
     if (ok &&
@@ -464,12 +531,12 @@ int run_parent(const std::string& binary_path)
             ok = false;
         }
 
-        const auto early_exit =
-            wait_for_process_exit(holder.pid, std::chrono::milliseconds(500), false);
-        if (early_exit.exited) {
-            std::fprintf(stderr,
-                "%sholder exited before paused joiner resumed\n",
-                k_failure_prefix);
+        if (!remains_running_for(
+                holder,
+                std::chrono::milliseconds(500),
+                "holder"))
+        {
+            holder_requires_final_wait = false;
             ok = false;
         }
     }
@@ -503,8 +570,7 @@ int run_parent(const std::string& binary_path)
         ok = false;
     }
 
-    if (joiner.launched &&
-        !sintra::test::wait_for_file(
+    if (!sintra::test::wait_for_file(
             marker_path(temp.path, "joiner_attached"),
             std::chrono::seconds(10),
             std::chrono::milliseconds(5)))
@@ -513,16 +579,13 @@ int run_parent(const std::string& binary_path)
         ok = false;
     }
 
-    if (holder.launched) {
-        const auto holder_exit =
-            wait_for_process_exit(holder.pid, std::chrono::seconds(10), true);
-        if (!holder_exit.exited || !holder_exit.normal) {
-            std::fprintf(stderr,
-                "%sholder did not exit cleanly, code %d\n",
-                k_failure_prefix,
-                holder_exit.code);
-            ok = false;
-        }
+    if (holder_requires_final_wait &&
+        !wait_for_clean_child_exit(
+            holder,
+            std::chrono::seconds(10),
+            "holder"))
+    {
+        ok = false;
     }
 
     if (!std::filesystem::exists(release_locked_file)) {
@@ -552,16 +615,12 @@ int run_parent(const std::string& binary_path)
         ok = false;
     }
 
-    if (joiner.launched) {
-        const auto joiner_exit =
-            wait_for_process_exit(joiner.pid, std::chrono::seconds(10), true);
-        if (!joiner_exit.exited || !joiner_exit.normal) {
-            std::fprintf(stderr,
-                "%sjoiner did not exit cleanly, code %d\n",
-                k_failure_prefix,
-                joiner_exit.code);
-            ok = false;
-        }
+    if (!wait_for_clean_child_exit(
+            joiner,
+            std::chrono::seconds(10),
+            "joiner"))
+    {
+        ok = false;
     }
 
     for (int retry = 0; retry < 40; ++retry) {
@@ -614,6 +673,7 @@ int run_parent(const std::string& binary_path)
         ok = false;
     }
 
+    settlement_guard.dismiss();
     return ok ? 0 : 1;
 }
 
@@ -625,5 +685,14 @@ int main(int argc, char* argv[])
         return run_child(argc, argv);
     }
 
-    return run_parent(sintra::test::get_binary_path(argc, argv));
+    try {
+        return run_parent(sintra::test::get_binary_path(argc, argv));
+    }
+    catch (const std::exception& e) {
+        std::fprintf(stderr, "%sparent exception: %s\n", k_failure_prefix, e.what());
+    }
+    catch (...) {
+        std::fprintf(stderr, "%sparent exception: unknown\n", k_failure_prefix);
+    }
+    return 1;
 }
