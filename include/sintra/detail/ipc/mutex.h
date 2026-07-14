@@ -330,7 +330,7 @@ private:
         owner_token expected = m_owner.load(std::memory_order_acquire);
 
         // Recovery path: previous owner is gone (process crashed/exited).
-        if (expected != k_unowned && try_recover(expected, self)) {
+        if (expected != k_unowned && try_recover(expected)) {
             if (try_acquire_unowned_when_no_recovery(self)) {
                 return true;
             }
@@ -364,9 +364,8 @@ private:
     }
 
     // Attempt robust recovery if the observed owner appears to be dead.
-    bool try_recover(owner_token observed_owner, owner_token self)
+    bool try_recover(owner_token observed_owner)
     {
-        (void)self; // self is currently unused but kept for symmetry/diagnostics
         if (observed_owner == k_unowned) {
             return false;
         }
