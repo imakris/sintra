@@ -175,8 +175,11 @@ Threading and lifecycle:
   recovery and monotonically asks Sintra's retained custody owner to drain the
   exact admitted occurrences, release their lifelines, retire publication and
   communication authoritatively, and confirm OS exit. The deadline bounds only
-  the caller's wait; an incomplete return retains ownership and cleanup keeps
-  running.
+  the caller's wait; an incomplete return retains ownership and cleanup normally
+  continues. A recorded release-attempt blocker means its associated attempt
+  stopped retryably. While release remains incomplete, callers should repeat an
+  idempotent release or termination call to retry. A retained historical
+  `last_failure` alone does not prove that a later or current attempt is stopped.
 - Repeated release and termination calls operate on the same opaque record; they do not
   reconstruct authority from a process id or name. A cleanup escalation cannot
   be downgraded by a later graceful release request.

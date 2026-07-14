@@ -3194,6 +3194,48 @@ inline void Managed_process::fail_release_attempt(
         << " message='" << failure.message << "'\n";
 }
 
+inline void Managed_process::record_release_attempt_blocker(
+    const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+    uint64_t release_attempt_generation,
+    instance_id_type process_instance_id,
+    uint32_t occurrence,
+    const char* message)
+{
+    if (!custody) {
+        return;
+    }
+
+    Managed_child_failure failure{
+        Managed_child_failure_kind::release_worker_execution,
+        occurrence,
+        0,
+        message};
+    uint64_t custody_identity = 0;
+    bool recorded = false;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        if (custody->release_state.mark_failing(
+                release_attempt_generation))
+        {
+            custody_identity = custody->identity;
+            custody->last_failure = std::move(failure);
+            recorded = true;
+        }
+    }
+    if (!recorded) {
+        return;
+    }
+
+    custody->changed.notify_all();
+    Log_stream(log_level::warning)
+        << "Managed-child release attempt blocked: custody="
+        << custody_identity
+        << " generation=" << release_attempt_generation
+        << " process_instance_id=" << process_instance_id
+        << " occurrence=" << occurrence
+        << " message='" << message << "'\n";
+}
+
 inline void Managed_process::start_child_custody_worker(
     std::function<void()> worker,
     const char* failure_stage,
@@ -3785,10 +3827,12 @@ inline void Managed_process::execute_child_custody_release_attempt(
                         occurrence->transport.ready_to_retire();
                 }
                 if (!native_terminal && !cleanup_child_native(token)) {
-                    std::lock_guard<std::mutex> custody_lock(custody->mutex);
-                    custody->release_state.mark_failing(
-                        release_attempt_generation);
-                    custody->changed.notify_all();
+                    record_release_attempt_blocker(
+                        custody,
+                        release_attempt_generation,
+                        target.process_instance_id,
+                        target.occurrence,
+                        "Managed-child native cleanup remained incomplete");
                     historical_cleanup_complete = false;
                     break;
                 }
@@ -4246,17 +4290,26 @@ inline void Managed_process::reset_child_communication_retirement(
     if (!custody) {
         return;
     }
-    std::lock_guard<std::mutex> lock(custody->mutex);
-    for (auto& occurrence : custody->occurrences) {
-        if (occurrence.process_instance_id == token.process_instance_id &&
-            occurrence.occurrence == token.occurrence &&
-            occurrence.transport.reset_retirement())
-        {
-            custody->release_state.mark_failing(
-                release_attempt_generation);
-            custody->changed.notify_all();
-            return;
+    bool retirement_reset = false;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        for (auto& occurrence : custody->occurrences) {
+            if (occurrence.process_instance_id == token.process_instance_id &&
+                occurrence.occurrence == token.occurrence &&
+                occurrence.transport.reset_retirement())
+            {
+                retirement_reset = true;
+                break;
+            }
         }
+    }
+    if (retirement_reset) {
+        record_release_attempt_blocker(
+            custody,
+            release_attempt_generation,
+            token.process_instance_id,
+            token.occurrence,
+            "Managed-child communication retirement remained incomplete");
     }
 }
 
@@ -4327,12 +4380,12 @@ inline bool Managed_process::execute_current_slot_child_retirement(
             {
                 return true;
             }
-            {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                custody->release_state.mark_failing(
-                    release_attempt_generation);
-            }
-            custody->changed.notify_all();
+            record_release_attempt_blocker(
+                custody,
+                release_attempt_generation,
+                process_iid,
+                occurrence,
+                "Managed-child native cleanup remained incomplete");
             return false;
         };
         if (release_mode == detail::Release_mode::cleanup) {
@@ -4364,10 +4417,12 @@ inline bool Managed_process::execute_current_slot_child_retirement(
                 capture_child_communication_retirement_authority(
                     token, retiring_reader);
             if (!authority_captured) {
-                std::lock_guard<std::mutex> lock(custody->mutex);
-                custody->release_state.mark_failing(
-                    release_attempt_generation);
-                custody->changed.notify_all();
+                record_release_attempt_blocker(
+                    custody,
+                    release_attempt_generation,
+                    process_iid,
+                    occurrence,
+                    "Managed-child communication retirement authority unavailable");
                 return false;
             }
             uint64_t claimed_release_attempt_generation = 0;

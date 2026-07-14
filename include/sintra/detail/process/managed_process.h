@@ -1226,6 +1226,12 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uint64_t release_attempt_generation,
         Managed_child_failure failure,
         instance_id_type process_instance_id);
+    void record_release_attempt_blocker(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        uint64_t release_attempt_generation,
+        instance_id_type process_instance_id,
+        uint32_t occurrence,
+        const char* message);
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         detail::Release_mode release_mode = detail::Release_mode::passive);

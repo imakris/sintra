@@ -1413,6 +1413,12 @@ bool run_split_transport_retirement(
         !(*held_facts)[0] && (*held_facts)[1] && !(*held_facts)[2] &&
         first_release.release_state ==
             sintra::Managed_child_release_state::requested && stop_deadline_bounded;
+    const bool first_blocker_reported =
+        first_release.last_failure.kind ==
+            sintra::Managed_child_failure_kind::release_worker_execution &&
+        first_release.last_failure.occurrence == 0 &&
+        first_release.last_failure.message.find("communication retirement") !=
+            std::string::npos;
 
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
@@ -1646,7 +1652,8 @@ bool run_split_transport_retirement(
     std::filesystem::remove(retry_finalized, ec);
     std::filesystem::remove(retry_exit, ec);
 
-    const bool valid = identity && release_written && first_pass_ended && after_join &&
+    const bool valid = identity && release_written && first_pass_ended &&
+        first_blocker_reported && after_join &&
         released.release_state == sintra::Managed_child_release_state::complete &&
         released.created_occurrences == 1 &&
         released.exited_occurrences == 1 && survivor_absent && reap_seen &&
@@ -1654,7 +1661,9 @@ bool run_split_transport_retirement(
     if (!valid) {
         std::fprintf(stderr,
             "SPLIT_TRANSPORT_INVALID identity=%d release_written=%d first_pass_ended=%d "
-            "stop_deadline_bounded=%d after_join=%d release_complete=%d created=%zu exited=%zu "
+            "stop_deadline_bounded=%d blocker_reported=%d blocker_kind=%d "
+            "blocker_occurrence=%u blocker_message='%s' after_join=%d "
+            "release_complete=%d created=%zu exited=%zu "
             "survivor_absent=%d reap_seen=%d reap_normal=%d worker_retry=%d "
             "worker_identity=%d worker_finalize_release_written=%d "
             "worker_exit_release_written=%d worker_attempt_started=%d "
@@ -1674,6 +1683,10 @@ bool run_split_transport_retirement(
             release_written ? 1 : 0,
             first_pass_ended ? 1 : 0,
             stop_deadline_bounded ? 1 : 0,
+            first_blocker_reported ? 1 : 0,
+            static_cast<int>(first_release.last_failure.kind),
+            first_release.last_failure.occurrence,
+            first_release.last_failure.message.c_str(),
             after_join ? 1 : 0,
             released.release_state ==
                 sintra::Managed_child_release_state::complete ? 1 : 0,
