@@ -141,9 +141,9 @@ fs::path pid_path(const fs::path& shared_path, uint32_t occurrence)
 
 bool write_pid(const fs::path& path, int pid)
 {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out << pid << '\n';
-    return static_cast<bool>(out);
+    return sintra::test::managed_child::write_complete_file(
+        path,
+        std::to_string(pid) + '\n');
 }
 
 int read_pid(const fs::path& path)
