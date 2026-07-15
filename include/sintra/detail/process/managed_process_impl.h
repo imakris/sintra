@@ -3315,21 +3315,27 @@ inline void Managed_process::retire_child_custody_if_complete(
             return;
         }
     }
-    std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-    auto record_it = m_child_custodies.find(custody->identity);
-    if (record_it != m_child_custodies.end() && record_it->second == custody) {
-        m_child_custodies.erase(record_it);
-    }
-    for (auto it = m_child_custody_by_process.begin();
-         it != m_child_custody_by_process.end();)
     {
-        if (it->second.custody.lock() == custody) {
-            it = m_child_custody_by_process.erase(it);
+        std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+        auto record_it = m_child_custodies.find(custody->identity);
+        if (record_it == m_child_custodies.end() ||
+            record_it->second != custody)
+        {
+            return;
         }
-        else {
-            ++it;
+        m_child_custodies.erase(record_it);
+        for (auto it = m_child_custody_by_process.begin();
+             it != m_child_custody_by_process.end();)
+        {
+            if (it->second.custody.lock() == custody) {
+                it = m_child_custody_by_process.erase(it);
+            }
+            else {
+                ++it;
+            }
         }
     }
+    m_child_custody_changed.notify_all();
 }
 
 namespace detail {
@@ -3979,34 +3985,18 @@ inline void Managed_process::request_all_child_custody_releases()
 
 inline bool Managed_process::all_child_custodies_released() const
 {
-    std::vector<std::shared_ptr<detail::Managed_child_custody_record>> custodies;
-    {
-        std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-        for (const auto& entry : m_child_custodies) {
-            custodies.push_back(entry.second);
-        }
-    }
-    for (const auto& custody : custodies) {
-        std::lock_guard<std::mutex> lock(custody->mutex);
-        if (!custody->release_state.released() ||
-            custody->readiness == detail::Readiness_phase::pending)
-        {
-            return false;
-        }
-    }
-    return true;
+    std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+    return m_child_custodies.empty();
 }
 
 inline bool Managed_process::wait_for_all_child_custodies(
     std::chrono::steady_clock::time_point deadline)
 {
-    while (!all_child_custodies_released()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    return true;
+    // Finalization closes teardown admission before waiting, so registry size
+    // can only move toward zero here.
+    std::unique_lock<std::mutex> lock(m_child_custody_mutex);
+    return m_child_custody_changed.wait_until(
+        lock, deadline, [this] { return m_child_custodies.empty(); });
 }
 
 inline bool Managed_process::child_custody_allows_recovery(

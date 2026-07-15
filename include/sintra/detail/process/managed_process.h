@@ -1325,6 +1325,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     mutable std::mutex                  m_cached_spawns_mutex;
 
     mutable std::mutex                  m_child_custody_mutex;
+    std::condition_variable             m_child_custody_changed;
     uint64_t                            m_next_child_custody_identity = 1;
     std::map<uint64_t, std::shared_ptr<detail::Managed_child_custody_record>>
                                         m_child_custodies;
