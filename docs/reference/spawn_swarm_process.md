@@ -83,6 +83,46 @@ struct Managed_child_status
     Managed_child_failure last_failure;
 };
 
+struct Managed_child_occurrence_identity
+{
+    instance_id_type process_instance_id = invalid_instance_id;
+    std::uint32_t occurrence = 0;
+};
+
+enum class Managed_child_exit_status_kind
+{
+    unavailable,
+    exited,
+    signaled
+};
+
+struct Managed_child_exit
+{
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_exit_status_kind status_kind =
+        Managed_child_exit_status_kind::unavailable;
+    std::uint32_t status = 0;
+    std::uint32_t native_status = 0;
+    bool native_status_available = false;
+};
+
+using Managed_child_exit_callback =
+    std::function<void(const Managed_child_exit&)>;
+
+class Managed_child_exit_subscription
+{
+public:
+    explicit operator bool() const noexcept;
+    void unsubscribe() noexcept;
+};
+
+struct Managed_child_exit_observation
+{
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_exit_subscription subscription;
+    explicit operator bool() const noexcept;
+};
+
 class Managed_child_custody
 {
 public:
@@ -91,6 +131,8 @@ public:
     Managed_child_status status() const;
     Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_exit_observation observe_latest_created_exit(
+        Managed_child_exit_callback callback) const;
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
@@ -141,6 +183,30 @@ Contract:
   while retained cleanup continues through exact exit confirmation.
 - Calls made while a lifecycle teardown protocol is active are rejected and
   return an empty handle with a warning logged; rejection creates no child.
+- `observe_latest_created_exit()` atomically selects the most recently admitted
+  occurrence for which OS creation actually succeeded. The returned immutable
+  `(process_instance_id, occurrence)` identifies that exact occurrence. The
+  subscription never follows a later recovery occurrence; call the method
+  again after a newer occurrence is created to observe that occurrence.
+- A newer admitted no-child occurrence does not displace the latest created
+  occurrence. If no occurrence was created, the observation is empty and the
+  callback is not retained. Older exited occurrences may be skipped by the
+  latest-created selection.
+- Exit observation requires the active coordinator runtime that created the
+  custody. Registration during teardown, after `shutdown()`, or after a later
+  `init()` when the custody belongs to an earlier runtime returns an empty
+  observation and does not retain the callback. While the owning runtime
+  remains active, registration after the selected occurrence exited schedules
+  exactly one late delivery.
+- `Managed_child_exit::status` is the portable normalized value selected by
+  `status_kind`: an exit code for `exited`, a signal number for `signaled`, and
+  zero when unavailable or not normalized. Windows reports every termination
+  as `exited` because its process status does not distinguish forced exit.
+  `native_status`, when available, preserves the complete Windows 32-bit exit
+  code or the POSIX wait-status bit pattern. Prefer `status_kind` and `status`
+  unless platform-specific diagnostics are required. An unexpected POSIX
+  wait-status classification reports `unavailable` while retaining that native
+  bit pattern.
 
 Threading and lifecycle:
 
@@ -154,6 +220,17 @@ Threading and lifecycle:
 - The custody handle's boolean conversion is the sole validity and durable
   acceptance fact. Status does not duplicate it. An empty handle's default
   status is `not_requested` / `open`.
+- Exit observations and subscriptions are move-only. Their boolean conversion
+  reports successful registration. Destroying the subscription or calling
+  `unsubscribe()` cancels pending delivery; an external unsubscribe waits for
+  an executing callback, while self-unsubscription completes after the
+  callback returns.
+- Exit callbacks run once on a Sintra-managed lifecycle thread without custody
+  locks held. Delivery may start before registration returns, observer ordering
+  is unspecified, and callback exceptions are logged without retry. Callbacks
+  must not initiate Sintra teardown and should post application work to the
+  caller's executor. `shutdown()`, `leave()`, and `detail::finalize()` throw
+  `std::logic_error` before teardown admission changes when called there.
 - `readiness_state` is `not_requested` when no readiness name was configured,
   `pending` while the exact target may still be observed, `reached` once the
   coordinator observed it, and `observation_stopped` when the target can no
@@ -221,6 +298,7 @@ Example source:
 - [tests/spawn_detached_test.cpp](../../tests/spawn_detached_test.cpp)
 - [tests/lifeline_basic_test.cpp](../../tests/lifeline_basic_test.cpp)
 - [tests/managed_child_public_cleanup_contract_test.cpp](../../tests/managed_child_public_cleanup_contract_test.cpp)
+- [tests/managed_child_exact_exit_observation_contract_test.cpp](../../tests/managed_child_exact_exit_observation_contract_test.cpp)
 
 See also:
 

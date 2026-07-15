@@ -12,6 +12,7 @@
 #include "transceiver_impl.h"
 #include "utility.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
@@ -48,6 +49,8 @@ namespace test_hooks {
 
 inline constexpr const char* k_stage_create_invitation_pre_admission_lock =
     "create_external_process_invitation/pre_admission_lock";
+inline constexpr const char* k_stage_observe_managed_child_exit_selected =
+    "observe_managed_child_exit/selected";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Runtime_stage_callback = void (*)(const char*);
@@ -331,6 +334,38 @@ public:
     Managed_child_status status() const;
     Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
+
+    /// Observes the latest OS-created occurrence retained by this custody.
+    ///
+    /// Selection and registration are atomic with respect to native exit. The
+    /// returned subscription follows only the selected immutable occurrence;
+    /// it never follows a later recovery occurrence. Consequently, selecting
+    /// the latest occurrence may intentionally skip older exited occurrences.
+    /// If no OS-created occurrence exists, the result is empty and the
+    /// callback is not retained. Registering after the selected occurrence has
+    /// exited still schedules one delivery while the coordinator runtime is
+    /// active. Registration during teardown, after shutdown, or through a
+    /// custody retained from an earlier runtime returns empty and does not
+    /// retain the callback.
+    ///
+    /// This observation is OS-authoritative. The communication-dependent
+    /// `terminated_abnormally` signal, coordinator publication lifecycle
+    /// handler, and aggregate custody status do not provide equivalent
+    /// exact-occurrence exit evidence.
+    ///
+    /// Callbacks run on a Sintra-managed lifecycle thread without custody
+    /// locks held. Delivery may begin before this function returns, and no
+    /// ordering between multiple observers is guaranteed. A callback must not
+    /// initiate Sintra runtime teardown; it should post application work to the
+    /// caller's executor instead. Teardown attempts throw `std::logic_error`
+    /// before teardown admission changes.
+    /// Destroying or unsubscribing externally waits for an executing callback
+    /// to finish. Self-unsubscription is deferred until that callback returns.
+    /// Callback exceptions are logged, are not retried, and do not escape the
+    /// worker.
+    Managed_child_exit_observation observe_latest_created_exit(
+        Managed_child_exit_callback callback) const;
+
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
@@ -710,6 +745,16 @@ inline void validate_leave_context()
     }
 }
 
+inline void validate_managed_child_exit_callback_teardown(
+    const char* api_name)
+{
+    if (tl_in_managed_child_exit_callback) {
+        throw std::logic_error(
+            std::string(api_name) +
+            " must not be called from a managed-child exit callback.");
+    }
+}
+
 /// Low-level teardown for single-process programs, exceptional/error
 /// paths, or test code that cannot participate in a symmetric shutdown.
 /// Ordinary multi-process callers should use `shutdown()` instead.
@@ -719,6 +764,8 @@ inline void validate_leave_context()
 /// path is an illegal composition.
 inline bool finalize()
 {
+    validate_managed_child_exit_callback_teardown(
+        "sintra::detail::finalize()");
     close_teardown_admission_and_claim_state(
         shutdown_protocol_state::finalizing,
         "sintra::detail::finalize()");
@@ -870,6 +917,8 @@ inline bool shutdown()
 
 inline bool shutdown(const shutdown_options& options)
 {
+    detail::validate_managed_child_exit_callback_teardown(
+        "sintra::shutdown()");
     const bool resume_finalization =
         detail::close_teardown_admission_for_shutdown("sintra::shutdown()");
 
@@ -983,6 +1032,8 @@ inline bool shutdown(const shutdown_options& options)
 
 inline bool leave()
 {
+    detail::validate_managed_child_exit_callback_teardown(
+        "sintra::leave()");
     detail::validate_leave_context();
     detail::close_teardown_admission_and_claim_state(
         detail::shutdown_protocol_state::local_departure_entered,
@@ -1106,6 +1157,48 @@ inline bool cancel_external_process_invitation(const External_process_invitation
     return s_coord->cancel_external_process_invitation(
         invitation.process_instance_id,
         invitation.token);
+}
+
+inline Managed_child_exit_subscription::Managed_child_exit_subscription(
+    std::shared_ptr<detail::Managed_child_exit_subscription_state> state)
+:
+    m_state(std::move(state))
+{}
+
+inline Managed_child_exit_subscription::~Managed_child_exit_subscription()
+{
+    unsubscribe();
+}
+
+inline Managed_child_exit_subscription::Managed_child_exit_subscription(
+    Managed_child_exit_subscription&& other) noexcept
+:
+    m_state(std::move(other.m_state))
+{}
+
+inline Managed_child_exit_subscription&
+Managed_child_exit_subscription::operator=(
+    Managed_child_exit_subscription&& other) noexcept
+{
+    if (this == &other) {
+        return *this;
+    }
+    unsubscribe();
+    m_state = std::move(other.m_state);
+    return *this;
+}
+
+inline Managed_child_exit_subscription::operator bool() const noexcept
+{
+    return static_cast<bool>(m_state);
+}
+
+inline void Managed_child_exit_subscription::unsubscribe() noexcept
+{
+    auto state = std::move(m_state);
+    if (state) {
+        state->unsubscribe();
+    }
 }
 
 // Accepts durable logical custody before authorizing OS creation.  Readiness is
@@ -1263,6 +1356,16 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 << " already has unresolved custody\n";
             return {};
         }
+
+        const auto occurrence =
+            s_mproc->allocate_child_custody_occurrence(piid);
+        if (!occurrence) {
+            Log_stream(log_level::error)
+                << "spawn_swarm_process: occurrence counter exhausted for process "
+                << static_cast<unsigned long long>(piid) << '\n';
+            return {};
+        }
+        spawn_args.occurrence = *occurrence;
 
         auto args = options.args;
         auto argv0_matches = [&]() {
@@ -1530,6 +1633,84 @@ inline Managed_child_status Managed_child_custody::wait_for_readiness_until(
         }
     }
     return status();
+}
+
+inline Managed_child_exit_observation
+Managed_child_custody::observe_latest_created_exit(
+    Managed_child_exit_callback callback) const
+{
+    if (!m_record || !callback) {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> admission_lock(
+        detail::s_teardown_admission_mutex);
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
+        !s_mproc)
+    {
+        return {};
+    }
+    const auto runtime_lifetime = m_record->runtime_lifetime.lock();
+    if (!runtime_lifetime || runtime_lifetime != s_mproc->m_runtime_lifetime) {
+        return {};
+    }
+
+    Managed_child_occurrence_identity identity;
+    std::shared_ptr<detail::Managed_child_exit_subscription_state> state;
+    std::optional<Managed_child_exit> replay;
+    {
+        std::lock_guard<std::mutex> lock(m_record->mutex);
+        const auto selected = std::find_if(
+            m_record->occurrences.rbegin(),
+            m_record->occurrences.rend(),
+            [](const detail::Managed_child_occurrence_record& candidate) {
+                return candidate.native.created();
+            });
+        if (selected == m_record->occurrences.rend()) {
+            return {};
+        }
+        // Establish delivery custody before the callback becomes observable.
+        // A thread-start failure rejects registration instead of losing a
+        // callback after the exit transition has claimed it.
+        if (!s_mproc->ensure_child_exit_dispatcher()) {
+            return {};
+        }
+
+        identity = {
+            selected->process_instance_id,
+            selected->occurrence,
+        };
+        state = std::make_shared<
+            detail::Managed_child_exit_subscription_state>(
+                m_record,
+                identity,
+                std::move(callback));
+        detail::runtime_stage_for_test(
+            detail::test_hooks::k_stage_observe_managed_child_exit_selected);
+        if (selected->native.exited()) {
+            replay = detail::make_managed_child_exit(
+                identity,
+                selected->native.wait_status(),
+                selected->native.wait_status_available());
+        }
+        else {
+            selected->exit_subscriptions.push_back(state);
+        }
+    }
+
+    Managed_child_exit_observation observation;
+    observation.occurrence = identity;
+    observation.subscription = Managed_child_exit_subscription(state);
+    if (replay.has_value()) {
+        try {
+            s_mproc->dispatch_child_exit_subscription(state, *replay);
+        }
+        catch (...) {
+            observation.subscription.unsubscribe();
+            return {};
+        }
+    }
+    return observation;
 }
 
 inline Managed_child_status Managed_child_custody::wait_until_released(

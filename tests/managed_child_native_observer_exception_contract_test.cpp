@@ -37,6 +37,7 @@ constexpr std::string_view k_child_flag =
 constexpr std::string_view k_case_flag = "--observer-case";
 constexpr std::string_view k_nonce_flag = "--observer-nonce";
 constexpr auto k_timeout = 10s;
+constexpr std::uint32_t k_high_bit_exit_status = 0xc0000005u;
 
 struct Ready_target : sintra::Derived_transceiver<Ready_target>
 {};
@@ -202,10 +203,17 @@ int run_child(
     {
         return 2;
     }
-    return sintra::test::wait_for_file(
-        case_file(shared_directory, "exit", case_number), k_timeout, 10ms)
-        ? 0
-        : 3;
+    if (!sintra::test::wait_for_file(
+            case_file(shared_directory, "exit", case_number), k_timeout, 10ms))
+    {
+        return 3;
+    }
+#ifdef _WIN32
+    ExitProcess(k_high_bit_exit_status);
+    return 0;
+#else
+    return 0;
+#endif
 }
 
 struct Case_result
@@ -220,12 +228,15 @@ struct Case_result
     bool handle_closed_once = false;
     bool survivor_absent = false;
     bool registration_ordered = false;
+    bool exit_observation = false;
+    bool callback_reentry = false;
 
     bool passed() const noexcept
     {
         return setup && failure_injected && typed_failure &&
             fallback_available && release_complete && exact_exit_once &&
-            handle_closed_once && survivor_absent && registration_ordered;
+            handle_closed_once && survivor_absent && registration_ordered &&
+            exit_observation && callback_reentry;
     }
 };
 
@@ -235,7 +246,9 @@ Case_result run_case(
     unsigned          case_number,
     const char*       failure_stage,
     bool              verify_finalize_retry,
-    bool              cancel_before_registration = false)
+    bool              cancel_before_registration = false,
+    bool              reenter_release = false,
+    bool              reenter_terminate = false)
 {
     Case_result result;
     const auto process_iid = sintra::compose_instance(61u + case_number, 1ull);
@@ -307,6 +320,33 @@ Case_result run_case(
         && child_handle && WaitForSingleObject(child_handle, 0) == WAIT_TIMEOUT
 #endif
         ;
+
+    std::mutex exit_mutex;
+    std::condition_variable exit_changed;
+    unsigned exit_callback_count = 0;
+    sintra::Managed_child_exit exit_event;
+    auto exit_observation = custody.observe_latest_created_exit(
+        [&](const sintra::Managed_child_exit& event) {
+            sintra::Managed_child_status callback_status;
+            // Fallback delivery must not run on the release worker awaited here.
+            if (reenter_terminate) {
+                callback_status = custody.terminate_until(
+                    std::chrono::steady_clock::now() + 1500ms);
+            }
+            else if (reenter_release) {
+                callback_status = custody.release_until(
+                    std::chrono::steady_clock::now() + 1500ms);
+            }
+            std::lock_guard<std::mutex> lock(exit_mutex);
+            exit_event = event;
+            ++exit_callback_count;
+            result.callback_reentry =
+                (!reenter_release && !reenter_terminate) ||
+                callback_status.release_state ==
+                    sintra::Managed_child_release_state::complete;
+            exit_changed.notify_all();
+        });
+    result.setup = result.setup && static_cast<bool>(exit_observation);
 
     sintra::Managed_child_status passive;
     std::thread passive_caller([&]() {
@@ -382,6 +422,26 @@ Case_result run_case(
     }
     result.exact_exit_once = complete.created_occurrences == 1 &&
         complete.exited_occurrences == 1;
+    {
+        std::unique_lock<std::mutex> lock(exit_mutex);
+        (void)exit_changed.wait_for(lock, 2s, [&]() {
+            return exit_callback_count != 0;
+        });
+        bool exit_status_valid = false;
+#ifdef _WIN32
+        exit_status_valid = exit_event.status_kind ==
+                sintra::Managed_child_exit_status_kind::exited &&
+            exit_event.native_status_available &&
+            exit_event.status == exit_code &&
+            exit_event.native_status == exit_code &&
+            exit_code == k_high_bit_exit_status;
+#endif
+        result.exit_observation = exit_callback_count == 1 &&
+            exit_event.occurrence.process_instance_id == process_iid &&
+            exit_event.occurrence.occurrence == 0 &&
+            exit_status_valid;
+    }
+    exit_observation.subscription.unsubscribe();
     result.survivor_absent = !exact_process_is_live(
         identity.pid, identity.start_stamp);
 
@@ -427,7 +487,9 @@ int run_root(
             i,
             failure_stages[i],
             i == 3,
-            i == 2);
+            i == 2,
+            i == 0,
+            i == 1);
         if (!results[i].passed() ||
             (i == 3 && !results[i].first_finalize_incomplete))
         {
@@ -435,7 +497,8 @@ int run_root(
                 stderr,
                 "NATIVE_OBSERVER_EXCEPTION_INVALID case=%u setup=%d "
                 "injected=%d typed=%d fallback=%d finalize=%d release=%d "
-                "exit=%d close=%d survivor_absent=%d registration=%d\n",
+                "exit=%d close=%d survivor_absent=%d registration=%d "
+                "observation=%d callback_reentry=%d\n",
                 i,
                 results[i].setup ? 1 : 0,
                 results[i].failure_injected ? 1 : 0,
@@ -446,7 +509,9 @@ int run_root(
                 results[i].exact_exit_once ? 1 : 0,
                 results[i].handle_closed_once ? 1 : 0,
                 results[i].survivor_absent ? 1 : 0,
-                results[i].registration_ordered ? 1 : 0);
+                results[i].registration_ordered ? 1 : 0,
+                results[i].exit_observation ? 1 : 0,
+                results[i].callback_reentry ? 1 : 0);
             return 2;
         }
     }

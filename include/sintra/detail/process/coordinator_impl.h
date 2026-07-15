@@ -2122,6 +2122,18 @@ void Coordinator::recover_if_required(const Crash_info& info)
             }
             spawn_args = spawn_it->second;
         }
+        const auto occurrence = s_mproc->allocate_child_custody_occurrence(
+            spawn_args.piid, spawn_args.occurrence);
+        if (!occurrence) {
+            s_mproc->note_child_custody_failure(
+                spawn_args.custody,
+                {Managed_child_failure_kind::occurrence_admission,
+                 spawn_args.occurrence,
+                 0,
+                 "Managed child occurrence counter exhausted"});
+            return;
+        }
+        spawn_args.occurrence = *occurrence;
         auto launch_attempt = s_mproc->admit_child_custody_occurrence(
             spawn_args.custody,
             spawn_args.piid,
