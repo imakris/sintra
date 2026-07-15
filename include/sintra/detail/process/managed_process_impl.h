@@ -1562,6 +1562,75 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
     m_owner->start_child_custody_worker(
         [custody, process_instance_id, occurrence_number, process_handle,
          process_handle_value, observer_complete]() {
+            struct Windows_native_observer_guard
+            {
+                std::shared_ptr<Managed_child_custody_record> custody;
+                std::shared_ptr<std::atomic<bool>> complete;
+                instance_id_type process_instance_id = invalid_instance_id;
+                uint32_t occurrence_number = 0;
+                uintptr_t process_handle_value = 0;
+                const char* message =
+                    "Managed-child native observer failed unexpectedly";
+                int native_error = 0;
+                bool committed = false;
+
+                ~Windows_native_observer_guard() noexcept
+                {
+                    bool fallback_available = false;
+                    if (!committed) {
+                        try {
+                            std::lock_guard<std::mutex> lock(custody->mutex);
+                            auto* exact = custody->find_occurrence_locked(
+                                process_instance_id, occurrence_number);
+                            if (exact &&
+                                exact->native.cancel_exit_observer(
+                                    process_handle_value) &&
+                                exact->native.fallback_wait_available())
+                            {
+                                fallback_available = true;
+                                if (custody->last_failure.kind ==
+                                        Managed_child_failure_kind::none ||
+                                    occurrence_number >=
+                                        custody->last_failure.occurrence)
+                                {
+                                    custody->last_failure = {
+                                        Managed_child_failure_kind::native_observer,
+                                        occurrence_number,
+                                        native_error,
+                                        message};
+                                }
+                            }
+                        }
+                        catch (...) {
+                        }
+                    }
+                    complete->store(true, std::memory_order_release);
+                    custody->changed.notify_all();
+                    if (fallback_available) {
+                        try {
+                            managed_child_cleanup_for_test(
+                                test_hooks::
+                                    k_managed_child_native_observer_fallback_available,
+                                process_instance_id,
+                                occurrence_number);
+                        }
+                        catch (...) {
+                        }
+                    }
+                }
+
+                void fail(const char* failure_message, int error) noexcept
+                {
+                    message = failure_message;
+                    native_error = error;
+                }
+            } observer_guard{
+                custody,
+                observer_complete,
+                process_instance_id,
+                occurrence_number,
+                process_handle_value};
+
             managed_child_cleanup_for_test(
                 test_hooks::k_managed_child_native_observer_before_wait,
                 process_instance_id,
@@ -1581,6 +1650,14 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                     occurrence_number)
                 ? WAIT_FAILED
                 : WaitForSingleObject(process_handle, INFINITE);
+            if (wait_result != WAIT_OBJECT_0) {
+                observer_guard.fail(
+                    "Managed-child native observer wait failed",
+                    wait_result == WAIT_FAILED
+                        ? static_cast<int>(GetLastError())
+                        : static_cast<int>(ERROR_INVALID_DATA));
+                return;
+            }
             uintptr_t released_handle = 0;
             bool transition_valid = false;
             {
@@ -1588,40 +1665,26 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                 auto* occurrence = custody->find_occurrence_locked(
                     process_instance_id, occurrence_number);
                 if (occurrence) {
-                    if (wait_result == WAIT_OBJECT_0) {
-                        DWORD exit_code = 0;
-                        const bool exit_code_available =
-                            GetExitCodeProcess(process_handle, &exit_code) != 0;
-                        transition_valid = occurrence->native.note_exit(
-                            static_cast<int>(exit_code),
-                            exit_code_available);
-                        if (transition_valid &&
-                            occurrence->native.process_handle_owned())
-                        {
-                            transition_valid =
-                                occurrence->native.take_owned_process_handle(
-                                    process_handle_value,
-                                    released_handle);
-                        }
-                    }
-                    else {
+                    DWORD exit_code = 0;
+                    const bool exit_code_available =
+                        GetExitCodeProcess(process_handle, &exit_code) != 0;
+                    transition_valid = occurrence->native.note_exit(
+                        static_cast<int>(exit_code), exit_code_available);
+                    if (transition_valid &&
+                        occurrence->native.process_handle_owned())
+                    {
                         transition_valid =
-                            occurrence->native.cancel_exit_observer(
-                                process_handle_value);
+                            occurrence->native.take_owned_process_handle(
+                                process_handle_value, released_handle);
+                    }
+                    if (transition_valid) {
+                        observer_guard.committed = true;
                     }
                 }
-                observer_complete->store(true, std::memory_order_release);
                 custody->changed.notify_all();
             }
             if (released_handle != 0) {
                 CloseHandle(reinterpret_cast<HANDLE>(released_handle));
-            }
-            if (wait_result == WAIT_FAILED && transition_valid) {
-                managed_child_cleanup_for_test(
-                    test_hooks::
-                        k_managed_child_native_observer_fallback_available,
-                    process_instance_id,
-                    occurrence_number);
             }
             if (!transition_valid) {
                 Log_stream(log_level::error)

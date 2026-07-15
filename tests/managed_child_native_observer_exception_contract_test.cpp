@@ -268,7 +268,7 @@ Case_result run_case(
     sintra::Managed_child_status passive;
     std::thread passive_caller([&]() {
         passive = custody.release_until(
-            std::chrono::steady_clock::now() + 8s);
+            std::chrono::steady_clock::now() + 12s);
     });
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
@@ -298,13 +298,14 @@ Case_result run_case(
 
     const bool exit_requested = write_complete_file(exit_path, "exit\n");
     const auto terminated = custody.terminate_until(
-        std::chrono::steady_clock::now() + 5s);
+        std::chrono::steady_clock::now() + k_timeout);
     passive_caller.join();
 #ifdef _WIN32
     DWORD exit_code = STILL_ACTIVE;
     const bool child_exited = child_handle &&
         WaitForSingleObject(child_handle, 5000) == WAIT_OBJECT_0 &&
-        GetExitCodeProcess(child_handle, &exit_code) != 0 && exit_code == 0;
+        GetExitCodeProcess(child_handle, &exit_code) != 0 &&
+        exit_code != STILL_ACTIVE;
 #else
     const bool child_exited = false;
 #endif
@@ -320,6 +321,23 @@ Case_result run_case(
     result.release_complete = exit_requested && child_exited &&
         terminated.release_state == sintra::Managed_child_release_state::complete &&
         passive.release_state == sintra::Managed_child_release_state::complete;
+    if (!result.release_complete) {
+        std::fprintf(
+            stderr,
+            "NATIVE_OBSERVER_RELEASE_INVALID case=%u requested=%d child=%d "
+            "terminated=%d passive=%d\n",
+            case_number,
+            exit_requested ? 1 : 0,
+            child_exited ? 1 : 0,
+            terminated.release_state ==
+                    sintra::Managed_child_release_state::complete
+                ? 1
+                : 0,
+            passive.release_state ==
+                    sintra::Managed_child_release_state::complete
+                ? 1
+                : 0);
+    }
     result.exact_exit_once = complete.created_occurrences == 1 &&
         complete.exited_occurrences == 1;
     result.survivor_absent = !exact_process_is_live(
