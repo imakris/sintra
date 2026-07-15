@@ -140,6 +140,11 @@ inline constexpr const char* k_managed_child_fail_native_observer_start =
     "managed_child_native_observer_start";
 inline constexpr const char* k_managed_child_native_observer_before_wait =
     "managed_child_native_observer_before_wait";
+inline constexpr const char*
+    k_managed_child_fail_native_observer_after_registration =
+        "managed_child_native_observer_after_registration";
+inline constexpr const char* k_managed_child_fail_native_observer_before_wait =
+    "managed_child_native_observer_before_wait";
 inline constexpr const char* k_managed_child_fail_native_observer_wait =
     "managed_child_native_observer_wait";
 inline constexpr const char* k_managed_child_native_observer_fallback_available =
@@ -1559,6 +1564,15 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
          process_handle_value, observer_complete]() {
             managed_child_cleanup_for_test(
                 test_hooks::k_managed_child_native_observer_before_wait,
+                process_instance_id,
+                occurrence_number);
+            managed_child_failure_for_test(
+                test_hooks::
+                    k_managed_child_fail_native_observer_after_registration,
+                process_instance_id,
+                occurrence_number);
+            managed_child_failure_for_test(
+                test_hooks::k_managed_child_fail_native_observer_before_wait,
                 process_instance_id,
                 occurrence_number);
             const auto wait_result = managed_child_failure_selected_for_test(

@@ -146,7 +146,8 @@ enum class Managed_child_failure_kind
     setup_worker_start,
     readiness_observation,
     release_worker_start,
-    release_worker_execution
+    release_worker_execution,
+    native_observer
 };
 
 struct Managed_child_failure
