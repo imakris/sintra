@@ -330,6 +330,8 @@ inline constexpr const char* k_managed_child_fail_communication_worker_start =
     "managed_child_communication_worker_start";
 inline constexpr const char* k_managed_child_fail_exit_dispatcher_start =
     "managed_child_exit_dispatcher_start";
+inline constexpr const char* k_managed_child_force_exit_status_unavailable =
+    "managed_child_exit_status_unavailable";
 inline constexpr const char* k_managed_child_prepublication_first_miss =
     "managed_child_prepublication_first_miss";
 inline constexpr const char* k_managed_child_prepublication_reader_terminal =
@@ -1848,6 +1850,11 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                 test_hooks::k_managed_child_native_exit_before_publication,
                 process_instance_id,
                 occurrence_number);
+            const bool exit_status_forced_unavailable =
+                managed_child_failure_selected_for_test(
+                    test_hooks::k_managed_child_force_exit_status_unavailable,
+                    process_instance_id,
+                    occurrence_number);
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 auto* occurrence = custody->find_occurrence_locked(
@@ -1858,7 +1865,9 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                         GetExitCodeProcess(process_handle, &exit_code) != 0;
                     exit_publication = record_managed_child_exit_locked(
                         *occurrence,
-                        exit_code, exit_code_available);
+                        exit_code,
+                        exit_code_available &&
+                            !exit_status_forced_unavailable);
                     transition_valid = exit_publication.transition_valid;
                     if (transition_valid &&
                         occurrence->native.process_handle_owned())
@@ -5002,6 +5011,13 @@ inline void Managed_process::note_child_os_exit(
         detail::test_hooks::k_managed_child_native_exit_before_publication,
         token.process_instance_id,
         token.occurrence);
+    if (detail::managed_child_failure_selected_for_test(
+            detail::test_hooks::k_managed_child_force_exit_status_unavailable,
+            token.process_instance_id,
+            token.occurrence))
+    {
+        wait_status_available = false;
+    }
     detail::Managed_child_exit_publication exit_publication;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
