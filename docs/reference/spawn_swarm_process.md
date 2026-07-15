@@ -227,7 +227,8 @@ Threading and lifecycle:
   locks held. Delivery may start before registration returns, observer ordering
   is unspecified, and callback exceptions are logged without retry. Callbacks
   must not initiate Sintra teardown and should post application work to the
-  caller's executor.
+  caller's executor. `shutdown()`, `leave()`, and `detail::finalize()` throw
+  `std::logic_error` before teardown admission changes when called there.
 - `readiness_state` is `not_requested` when no readiness name was configured,
   `pending` while the exact target may still be observed, `reached` once the
   coordinator observed it, and `observation_stopped` when the target can no

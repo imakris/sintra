@@ -602,6 +602,8 @@ struct Managed_child_occurrence_token
     explicit operator bool() const noexcept { return !custody.expired(); }
 };
 
+inline thread_local bool tl_in_managed_child_exit_callback = false;
+
 class Managed_child_exit_subscription_state final
 {
 public:

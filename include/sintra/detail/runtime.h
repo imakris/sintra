@@ -356,7 +356,8 @@ public:
     /// locks held. Delivery may begin before this function returns, and no
     /// ordering between multiple observers is guaranteed. A callback must not
     /// initiate Sintra runtime teardown; it should post application work to the
-    /// caller's executor instead.
+    /// caller's executor instead. Teardown attempts throw `std::logic_error`
+    /// before teardown admission changes.
     /// Destroying or unsubscribing externally waits for an executing callback
     /// to finish. Self-unsubscription is deferred until that callback returns.
     /// Callback exceptions are logged, are not retried, and do not escape the
@@ -743,6 +744,16 @@ inline void validate_leave_context()
     }
 }
 
+inline void validate_managed_child_exit_callback_teardown(
+    const char* api_name)
+{
+    if (tl_in_managed_child_exit_callback) {
+        throw std::logic_error(
+            std::string(api_name) +
+            " must not be called from a managed-child exit callback.");
+    }
+}
+
 /// Low-level teardown for single-process programs, exceptional/error
 /// paths, or test code that cannot participate in a symmetric shutdown.
 /// Ordinary multi-process callers should use `shutdown()` instead.
@@ -752,6 +763,8 @@ inline void validate_leave_context()
 /// path is an illegal composition.
 inline bool finalize()
 {
+    validate_managed_child_exit_callback_teardown(
+        "sintra::detail::finalize()");
     close_teardown_admission_and_claim_state(
         shutdown_protocol_state::finalizing,
         "sintra::detail::finalize()");
@@ -903,6 +916,8 @@ inline bool shutdown()
 
 inline bool shutdown(const shutdown_options& options)
 {
+    detail::validate_managed_child_exit_callback_teardown(
+        "sintra::shutdown()");
     const bool resume_finalization =
         detail::close_teardown_admission_for_shutdown("sintra::shutdown()");
 
@@ -1016,6 +1031,8 @@ inline bool shutdown(const shutdown_options& options)
 
 inline bool leave()
 {
+    detail::validate_managed_child_exit_callback_teardown(
+        "sintra::leave()");
     detail::validate_leave_context();
     detail::close_teardown_admission_and_claim_state(
         detail::shutdown_protocol_state::local_departure_entered,

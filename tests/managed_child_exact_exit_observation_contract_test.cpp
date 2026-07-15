@@ -365,6 +365,46 @@ int run_root(
     int observed_count = 0;
     sintra::Managed_child_custody reentrant_custody;
 
+    std::atomic_int lifecycle_rejection_count{0};
+    std::atomic_int lifecycle_unexpected_count{0};
+    auto expect_lifecycle_rejection = [&](auto&& action) {
+        try {
+            action();
+            lifecycle_unexpected_count.fetch_add(1, std::memory_order_release);
+        }
+        catch (const std::logic_error& error) {
+            if (std::string_view(error.what()).find(
+                    "managed-child exit callback") != std::string_view::npos)
+            {
+                lifecycle_rejection_count.fetch_add(
+                    1, std::memory_order_release);
+            }
+            else {
+                lifecycle_unexpected_count.fetch_add(
+                    1, std::memory_order_release);
+            }
+        }
+        catch (...) {
+            lifecycle_unexpected_count.fetch_add(1, std::memory_order_release);
+        }
+    };
+    auto shutdown_from_callback = custody.observe_latest_created_exit(
+        [&](const sintra::Managed_child_exit&) {
+            expect_lifecycle_rejection([]() { (void)sintra::shutdown(); });
+        });
+    auto leave_from_callback = custody.observe_latest_created_exit(
+        [&](const sintra::Managed_child_exit&) {
+            expect_lifecycle_rejection([]() { (void)sintra::leave(); });
+        });
+    auto finalize_from_callback = custody.observe_latest_created_exit(
+        [&](const sintra::Managed_child_exit&) {
+            expect_lifecycle_rejection(
+                []() { (void)sintra::detail::finalize(); });
+        });
+    const bool lifecycle_observations_registered =
+        shutdown_from_callback && leave_from_callback &&
+        finalize_from_callback;
+
     std::atomic_int cancelled_count{0};
     auto cancelled_observation = custody.observe_latest_created_exit(
         [&](const sintra::Managed_child_exit&) {
@@ -684,6 +724,9 @@ int run_root(
     }
 
     observation.subscription.unsubscribe();
+    shutdown_from_callback.subscription.unsubscribe();
+    leave_from_callback.subscription.unsubscribe();
+    finalize_from_callback.subscription.unsubscribe();
     throwing_observation.subscription.unsubscribe();
     unavailable_observation.subscription.unsubscribe();
     replacement_observation.subscription.unsubscribe();
@@ -737,6 +780,9 @@ int run_root(
         observation_registered && cancelled_observation_registered &&
         self_observation_registered &&
         throwing_observation_registered &&
+        lifecycle_observations_registered &&
+        lifecycle_rejection_count.load(std::memory_order_acquire) == 3 &&
+        lifecycle_unexpected_count.load(std::memory_order_acquire) == 0 &&
         callback_started && unsubscribe_waited &&
         pid_seen && terminated && callback_observed && observed_count == 1 &&
         expected_recovery_exit(observed_event) && identity_valid &&
@@ -773,6 +819,7 @@ int run_root(
             "callback_started=%d waited=%d "
             "callback=%d observed_count=%d expected_exit=%d off_thread=%d "
             "cancelled_registered=%d cancelled=%d self=%d throwing=%d "
+            "lifecycle_rejected=%d lifecycle_unexpected=%d "
             "replacement_pid=%d replacement_selected=%d replacement_exit=%d "
             "replacement_count=%d replay=%d replay_count=%d replay_exit=%d "
             "replay_off_thread=%d unavailable=%d newer_no_child=%d "
@@ -804,6 +851,8 @@ int run_root(
             cancelled_count.load(std::memory_order_acquire),
             self_unsubscribe_count.load(std::memory_order_acquire),
             throwing_count.load(std::memory_order_acquire),
+            lifecycle_rejection_count.load(std::memory_order_acquire),
+            lifecycle_unexpected_count.load(std::memory_order_acquire),
             replacement_pid_seen ? 1 : 0,
             replacement_selected_latest ? 1 : 0,
             expected_terminated_exit(replacement_event) ? 1 : 0,

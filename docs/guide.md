@@ -440,8 +440,10 @@ runtime is active, registering after the selected occurrence exited schedules
 one late delivery. Callbacks execute once on a Sintra-managed lifecycle thread,
 may start before registration returns, have no ordering guarantee, and run
 without custody locks held. They must not initiate runtime teardown and should
-post application work to the caller's executor. Exceptions are logged without
-retry. Destroying the move-only subscription or calling `unsubscribe()` cancels
+post application work to the caller's executor. `shutdown()`, `leave()`, and
+`detail::finalize()` throw `std::logic_error` before teardown admission changes
+when called there. Exceptions are logged without retry. Destroying the
+move-only subscription or calling `unsubscribe()` cancels
 pending delivery; an external unsubscribe waits for an executing callback, and
 self-unsubscription finishes after the callback returns.
 

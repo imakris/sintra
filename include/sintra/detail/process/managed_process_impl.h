@@ -105,6 +105,9 @@ inline void Managed_child_exit_subscription_state::deliver(
         callback = std::move(m_callback);
     }
 
+    const bool previous_callback_context =
+        tl_in_managed_child_exit_callback;
+    tl_in_managed_child_exit_callback = true;
     try {
         callback(event);
     }
@@ -123,6 +126,7 @@ inline void Managed_child_exit_subscription_state::deliver(
                 event.occurrence.process_instance_id)
             << " occurrence=" << event.occurrence.occurrence << "\n";
     }
+    tl_in_managed_child_exit_callback = previous_callback_context;
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
