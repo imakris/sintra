@@ -49,6 +49,8 @@ namespace test_hooks {
 
 inline constexpr const char* k_stage_create_invitation_pre_admission_lock =
     "create_external_process_invitation/pre_admission_lock";
+inline constexpr const char* k_stage_observe_managed_child_exit_selected =
+    "observe_managed_child_exit/selected";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Runtime_stage_callback = void (*)(const char*);
@@ -1645,6 +1647,8 @@ Managed_child_custody::observe_latest_created_exit(
                 m_record,
                 identity,
                 std::move(callback));
+        detail::runtime_stage_for_test(
+            detail::test_hooks::k_stage_observe_managed_child_exit_selected);
         if (selected->native.exited()) {
             replay = detail::make_managed_child_exit(
                 identity,

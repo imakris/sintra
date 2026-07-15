@@ -317,6 +317,8 @@ inline constexpr const char* k_managed_child_fail_native_observer_wait =
     "managed_child_native_observer_wait";
 inline constexpr const char* k_managed_child_native_observer_fallback_available =
     "managed_child_native_observer_fallback_available";
+inline constexpr const char* k_managed_child_native_exit_before_publication =
+    "managed_child_native_exit_before_publication";
 inline constexpr const char* k_managed_child_windows_fallback_handle_closed =
     "managed_child_windows_fallback_handle_closed";
 inline constexpr const char* k_managed_child_fail_admission_mapping =
@@ -1843,6 +1845,10 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
             uintptr_t released_handle = 0;
             bool transition_valid = false;
             Managed_child_exit_publication exit_publication;
+            managed_child_cleanup_for_test(
+                test_hooks::k_managed_child_native_exit_before_publication,
+                process_instance_id,
+                occurrence_number);
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 auto* occurrence = custody->find_occurrence_locked(
@@ -4877,6 +4883,10 @@ inline void Managed_process::note_child_os_exit(
     if (!custody) {
         return;
     }
+    detail::managed_child_cleanup_for_test(
+        detail::test_hooks::k_managed_child_native_exit_before_publication,
+        token.process_instance_id,
+        token.occurrence);
     detail::Managed_child_exit_publication exit_publication;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
