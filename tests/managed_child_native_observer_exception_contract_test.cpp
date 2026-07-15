@@ -229,13 +229,14 @@ struct Case_result
     bool survivor_absent = false;
     bool registration_ordered = false;
     bool exit_observation = false;
+    bool callback_reentry = false;
 
     bool passed() const noexcept
     {
         return setup && failure_injected && typed_failure &&
             fallback_available && release_complete && exact_exit_once &&
             handle_closed_once && survivor_absent && registration_ordered &&
-            exit_observation;
+            exit_observation && callback_reentry;
     }
 };
 
@@ -245,7 +246,9 @@ Case_result run_case(
     unsigned          case_number,
     const char*       failure_stage,
     bool              verify_finalize_retry,
-    bool              cancel_before_registration = false)
+    bool              cancel_before_registration = false,
+    bool              reenter_release = false,
+    bool              reenter_terminate = false)
 {
     Case_result result;
     const auto process_iid = sintra::compose_instance(61u + case_number, 1ull);
@@ -324,9 +327,23 @@ Case_result run_case(
     sintra::Managed_child_exit exit_event;
     auto exit_observation = custody.observe_latest_created_exit(
         [&](const sintra::Managed_child_exit& event) {
+            sintra::Managed_child_status callback_status;
+            // Fallback delivery must not run on the release worker awaited here.
+            if (reenter_terminate) {
+                callback_status = custody.terminate_until(
+                    std::chrono::steady_clock::now() + 1500ms);
+            }
+            else if (reenter_release) {
+                callback_status = custody.release_until(
+                    std::chrono::steady_clock::now() + 1500ms);
+            }
             std::lock_guard<std::mutex> lock(exit_mutex);
             exit_event = event;
             ++exit_callback_count;
+            result.callback_reentry =
+                (!reenter_release && !reenter_terminate) ||
+                callback_status.release_state ==
+                    sintra::Managed_child_release_state::complete;
             exit_changed.notify_all();
         });
     result.setup = result.setup && static_cast<bool>(exit_observation);
@@ -470,7 +487,9 @@ int run_root(
             i,
             failure_stages[i],
             i == 3,
-            i == 2);
+            i == 2,
+            i == 0,
+            i == 1);
         if (!results[i].passed() ||
             (i == 3 && !results[i].first_finalize_incomplete))
         {
@@ -479,7 +498,7 @@ int run_root(
                 "NATIVE_OBSERVER_EXCEPTION_INVALID case=%u setup=%d "
                 "injected=%d typed=%d fallback=%d finalize=%d release=%d "
                 "exit=%d close=%d survivor_absent=%d registration=%d "
-                "observation=%d\n",
+                "observation=%d callback_reentry=%d\n",
                 i,
                 results[i].setup ? 1 : 0,
                 results[i].failure_injected ? 1 : 0,
@@ -491,7 +510,8 @@ int run_root(
                 results[i].handle_closed_once ? 1 : 0,
                 results[i].survivor_absent ? 1 : 0,
                 results[i].registration_ordered ? 1 : 0,
-                results[i].exit_observation ? 1 : 0);
+                results[i].exit_observation ? 1 : 0,
+                results[i].callback_reentry ? 1 : 0);
             return 2;
         }
     }

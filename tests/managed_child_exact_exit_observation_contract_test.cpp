@@ -41,6 +41,8 @@ using namespace std::chrono_literals;
 
 constexpr const char* k_child_flag =
     "--managed_child_exact_exit_observation_child";
+constexpr const char* k_reentrant_child_flag =
+    "--managed_child_exact_exit_observation_reentrant_child";
 constexpr const char* k_pid_0_file =
     "managed_child_exact_exit_observation_pid_0.txt";
 constexpr const char* k_pid_1_file =
@@ -52,6 +54,20 @@ constexpr sintra::instance_id_type k_child_process_iid =
     sintra::compose_instance(31u, 1ull);
 constexpr sintra::instance_id_type k_missing_process_iid =
     sintra::compose_instance(32u, 1ull);
+constexpr sintra::instance_id_type k_reentrant_process_iid =
+    sintra::compose_instance(33u, 1ull);
+
+std::atomic_bool s_fail_exit_dispatcher_start{false};
+
+bool fail_exit_dispatcher_start(
+    const char* stage,
+    sintra::instance_id_type,
+    uint32_t) noexcept
+{
+    return stage &&
+        std::string_view(stage) == "managed_child_exit_dispatcher_start" &&
+        s_fail_exit_dispatcher_start.exchange(false, std::memory_order_acq_rel);
+}
 
 static_assert(std::is_same_v<
     decltype(sintra::Managed_child_exit{}.status), std::uint32_t>);
@@ -231,6 +247,17 @@ int run_child(
     return 2;
 }
 
+int run_reentrant_child(int argc, char* argv[])
+{
+    try {
+        sintra::init(argc, argv);
+    }
+    catch (...) {
+        return 2;
+    }
+    return 0;
+}
+
 int run_root(
     int argc,
     char* argv[],
@@ -276,6 +303,19 @@ int run_root(
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
 
+    std::atomic_int rejected_callback_count{0};
+    sintra::Managed_child_exit_observation rejected_observation;
+    {
+        s_fail_exit_dispatcher_start.store(true, std::memory_order_release);
+        sintra::test::managed_child::Scoped_test_hook dispatcher_start_hook(
+            sintra::detail::test_hooks::s_managed_child_failure,
+            &fail_exit_dispatcher_start);
+        rejected_observation = custody.observe_latest_created_exit(
+            [&](const sintra::Managed_child_exit&) {
+                rejected_callback_count.fetch_add(1, std::memory_order_release);
+            });
+    }
+
     std::mutex event_mutex;
     std::condition_variable event_changed;
     sintra::Managed_child_exit observed_event;
@@ -283,6 +323,7 @@ int run_root(
     std::thread::id registering_thread;
     std::thread::id observed_thread;
     int observed_count = 0;
+    sintra::Managed_child_custody reentrant_custody;
 
     std::atomic_int cancelled_count{0};
     auto cancelled_observation = custody.observe_latest_created_exit(
@@ -344,7 +385,19 @@ int run_root(
         registering_thread = std::this_thread::get_id();
         observation = custody.observe_latest_created_exit(
             [&](const sintra::Managed_child_exit& event) {
+#ifndef _WIN32
+                // Live delivery must not inherit the central reaper's roster lock.
+                sintra::Spawn_options reentrant_options;
+                reentrant_options.binary_path = binary_path;
+                reentrant_options.args = {k_reentrant_child_flag};
+                reentrant_options.process_instance_id = k_reentrant_process_iid;
+                reentrant_options.lifetime.enable_lifeline = false;
+                auto spawned = sintra::spawn_swarm_process(reentrant_options);
+#endif
                 std::lock_guard<std::mutex> lock(event_mutex);
+#ifndef _WIN32
+                reentrant_custody = std::move(spawned);
+#endif
                 observed_event = event;
                 observed_thread = std::this_thread::get_id();
                 ++observed_count;
@@ -498,6 +551,15 @@ int run_root(
     replacement_observation.subscription.unsubscribe();
     replay_observation.subscription.unsubscribe();
 
+#ifndef _WIN32
+    const auto reentrant_released = reentrant_custody.release_until(
+        std::chrono::steady_clock::now() + 5s);
+    const bool reentrant_spawn_valid = reentrant_custody &&
+        reentrant_released.release_state ==
+            sintra::Managed_child_release_state::complete;
+#else
+    const bool reentrant_spawn_valid = true;
+#endif
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 5s);
     const auto completed_status = custody.status();
@@ -520,6 +582,8 @@ int run_root(
         missing_released.release_state ==
             sintra::Managed_child_release_state::complete &&
         no_occurrence_callback_count.load(std::memory_order_acquire) == 0 &&
+        !rejected_observation &&
+        rejected_callback_count.load(std::memory_order_acquire) == 0 &&
         custody && registration_selected && native_exit_ready &&
         observation_registered && cancelled_observation_registered &&
         self_observation_registered &&
@@ -538,6 +602,7 @@ int run_root(
         replay_observation_registered && replay_observed && replay_count == 1 &&
         expected_terminated_exit(replay_event) &&
         replay_thread != replay_registering_thread &&
+        reentrant_spawn_valid &&
         completed_status.created_occurrences == 2 &&
         completed_status.exited_occurrences == 2 &&
         released.release_state ==
@@ -548,14 +613,16 @@ int run_root(
             stderr,
             "MANAGED_CHILD_EXACT_EXIT_OBSERVATION_INVALID missing=%d "
             "missing_observation=%d missing_created=%zu missing_released=%d "
-            "no_occurrence_count=%d custody=%d observation=%d identity=%d "
+            "no_occurrence_count=%d rejected=%d rejected_count=%d custody=%d "
+            "observation=%d identity=%d "
             "race_selected=%d exit_ready=%d pid_seen=%d terminated=%d "
             "callback_started=%d waited=%d "
             "callback=%d observed_count=%d expected_exit=%d off_thread=%d "
             "cancelled_registered=%d cancelled=%d self=%d throwing=%d "
             "replacement_pid=%d replacement_selected=%d replacement_exit=%d "
             "replacement_count=%d replay=%d replay_count=%d replay_exit=%d "
-            "replay_off_thread=%d created=%zu exited=%zu released=%d "
+            "replay_off_thread=%d reentrant_spawn=%d created=%zu exited=%zu "
+            "released=%d "
             "finalized=%d\n",
             missing_custody ? 1 : 0,
             missing_observation ? 1 : 0,
@@ -563,6 +630,8 @@ int run_root(
             missing_released.release_state ==
                 sintra::Managed_child_release_state::complete ? 1 : 0,
             no_occurrence_callback_count.load(std::memory_order_acquire),
+            rejected_observation ? 1 : 0,
+            rejected_callback_count.load(std::memory_order_acquire),
             custody ? 1 : 0,
             observation_registered ? 1 : 0,
             identity_valid ? 1 : 0,
@@ -588,6 +657,7 @@ int run_root(
             replay_count,
             expected_terminated_exit(replay_event) ? 1 : 0,
             replay_thread != replay_registering_thread ? 1 : 0,
+            reentrant_spawn_valid ? 1 : 0,
             completed_status.created_occurrences,
             completed_status.exited_occurrences,
             released.release_state ==
@@ -606,6 +676,9 @@ int main(int argc, char* argv[])
         "managed_child_exact_exit_observation_contract_test");
     if (sintra::test::has_argv_flag(argc, argv, k_child_flag)) {
         return run_child(argc, argv, shared.path());
+    }
+    if (sintra::test::has_argv_flag(argc, argv, k_reentrant_child_flag)) {
+        return run_reentrant_child(argc, argv);
     }
     return run_root(argc, argv, shared.path());
 }

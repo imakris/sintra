@@ -156,6 +156,8 @@ struct Cleanup_gate
     unsigned lifeline_released_count = 0;
     unsigned retirement_confirmed_count = 0;
     unsigned passive_wait_count = 0;
+    bool observer_waiting = false;
+    bool release_observer_wait = false;
     bool entered = false;
     bool release = false;
 };
@@ -174,6 +176,16 @@ void observe_cleanup(
         return;
     }
     std::unique_lock<std::mutex> lock(gate->mutex);
+#ifdef _WIN32
+    if (std::string_view(stage) ==
+        sintra::detail::test_hooks::k_managed_child_native_observer_before_wait)
+    {
+        gate->observer_waiting = true;
+        gate->changed.notify_all();
+        gate->changed.wait(lock, [&]() { return gate->release_observer_wait; });
+    }
+    else
+#endif
     if (std::string_view(stage) ==
         sintra::detail::test_hooks::k_managed_child_cleanup_before_actions)
     {
@@ -696,6 +708,42 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         resolve_publicly(ready_name) ==
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
 
+    bool cleanup_observer_waiting = true;
+    bool cleanup_callback_reentry = true;
+    bool cleanup_exit_observed = true;
+    sintra::Managed_child_exit_observation cleanup_exit_observation;
+#ifdef _WIN32
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        cleanup_observer_waiting = gate.changed.wait_for(lock, 2s, [&]() {
+            return gate.observer_waiting;
+        });
+    }
+    std::mutex cleanup_exit_mutex;
+    std::condition_variable cleanup_exit_changed;
+    unsigned cleanup_exit_count = 0;
+    cleanup_callback_reentry = false;
+    cleanup_exit_observed = false;
+    // Hold the native observer so cleanup is the authoritative exit producer.
+    cleanup_exit_observation = custody.observe_latest_created_exit(
+        [&](const sintra::Managed_child_exit&) {
+            {
+                std::lock_guard<std::mutex> lock(gate.mutex);
+                gate.release_observer_wait = true;
+                gate.changed.notify_all();
+            }
+            const auto callback_status = custody.terminate_until(
+                std::chrono::steady_clock::now() + 3s);
+            std::lock_guard<std::mutex> lock(cleanup_exit_mutex);
+            ++cleanup_exit_count;
+            cleanup_callback_reentry = callback_status.release_state ==
+                sintra::Managed_child_release_state::complete;
+            cleanup_exit_changed.notify_all();
+        });
+    cleanup_observer_waiting = cleanup_observer_waiting &&
+        static_cast<bool>(cleanup_exit_observation);
+#endif
+
     // Start graceful release on a separate caller. The observation seam proves
     // its one retained worker evaluated passive release mode and entered its
     // passive wait before the public cleanup escalation occurs.
@@ -768,6 +816,20 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     if (passive_caller.joinable()) {
         passive_caller.join();
     }
+#ifdef _WIN32
+    {
+        std::unique_lock<std::mutex> lock(cleanup_exit_mutex);
+        cleanup_exit_observed = cleanup_exit_changed.wait_for(lock, 4s, [&]() {
+            return cleanup_exit_count == 1;
+        });
+    }
+    cleanup_exit_observation.subscription.unsubscribe();
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        gate.release_observer_wait = true;
+        gate.changed.notify_all();
+    }
+#endif
     const bool authoritative_cleanup_once = [&]() {
         std::lock_guard<std::mutex> lock(gate.mutex);
         return gate.before_count == 1 && gate.lifeline_released_count == 1 &&
@@ -816,7 +878,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool final_retry_succeeded = sintra::detail::finalize();
 
     const bool valid = windows_fallback.passed() &&
-        ready_valid && bounded_incomplete &&
+        ready_valid && cleanup_observer_waiting && cleanup_exit_observed &&
+        cleanup_callback_reentry && bounded_incomplete &&
         retained_across_finalize && complete.release_state ==
             sintra::Managed_child_release_state::complete &&
         complete.admitted_occurrences == 1 &&
@@ -833,7 +896,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             "retained_finalize=1 monotone_retry=1 lifeline_released=1 "
             "publication_retired=1 communication_retired=1 exact_exit=1 "
             "expected_status=99 survivor_absent=1 final_retry=1 "
-            "windows_fallback_wake=%s\n",
+            "callback_reentry=1 windows_fallback_wake=%s\n",
             nonce.c_str(), windows_fallback.applicable ? "1" : "na");
         std::fflush(stdout);
         return 0;
@@ -848,6 +911,17 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             "handle_closed=1 survivor_absent=1 finalization=%d "
             "cause=release_wait_predicate_omits_fallback_availability\n",
             final_retry_succeeded ? 1 : 0);
+    }
+    else if (!cleanup_observer_waiting || !cleanup_exit_observed ||
+        !cleanup_callback_reentry)
+    {
+        std::fprintf(
+            stderr,
+            "WINDOWS_CLEANUP_CALLBACK_REENTRY_INVALID observer=%d exit=%d "
+            "reentry=%d\n",
+            cleanup_observer_waiting ? 1 : 0,
+            cleanup_exit_observed ? 1 : 0,
+            cleanup_callback_reentry ? 1 : 0);
     }
     else if (windows_fallback.applicable && !windows_fallback.passed()) {
         std::fprintf(
