@@ -141,6 +141,18 @@ inline constexpr const char* k_managed_child_fail_native_observer_start =
 inline constexpr const char* k_managed_child_native_observer_before_wait =
     "managed_child_native_observer_before_wait";
 inline constexpr const char*
+    k_managed_child_native_observer_after_cancel =
+        "managed_child_native_observer_after_cancel";
+inline constexpr const char*
+    k_managed_child_native_observer_before_registration =
+        "managed_child_native_observer_before_registration";
+inline constexpr const char*
+    k_managed_child_native_observer_registered =
+        "managed_child_native_observer_registered";
+inline constexpr const char*
+    k_managed_child_native_observer_registration_complete =
+        "managed_child_native_observer_registration_complete";
+inline constexpr const char*
     k_managed_child_fail_native_observer_after_registration =
         "managed_child_native_observer_after_registration";
 inline constexpr const char* k_managed_child_fail_native_observer_before_wait =
@@ -1606,6 +1618,17 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                         catch (...) {
                         }
                     }
+                    if (!committed) {
+                        try {
+                            managed_child_cleanup_for_test(
+                                test_hooks::
+                                    k_managed_child_native_observer_after_cancel,
+                                process_instance_id,
+                                occurrence_number);
+                        }
+                        catch (...) {
+                        }
+                    }
                     complete->store(true, std::memory_order_release);
                     custody->changed.notify_all();
                     if (fallback_available) {
@@ -1697,6 +1720,12 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
         process_instance_id,
         occurrence_number);
 
+    managed_child_cleanup_for_test(
+        test_hooks::k_managed_child_native_observer_before_registration,
+        process_instance_id,
+        occurrence_number);
+
+    bool observer_registered = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         auto* exact = custody->find_occurrence_locked(
@@ -1719,10 +1748,13 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                 }
             }
             else if (!exact->native.register_exit_observer(
-                         process_handle_value))
+                          process_handle_value))
             {
                 throw std::runtime_error(
                     "Managed-child native observer registration failed");
+            }
+            else {
+                observer_registered = true;
             }
         }
         else if (!exact->native.exited()) {
@@ -1733,6 +1765,16 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
         m_windows_native = Windows_native_ownership::transferred;
         m_windows_process_handle = 0;
     }
+    if (observer_registered) {
+        managed_child_cleanup_for_test(
+            test_hooks::k_managed_child_native_observer_registered,
+            process_instance_id,
+            occurrence_number);
+    }
+    managed_child_cleanup_for_test(
+        test_hooks::k_managed_child_native_observer_registration_complete,
+        process_instance_id,
+        occurrence_number);
 }
 #endif
 

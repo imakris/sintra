@@ -81,6 +81,10 @@ struct Observer_gate
     unsigned                 before_wait = 0;
     unsigned                 fallback_available = 0;
     unsigned                 handle_closed = 0;
+    unsigned                 observer_registered = 0;
+    bool                     cancel_before_registration = false;
+    bool                     observer_cancelled = false;
+    bool                     registration_complete = false;
     bool                     release_observer = false;
 };
 
@@ -105,7 +109,40 @@ void observe_observer(
     {
         ++gate->before_wait;
         gate->changed.notify_all();
-        gate->changed.wait(lock, [&]() { return gate->release_observer; });
+        if (!gate->cancel_before_registration) {
+            gate->changed.wait(lock, [&]() { return gate->release_observer; });
+        }
+    }
+    else if (observed == sintra::detail::test_hooks::
+            k_managed_child_native_observer_after_cancel)
+    {
+        gate->observer_cancelled = true;
+        gate->changed.notify_all();
+        if (gate->cancel_before_registration) {
+            gate->changed.wait(lock, [&]() {
+                return gate->registration_complete;
+            });
+        }
+    }
+    else if (observed == sintra::detail::test_hooks::
+            k_managed_child_native_observer_before_registration)
+    {
+        if (gate->cancel_before_registration) {
+            gate->changed.wait(lock, [&]() {
+                return gate->observer_cancelled;
+            });
+        }
+    }
+    else if (observed == sintra::detail::test_hooks::
+            k_managed_child_native_observer_registered)
+    {
+        ++gate->observer_registered;
+    }
+    else if (observed == sintra::detail::test_hooks::
+            k_managed_child_native_observer_registration_complete)
+    {
+        gate->registration_complete = true;
+        gate->changed.notify_all();
     }
     else if (observed == sintra::detail::test_hooks::
             k_managed_child_native_observer_fallback_available)
@@ -182,12 +219,13 @@ struct Case_result
     bool exact_exit_once = false;
     bool handle_closed_once = false;
     bool survivor_absent = false;
+    bool registration_ordered = false;
 
     bool passed() const noexcept
     {
         return setup && failure_injected && typed_failure &&
             fallback_available && release_complete && exact_exit_once &&
-            handle_closed_once && survivor_absent;
+            handle_closed_once && survivor_absent && registration_ordered;
     }
 };
 
@@ -196,7 +234,8 @@ Case_result run_case(
     const fs::path&   shared_directory,
     unsigned          case_number,
     const char*       failure_stage,
-    bool              verify_finalize_retry)
+    bool              verify_finalize_retry,
+    bool              cancel_before_registration = false)
 {
     Case_result result;
     const auto process_iid = sintra::compose_instance(61u + case_number, 1ull);
@@ -211,6 +250,7 @@ Case_result run_case(
 
     Observer_gate gate;
     gate.process_iid = process_iid;
+    gate.cancel_before_registration = cancel_before_registration;
     s_observer_gate = &gate;
     Scoped_test_hook cleanup_hook(
         sintra::detail::test_hooks::s_managed_child_cleanup,
@@ -255,6 +295,8 @@ Case_result run_case(
         result.setup = gate.changed.wait_for(lock, 2s, [&]() {
             return gate.before_wait == 1;
         });
+        result.registration_ordered = !cancel_before_registration ||
+            gate.observer_registered == 0;
     }
     result.setup = result.setup && custody && identity_seen &&
         identity.pid > 0 && identity.start_stamp != 0 &&
@@ -374,19 +416,26 @@ int run_root(
             k_managed_child_fail_native_observer_after_registration,
         sintra::detail::test_hooks::
             k_managed_child_fail_native_observer_before_wait,
+        sintra::detail::test_hooks::
+            k_managed_child_fail_native_observer_after_registration,
         sintra::detail::test_hooks::k_managed_child_fail_native_observer_wait};
-    Case_result results[3];
-    for (unsigned i = 0; i != 3; ++i) {
+    Case_result results[4];
+    for (unsigned i = 0; i != 4; ++i) {
         results[i] = run_case(
-            binary_path, shared_directory, i, failure_stages[i], i == 2);
+            binary_path,
+            shared_directory,
+            i,
+            failure_stages[i],
+            i == 3,
+            i == 2);
         if (!results[i].passed() ||
-            (i == 2 && !results[i].first_finalize_incomplete))
+            (i == 3 && !results[i].first_finalize_incomplete))
         {
             std::fprintf(
                 stderr,
                 "NATIVE_OBSERVER_EXCEPTION_INVALID case=%u setup=%d "
                 "injected=%d typed=%d fallback=%d finalize=%d release=%d "
-                "exit=%d close=%d survivor_absent=%d\n",
+                "exit=%d close=%d survivor_absent=%d registration=%d\n",
                 i,
                 results[i].setup ? 1 : 0,
                 results[i].failure_injected ? 1 : 0,
@@ -396,7 +445,8 @@ int run_root(
                 results[i].release_complete ? 1 : 0,
                 results[i].exact_exit_once ? 1 : 0,
                 results[i].handle_closed_once ? 1 : 0,
-                results[i].survivor_absent ? 1 : 0);
+                results[i].survivor_absent ? 1 : 0,
+                results[i].registration_ordered ? 1 : 0);
             return 2;
         }
     }
@@ -408,7 +458,7 @@ int run_root(
         return 2;
     }
     std::printf(
-        "NATIVE_OBSERVER_EXCEPTION_GREEN cases=3 typed=1 fallback=1 "
+        "NATIVE_OBSERVER_EXCEPTION_GREEN cases=4 typed=1 fallback=1 "
         "terminate_retry=1 finalize_retry=1 close_once=1 survivor_absent=1\n");
     return 0;
 #endif
