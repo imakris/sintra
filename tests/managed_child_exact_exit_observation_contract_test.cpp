@@ -973,7 +973,7 @@ int main(int argc, char* argv[])
 {
     sintra::test::Shared_directory shared(
         "SINTRA_TEST_SHARED_DIR",
-        "managed_child_exact_exit_observation_contract_test");
+        "mc_exit");
     if (sintra::test::has_argv_flag(argc, argv, k_child_flag)) {
         return run_child(argc, argv, shared.path());
     }

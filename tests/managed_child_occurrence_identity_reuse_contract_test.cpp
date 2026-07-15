@@ -306,7 +306,7 @@ int main(int argc, char* argv[])
 {
     sintra::test::Shared_directory shared(
         "SINTRA_TEST_SHARED_DIR",
-        "managed_child_occurrence_identity_reuse_contract_test");
+        "occurrence_identity_reuse");
     if (sintra::test::has_argv_flag(argc, argv, k_child_a_flag)) {
         return run_child_a(argc, argv, shared.path());
     }
