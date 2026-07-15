@@ -1637,6 +1637,12 @@ Managed_child_custody::observe_latest_created_exit(
         if (selected == m_record->occurrences.rend()) {
             return {};
         }
+        // Establish delivery custody before the callback becomes observable.
+        // A thread-start failure rejects registration instead of losing a
+        // callback after the exit transition has claimed it.
+        if (!s_mproc->ensure_child_exit_dispatcher()) {
+            return {};
+        }
 
         identity = {
             selected->process_instance_id,

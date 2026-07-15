@@ -331,6 +331,8 @@ inline constexpr const char* k_managed_child_fail_cleanup_actions =
     "managed_child_cleanup_actions";
 inline constexpr const char* k_managed_child_fail_communication_worker_start =
     "managed_child_communication_worker_start";
+inline constexpr const char* k_managed_child_fail_exit_dispatcher_start =
+    "managed_child_exit_dispatcher_start";
 inline constexpr const char* k_managed_child_prepublication_first_miss =
     "managed_child_prepublication_first_miss";
 inline constexpr const char* k_managed_child_prepublication_reader_terminal =
@@ -2446,10 +2448,18 @@ Managed_process::Managed_process():
 inline
 Managed_process::~Managed_process()
 {
+#ifndef _WIN32
+    // SIGCHLD publication runs under the shared dispatch lock. Wait for any
+    // active producer to enqueue its owned callbacks before draining.
+    {
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+    }
+#endif
     // finalize_impl() only reaches destruction after every retained custody
     // record is terminal, so the owned observers/cleanup workers are bounded
     // joins here and cannot outlive the runtime they report into.
     join_child_custody_workers();
+    drain_child_exit_dispatcher();
 
     // The coordinating process will be removing its readers whenever
     // they are unpublished - when they are all done, the process may exit.
@@ -2619,6 +2629,7 @@ Managed_process::~Managed_process()
         s_mproc = nullptr;
         s_mproc_id = 0;
     }
+    stop_child_exit_dispatcher();
 }
 
 #ifndef _WIN32
@@ -3542,27 +3553,134 @@ inline void Managed_process::start_child_custody_worker(
     }
 }
 
-inline void Managed_process::dispatch_child_exit_subscription(
+inline bool Managed_process::ensure_child_exit_dispatcher() noexcept
+{
+    std::lock_guard<std::mutex> lock(m_child_exit_dispatch_mutex);
+    if (m_child_exit_dispatch_thread.joinable()) {
+        return true;
+    }
+    try {
+        detail::managed_child_failure_for_test(
+            detail::test_hooks::k_managed_child_fail_exit_dispatcher_start,
+            invalid_instance_id,
+            0);
+        m_child_exit_dispatch_stopping = false;
+        m_child_exit_dispatch_thread = std::thread(
+            [this]() { run_child_exit_dispatcher(); });
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+inline void Managed_process::run_child_exit_dispatcher() noexcept
+{
+    while (true) {
+        std::shared_ptr<detail::Managed_child_exit_subscription_state>
+            subscription;
+        Managed_child_exit event;
+        {
+            std::unique_lock<std::mutex> lock(m_child_exit_dispatch_mutex);
+            m_child_exit_dispatch_changed.wait(lock, [this]() {
+                return m_child_exit_dispatch_stopping ||
+                    m_child_exit_dispatch_head != nullptr;
+            });
+            if (!m_child_exit_dispatch_head) {
+                return;
+            }
+            auto* queued = m_child_exit_dispatch_head;
+            m_child_exit_dispatch_head = queued->m_dispatch_next;
+            if (!m_child_exit_dispatch_head) {
+                m_child_exit_dispatch_tail = nullptr;
+            }
+            queued->m_dispatch_next = nullptr;
+            event = queued->m_dispatch_event;
+            subscription = std::move(queued->m_dispatch_owner);
+            m_child_exit_dispatch_active = true;
+        }
+
+        subscription->deliver(event);
+
+        {
+            std::lock_guard<std::mutex> lock(m_child_exit_dispatch_mutex);
+            m_child_exit_dispatch_active = false;
+        }
+        m_child_exit_dispatch_changed.notify_all();
+    }
+}
+
+inline void Managed_process::drain_child_exit_dispatcher() noexcept
+{
+    std::unique_lock<std::mutex> lock(m_child_exit_dispatch_mutex);
+    m_child_exit_dispatch_changed.wait(lock, [this]() {
+        return !m_child_exit_dispatch_head && !m_child_exit_dispatch_active;
+    });
+}
+
+inline void Managed_process::stop_child_exit_dispatcher() noexcept
+{
+    {
+        std::lock_guard<std::mutex> lock(m_child_exit_dispatch_mutex);
+        if (!m_child_exit_dispatch_thread.joinable()) {
+            return;
+        }
+        m_child_exit_dispatch_stopping = true;
+    }
+    m_child_exit_dispatch_changed.notify_all();
+    m_child_exit_dispatch_thread.join();
+}
+
+inline void Managed_process::enqueue_child_exit_subscription_locked(
     std::shared_ptr<detail::Managed_child_exit_subscription_state> subscription,
-    Managed_child_exit event)
+    const Managed_child_exit& event) noexcept
 {
     if (!subscription) {
         return;
     }
-    start_child_custody_worker(
-        [subscription = std::move(subscription), event]() {
-            subscription->deliver(event);
-        });
+    auto* queued = subscription.get();
+    if (m_child_exit_dispatch_stopping || queued->m_dispatch_owner ||
+        queued->m_dispatch_next)
+    {
+        std::terminate();
+    }
+    queued->m_dispatch_event = event;
+    queued->m_dispatch_owner = std::move(subscription);
+    if (m_child_exit_dispatch_tail) {
+        m_child_exit_dispatch_tail->m_dispatch_next = queued;
+    }
+    else {
+        m_child_exit_dispatch_head = queued;
+    }
+    m_child_exit_dispatch_tail = queued;
 }
 
 inline void Managed_process::dispatch_child_exit_publication(
-    detail::Managed_child_exit_publication publication)
+    detail::Managed_child_exit_publication publication) noexcept
 {
-    for (auto& subscription : publication.subscriptions) {
-        if (subscription) {
-            subscription->deliver(publication.event);
+    if (publication.subscriptions.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_child_exit_dispatch_mutex);
+        for (auto& subscription : publication.subscriptions) {
+            enqueue_child_exit_subscription_locked(
+                std::move(subscription), publication.event);
         }
     }
+    m_child_exit_dispatch_changed.notify_one();
+}
+
+inline void Managed_process::dispatch_child_exit_subscription(
+    std::shared_ptr<detail::Managed_child_exit_subscription_state> subscription,
+    Managed_child_exit event) noexcept
+{
+    {
+        std::lock_guard<std::mutex> lock(m_child_exit_dispatch_mutex);
+        enqueue_child_exit_subscription_locked(
+            std::move(subscription), event);
+    }
+    m_child_exit_dispatch_changed.notify_one();
 }
 
 inline void Managed_process::join_child_custody_workers()

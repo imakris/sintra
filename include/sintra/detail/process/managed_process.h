@@ -625,6 +625,13 @@ private:
     std::thread::id                             m_callback_thread;
     bool                                        m_active = true;
     bool                                        m_callback_running = false;
+
+    Managed_child_exit                         m_dispatch_event;
+    std::shared_ptr<Managed_child_exit_subscription_state>
+                                                m_dispatch_owner;
+    Managed_child_exit_subscription_state*     m_dispatch_next = nullptr;
+
+    friend struct ::sintra::Managed_process;
 };
 
 struct Managed_child_exit_publication
@@ -1452,11 +1459,18 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const detail::Managed_child_occurrence_token& token,
         int wait_status,
         bool wait_status_available = true);
+    bool ensure_child_exit_dispatcher() noexcept;
+    void run_child_exit_dispatcher() noexcept;
+    void drain_child_exit_dispatcher() noexcept;
+    void stop_child_exit_dispatcher() noexcept;
+    void enqueue_child_exit_subscription_locked(
+        std::shared_ptr<detail::Managed_child_exit_subscription_state> subscription,
+        const Managed_child_exit& event) noexcept;
     void dispatch_child_exit_publication(
-        detail::Managed_child_exit_publication publication);
+        detail::Managed_child_exit_publication publication) noexcept;
     void dispatch_child_exit_subscription(
         std::shared_ptr<detail::Managed_child_exit_subscription_state> subscription,
-        Managed_child_exit event);
+        Managed_child_exit event) noexcept;
 #ifndef _WIN32
     bool signal_child_native_exact(
         const detail::Managed_child_occurrence_token& token,
@@ -1494,6 +1508,15 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::shared_ptr<std::atomic<bool>>  complete;
     };
     std::vector<Child_custody_worker>   m_child_custody_workers;
+    std::mutex                          m_child_exit_dispatch_mutex;
+    std::condition_variable             m_child_exit_dispatch_changed;
+    std::thread                         m_child_exit_dispatch_thread;
+    detail::Managed_child_exit_subscription_state*
+                                        m_child_exit_dispatch_head = nullptr;
+    detail::Managed_child_exit_subscription_state*
+                                        m_child_exit_dispatch_tail = nullptr;
+    bool                                m_child_exit_dispatch_active = false;
+    bool                                m_child_exit_dispatch_stopping = false;
 };
 
 
