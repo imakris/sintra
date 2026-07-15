@@ -30,14 +30,22 @@ int main(int argc, char* argv[])
 
     auto first = process.accept_child_custody();
     auto second = process.accept_child_custody();
+    const auto first_iid = sintra::compose_instance(32u, 1u);
+    const auto second_iid = sintra::compose_instance(33u, 1u);
     {
         std::lock_guard<std::mutex> lock(process.m_child_custody_mutex);
         process.m_child_custody_by_process.emplace(
-            sintra::compose_instance(32u, 1u),
+            first_iid,
             sintra::detail::Managed_child_active_occurrence{first, 0});
         process.m_child_custody_by_process.emplace(
-            sintra::compose_instance(33u, 1u),
+            second_iid,
             sintra::detail::Managed_child_active_occurrence{second, 0});
+    }
+    const bool unresolved_times_out = !process.wait_for_all_child_custodies(
+        std::chrono::steady_clock::now() + 20ms);
+    {
+        std::lock_guard<std::mutex> lock(first->mutex);
+        first->readiness = sintra::detail::Readiness_phase::pending;
     }
 
     auto waiter_1 = std::async(std::launch::async, [&] {
@@ -51,7 +59,36 @@ int main(int argc, char* argv[])
 
     const bool first_released = mark_released(first);
     process.retire_child_custody_if_complete(first);
+    bool pending_record_retained = false;
+    {
+        std::lock_guard<std::mutex> lock(process.m_child_custody_mutex);
+        pending_record_retained =
+            process.m_child_custodies.find(first->identity) !=
+                process.m_child_custodies.end() &&
+            process.m_child_custody_by_process.find(first_iid) !=
+                process.m_child_custody_by_process.end();
+    }
+    {
+        std::lock_guard<std::mutex> lock(first->mutex);
+        first->readiness = sintra::detail::Readiness_phase::reached;
+    }
+    process.retire_child_custody_if_complete(first);
     const bool one_remaining = !process.all_child_custodies_released();
+    bool exact_first_retired = false;
+    {
+        std::lock_guard<std::mutex> lock(process.m_child_custody_mutex);
+        const auto second_active =
+            process.m_child_custody_by_process.find(second_iid);
+        exact_first_retired =
+            process.m_child_custodies.find(first->identity) ==
+                process.m_child_custodies.end() &&
+            process.m_child_custody_by_process.find(first_iid) ==
+                process.m_child_custody_by_process.end() &&
+            process.m_child_custodies.find(second->identity) !=
+                process.m_child_custodies.end() &&
+            second_active != process.m_child_custody_by_process.end() &&
+            second_active->second.custody.lock() == second;
+    }
 
     const bool second_released = mark_released(second);
     const bool terminal_record_still_registered =
@@ -73,7 +110,8 @@ int main(int argc, char* argv[])
             std::chrono::steady_clock::now() + 1s);
     const bool finalized = sintra::detail::finalize();
 
-    return empty_returns_immediately && first_released && one_remaining &&
+    return empty_returns_immediately && unresolved_times_out && first_released &&
+        pending_record_retained && one_remaining && exact_first_retired &&
         second_released && terminal_record_still_registered &&
         waiters_still_blocked && waiters_completed && registries_empty &&
         retirement_before_wait_is_durable && finalized
