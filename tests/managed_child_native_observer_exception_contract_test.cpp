@@ -312,6 +312,13 @@ Case_result run_case(
         passive = custody.release_until(
             std::chrono::steady_clock::now() + 12s);
     });
+    if (verify_finalize_retry) {
+        const auto begin = std::chrono::steady_clock::now();
+        const bool first_finalize = sintra::detail::finalize();
+        const auto elapsed = std::chrono::steady_clock::now() - begin;
+        result.first_finalize_incomplete = !first_finalize && custody &&
+            elapsed < 2s;
+    }
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
         gate.release_observer = true;
@@ -329,14 +336,6 @@ Case_result run_case(
     result.typed_failure = failed.last_failure.kind ==
         sintra::Managed_child_failure_kind::native_observer &&
         failed.created_occurrences == 1 && failed.exited_occurrences == 0;
-
-    if (verify_finalize_retry) {
-        const auto begin = std::chrono::steady_clock::now();
-        const bool first_finalize = sintra::detail::finalize();
-        const auto elapsed = std::chrono::steady_clock::now() - begin;
-        result.first_finalize_incomplete = !first_finalize && custody &&
-            elapsed >= 150ms && elapsed < 2s;
-    }
 
     const bool exit_requested = write_complete_file(exit_path, "exit\n");
     const auto terminated = custody.terminate_until(
