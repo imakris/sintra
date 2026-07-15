@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 
 namespace {
 
@@ -39,11 +40,16 @@ constexpr const char* k_child_flag =
     "--managed_child_exact_exit_observation_child";
 constexpr const char* k_pid_file =
     "managed_child_exact_exit_observation_pid.txt";
-constexpr int k_exit_code = 77;
+constexpr std::uint32_t k_exit_code = 0xc0000005u;
 constexpr sintra::instance_id_type k_child_process_iid =
     sintra::compose_instance(31u, 1ull);
 constexpr sintra::instance_id_type k_missing_process_iid =
     sintra::compose_instance(32u, 1ull);
+
+static_assert(std::is_same_v<
+    decltype(sintra::Managed_child_exit{}.status), std::uint32_t>);
+static_assert(std::is_same_v<
+    decltype(sintra::Managed_child_exit{}.native_status), std::uint32_t>);
 
 struct Callback_gate
 {
@@ -103,8 +109,8 @@ bool expected_exit(const sintra::Managed_child_exit& event)
     return event.status_kind ==
             sintra::Managed_child_exit_status_kind::signaled &&
         event.status == SIGKILL &&
-        WIFSIGNALED(event.native_status) &&
-        WTERMSIG(event.native_status) == SIGKILL;
+        WIFSIGNALED(static_cast<int>(event.native_status)) &&
+        WTERMSIG(static_cast<int>(event.native_status)) == SIGKILL;
 #endif
 }
 

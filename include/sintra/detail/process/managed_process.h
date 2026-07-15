@@ -187,8 +187,8 @@ struct Managed_child_exit
     Managed_child_occurrence_identity occurrence;
     Managed_child_exit_status_kind    status_kind =
         Managed_child_exit_status_kind::unavailable;
-    int                               status = 0;
-    int                               native_status = 0;
+    std::uint32_t                     status = 0;
+    std::uint32_t                     native_status = 0;
     bool                              native_status_available = false;
 };
 
@@ -409,7 +409,7 @@ public:
         uint64_t start_stamp,
         bool already_exited,
         bool wait_status_available,
-        int wait_status
+        std::uint32_t wait_status
 #ifdef _WIN32
         , uintptr_t process_handle,
         bool process_handle_owned
@@ -443,7 +443,9 @@ public:
         return true;
     }
 
-    bool note_exit(int wait_status, bool wait_status_available) noexcept
+    bool note_exit(
+        std::uint32_t wait_status,
+        bool          wait_status_available) noexcept
     {
         if (m_phase == Phase::ABSENT) {
             return false;
@@ -471,7 +473,7 @@ public:
     {
         return m_wait_status_available;
     }
-    int wait_status() const noexcept { return m_wait_status; }
+    std::uint32_t wait_status() const noexcept { return m_wait_status; }
 
 #ifdef _WIN32
     bool register_exit_observer(uintptr_t expected_handle) noexcept
@@ -540,7 +542,7 @@ private:
     int      m_pid = -1;
     uint64_t m_start_stamp = 0;
     bool     m_start_stamp_available = false;
-    int      m_wait_status = 0;
+    std::uint32_t m_wait_status = 0;
     bool     m_wait_status_available = false;
 #ifdef _WIN32
     uintptr_t m_process_handle = 0;
@@ -633,12 +635,12 @@ struct Managed_child_exit_publication
 
 Managed_child_exit make_managed_child_exit(
     Managed_child_occurrence_identity occurrence,
-    int                               wait_status,
+    std::uint32_t                     wait_status,
     bool                              wait_status_available) noexcept;
 
 Managed_child_exit_publication record_managed_child_exit_locked(
     Managed_child_occurrence_record& occurrence,
-    int                              wait_status,
+    std::uint32_t                    wait_status,
     bool                             wait_status_available);
 
 enum class Readiness_phase

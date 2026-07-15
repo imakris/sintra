@@ -180,7 +180,7 @@ remove_from_occurrence() noexcept
 
 inline Managed_child_exit make_managed_child_exit(
     Managed_child_occurrence_identity occurrence,
-    int                               wait_status,
+    std::uint32_t                     wait_status,
     bool                              wait_status_available) noexcept
 {
     Managed_child_exit event;
@@ -195,14 +195,15 @@ inline Managed_child_exit make_managed_child_exit(
     event.status_kind = Managed_child_exit_status_kind::exited;
     event.status = wait_status;
 #else
-    if (WIFEXITED(wait_status)) {
+    const auto native_status = static_cast<int>(wait_status);
+    if (WIFEXITED(native_status)) {
         event.status_kind = Managed_child_exit_status_kind::exited;
-        event.status = WEXITSTATUS(wait_status);
+        event.status = WEXITSTATUS(native_status);
     }
     else
-    if (WIFSIGNALED(wait_status)) {
+    if (WIFSIGNALED(native_status)) {
         event.status_kind = Managed_child_exit_status_kind::signaled;
-        event.status = WTERMSIG(wait_status);
+        event.status = WTERMSIG(native_status);
     }
     else {
         event.status_kind = Managed_child_exit_status_kind::other;
@@ -213,7 +214,7 @@ inline Managed_child_exit make_managed_child_exit(
 
 inline Managed_child_exit_publication record_managed_child_exit_locked(
     Managed_child_occurrence_record& occurrence,
-    int                              wait_status,
+    std::uint32_t                    wait_status,
     bool                             wait_status_available)
 {
     Managed_child_exit_publication publication;
@@ -1585,7 +1586,7 @@ detail::Managed_child_launch_attempt::commit_posix_native_handoff(
                     0,
                     true,
                     wait_status_available,
-                    wait_status))
+                    static_cast<std::uint32_t>(wait_status)))
             {
                 throw std::runtime_error(
                     "Managed-child native authority commit failed");
@@ -1852,7 +1853,7 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                         GetExitCodeProcess(process_handle, &exit_code) != 0;
                     exit_publication = record_managed_child_exit_locked(
                         *occurrence,
-                        static_cast<int>(exit_code), exit_code_available);
+                        exit_code, exit_code_available);
                     transition_valid = exit_publication.transition_valid;
                     if (transition_valid &&
                         occurrence->native.process_handle_owned())
@@ -3745,7 +3746,7 @@ struct timed_out {};
 
 struct signaled
 {
-    int exit_status = 0;
+    std::uint32_t exit_status = 0;
 };
 
 enum class failed_operation
@@ -3802,7 +3803,7 @@ execute_managed_child_windows_fallback(
     if (GetExitCodeProcess(process_handle, &exit_status) == 0) {
         return wait_failed{failed_operation::exit_query, GetLastError()};
     }
-    return signaled{static_cast<int>(exit_status)};
+    return signaled{exit_status};
 }
 
 inline managed_child_windows_fallback_result::application_result
@@ -4886,7 +4887,7 @@ inline void Managed_process::note_child_os_exit(
         }
         exit_publication = detail::record_managed_child_exit_locked(
             *occurrence,
-            wait_status,
+            static_cast<std::uint32_t>(wait_status),
             wait_status_available);
         if (!exit_publication.transition_valid) {
             Log_stream(log_level::error)
@@ -5037,7 +5038,7 @@ inline bool Managed_process::cleanup_child_native(
             if (occurrence) {
                 exit_publication = detail::record_managed_child_exit_locked(
                     *occurrence,
-                    static_cast<int>(exit_code),
+                    exit_code,
                     true);
                 transition_valid = exit_publication.transition_valid;
                 if (transition_valid &&

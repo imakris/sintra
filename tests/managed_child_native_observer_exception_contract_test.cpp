@@ -37,6 +37,7 @@ constexpr std::string_view k_child_flag =
 constexpr std::string_view k_case_flag = "--observer-case";
 constexpr std::string_view k_nonce_flag = "--observer-nonce";
 constexpr auto k_timeout = 10s;
+constexpr std::uint32_t k_high_bit_exit_status = 0xc0000005u;
 
 struct Ready_target : sintra::Derived_transceiver<Ready_target>
 {};
@@ -202,10 +203,17 @@ int run_child(
     {
         return 2;
     }
-    return sintra::test::wait_for_file(
-        case_file(shared_directory, "exit", case_number), k_timeout, 10ms)
-        ? 0
-        : 3;
+    if (!sintra::test::wait_for_file(
+            case_file(shared_directory, "exit", case_number), k_timeout, 10ms))
+    {
+        return 3;
+    }
+#ifdef _WIN32
+    ExitProcess(k_high_bit_exit_status);
+    return 0;
+#else
+    return 0;
+#endif
 }
 
 struct Case_result
@@ -407,7 +415,9 @@ Case_result run_case(
         exit_status_valid = exit_event.status_kind ==
                 sintra::Managed_child_exit_status_kind::exited &&
             exit_event.native_status_available &&
-            exit_event.status == static_cast<int>(exit_code);
+            exit_event.status == exit_code &&
+            exit_event.native_status == exit_code &&
+            exit_code == k_high_bit_exit_status;
 #endif
         result.exit_observation = exit_callback_count == 1 &&
             exit_event.occurrence.process_instance_id == process_iid &&
