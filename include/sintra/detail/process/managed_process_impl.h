@@ -1593,11 +1593,13 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                                     occurrence_number >=
                                         custody->last_failure.occurrence)
                                 {
-                                    custody->last_failure = {
-                                        Managed_child_failure_kind::native_observer,
-                                        occurrence_number,
-                                        native_error,
-                                        message};
+                                    custody->last_failure.kind =
+                                        Managed_child_failure_kind::native_observer;
+                                    custody->last_failure.occurrence =
+                                        occurrence_number;
+                                    custody->last_failure.native_error =
+                                        native_error;
+                                    custody->last_failure.message = message;
                                 }
                             }
                         }

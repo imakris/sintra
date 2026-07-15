@@ -44,7 +44,8 @@ enum class Managed_child_failure_kind
     setup_worker_start,
     readiness_observation,
     release_worker_start,
-    release_worker_execution
+    release_worker_execution,
+    native_observer
 };
 
 struct Managed_child_failure
@@ -208,6 +209,8 @@ Failures:
   exception escaping its lifecycle work is reported as
   `release_worker_execution`. Both retain custody and permit a later release or
   termination call to retry with the same authority.
+- A Windows exit-observer failure is reported as `native_observer`; exact
+  process-handle authority remains available for release or termination retry.
 - `Managed_child_failure_kind::none` means no managed-child failure report has
   been recorded. It is not an independent success result; use the other status
   states to decide whether the requested milestone is confirmed.
