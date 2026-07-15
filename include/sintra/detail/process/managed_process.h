@@ -621,12 +621,6 @@ public:
             generation() == expected_generation;
     }
 
-    bool active(uint64_t expected_generation) const noexcept
-    {
-        return expected_generation != 0 && active() &&
-            generation() == expected_generation;
-    }
-
     bool mark_failing(uint64_t expected_generation) noexcept
     {
         auto releasing = exact_releasing(expected_generation);
