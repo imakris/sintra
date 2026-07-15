@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <cstdint>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -1382,6 +1383,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
+    std::optional<uint32_t> allocate_child_custody_occurrence(
+        instance_id_type process_instance_id,
+        uint32_t minimum = 0);
     detail::Managed_child_launch_attempt admit_child_custody_occurrence(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         instance_id_type process_instance_id,
@@ -1510,6 +1514,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
                                         m_child_custodies;
     std::map<instance_id_type, detail::Managed_child_active_occurrence>
                                         m_child_custody_by_process;
+    std::map<instance_id_type, uint32_t> m_next_child_occurrence_by_process;
     mutable std::mutex                  m_child_custody_workers_mutex;
     struct Child_custody_worker
     {

@@ -1357,6 +1357,16 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             return {};
         }
 
+        const auto occurrence =
+            s_mproc->allocate_child_custody_occurrence(piid);
+        if (!occurrence) {
+            Log_stream(log_level::error)
+                << "spawn_swarm_process: occurrence counter exhausted for process "
+                << static_cast<unsigned long long>(piid) << '\n';
+            return {};
+        }
+        spawn_args.occurrence = *occurrence;
+
         auto args = options.args;
         auto argv0_matches = [&]() {
             if (args.empty()) {

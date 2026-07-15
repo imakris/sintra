@@ -22,6 +22,7 @@
 #include <fstream>
 #include <functional>
 #include <list>
+#include <limits>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -3352,6 +3353,20 @@ inline bool Managed_process::can_accept_child_custody(
     return existing->release_state.released();
 }
 
+inline std::optional<uint32_t>
+Managed_process::allocate_child_custody_occurrence(
+    instance_id_type process_instance_id,
+    uint32_t minimum)
+{
+    std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+    auto& next = m_next_child_occurrence_by_process[process_instance_id];
+    next = std::max(next, minimum);
+    if (next == std::numeric_limits<uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return next++;
+}
+
 inline detail::Managed_child_launch_attempt
 Managed_process::admit_child_custody_occurrence(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
@@ -3359,6 +3374,9 @@ Managed_process::admit_child_custody_occurrence(
     uint32_t occurrence)
 {
     if (!custody) {
+        return {};
+    }
+    if (occurrence == std::numeric_limits<uint32_t>::max()) {
         return {};
     }
     {
@@ -3381,6 +3399,9 @@ Managed_process::admit_child_custody_occurrence(
             occurrence);
         {
             std::lock_guard<std::mutex> lock(m_child_custody_mutex);
+            auto& next =
+                m_next_child_occurrence_by_process[process_instance_id];
+            next = std::max(next, occurrence + 1);
             m_child_custody_by_process[process_instance_id] = {custody, occurrence};
         }
     }
