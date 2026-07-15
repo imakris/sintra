@@ -187,7 +187,9 @@ struct Managed_child_exit
     Managed_child_occurrence_identity occurrence;
     Managed_child_exit_status_kind    status_kind =
         Managed_child_exit_status_kind::unavailable;
+    // Portable exit code or signal number interpreted by status_kind.
     std::uint32_t                     status = 0;
+    // Exact Windows DWORD or the POSIX wait-status bit pattern.
     std::uint32_t                     native_status = 0;
     bool                              native_status_available = false;
 };

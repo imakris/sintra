@@ -341,7 +341,9 @@ public:
     /// the latest occurrence may intentionally skip older exited occurrences.
     /// If no OS-created occurrence exists, the result is empty and the
     /// callback is not retained. Registering after the selected occurrence has
-    /// exited still schedules one delivery.
+    /// exited still schedules one delivery while the coordinator runtime is
+    /// active. Registration during teardown or after shutdown returns empty
+    /// and does not retain the callback.
     ///
     /// This observation is OS-authoritative. The communication-dependent
     /// `terminated_abnormally` signal, coordinator publication lifecycle

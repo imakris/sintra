@@ -344,6 +344,47 @@ struct Managed_child_status
     Managed_child_failure last_failure;
 };
 
+struct Managed_child_occurrence_identity
+{
+    instance_id_type process_instance_id = invalid_instance_id;
+    std::uint32_t occurrence = 0;
+};
+
+enum class Managed_child_exit_status_kind
+{
+    unavailable,
+    exited,
+    signaled,
+    other
+};
+
+struct Managed_child_exit
+{
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_exit_status_kind status_kind =
+        Managed_child_exit_status_kind::unavailable;
+    std::uint32_t status = 0;
+    std::uint32_t native_status = 0;
+    bool native_status_available = false;
+};
+
+using Managed_child_exit_callback =
+    std::function<void(const Managed_child_exit&)>;
+
+class Managed_child_exit_subscription
+{
+public:
+    explicit operator bool() const noexcept;
+    void unsubscribe() noexcept;
+};
+
+struct Managed_child_exit_observation
+{
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_exit_subscription subscription;
+    explicit operator bool() const noexcept;
+};
+
 class Managed_child_custody
 {
 public:
@@ -351,6 +392,8 @@ public:
     Managed_child_status status() const;
     Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_exit_observation observe_latest_created_exit(
+        Managed_child_exit_callback callback) const;
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
@@ -384,6 +427,32 @@ A synchronous setup failure after acceptance returns the retained handle and
 settles a no-child occurrence or continues active cleanup for an already-created
 child.
 
+`observe_latest_created_exit()` atomically selects the latest occurrence whose
+OS process was actually created and returns its immutable
+`(process_instance_id, occurrence)` identity. The subscription observes only
+that exact occurrence and never follows recovery. A newer no-child admission
+does not displace the latest created occurrence; if no occurrence was created,
+the result is empty and the callback is not retained. Register again after a
+new recovery occurrence is created to observe it.
+
+Registration requires an active coordinator runtime. During teardown or after
+`shutdown()`, it returns empty and does not retain the callback. While the
+runtime is active, registering after the selected occurrence exited schedules
+one late delivery. Callbacks execute once on a Sintra-managed lifecycle thread,
+may start before registration returns, have no ordering guarantee, and run
+without custody locks held. They must not initiate runtime teardown and should
+post application work to the caller's executor. Exceptions are logged without
+retry. Destroying the move-only subscription or calling `unsubscribe()` cancels
+pending delivery; an external unsubscribe waits for an executing callback, and
+self-unsubscription finishes after the callback returns.
+
+`Managed_child_exit::status_kind` interprets the portable `status` value:
+`exited` carries an exit code, `signaled` carries a POSIX signal number, and
+`unavailable` has no status. Windows reports every process termination as
+`exited`. When `native_status_available` is true, `native_status` preserves the
+full Windows 32-bit exit code or the POSIX wait-status bit pattern. Prefer the
+normalized fields unless platform-specific diagnostics are needed.
+
 Every operation returns a compact status snapshot containing only confirmed
 facts. Deadline expiry may leave readiness, release, or termination incomplete;
 it does not itself record a managed-child failure. `last_failure` is retained
@@ -393,9 +462,11 @@ means no failure report has been recorded, not that the requested milestone
 succeeded.
 
 Compiled examples/tests:
+
 - [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp)
 - [`tests/lifeline_basic_test.cpp`](../tests/lifeline_basic_test.cpp)
 - [`tests/managed_child_public_cleanup_contract_test.cpp`](../tests/managed_child_public_cleanup_contract_test.cpp)
+- [`tests/managed_child_exact_exit_observation_contract_test.cpp`](../tests/managed_child_exact_exit_observation_contract_test.cpp)
 
 ### `sintra::join_swarm`
 
