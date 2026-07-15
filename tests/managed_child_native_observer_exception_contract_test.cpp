@@ -293,7 +293,8 @@ Case_result run_case(
     {
         std::unique_lock<std::mutex> lock(gate.mutex);
         result.setup = gate.changed.wait_for(lock, 2s, [&]() {
-            return gate.before_wait == 1;
+            return gate.before_wait == 1 &&
+                (!cancel_before_registration || gate.registration_complete);
         });
         result.registration_ordered = !cancel_before_registration ||
             gate.observer_registered == 0;
