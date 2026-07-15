@@ -780,6 +780,7 @@ int run_root(
 
         auto stale_after_reinit = custody.observe_latest_created_exit(
             [&](const sintra::Managed_child_exit&) {
+                std::lock_guard<std::mutex> lock(reinitialized_mutex);
                 stale_after_reinit_count.fetch_add(1, std::memory_order_release);
                 reinitialized_changed.notify_all();
             });
@@ -804,6 +805,7 @@ int run_root(
             reinitialized_options);
         auto current_observation = current_custody.observe_latest_created_exit(
             [&](const sintra::Managed_child_exit&) {
+                std::lock_guard<std::mutex> lock(reinitialized_mutex);
                 current_after_reinit_count.fetch_add(
                     1, std::memory_order_release);
                 reinitialized_changed.notify_all();
