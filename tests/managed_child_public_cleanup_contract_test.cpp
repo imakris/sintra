@@ -41,6 +41,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_public_cleanup_child";
@@ -143,18 +144,6 @@ std::optional<sintra::instance_id_type> resolve_publicly(const std::string& name
     catch (...) {
         return std::nullopt;
     }
-}
-
-bool exact_child_is_live(const Child_ledger& ledger)
-{
-    if (!ledger.start_stamp_available || ledger.pid <= 0 ||
-        !sintra::is_process_alive(static_cast<uint32_t>(ledger.pid)))
-    {
-        return false;
-    }
-    const auto stamp = sintra::query_process_start_stamp(
-        static_cast<uint32_t>(ledger.pid));
-    return stamp && *stamp == ledger.start_stamp;
 }
 
 struct Cleanup_gate
@@ -507,7 +496,8 @@ Windows_fallback_wake_result run_windows_fallback_wake(
         ledger->process_iid == k_fallback_child_process_iid &&
         ledger->occurrence == 0 && child_handle &&
         WaitForSingleObject(child_handle, 0) == WAIT_TIMEOUT &&
-        exact_child_is_live(*ledger);
+        exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 
     sintra::Managed_child_status passive;
     std::thread passive_caller([&]() {
@@ -540,7 +530,8 @@ Windows_fallback_wake_result run_windows_fallback_wake(
     result.child_exited_naturally = exit_requested && external_exit &&
         exit_code == 0;
     result.survivor_absent = result.child_exited_naturally && ledger &&
-        !exact_child_is_live(*ledger);
+        !exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 
     const auto passive_check_begin = std::chrono::steady_clock::now();
     const auto after_exit = custody.release_until(passive_check_begin + 180ms);
@@ -694,7 +685,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool ready_valid = !spawn_threw && custody &&
         launch.readiness_state == sintra::Managed_child_readiness_state::reached &&
         launch.created_occurrences == 1 &&
-        identity_valid && ledger && exact_child_is_live(*ledger) &&
+        identity_valid && ledger && exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp) &&
 #ifdef _WIN32
         child_handle && WaitForSingleObject(child_handle, 0) == WAIT_TIMEOUT &&
 #endif
@@ -727,7 +719,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const auto failed_cleanup = custody.terminate_until(failed_begin + 120ms);
     const auto failed_elapsed = std::chrono::steady_clock::now() - failed_begin;
     const bool failure_seen = failure_hits(failure_plan) == 1;
-    const bool retained_after_failure = ledger && exact_child_is_live(*ledger) &&
+    const bool retained_after_failure = ledger && exact_process_is_live(
+        ledger->pid, ledger->start_stamp_available, ledger->start_stamp) &&
         resolve_publicly(ready_name) ==
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
     bool failed_bounded_incomplete = passive_wait_seen && failure_seen &&
@@ -752,7 +745,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         cleanup_entered = gate.changed.wait_for(lock, 2s, [&]() { return gate.entered; });
     }
 
-    const bool child_retained_while_held = ledger && exact_child_is_live(*ledger) &&
+    const bool child_retained_while_held = ledger && exact_process_is_live(
+        ledger->pid, ledger->start_stamp_available, ledger->start_stamp) &&
         resolve_publicly(ready_name) ==
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
     const bool bounded_incomplete = failed_bounded_incomplete &&
@@ -767,7 +761,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::chrono::steady_clock::now() + 80ms);
     const bool retained_across_finalize = !first_finalize_succeeded && custody &&
         retry.release_state == sintra::Managed_child_release_state::requested && ledger &&
-        exact_child_is_live(*ledger);
+        exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
@@ -795,7 +790,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         DWORD exit_code = STILL_ACTIVE;
         exact_exit = GetExitCodeProcess(child_handle, &exit_code) != 0;
         expected_status = exact_exit && exit_code == 99;
-        survivor_absent = exact_exit && ledger && !exact_child_is_live(*ledger);
+        survivor_absent = exact_exit && ledger && !exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
     }
     if (child_handle) {
         CloseHandle(child_handle);
@@ -809,7 +805,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     exact_exit = reap_count == 1;
     expected_status = exact_exit && WIFEXITED(reap_status) &&
         WEXITSTATUS(reap_status) == 99;
-    survivor_absent = exact_exit && ledger && !exact_child_is_live(*ledger);
+    survivor_absent = exact_exit && ledger && !exact_process_is_live(
+        ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 #endif
 
     sintra::detail::test_hooks::s_managed_child_failure.store(

@@ -40,6 +40,7 @@
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_adverse_cleanup_child";
@@ -366,18 +367,6 @@ bool wait_for_spawn_call(Spawn_call& call, std::chrono::milliseconds timeout)
     return call.cv.wait_for(lock, timeout, [&]() { return call.done; });
 }
 
-bool exact_child_is_live(const Child_ledger& ledger)
-{
-    if (ledger.pid <= 0 || !ledger.start_stamp_available ||
-        !sintra::is_process_alive(static_cast<uint32_t>(ledger.pid)))
-    {
-        return false;
-    }
-    const auto observed =
-        sintra::query_process_start_stamp(static_cast<uint32_t>(ledger.pid));
-    return observed && *observed == ledger.start_stamp;
-}
-
 bool exact_name_map_absent(const std::string& name)
 {
     if (!sintra::s_mproc) {
@@ -436,7 +425,9 @@ bool wait_for_posix_reap(std::chrono::milliseconds timeout)
 
 bool terminate_exact_child(const Child_ledger& ledger)
 {
-    if (!exact_child_is_live(ledger)) {
+    if (!exact_process_is_live(
+            ledger.pid, ledger.start_stamp_available, ledger.start_stamp))
+    {
         return false;
     }
 #ifdef _WIN32
@@ -628,7 +619,8 @@ bool run_native_escalation_phase(
 #endif
     const bool caller_bounded =
         returned - started <= k_requested_wait_timeout + k_scheduling_tolerance;
-    const bool live_after_caller = ledger_valid && exact_child_is_live(*ledger);
+    const bool live_after_caller = ledger_valid && exact_process_is_live(
+        ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 
 #ifdef _WIN32
     HANDLE process = ledger_valid
@@ -643,7 +635,8 @@ bool run_native_escalation_phase(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
     const auto retried = custody.terminate_until(
         std::chrono::steady_clock::now() + std::chrono::seconds(1));
-    const bool survivor_absent = ledger_valid && !exact_child_is_live(*ledger);
+    const bool survivor_absent = ledger_valid && !exact_process_is_live(
+        ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
     const uint32_t soft_count =
         s_native_cleanup.soft.load(std::memory_order_acquire);
     const uint32_t hard_count =
@@ -827,19 +820,22 @@ Native_retry_result run_native_retry_phase(
     const bool hard_hook_bounded = hard_hook_elapsed_ns >= 0 &&
         std::chrono::nanoseconds(hard_hook_elapsed_ns) <=
             k_native_retry_hard_hook_deadline;
-    const bool retained_after_first = ledger_valid && exact_child_is_live(*ledger);
+    const bool retained_after_first = ledger_valid && exact_process_is_live(
+        ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
     const uint32_t failure_hits =
         s_native_hard_failure_hits.load(std::memory_order_acquire);
 
     const auto second = custody.terminate_until(
         std::chrono::steady_clock::now() + k_watchdog_timeout);
-    bool survivor_absent = ledger_valid && !exact_child_is_live(*ledger);
+    bool survivor_absent = ledger_valid && !exact_process_is_live(
+        ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
     bool forced_cleanup = false;
     if (ledger_valid && !survivor_absent) {
         forced_cleanup = terminate_exact_child(*ledger);
         custody.release_until(
             std::chrono::steady_clock::now() + k_watchdog_timeout);
-        survivor_absent = !exact_child_is_live(*ledger);
+        survivor_absent = !exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
     }
 
     const uint32_t soft_count =
@@ -1108,7 +1104,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         observed_start_stamp &&
         *observed_start_stamp == ledger->start_stamp;
     const bool child_alive_at_observation =
-        start_stamp_verified && exact_child_is_live(*ledger);
+        start_stamp_verified && exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
     const bool name_absent_at_seam =
         ledger_identity_valid && exact_name_map_absent(ledger->managed_name);
     const bool reader_nonterminal_at_seam =
@@ -1193,7 +1190,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     wait_for_posix_reap(k_watchdog_timeout);
 #endif
 
-    if (ledger && !native_exit_confirmed && exact_child_is_live(*ledger)) {
+    if (ledger && !native_exit_confirmed && exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp))
+    {
         forced_cleanup = terminate_exact_child(*ledger);
 #ifndef _WIN32
         wait_for_posix_reap(std::chrono::seconds(2));
@@ -1235,7 +1234,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #endif
 
     const bool survivor_absent =
-        native_exit_confirmed && ledger && !exact_child_is_live(*ledger);
+        native_exit_confirmed && ledger && !exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 
 #ifdef _WIN32
     if (child_process) {

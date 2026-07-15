@@ -39,6 +39,7 @@
 namespace {
 
 namespace fs = std::filesystem;
+using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag = "--managed_child_readiness_deadline_child";
@@ -218,20 +219,6 @@ bool wait_for_spawn_call(Spawn_call& call, std::chrono::milliseconds timeout)
     });
 }
 
-bool exact_child_is_live(const Child_ledger& ledger)
-{
-    if (ledger.pid <= 0 ||
-        !ledger.start_stamp_available ||
-        !sintra::is_process_alive(static_cast<uint32_t>(ledger.pid)))
-    {
-        return false;
-    }
-
-    const auto observed = sintra::query_process_start_stamp(
-        static_cast<uint32_t>(ledger.pid));
-    return observed && *observed == ledger.start_stamp;
-}
-
 #ifndef _WIN32
 struct Posix_reap_observation
 {
@@ -267,7 +254,9 @@ bool wait_for_posix_reap(std::chrono::milliseconds timeout)
 
 bool terminate_exact_child(const Child_ledger& ledger)
 {
-    if (!exact_child_is_live(ledger)) {
+    if (!exact_process_is_live(
+            ledger.pid, ledger.start_stamp_available, ledger.start_stamp))
+    {
         return false;
     }
 
@@ -481,7 +470,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         observed_start_stamp &&
         *observed_start_stamp == ledger->start_stamp;
     const bool child_alive_during_hold =
-        start_stamp_verified && exact_child_is_live(*ledger);
+        start_stamp_verified && exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 
 #ifdef _WIN32
     HANDLE child_process = ledger
@@ -541,7 +531,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     const bool resolution_entered_before_deadline =
         resolution_entered && resolution_entered_at < requested_deadline;
     const bool child_alive_at_observation =
-        ledger && start_stamp_verified && exact_child_is_live(*ledger);
+        ledger && start_stamp_verified && exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
     const bool deadline_expired_before_call =
         wait_called && wait_called_at > requested_deadline;
     const auto call_started_after_deadline_ms = wait_called
@@ -608,7 +599,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     wait_for_posix_reap(k_watchdog_timeout);
 #endif
 
-    if (ledger && !native_exit_confirmed && exact_child_is_live(*ledger)) {
+    if (ledger && !native_exit_confirmed && exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp))
+    {
         forced_cleanup = terminate_exact_child(*ledger);
 #ifdef _WIN32
         if (child_process && WaitForSingleObject(child_process, 2000) == WAIT_OBJECT_0) {
@@ -650,7 +643,8 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     survivor_absent =
         native_exit_confirmed &&
         ledger &&
-        !exact_child_is_live(*ledger);
+        !exact_process_is_live(
+            ledger->pid, ledger->start_stamp_available, ledger->start_stamp);
 
 #ifdef _WIN32
     if (child_process) {

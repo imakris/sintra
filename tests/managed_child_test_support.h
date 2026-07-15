@@ -132,6 +132,14 @@ inline bool exact_process_is_live(int pid, std::uint64_t start_stamp)
     return observed && *observed == start_stamp;
 }
 
+inline bool exact_process_is_live(
+    int pid,
+    bool start_stamp_available,
+    std::uint64_t start_stamp)
+{
+    return start_stamp_available && exact_process_is_live(pid, start_stamp);
+}
+
 inline bool write_complete_file(
     const std::filesystem::path& path,
     const std::string&           contents)
