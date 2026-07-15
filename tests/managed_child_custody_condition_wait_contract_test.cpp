@@ -56,6 +56,10 @@ int main(int argc, char* argv[])
         return process.wait_for_all_child_custodies(
             std::chrono::steady_clock::now() + 2s);
     });
+    process.m_child_custody_changed.notify_all();
+    const bool spurious_notification_ignored =
+        waiter_1.wait_for(20ms) == std::future_status::timeout &&
+        waiter_2.wait_for(20ms) == std::future_status::timeout;
 
     const bool first_released = mark_released(first);
     process.retire_child_custody_if_complete(first);
@@ -110,7 +114,8 @@ int main(int argc, char* argv[])
             std::chrono::steady_clock::now() + 1s);
     const bool finalized = sintra::detail::finalize();
 
-    return empty_returns_immediately && unresolved_times_out && first_released &&
+    return empty_returns_immediately && unresolved_times_out &&
+        spurious_notification_ignored && first_released &&
         pending_record_retained && one_remaining && exact_first_retired &&
         second_released && terminal_record_still_registered &&
         waiters_still_blocked && waiters_completed && registries_empty &&
