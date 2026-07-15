@@ -1639,6 +1639,10 @@ Managed_child_custody::observe_latest_created_exit(
     {
         return {};
     }
+    const auto runtime_lifetime = m_record->runtime_lifetime.lock();
+    if (!runtime_lifetime || runtime_lifetime != s_mproc->m_runtime_lifetime) {
+        return {};
+    }
 
     Managed_child_occurrence_identity identity;
     std::shared_ptr<detail::Managed_child_exit_subscription_state> state;

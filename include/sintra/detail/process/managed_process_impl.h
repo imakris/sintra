@@ -3324,6 +3324,7 @@ inline std::shared_ptr<detail::Managed_child_custody_record>
 Managed_process::accept_child_custody()
 {
     auto custody = std::make_shared<detail::Managed_child_custody_record>();
+    custody->runtime_lifetime = m_runtime_lifetime;
     {
         std::lock_guard<std::mutex> lock(m_child_custody_mutex);
         custody->identity = m_next_child_custody_identity++;

@@ -839,10 +839,15 @@ private:
 
 // One retained logical custody record.  Subsystems remain authoritative for
 // their own facts; this record only joins their exact-occurrence reports.
+struct Managed_process_lifetime
+{};
+
 struct Managed_child_custody_record
 {
     mutable std::mutex                         mutex;
     std::condition_variable                    changed;
+    std::weak_ptr<const Managed_process_lifetime>
+                                                runtime_lifetime;
     uint64_t                                   identity = 0;
     Readiness_phase                            readiness = Readiness_phase::not_requested;
     std::atomic<bool>                          readiness_cancelled{false};
@@ -1497,6 +1502,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     mutable std::mutex                  m_child_custody_mutex;
     std::condition_variable             m_child_custody_changed;
+    std::shared_ptr<const detail::Managed_process_lifetime>
+                                        m_runtime_lifetime = std::make_shared<
+                                            const detail::Managed_process_lifetime>();
     uint64_t                            m_next_child_custody_identity = 1;
     std::map<uint64_t, std::shared_ptr<detail::Managed_child_custody_record>>
                                         m_child_custodies;
