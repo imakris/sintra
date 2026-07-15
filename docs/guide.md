@@ -354,8 +354,7 @@ enum class Managed_child_exit_status_kind
 {
     unavailable,
     exited,
-    signaled,
-    other
+    signaled
 };
 
 struct Managed_child_exit
@@ -451,7 +450,9 @@ self-unsubscription finishes after the callback returns.
 `unavailable` has no status. Windows reports every process termination as
 `exited`. When `native_status_available` is true, `native_status` preserves the
 full Windows 32-bit exit code or the POSIX wait-status bit pattern. Prefer the
-normalized fields unless platform-specific diagnostics are needed.
+normalized fields unless platform-specific diagnostics are needed. An
+unexpected POSIX wait-status classification remains available in
+`native_status` but reports normalized status as `unavailable`.
 
 Every operation returns a compact status snapshot containing only confirmed
 facts. Deadline expiry may leave readiness, release, or termination incomplete;

@@ -205,9 +205,6 @@ inline Managed_child_exit make_managed_child_exit(
         event.status_kind = Managed_child_exit_status_kind::signaled;
         event.status = WTERMSIG(native_status);
     }
-    else {
-        event.status_kind = Managed_child_exit_status_kind::other;
-    }
 #endif
     return event;
 }

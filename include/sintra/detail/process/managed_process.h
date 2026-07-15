@@ -178,8 +178,7 @@ enum class Managed_child_exit_status_kind
     // distinguish an ordinary return from TerminateProcess.
     exited,
     // Reported only when the platform supplies signal termination status.
-    signaled,
-    other
+    signaled
 };
 
 struct Managed_child_exit

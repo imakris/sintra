@@ -211,6 +211,23 @@ bool expected_terminated_exit(const sintra::Managed_child_exit& event)
 #endif
 }
 
+bool unexpected_native_status_is_unavailable()
+{
+#ifdef _WIN32
+    return true;
+#else
+    const auto native_status = static_cast<std::uint32_t>(
+        (SIGSTOP << 8) | 0x7f);
+    const auto event = sintra::detail::make_managed_child_exit(
+        {k_child_process_iid, 99}, native_status, true);
+    return WIFSTOPPED(static_cast<int>(native_status)) &&
+        event.status_kind ==
+            sintra::Managed_child_exit_status_kind::unavailable &&
+        event.status == 0 && event.native_status_available &&
+        event.native_status == native_status;
+#endif
+}
+
 int run_child(
     int argc,
     char* argv[],
@@ -578,6 +595,7 @@ int run_root(
         replay_observation.occurrence == replacement_observation.occurrence &&
         replay_event.occurrence == replacement_observation.occurrence;
     const bool valid = missing_custody && !missing_observation &&
+        unexpected_native_status_is_unavailable() &&
         missing_status.created_occurrences == 0 &&
         missing_released.release_state ==
             sintra::Managed_child_release_state::complete &&

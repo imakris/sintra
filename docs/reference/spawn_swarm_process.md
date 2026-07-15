@@ -93,8 +93,7 @@ enum class Managed_child_exit_status_kind
 {
     unavailable,
     exited,
-    signaled,
-    other
+    signaled
 };
 
 struct Managed_child_exit
@@ -203,7 +202,9 @@ Contract:
   as `exited` because its process status does not distinguish forced exit.
   `native_status`, when available, preserves the complete Windows 32-bit exit
   code or the POSIX wait-status bit pattern. Prefer `status_kind` and `status`
-  unless platform-specific diagnostics are required.
+  unless platform-specific diagnostics are required. An unexpected POSIX
+  wait-status classification reports `unavailable` while retaining that native
+  bit pattern.
 
 Threading and lifecycle:
 
