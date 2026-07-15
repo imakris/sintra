@@ -58,6 +58,8 @@ constexpr sintra::instance_id_type k_missing_process_iid =
     sintra::compose_instance(32u, 1ull);
 constexpr sintra::instance_id_type k_reentrant_process_iid =
     sintra::compose_instance(33u, 1ull);
+constexpr sintra::instance_id_type k_reinitialized_process_iid =
+    sintra::compose_instance(34u, 1ull);
 
 std::atomic_bool s_fail_exit_dispatcher_start{false};
 std::atomic_int s_forced_unavailable_hits{0};
@@ -761,6 +763,73 @@ int run_root(
             teardown_callback_count.fetch_add(1, std::memory_order_release);
         });
 
+    std::mutex reinitialized_mutex;
+    std::condition_variable reinitialized_changed;
+    std::atomic_int stale_after_reinit_count{0};
+    std::atomic_int current_after_reinit_count{0};
+    bool reinitialized = false;
+    bool stale_after_reinit_valid = false;
+    bool stale_after_reinit_replayed = false;
+    bool current_after_reinit_registered = false;
+    bool current_after_reinit_observed = false;
+    bool current_after_reinit_released = false;
+    bool refinalized = false;
+    try {
+        sintra::init(argc, argv);
+        reinitialized = true;
+
+        auto stale_after_reinit = custody.observe_latest_created_exit(
+            [&](const sintra::Managed_child_exit&) {
+                stale_after_reinit_count.fetch_add(1, std::memory_order_release);
+                reinitialized_changed.notify_all();
+            });
+        stale_after_reinit_valid = static_cast<bool>(stale_after_reinit);
+        if (stale_after_reinit_valid) {
+            std::unique_lock<std::mutex> lock(reinitialized_mutex);
+            stale_after_reinit_replayed = reinitialized_changed.wait_for(
+                lock,
+                5s,
+                [&]() {
+                    return stale_after_reinit_count.load(
+                        std::memory_order_acquire) == 1;
+                });
+        }
+
+        sintra::Spawn_options reinitialized_options;
+        reinitialized_options.binary_path = binary_path;
+        reinitialized_options.args = {k_reentrant_child_flag};
+        reinitialized_options.process_instance_id = k_reinitialized_process_iid;
+        reinitialized_options.lifetime.enable_lifeline = false;
+        auto current_custody = sintra::spawn_swarm_process(
+            reinitialized_options);
+        auto current_observation = current_custody.observe_latest_created_exit(
+            [&](const sintra::Managed_child_exit&) {
+                current_after_reinit_count.fetch_add(
+                    1, std::memory_order_release);
+                reinitialized_changed.notify_all();
+            });
+        current_after_reinit_registered =
+            static_cast<bool>(current_observation);
+        if (current_after_reinit_registered) {
+            std::unique_lock<std::mutex> lock(reinitialized_mutex);
+            current_after_reinit_observed = reinitialized_changed.wait_for(
+                lock,
+                5s,
+                [&]() {
+                    return current_after_reinit_count.load(
+                        std::memory_order_acquire) == 1;
+                });
+        }
+        const auto current_released = current_custody.release_until(
+            std::chrono::steady_clock::now() + 5s);
+        current_after_reinit_released = current_custody &&
+            current_released.release_state ==
+                sintra::Managed_child_release_state::complete;
+        refinalized = sintra::shutdown();
+    }
+    catch (...) {
+    }
+
     const bool identity_valid = observation_registered &&
         observation.occurrence.process_instance_id == k_child_process_iid &&
         observation.occurrence.occurrence == 0 &&
@@ -807,7 +876,13 @@ int run_root(
             sintra::Managed_child_release_state::complete &&
         finalized && teardown_observation_empty &&
         !after_shutdown_observation &&
-        teardown_callback_count.load(std::memory_order_acquire) == 0;
+        teardown_callback_count.load(std::memory_order_acquire) == 0 &&
+        reinitialized && !stale_after_reinit_valid &&
+        !stale_after_reinit_replayed &&
+        stale_after_reinit_count.load(std::memory_order_acquire) == 0 &&
+        current_after_reinit_registered && current_after_reinit_observed &&
+        current_after_reinit_count.load(std::memory_order_acquire) == 1 &&
+        current_after_reinit_released && refinalized;
     if (!valid) {
         std::fprintf(
             stderr,
@@ -825,7 +900,10 @@ int run_root(
             "replay_off_thread=%d unavailable=%d newer_no_child=%d "
             "reentrant_spawn=%d admitted=%zu created=%zu exited=%zu "
             "released=%d finalized=%d teardown_empty=%d after_empty=%d "
-            "teardown_count=%d\n",
+            "teardown_count=%d reinitialized=%d stale_valid=%d "
+            "stale_replayed=%d stale_count=%d current_registered=%d "
+            "current_observed=%d current_count=%d current_released=%d "
+            "refinalized=%d\n",
             missing_custody ? 1 : 0,
             missing_observation ? 1 : 0,
             missing_status.created_occurrences,
@@ -872,7 +950,16 @@ int run_root(
             finalized ? 1 : 0,
             teardown_observation_empty ? 1 : 0,
             after_shutdown_observation ? 0 : 1,
-            teardown_callback_count.load(std::memory_order_acquire));
+            teardown_callback_count.load(std::memory_order_acquire),
+            reinitialized ? 1 : 0,
+            stale_after_reinit_valid ? 1 : 0,
+            stale_after_reinit_replayed ? 1 : 0,
+            stale_after_reinit_count.load(std::memory_order_acquire),
+            current_after_reinit_registered ? 1 : 0,
+            current_after_reinit_observed ? 1 : 0,
+            current_after_reinit_count.load(std::memory_order_acquire),
+            current_after_reinit_released ? 1 : 0,
+            refinalized ? 1 : 0);
     }
     return valid ? 0 : 1;
 }
