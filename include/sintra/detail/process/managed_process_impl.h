@@ -1592,6 +1592,7 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                     if (!committed) {
                         try {
                             std::lock_guard<std::mutex> lock(custody->mutex);
+                            complete->store(true, std::memory_order_release);
                             auto* exact = custody->find_occurrence_locked(
                                 process_instance_id, occurrence_number);
                             if (exact &&
