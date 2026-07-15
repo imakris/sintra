@@ -722,6 +722,32 @@ struct Managed_child_custody_record
     Managed_child_release_state                release_state;
     Managed_child_failure                      last_failure;
     std::vector<Managed_child_occurrence_record> occurrences;
+
+    Managed_child_occurrence_record* find_occurrence_locked(
+        instance_id_type process_instance_id,
+        uint32_t occurrence) noexcept
+    {
+        const auto exact = std::find_if(
+            occurrences.begin(), occurrences.end(),
+            [&](const Managed_child_occurrence_record& candidate) {
+                return candidate.process_instance_id == process_instance_id &&
+                    candidate.occurrence == occurrence;
+            });
+        return exact == occurrences.end() ? nullptr : &*exact;
+    }
+
+    const Managed_child_occurrence_record* find_occurrence_locked(
+        instance_id_type process_instance_id,
+        uint32_t occurrence) const noexcept
+    {
+        const auto exact = std::find_if(
+            occurrences.begin(), occurrences.end(),
+            [&](const Managed_child_occurrence_record& candidate) {
+                return candidate.process_instance_id == process_instance_id &&
+                    candidate.occurrence == occurrence;
+            });
+        return exact == occurrences.end() ? nullptr : &*exact;
+    }
 };
 
 // Pins one admitted occurrence until setup becomes terminal.  The launch
@@ -798,15 +824,9 @@ public:
         bool changed = false;
         try {
             std::lock_guard<std::mutex> lock(m_custody->mutex);
-            const auto exact = std::find_if(
-                m_custody->occurrences.begin(),
-                m_custody->occurrences.end(),
-                [&](const Managed_child_occurrence_record& candidate) {
-                    return candidate.process_instance_id ==
-                            m_process_instance_id &&
-                        candidate.occurrence == m_occurrence;
-                });
-            if (exact != m_custody->occurrences.end()) {
+            auto* exact = m_custody->find_occurrence_locked(
+                m_process_instance_id, m_occurrence);
+            if (exact) {
                 child_created = exact->native.created();
                 if (exact->setup ==
                     Managed_child_occurrence_record::setup_state::pending)

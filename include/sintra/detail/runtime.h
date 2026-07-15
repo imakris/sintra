@@ -1210,13 +1210,10 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
         bool child_created = false;
         {
             std::lock_guard<std::mutex> lock(record->mutex);
-            for (auto& occurrence : record->occurrences) {
-                if (occurrence.process_instance_id == process_id &&
-                    occurrence.occurrence == occurrence_number)
-                {
-                    child_created = occurrence.native.created();
-                    break;
-                }
+            const auto* occurrence = record->find_occurrence_locked(
+                process_id, occurrence_number);
+            if (occurrence) {
+                child_created = occurrence->native.created();
             }
         }
         owner->request_child_custody_release(
@@ -1316,14 +1313,9 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             uint32_t admitted_failure_occurrence = 0;
             {
                 std::lock_guard<std::mutex> lock(custody_record->mutex);
-                const auto admitted = std::find_if(
-                    custody_record->occurrences.begin(),
-                    custody_record->occurrences.end(),
-                    [&](const detail::Managed_child_occurrence_record& occurrence) {
-                        return occurrence.process_instance_id == piid &&
-                            occurrence.occurrence == spawn_args.occurrence;
-                    });
-                if (admitted != custody_record->occurrences.end()) {
+                if (custody_record->find_occurrence_locked(
+                        piid, spawn_args.occurrence))
+                {
                     admitted_failure_occurrence = spawn_args.occurrence;
                 }
             }
