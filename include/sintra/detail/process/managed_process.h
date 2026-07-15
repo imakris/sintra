@@ -548,6 +548,7 @@ public:
                 releasing->cleanup_requested = true;
             }
             if (releasing->attempt != Attempt::retryable) {
+                releasing->rerun_requested = true;
                 return 0;
             }
             releasing->generation = next_generation(releasing->generation);
@@ -560,6 +561,7 @@ public:
         const auto generation = next_generation(0);
         m_state = Releasing{
             command == Release_mode::cleanup,
+            false,
             generation,
             Attempt::running};
         return generation;
@@ -643,6 +645,12 @@ public:
         {
             return false;
         }
+        if (releasing->rerun_requested) {
+            releasing->rerun_requested = false;
+            releasing->generation = next_generation(releasing->generation);
+            releasing->attempt = Attempt::running;
+            return true;
+        }
         releasing->attempt = Attempt::retryable;
         return true;
     }
@@ -670,6 +678,7 @@ private:
     struct Releasing
     {
         bool        cleanup_requested = false;
+        bool        rerun_requested = false;
         uint64_t    generation = 1;
         Attempt     attempt = Attempt::running;
     };
@@ -1242,6 +1251,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         detail::Release_mode release_mode = detail::Release_mode::passive);
+    void start_child_custody_release_worker(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        uint64_t release_attempt_generation);
     void execute_child_custody_release_attempt(
         std::shared_ptr<detail::Managed_child_custody_record> custody,
         uint64_t release_attempt_generation,

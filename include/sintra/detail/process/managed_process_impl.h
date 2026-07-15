@@ -3168,6 +3168,7 @@ inline void Managed_process::fail_release_attempt(
     }
 
     uint64_t custody_identity = 0;
+    uint64_t rerun_generation = 0;
     bool failed = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
@@ -3179,6 +3180,9 @@ inline void Managed_process::fail_release_attempt(
             // Do not apply setup failure's occurrence-number precedence: an
             // exact predecessor can fail after a newer occurrence was admitted.
             custody->last_failure = failure;
+            if (custody->release_state.running()) {
+                rerun_generation = custody->release_state.generation();
+            }
             failed = true;
         }
     }
@@ -3195,6 +3199,9 @@ inline void Managed_process::fail_release_attempt(
         << " kind=" << static_cast<int>(failure.kind)
         << " native_error=" << failure.native_error
         << " message='" << failure.message << "'\n";
+    if (rerun_generation != 0) {
+        start_child_custody_release_worker(custody, rerun_generation);
+    }
 }
 
 inline void Managed_process::record_release_attempt_blocker(
@@ -3618,6 +3625,14 @@ inline void Managed_process::request_child_custody_release(
         return;
     }
 
+    start_child_custody_release_worker(
+        custody, release_attempt_generation);
+}
+
+inline void Managed_process::start_child_custody_release_worker(
+    const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+    uint64_t release_attempt_generation)
+{
     instance_id_type failure_iid = invalid_instance_id;
     uint32_t failure_occurrence = 0;
     {
@@ -3743,10 +3758,19 @@ inline void Managed_process::execute_child_custody_release_attempt(
             cleanup_applied);
 
         if (std::holds_alternative<stop_attempt>(action)) {
-            custody->release_state.mark_retryable(
-                release_attempt_generation);
+            uint64_t rerun_generation = 0;
+            if (custody->release_state.mark_retryable(
+                    release_attempt_generation) &&
+                custody->release_state.running())
+            {
+                rerun_generation = custody->release_state.generation();
+            }
             lock.unlock();
             custody->changed.notify_all();
+            if (rerun_generation != 0) {
+                start_child_custody_release_worker(
+                    custody, rerun_generation);
+            }
             return;
         }
 
