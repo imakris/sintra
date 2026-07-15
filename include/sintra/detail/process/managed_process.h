@@ -25,6 +25,7 @@
 #endif
 #include <deque>
 #include <float.h>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -156,6 +157,81 @@ struct Managed_child_failure
     uint32_t                   occurrence = 0;
     int                        native_error = 0;
     std::string                message;
+};
+
+namespace detail {
+class Managed_child_exit_subscription_state;
+}
+
+struct Managed_child_occurrence_identity
+{
+    instance_id_type process_instance_id = invalid_instance_id;
+    uint32_t         occurrence = 0;
+
+    bool operator==(const Managed_child_occurrence_identity&) const = default;
+};
+
+enum class Managed_child_exit_status_kind
+{
+    unavailable,
+    // On Windows this is the native process exit code; the OS does not
+    // distinguish an ordinary return from TerminateProcess.
+    exited,
+    // Reported only when the platform supplies signal termination status.
+    signaled,
+    other
+};
+
+struct Managed_child_exit
+{
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_exit_status_kind    status_kind =
+        Managed_child_exit_status_kind::unavailable;
+    int                               status = 0;
+    int                               native_status = 0;
+    bool                              native_status_available = false;
+};
+
+using Managed_child_exit_callback =
+    std::function<void(const Managed_child_exit&)>;
+
+class Managed_child_exit_subscription
+{
+public:
+    Managed_child_exit_subscription() = default;
+    ~Managed_child_exit_subscription();
+
+    Managed_child_exit_subscription(
+        Managed_child_exit_subscription&& other) noexcept;
+    Managed_child_exit_subscription& operator=(
+        Managed_child_exit_subscription&& other) noexcept;
+
+    Managed_child_exit_subscription(
+        const Managed_child_exit_subscription&) = delete;
+    Managed_child_exit_subscription& operator=(
+        const Managed_child_exit_subscription&) = delete;
+
+    explicit operator bool() const noexcept;
+    void unsubscribe() noexcept;
+
+private:
+    explicit Managed_child_exit_subscription(
+        std::shared_ptr<detail::Managed_child_exit_subscription_state> state);
+
+    std::shared_ptr<detail::Managed_child_exit_subscription_state> m_state;
+
+    friend class Managed_child_custody;
+};
+
+struct Managed_child_exit_observation
+{
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_exit_subscription   subscription;
+
+    explicit operator bool() const noexcept
+    {
+        return static_cast<bool>(subscription);
+    }
 };
 
 
@@ -489,6 +565,8 @@ struct Managed_child_occurrence_record
                                transport;
     Managed_child_native_authority
                                native;
+    std::vector<std::shared_ptr<Managed_child_exit_subscription_state>>
+                               exit_subscriptions;
 };
 
 // Immutable exact identity captured by a release attempt after setup settles.
@@ -520,6 +598,48 @@ struct Managed_child_occurrence_token
 
     explicit operator bool() const noexcept { return !custody.expired(); }
 };
+
+class Managed_child_exit_subscription_state final
+{
+public:
+    Managed_child_exit_subscription_state(
+        std::weak_ptr<Managed_child_custody_record> custody,
+        Managed_child_occurrence_identity          occurrence,
+        Managed_child_exit_callback                callback);
+
+    void deliver(const Managed_child_exit& event) noexcept;
+    void unsubscribe() noexcept;
+
+private:
+    void remove_from_occurrence() noexcept;
+
+    std::weak_ptr<Managed_child_custody_record> m_custody;
+    Managed_child_occurrence_identity           m_occurrence;
+    mutable std::mutex                          m_mutex;
+    std::condition_variable                     m_quiesced;
+    Managed_child_exit_callback                 m_callback;
+    std::thread::id                             m_callback_thread;
+    bool                                        m_active = true;
+    bool                                        m_callback_running = false;
+};
+
+struct Managed_child_exit_publication
+{
+    Managed_child_exit event;
+    std::vector<std::shared_ptr<Managed_child_exit_subscription_state>>
+                       subscriptions;
+    bool               transition_valid = false;
+};
+
+Managed_child_exit make_managed_child_exit(
+    Managed_child_occurrence_identity occurrence,
+    int                               wait_status,
+    bool                              wait_status_available) noexcept;
+
+Managed_child_exit_publication record_managed_child_exit_locked(
+    Managed_child_occurrence_record& occurrence,
+    int                              wait_status,
+    bool                             wait_status_available);
 
 enum class Readiness_phase
 {
@@ -1328,6 +1448,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const detail::Managed_child_occurrence_token& token,
         int wait_status,
         bool wait_status_available = true);
+    void dispatch_child_exit_publication(
+        detail::Managed_child_exit_publication publication);
+    void dispatch_child_exit_subscription(
+        std::shared_ptr<detail::Managed_child_exit_subscription_state> subscription,
+        Managed_child_exit event);
 #ifndef _WIN32
     bool signal_child_native_exact(
         const detail::Managed_child_occurrence_token& token,

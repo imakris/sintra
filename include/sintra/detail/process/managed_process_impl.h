@@ -78,6 +78,161 @@ inline void child_reaped_for_test(pid_t pid, int status) noexcept
 #endif
 
 namespace detail {
+
+inline Managed_child_exit_subscription_state::
+Managed_child_exit_subscription_state(
+    std::weak_ptr<Managed_child_custody_record> custody,
+    Managed_child_occurrence_identity          occurrence,
+    Managed_child_exit_callback                callback)
+:
+    m_custody(std::move(custody)),
+    m_occurrence(occurrence),
+    m_callback(std::move(callback))
+{}
+
+inline void Managed_child_exit_subscription_state::deliver(
+    const Managed_child_exit& event) noexcept
+{
+    Managed_child_exit_callback callback;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_active || !m_callback) {
+            return;
+        }
+        m_active = false;
+        m_callback_running = true;
+        m_callback_thread = std::this_thread::get_id();
+        callback = std::move(m_callback);
+    }
+
+    try {
+        callback(event);
+    }
+    catch (const std::exception& error) {
+        Log_stream(log_level::error)
+            << "Managed-child exit callback threw for process_instance_id="
+            << static_cast<unsigned long long>(
+                event.occurrence.process_instance_id)
+            << " occurrence=" << event.occurrence.occurrence
+            << " message='" << error.what() << "'\n";
+    }
+    catch (...) {
+        Log_stream(log_level::error)
+            << "Managed-child exit callback threw for process_instance_id="
+            << static_cast<unsigned long long>(
+                event.occurrence.process_instance_id)
+            << " occurrence=" << event.occurrence.occurrence << "\n";
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_callback_running = false;
+        m_callback_thread = {};
+    }
+    m_quiesced.notify_all();
+}
+
+inline void Managed_child_exit_subscription_state::unsubscribe() noexcept
+{
+    bool called_from_callback = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_active = false;
+        m_callback = {};
+        called_from_callback =
+            m_callback_running && m_callback_thread == std::this_thread::get_id();
+    }
+
+    remove_from_occurrence();
+    if (called_from_callback) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(m_mutex);
+    m_quiesced.wait(lock, [this]() { return !m_callback_running; });
+}
+
+inline void Managed_child_exit_subscription_state::
+remove_from_occurrence() noexcept
+{
+    const auto custody = m_custody.lock();
+    if (!custody) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    auto* occurrence = custody->find_occurrence_locked(
+        m_occurrence.process_instance_id,
+        m_occurrence.occurrence);
+    if (!occurrence) {
+        return;
+    }
+    auto& subscriptions = occurrence->exit_subscriptions;
+    subscriptions.erase(
+        std::remove_if(
+            subscriptions.begin(),
+            subscriptions.end(),
+            [this](const auto& candidate) {
+                return candidate.get() == this;
+            }),
+        subscriptions.end());
+}
+
+inline Managed_child_exit make_managed_child_exit(
+    Managed_child_occurrence_identity occurrence,
+    int                               wait_status,
+    bool                              wait_status_available) noexcept
+{
+    Managed_child_exit event;
+    event.occurrence = occurrence;
+    event.native_status = wait_status;
+    event.native_status_available = wait_status_available;
+    if (!wait_status_available) {
+        return event;
+    }
+
+#ifdef _WIN32
+    event.status_kind = Managed_child_exit_status_kind::exited;
+    event.status = wait_status;
+#else
+    if (WIFEXITED(wait_status)) {
+        event.status_kind = Managed_child_exit_status_kind::exited;
+        event.status = WEXITSTATUS(wait_status);
+    }
+    else
+    if (WIFSIGNALED(wait_status)) {
+        event.status_kind = Managed_child_exit_status_kind::signaled;
+        event.status = WTERMSIG(wait_status);
+    }
+    else {
+        event.status_kind = Managed_child_exit_status_kind::other;
+    }
+#endif
+    return event;
+}
+
+inline Managed_child_exit_publication record_managed_child_exit_locked(
+    Managed_child_occurrence_record& occurrence,
+    int                              wait_status,
+    bool                             wait_status_available)
+{
+    Managed_child_exit_publication publication;
+    const bool was_exited = occurrence.native.exited();
+    publication.transition_valid = occurrence.native.note_exit(
+        wait_status,
+        wait_status_available);
+    if (!publication.transition_valid || was_exited) {
+        return publication;
+    }
+
+    publication.event = make_managed_child_exit(
+        {occurrence.process_instance_id, occurrence.occurrence},
+        wait_status,
+        wait_status_available);
+    publication.subscriptions.swap(occurrence.exit_subscriptions);
+    return publication;
+}
+
 namespace test_hooks {
 
 enum class Managed_child_invariant
@@ -1572,8 +1727,8 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
     auto observer_complete = std::make_shared<std::atomic<bool>>(false);
 
     m_owner->start_child_custody_worker(
-        [custody, process_instance_id, occurrence_number, process_handle,
-         process_handle_value, observer_complete]() {
+        [owner = m_owner, custody, process_instance_id, occurrence_number,
+         process_handle, process_handle_value, observer_complete]() {
             struct Windows_native_observer_guard
             {
                 std::shared_ptr<Managed_child_custody_record> custody;
@@ -1686,6 +1841,7 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
             }
             uintptr_t released_handle = 0;
             bool transition_valid = false;
+            Managed_child_exit_publication exit_publication;
             {
                 std::lock_guard<std::mutex> lock(custody->mutex);
                 auto* occurrence = custody->find_occurrence_locked(
@@ -1694,8 +1850,10 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                     DWORD exit_code = 0;
                     const bool exit_code_available =
                         GetExitCodeProcess(process_handle, &exit_code) != 0;
-                    transition_valid = occurrence->native.note_exit(
+                    exit_publication = record_managed_child_exit_locked(
+                        *occurrence,
                         static_cast<int>(exit_code), exit_code_available);
+                    transition_valid = exit_publication.transition_valid;
                     if (transition_valid &&
                         occurrence->native.process_handle_owned())
                     {
@@ -1709,6 +1867,8 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                 }
                 custody->changed.notify_all();
             }
+            owner->dispatch_child_exit_publication(
+                std::move(exit_publication));
             if (released_handle != 0) {
                 CloseHandle(reinterpret_cast<HANDLE>(released_handle));
             }
@@ -3375,6 +3535,29 @@ inline void Managed_process::start_child_custody_worker(
     }
 }
 
+inline void Managed_process::dispatch_child_exit_subscription(
+    std::shared_ptr<detail::Managed_child_exit_subscription_state> subscription,
+    Managed_child_exit event)
+{
+    if (!subscription) {
+        return;
+    }
+    start_child_custody_worker(
+        [subscription = std::move(subscription), event]() {
+            subscription->deliver(event);
+        });
+}
+
+inline void Managed_process::dispatch_child_exit_publication(
+    detail::Managed_child_exit_publication publication)
+{
+    for (auto& subscription : publication.subscriptions) {
+        if (subscription) {
+            subscription->deliver(publication.event);
+        }
+    }
+}
+
 inline void Managed_process::join_child_custody_workers()
 {
     std::vector<Child_custody_worker> workers;
@@ -3626,7 +3809,8 @@ inline managed_child_windows_fallback_result::application_result
 apply_managed_child_windows_fallback_locked(
     Managed_child_custody_record& custody,
     const managed_child_release_action::poll_windows_fallback& target,
-    const managed_child_windows_fallback_result::execution_result& result)
+    const managed_child_windows_fallback_result::execution_result& result,
+    Managed_child_exit_publication& exit_publication)
 {
     using namespace managed_child_windows_fallback_result;
 
@@ -3648,7 +3832,11 @@ apply_managed_child_windows_fallback_locked(
 
     const auto& exit = std::get<signaled>(result);
     uintptr_t released_handle = 0;
-    if (!exact->native.note_exit(exit.exit_status, true) ||
+    exit_publication = record_managed_child_exit_locked(
+        *exact,
+        exit.exit_status,
+        true);
+    if (!exit_publication.transition_valid ||
         !exact->native.take_owned_process_handle(
             target.process_handle, released_handle))
     {
@@ -3980,13 +4168,18 @@ inline void Managed_process::execute_child_custody_release_attempt(
         auto fallback_application = detail::
             managed_child_windows_fallback_result::application_result{
                 detail::managed_child_windows_fallback_result::retry{}};
+        detail::Managed_child_exit_publication exit_publication;
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             fallback_application =
                 detail::apply_managed_child_windows_fallback_locked(
-                    *custody, *fallback_target, fallback_execution);
+                    *custody,
+                    *fallback_target,
+                    fallback_execution,
+                    exit_publication);
             custody->changed.notify_all();
         }
+        dispatch_child_exit_publication(std::move(exit_publication));
         if (const auto applied = std::get_if<detail::
                 managed_child_windows_fallback_result::applied>(
                     &fallback_application))
@@ -4683,18 +4876,26 @@ inline void Managed_process::note_child_os_exit(
     if (!custody) {
         return;
     }
-    std::lock_guard<std::mutex> lock(custody->mutex);
-    auto* occurrence = custody->find_occurrence_locked(
-        token.process_instance_id, token.occurrence);
-    if (!occurrence) {
-        return;
+    detail::Managed_child_exit_publication exit_publication;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        auto* occurrence = custody->find_occurrence_locked(
+            token.process_instance_id, token.occurrence);
+        if (!occurrence) {
+            return;
+        }
+        exit_publication = detail::record_managed_child_exit_locked(
+            *occurrence,
+            wait_status,
+            wait_status_available);
+        if (!exit_publication.transition_valid) {
+            Log_stream(log_level::error)
+                << "Managed-child exact native-exit fact conflicted with "
+                   "retained authority.\n";
+        }
+        custody->changed.notify_all();
     }
-    if (!occurrence->native.note_exit(wait_status, wait_status_available)) {
-        Log_stream(log_level::error)
-            << "Managed-child exact native-exit fact conflicted with "
-               "retained authority.\n";
-    }
-    custody->changed.notify_all();
+    dispatch_child_exit_publication(std::move(exit_publication));
 }
 
 #ifndef _WIN32
@@ -4828,13 +5029,17 @@ inline bool Managed_process::cleanup_child_native(
         }
         uintptr_t released_handle = 0;
         bool transition_valid = false;
+        detail::Managed_child_exit_publication exit_publication;
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
             auto* occurrence = custody->find_occurrence_locked(
                 token.process_instance_id, token.occurrence);
             if (occurrence) {
-                transition_valid = occurrence->native.note_exit(
-                    static_cast<int>(exit_code), true);
+                exit_publication = detail::record_managed_child_exit_locked(
+                    *occurrence,
+                    static_cast<int>(exit_code),
+                    true);
+                transition_valid = exit_publication.transition_valid;
                 if (transition_valid &&
                     !occurrence->native.exit_observer_registered() &&
                     occurrence->native.process_handle_owned())
@@ -4846,6 +5051,7 @@ inline bool Managed_process::cleanup_child_native(
                 custody->changed.notify_all();
             }
         }
+        dispatch_child_exit_publication(std::move(exit_publication));
         if (released_handle != 0) {
             CloseHandle(reinterpret_cast<HANDLE>(released_handle));
         }

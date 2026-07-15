@@ -220,12 +220,14 @@ struct Case_result
     bool handle_closed_once = false;
     bool survivor_absent = false;
     bool registration_ordered = false;
+    bool exit_observation = false;
 
     bool passed() const noexcept
     {
         return setup && failure_injected && typed_failure &&
             fallback_available && release_complete && exact_exit_once &&
-            handle_closed_once && survivor_absent && registration_ordered;
+            handle_closed_once && survivor_absent && registration_ordered &&
+            exit_observation;
     }
 };
 
@@ -308,6 +310,19 @@ Case_result run_case(
 #endif
         ;
 
+    std::mutex exit_mutex;
+    std::condition_variable exit_changed;
+    unsigned exit_callback_count = 0;
+    sintra::Managed_child_exit exit_event;
+    auto exit_observation = custody.observe_latest_created_exit(
+        [&](const sintra::Managed_child_exit& event) {
+            std::lock_guard<std::mutex> lock(exit_mutex);
+            exit_event = event;
+            ++exit_callback_count;
+            exit_changed.notify_all();
+        });
+    result.setup = result.setup && static_cast<bool>(exit_observation);
+
     sintra::Managed_child_status passive;
     std::thread passive_caller([&]() {
         passive = custody.release_until(
@@ -382,6 +397,24 @@ Case_result run_case(
     }
     result.exact_exit_once = complete.created_occurrences == 1 &&
         complete.exited_occurrences == 1;
+    {
+        std::unique_lock<std::mutex> lock(exit_mutex);
+        (void)exit_changed.wait_for(lock, 2s, [&]() {
+            return exit_callback_count != 0;
+        });
+        bool exit_status_valid = false;
+#ifdef _WIN32
+        exit_status_valid = exit_event.status_kind ==
+                sintra::Managed_child_exit_status_kind::exited &&
+            exit_event.native_status_available &&
+            exit_event.status == static_cast<int>(exit_code);
+#endif
+        result.exit_observation = exit_callback_count == 1 &&
+            exit_event.occurrence.process_instance_id == process_iid &&
+            exit_event.occurrence.occurrence == 0 &&
+            exit_status_valid;
+    }
+    exit_observation.subscription.unsubscribe();
     result.survivor_absent = !exact_process_is_live(
         identity.pid, identity.start_stamp);
 
@@ -435,7 +468,8 @@ int run_root(
                 stderr,
                 "NATIVE_OBSERVER_EXCEPTION_INVALID case=%u setup=%d "
                 "injected=%d typed=%d fallback=%d finalize=%d release=%d "
-                "exit=%d close=%d survivor_absent=%d registration=%d\n",
+                "exit=%d close=%d survivor_absent=%d registration=%d "
+                "observation=%d\n",
                 i,
                 results[i].setup ? 1 : 0,
                 results[i].failure_injected ? 1 : 0,
@@ -446,7 +480,8 @@ int run_root(
                 results[i].exact_exit_once ? 1 : 0,
                 results[i].handle_closed_once ? 1 : 0,
                 results[i].survivor_absent ? 1 : 0,
-                results[i].registration_ordered ? 1 : 0);
+                results[i].registration_ordered ? 1 : 0,
+                results[i].exit_observation ? 1 : 0);
             return 2;
         }
     }

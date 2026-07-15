@@ -12,6 +12,7 @@
 #include "transceiver_impl.h"
 #include "utility.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
@@ -331,6 +332,34 @@ public:
     Managed_child_status status() const;
     Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
+
+    /// Observes the latest OS-created occurrence retained by this custody.
+    ///
+    /// Selection and registration are atomic with respect to native exit. The
+    /// returned subscription follows only the selected immutable occurrence;
+    /// it never follows a later recovery occurrence. Consequently, selecting
+    /// the latest occurrence may intentionally skip older exited occurrences.
+    /// If no OS-created occurrence exists, the result is empty and the
+    /// callback is not retained. Registering after the selected occurrence has
+    /// exited still schedules one delivery.
+    ///
+    /// This observation is OS-authoritative. The communication-dependent
+    /// `terminated_abnormally` signal, coordinator publication lifecycle
+    /// handler, and aggregate custody status do not provide equivalent
+    /// exact-occurrence exit evidence.
+    ///
+    /// Callbacks run on a Sintra-managed lifecycle thread without custody
+    /// locks held. Delivery may begin before this function returns, and no
+    /// ordering between multiple observers is guaranteed. A callback must not
+    /// initiate Sintra runtime teardown; it should post application work to the
+    /// caller's executor instead.
+    /// Destroying or unsubscribing externally waits for an executing callback
+    /// to finish. Self-unsubscription is deferred until that callback returns.
+    /// Callback exceptions are logged, are not retried, and do not escape the
+    /// worker.
+    Managed_child_exit_observation observe_latest_created_exit(
+        Managed_child_exit_callback callback) const;
+
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
@@ -1108,6 +1137,48 @@ inline bool cancel_external_process_invitation(const External_process_invitation
         invitation.token);
 }
 
+inline Managed_child_exit_subscription::Managed_child_exit_subscription(
+    std::shared_ptr<detail::Managed_child_exit_subscription_state> state)
+:
+    m_state(std::move(state))
+{}
+
+inline Managed_child_exit_subscription::~Managed_child_exit_subscription()
+{
+    unsubscribe();
+}
+
+inline Managed_child_exit_subscription::Managed_child_exit_subscription(
+    Managed_child_exit_subscription&& other) noexcept
+:
+    m_state(std::move(other.m_state))
+{}
+
+inline Managed_child_exit_subscription&
+Managed_child_exit_subscription::operator=(
+    Managed_child_exit_subscription&& other) noexcept
+{
+    if (this == &other) {
+        return *this;
+    }
+    unsubscribe();
+    m_state = std::move(other.m_state);
+    return *this;
+}
+
+inline Managed_child_exit_subscription::operator bool() const noexcept
+{
+    return static_cast<bool>(m_state);
+}
+
+inline void Managed_child_exit_subscription::unsubscribe() noexcept
+{
+    auto state = std::move(m_state);
+    if (state) {
+        state->unsubscribe();
+    }
+}
+
 // Accepts durable logical custody before authorizing OS creation.  Readiness is
 // an observation on the returned opaque custody and never controls ownership.
 inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
@@ -1530,6 +1601,72 @@ inline Managed_child_status Managed_child_custody::wait_for_readiness_until(
         }
     }
     return status();
+}
+
+inline Managed_child_exit_observation
+Managed_child_custody::observe_latest_created_exit(
+    Managed_child_exit_callback callback) const
+{
+    if (!m_record || !callback) {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> admission_lock(
+        detail::s_teardown_admission_mutex);
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
+        !s_mproc)
+    {
+        return {};
+    }
+
+    Managed_child_occurrence_identity identity;
+    std::shared_ptr<detail::Managed_child_exit_subscription_state> state;
+    std::optional<Managed_child_exit> replay;
+    {
+        std::lock_guard<std::mutex> lock(m_record->mutex);
+        const auto selected = std::find_if(
+            m_record->occurrences.rbegin(),
+            m_record->occurrences.rend(),
+            [](const detail::Managed_child_occurrence_record& candidate) {
+                return candidate.native.created();
+            });
+        if (selected == m_record->occurrences.rend()) {
+            return {};
+        }
+
+        identity = {
+            selected->process_instance_id,
+            selected->occurrence,
+        };
+        state = std::make_shared<
+            detail::Managed_child_exit_subscription_state>(
+                m_record,
+                identity,
+                std::move(callback));
+        if (selected->native.exited()) {
+            replay = detail::make_managed_child_exit(
+                identity,
+                selected->native.wait_status(),
+                selected->native.wait_status_available());
+        }
+        else {
+            selected->exit_subscriptions.push_back(state);
+        }
+    }
+
+    Managed_child_exit_observation observation;
+    observation.occurrence = identity;
+    observation.subscription = Managed_child_exit_subscription(state);
+    if (replay.has_value()) {
+        try {
+            s_mproc->dispatch_child_exit_subscription(state, *replay);
+        }
+        catch (...) {
+            observation.subscription.unsubscribe();
+            return {};
+        }
+    }
+    return observation;
 }
 
 inline Managed_child_status Managed_child_custody::wait_until_released(
