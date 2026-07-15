@@ -192,10 +192,12 @@ Contract:
   occurrence. If no occurrence was created, the observation is empty and the
   callback is not retained. Older exited occurrences may be skipped by the
   latest-created selection.
-- Exit observation requires an active coordinator runtime. Registration during
-  teardown or after `shutdown()` returns an empty observation and does not
-  retain the callback. While the runtime remains active, registration after the
-  selected occurrence exited schedules exactly one late delivery.
+- Exit observation requires the active coordinator runtime that created the
+  custody. Registration during teardown, after `shutdown()`, or after a later
+  `init()` when the custody belongs to an earlier runtime returns an empty
+  observation and does not retain the callback. While the owning runtime
+  remains active, registration after the selected occurrence exited schedules
+  exactly one late delivery.
 - `Managed_child_exit::status` is the portable normalized value selected by
   `status_kind`: an exit code for `exited`, a signal number for `signaled`, and
   zero when unavailable or not normalized. Windows reports every termination

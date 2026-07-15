@@ -434,10 +434,12 @@ does not displace the latest created occurrence; if no occurrence was created,
 the result is empty and the callback is not retained. Register again after a
 new recovery occurrence is created to observe it.
 
-Registration requires an active coordinator runtime. During teardown or after
-`shutdown()`, it returns empty and does not retain the callback. While the
-runtime is active, registering after the selected occurrence exited schedules
-one late delivery. Callbacks execute once on a Sintra-managed lifecycle thread,
+Registration requires the active coordinator runtime that created the custody.
+During teardown, after `shutdown()`, or after a later `init()` when the custody
+belongs to an earlier runtime, it returns empty and does not retain the callback.
+While the owning runtime is active, registering after the selected occurrence
+exited schedules one late delivery. Callbacks execute once on a Sintra-managed
+lifecycle thread,
 may start before registration returns, have no ordering guarantee, and run
 without custody locks held. They must not initiate runtime teardown and should
 post application work to the caller's executor. `shutdown()`, `leave()`, and
