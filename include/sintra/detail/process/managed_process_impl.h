@@ -3191,6 +3191,9 @@ inline void Managed_process::fail_release_attempt(
     }
 
     custody->changed.notify_all();
+    if (rerun_generation != 0) {
+        start_child_custody_release_worker(custody, rerun_generation);
+    }
     Log_stream(log_level::warning)
         << "Managed-child release attempt failed: custody=" << custody_identity
         << " generation=" << release_attempt_generation
@@ -3199,9 +3202,6 @@ inline void Managed_process::fail_release_attempt(
         << " kind=" << static_cast<int>(failure.kind)
         << " native_error=" << failure.native_error
         << " message='" << failure.message << "'\n";
-    if (rerun_generation != 0) {
-        start_child_custody_release_worker(custody, rerun_generation);
-    }
 }
 
 inline void Managed_process::record_release_attempt_blocker(
