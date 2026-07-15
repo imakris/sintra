@@ -20,12 +20,41 @@ int main()
 
     const auto rerun_generation = state.generation();
     if (!state.running(rerun_generation) ||
-        rerun_generation == first_generation)
+        rerun_generation == first_generation ||
+        !state.cleanup_requested() ||
+        state.running(first_generation) ||
+        state.mark_retryable(first_generation) ||
+        state.mark_released(first_generation))
     {
         return 2;
     }
 
-    return state.mark_retryable(rerun_generation) && state.retryable()
+    if (!state.mark_retryable(rerun_generation) || !state.retryable() ||
+        !state.cleanup_requested())
+    {
+        return 3;
+    }
+
+    const auto requested_generation = state.request(Release_mode::passive);
+    if (requested_generation == 0 || requested_generation == rerun_generation ||
+        !state.running(requested_generation))
+    {
+        return 4;
+    }
+    if (state.request(Release_mode::cleanup) != 0 ||
+        !state.mark_retryable(requested_generation))
+    {
+        return 5;
+    }
+
+    const auto running_rerun = state.generation();
+    if (running_rerun == requested_generation ||
+        !state.running(running_rerun) || !state.cleanup_requested())
+    {
+        return 6;
+    }
+    return state.mark_retryable(running_rerun) && state.retryable() &&
+        state.cleanup_requested()
         ? 0
-        : 3;
+        : 7;
 }
