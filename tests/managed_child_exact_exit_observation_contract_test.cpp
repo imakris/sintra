@@ -206,11 +206,11 @@ bool expected_recovery_exit(const sintra::Managed_child_exit& event)
             sintra::Managed_child_exit_status_kind::exited &&
         event.status != 0 && event.native_status == event.status;
 #else
+    const int native_status = static_cast<int>(event.native_status);
     return event.status_kind ==
             sintra::Managed_child_exit_status_kind::signaled &&
         event.status == SIGABRT &&
-        WIFSIGNALED(static_cast<int>(event.native_status)) &&
-        WTERMSIG(static_cast<int>(event.native_status)) == SIGABRT;
+        WIFSIGNALED(native_status) && WTERMSIG(native_status) == SIGABRT;
 #endif
 }
 
@@ -224,11 +224,11 @@ bool expected_terminated_exit(const sintra::Managed_child_exit& event)
             sintra::Managed_child_exit_status_kind::exited &&
         event.status == k_exit_code && event.native_status == k_exit_code;
 #else
+    const int native_status = static_cast<int>(event.native_status);
     return event.status_kind ==
             sintra::Managed_child_exit_status_kind::signaled &&
         event.status == SIGKILL &&
-        WIFSIGNALED(static_cast<int>(event.native_status)) &&
-        WTERMSIG(static_cast<int>(event.native_status)) == SIGKILL;
+        WIFSIGNALED(native_status) && WTERMSIG(native_status) == SIGKILL;
 #endif
 }
 
@@ -239,9 +239,10 @@ bool unexpected_native_status_is_unavailable()
 #else
     const auto native_status = static_cast<std::uint32_t>(
         (SIGSTOP << 8) | 0x7f);
+    const int wait_status = static_cast<int>(native_status);
     const auto event = sintra::detail::make_managed_child_exit(
         {k_child_process_iid, 99}, native_status, true);
-    return WIFSTOPPED(static_cast<int>(native_status)) &&
+    return WIFSTOPPED(wait_status) &&
         event.status_kind ==
             sintra::Managed_child_exit_status_kind::unavailable &&
         event.status == 0 && event.native_status_available &&
