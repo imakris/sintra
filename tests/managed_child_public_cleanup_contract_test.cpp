@@ -712,9 +712,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         });
     }
 
-    // The first public escalation is injected to fail before any cleanup
-    // action. Custody and the child must remain retained, and the deadline
-    // facing caller must still return bounded-incomplete.
+    // The public escalation is injected to fail before any cleanup action.
+    // Its latched rerun is held before its first action, while the deadline
+    // facing caller still returns bounded-incomplete with custody retained.
     const auto failed_begin = std::chrono::steady_clock::now();
     const auto failed_cleanup = custody.terminate_until(failed_begin + 120ms);
     const auto failed_elapsed = std::chrono::steady_clock::now() - failed_begin;
@@ -723,26 +723,21 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         ledger->pid, ledger->start_stamp_available, ledger->start_stamp) &&
         resolve_publicly(ready_name) ==
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
-    bool failed_bounded_incomplete = passive_wait_seen && failure_seen &&
-        custody && failed_cleanup.release_state ==
-            sintra::Managed_child_release_state::requested && failed_elapsed >= 80ms &&
-        failed_elapsed < 2s && retained_after_failure;
-    {
-        std::lock_guard<std::mutex> lock(gate.mutex);
-        failed_bounded_incomplete = failed_bounded_incomplete &&
-            gate.before_count == 0 && gate.lifeline_released_count == 0 &&
-            gate.retirement_confirmed_count == 0;
-    }
-
-    // Re-drive the same opaque custody. The successful worker is held before
-    // its first cleanup action to prove a second bounded-incomplete return.
-    const auto cleanup_begin = std::chrono::steady_clock::now();
-    const auto held = custody.terminate_until(cleanup_begin + 120ms);
-    const auto cleanup_elapsed = std::chrono::steady_clock::now() - cleanup_begin;
     bool cleanup_entered = false;
     {
         std::unique_lock<std::mutex> lock(gate.mutex);
-        cleanup_entered = gate.changed.wait_for(lock, 2s, [&]() { return gate.entered; });
+        cleanup_entered = gate.changed.wait_for(
+            lock, 2s, [&]() { return gate.entered; });
+    }
+    bool failed_bounded_incomplete = passive_wait_seen && failure_seen &&
+        custody && failed_cleanup.release_state ==
+            sintra::Managed_child_release_state::requested && failed_elapsed >= 80ms &&
+        failed_elapsed < 2s && retained_after_failure && cleanup_entered;
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        failed_bounded_incomplete = failed_bounded_incomplete &&
+            gate.before_count == 1 && gate.lifeline_released_count == 0 &&
+            gate.retirement_confirmed_count == 0;
     }
 
     const bool child_retained_while_held = ledger && exact_process_is_live(
@@ -750,8 +745,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         resolve_publicly(ready_name) ==
             std::optional<sintra::instance_id_type>(ledger->ready_iid);
     const bool bounded_incomplete = failed_bounded_incomplete &&
-        held.release_state == sintra::Managed_child_release_state::requested &&
-        cleanup_elapsed >= 80ms && cleanup_elapsed < 2s && cleanup_entered &&
         child_retained_while_held &&
         ready_unpublished.load(std::memory_order_acquire) == 0 &&
         process_unpublished.load(std::memory_order_acquire) == 0;
