@@ -3380,13 +3380,17 @@ inline Managed_child_release_action_plan plan_managed_child_release_action_locke
     }
 
     Managed_child_release_roster current_targets;
+    Managed_child_release_roster historical_targets;
+#ifdef _WIN32
+    std::optional<poll_windows_fallback> windows_fallback;
+#endif
     for (const auto& target : release_roster) {
-        if (!target.slot_current) {
-            continue;
-        }
         const auto* occurrence = custody.find_occurrence_locked(
             target.process_instance_id, target.occurrence);
-        if (occurrence &&
+        if (!occurrence) {
+            continue;
+        }
+        if (target.slot_current &&
             (cleanup_applied || occurrence->native.exited()) &&
             !occurrence->transport.retirement_started() &&
             (occurrence->initialization_reservation_active ||
@@ -3395,38 +3399,31 @@ inline Managed_child_release_action_plan plan_managed_child_release_action_locke
         {
             current_targets.push_back(target);
         }
-    }
-    if (!current_targets.empty()) {
-        return retire_current_transport{std::move(current_targets)};
-    }
-
-    Managed_child_release_roster historical_targets;
-    for (const auto& target : release_roster) {
-        const auto* occurrence = custody.find_occurrence_locked(
-            target.process_instance_id, target.occurrence);
-        if (occurrence &&
-            occurrence->transport.ready_to_retire())
-        {
+        if (occurrence->transport.ready_to_retire()) {
             historical_targets.push_back(target);
         }
+#ifdef _WIN32
+        if (!windows_fallback &&
+            occurrence->native.fallback_wait_available())
+        {
+            windows_fallback = poll_windows_fallback{
+                target.process_instance_id,
+                target.occurrence,
+                occurrence->native.process_handle()};
+        }
+#endif
+    }
+
+    if (!current_targets.empty()) {
+        return retire_current_transport{std::move(current_targets)};
     }
     if (!historical_targets.empty()) {
         return retire_historical_communication{
             std::move(historical_targets)};
     }
-
 #ifdef _WIN32
-    for (const auto& target : release_roster) {
-        const auto* occurrence = custody.find_occurrence_locked(
-            target.process_instance_id, target.occurrence);
-        if (occurrence &&
-            occurrence->native.fallback_wait_available())
-        {
-            return poll_windows_fallback{
-                target.process_instance_id,
-                target.occurrence,
-                occurrence->native.process_handle()};
-        }
+    if (windows_fallback) {
+        return *windows_fallback;
     }
 #endif
 
