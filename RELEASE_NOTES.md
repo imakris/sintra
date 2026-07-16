@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Highlights
+
+- Added exact managed-child exit observation with immutable occurrence
+  identity, late exactly-once delivery, quiescent cancellation, normalized and
+  native status, and lifecycle-thread exception containment.
+- Scoped recovery authority and retained launch recipes to managed-child
+  custody, preventing opt-in or delayed runners from crossing process-id reuse.
+- Hardened managed and external publication retirement with exact reader
+  generation checks and ordered publication notifications.
+
 ### Compatibility
 
 - Restored custody-relative recovery numbering: every fresh managed-child

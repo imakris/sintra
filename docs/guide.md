@@ -316,167 +316,25 @@ Signature:
 
 ```cpp
 Managed_child_custody spawn_swarm_process(const Spawn_options& options);
-
-enum class Managed_child_readiness_state
-{
-    not_requested,
-    pending,
-    reached,
-    observation_stopped
-};
-
-enum class Managed_child_release_state
-{
-    open,
-    requested,
-    complete
-};
-
-struct Managed_child_status
-{
-    Managed_child_readiness_state readiness_state =
-        Managed_child_readiness_state::not_requested;
-    Managed_child_release_state release_state =
-        Managed_child_release_state::open;
-    std::size_t admitted_occurrences = 0;
-    std::size_t created_occurrences = 0;
-    std::size_t exited_occurrences = 0;
-    Managed_child_failure last_failure;
-};
-
-struct Managed_child_occurrence_identity
-{
-    instance_id_type process_instance_id = invalid_instance_id;
-    std::uint32_t occurrence = 0;
-    std::uint64_t custody_identity = 0;
-};
-
-enum class Managed_child_exit_status_kind
-{
-    unavailable,
-    exited,
-    signaled
-};
-
-struct Managed_child_exit
-{
-    Managed_child_occurrence_identity occurrence;
-    Managed_child_exit_status_kind status_kind =
-        Managed_child_exit_status_kind::unavailable;
-    std::uint32_t status = 0;
-    std::uint32_t native_status = 0;
-    bool native_status_available = false;
-};
-
-using Managed_child_exit_callback =
-    std::function<void(const Managed_child_exit&)>;
-
-class Managed_child_exit_subscription
-{
-public:
-    explicit operator bool() const noexcept;
-    void unsubscribe() noexcept;
-};
-
-struct Managed_child_exit_observation
-{
-    Managed_child_occurrence_identity occurrence;
-    Managed_child_exit_subscription subscription;
-    explicit operator bool() const noexcept;
-};
-
-class Managed_child_custody
-{
-public:
-    explicit operator bool() const noexcept;
-    Managed_child_status status() const;
-    Managed_child_status wait_for_readiness_until(
-        std::chrono::steady_clock::time_point deadline) const;
-    Managed_child_exit_observation observe_latest_created_exit(
-        Managed_child_exit_callback callback) const;
-    Managed_child_status release_until(
-        std::chrono::steady_clock::time_point deadline) const;
-    Managed_child_status terminate_until(
-        std::chrono::steady_clock::time_point deadline) const;
-};
 ```
 
-Accepts durable custody for one additional managed process before authorizing
-OS creation. This operation is available only in the process hosting the local
-coordinator; worker calls and malformed explicit process ids are rejected
-before acceptance. Use `Spawn_options` to select the binary, arguments,
-environment overrides, optional readiness instance name, and lifeline policy.
-A readiness-configured spawn returns its accepted handle immediately; call
-`wait_for_readiness_until()` with an absolute steady-clock deadline to observe that
-exact occurrence. The opaque handle also supports compact `status()`
-observation and bounded `release_until()` and `terminate_until()` operations.
-Test handle validity and durable acceptance through its explicit boolean
-conversion; status does not duplicate that fact. `readiness_state` distinguishes
-an unrequested observation, a pending target, an observed target, and an
-observation that can no longer reach the target. `release_state` distinguishes
-open custody, requested release that is still incomplete, and complete release.
-An empty handle's default status is `not_requested` / `open`.
-Graceful release is idempotent, so another call waits on the same retained
-custody through a new absolute deadline. It remains passive; explicit cleanup
-monotonically escalates the retained custody owner to lifeline release and
-authoritative retirement. Readiness, release, or termination deadline expiry
-never discards custody. In particular, `wait_for_readiness_until()` is observation-only:
-its deadline does not request release or cleanup. Call `terminate_until()` to
-request adverse cleanup explicitly.
-A synchronous setup failure after acceptance returns the retained handle and
-settles a no-child occurrence or continues active cleanup for an already-created
-child.
+This accepts durable custody before authorizing OS creation. Test the returned
+handle for acceptance, then use its deadline-based readiness, release, and
+termination operations. Readiness waits are observation-only; `release_until()`
+is passive, while `terminate_until()` requests adverse cleanup. Expired
+deadlines return confirmed status without discarding custody.
 
-`observe_latest_created_exit()` atomically selects the latest occurrence whose
-OS process was actually created and returns its immutable
-`(process_instance_id, occurrence, custody_identity)` identity. Occurrence `0`
-is the original launch within one custody and later values are its recoveries;
-every fresh custody starts at `0`. The opaque custody token distinguishes fresh
-custodies that reuse the same process id. It is unique only within the owning
-active runtime and may repeat in a later runtime. The subscription observes only
-that exact occurrence and never follows recovery. A newer no-child admission
-does not displace the latest created occurrence; if no occurrence was created,
-the result is empty and the callback is not retained. Register again after a
-new recovery occurrence is created to observe it.
+`observe_latest_created_exit()` binds once to the latest OS-created occurrence
+and never follows a replacement. Its identity is the exact
+`(process_instance_id, occurrence, custody_identity)` triple; a fresh custody
+starts at occurrence `0`. Late registration still delivers once while the
+owning runtime is active. Keep the returned move-only subscription alive for
+delivery, and do not initiate Sintra teardown from its lifecycle-thread
+callback.
 
-Registration requires the active coordinator runtime that created the custody.
-During teardown, after `shutdown()`, or after a later `init()` when the custody
-belongs to an earlier runtime, it returns empty and does not retain the callback.
-While the owning runtime is active, registering after the selected occurrence
-exited schedules one late delivery. Callbacks execute once on a Sintra-managed
-lifecycle thread,
-may start before registration returns, have no ordering guarantee, and run
-without custody locks held. They must not initiate runtime teardown and should
-post application work to the caller's executor. `shutdown()`, `leave()`, and
-`detail::finalize()` throw `std::logic_error` before teardown admission changes
-when called there. Exceptions are logged without retry. Destroying the
-move-only subscription or calling `unsubscribe()` cancels
-pending delivery; an external unsubscribe waits for an executing callback, and
-self-unsubscription finishes after the callback returns.
-
-`Managed_child_exit::status_kind` interprets the portable `status` value:
-`exited` carries an exit code, `signaled` carries a POSIX signal number, and
-`unavailable` has no status. Windows reports every process termination as
-`exited`. When `native_status_available` is true, `native_status` preserves the
-full Windows 32-bit exit code or the POSIX wait-status bit pattern. Prefer the
-normalized fields unless platform-specific diagnostics are needed. An
-unexpected POSIX wait-status classification remains available in
-`native_status` but reports normalized status as `unavailable`.
-
-Every operation returns a compact status snapshot containing only confirmed
-facts. Deadline expiry may leave readiness, release, or termination incomplete;
-it does not itself record a managed-child failure. `last_failure` is retained
-historical diagnostics qualified by `last_failure.occurrence`, and it may remain
-set after later progress or complete release. A `last_failure.kind` of `none`
-means no failure report has been recorded, not that the requested milestone
-succeeded.
-
-Compiled examples/tests:
-
-- [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp)
-- [`tests/lifeline_basic_test.cpp`](../tests/lifeline_basic_test.cpp)
-- [`tests/managed_child_public_cleanup_contract_test.cpp`](../tests/managed_child_public_cleanup_contract_test.cpp)
-- [`tests/managed_child_exact_exit_observation_contract_test.cpp`](../tests/managed_child_exact_exit_observation_contract_test.cpp)
+The complete status, failure, exact-exit, callback, cancellation, quiescence,
+threading, and teardown contract is in
+[`sintra::spawn_swarm_process`](reference/spawn_swarm_process.md).
 
 ### `sintra::join_swarm`
 
@@ -506,6 +364,8 @@ struct External_process_invitation_options
 
 struct External_process_invitation
 {
+    instance_id_type process_instance_id = invalid_instance_id;
+    uint32_t occurrence = 0;
     bool valid() const;
     explicit operator bool() const;
     std::vector<std::string> sintra_args() const;
@@ -523,19 +383,13 @@ bool cancel_external_process_invitation(
 
 External process invitations let the coordinator pre-admit a process that will
 be launched by application code, a shell, a debugger, or another supervisor.
-The coordinator reserves the process id, starts reader state, records a
-single-use token, and returns the Sintra arguments that the external process
-passes to normal `sintra::init(argc, argv)`.
-
-The token is sensitive and should not be logged. Pending invitations expire or
-can be canceled. Canceling with an `External_process_invitation` checks the
-token as well as the process id, so an older invitation object cannot cancel a
-newer pending invitation that reused the same explicit id. Accepted external
-processes can call `sintra::leave()` when they should depart while the swarm
-keeps running.
-
-Compiled test:
-- [`tests/external_process_invitation_test.cpp`](../tests/external_process_invitation_test.cpp)
+The single-use token and monotonically assigned invitation occurrence bind the
+claim to one exact reader generation. Keep the token secret. Canceled, expired,
+and retired generations are not reusable until their reader is quiescent.
+Externally attached processes may leave, but they are never recovered by
+Sintra. See
+[`sintra::create_external_process_invitation`](reference/external_process_invitation.md)
+for the complete contract.
 
 ### `sintra::process_index`
 
@@ -1056,23 +910,17 @@ For deeper lifecycle details, see
 
 ### `sintra::enable_recovery`
 
-Signature:
-
 ```cpp
 void enable_recovery();
 ```
 
-Marks the current process for coordinator-managed respawn after an unexpected
-exit. Recovery is opt-in per process, and the call requires an active local
-Sintra runtime.
-
-Compiled examples/tests:
-- [`example/sintra/sintra_example_4_recovery.cpp`](../example/sintra/sintra_example_4_recovery.cpp)
-- [`tests/recovery_test.cpp`](../tests/recovery_test.cpp)
+Call this from a managed child to opt its custody into recovery. The opt-in
+persists across recoveries of that custody, but never crosses to a fresh
+custody that reuses the process instance id. Externally attached processes are
+not recoverable. Use `s_recovery_occurrence` to distinguish the original run
+(`0`) from recoveries (`1`, `2`, ...).
 
 ### Coordinator Hooks
-
-Signatures:
 
 ```cpp
 void set_recovery_policy(Recovery_policy policy);
@@ -1080,64 +928,11 @@ void set_recovery_runner(Recovery_runner runner);
 void set_lifecycle_handler(Lifecycle_handler handler);
 ```
 
-These calls are effective only in the coordinator process. Non-coordinator
-calls are no-ops.
-
-Types:
-
-```cpp
-struct Crash_info
-{
-    instance_id_type process_iid = invalid_instance_id;
-    uint32_t process_slot = 0;
-    int status = 0;
-};
-
-struct Recovery_control
-{
-    std::function<bool()> should_cancel;
-    std::function<void()> spawn;
-};
-
-using Recovery_policy = std::function<bool(const Crash_info&)>;
-using Recovery_runner = std::function<void(const Crash_info&, const Recovery_control&)>;
-using Lifecycle_handler = std::function<void(const process_lifecycle_event&)>;
-```
-
-Lifecycle events:
-
-```cpp
-struct process_lifecycle_event
-{
-    enum class reason { crash, normal_exit, unpublished };
-    instance_id_type process_iid = invalid_instance_id;
-    uint32_t process_slot = 0;
-    reason why = reason::unpublished;
-    int status = 0;
-};
-```
-
-Crash notification message:
-
-```cpp
-sintra::Managed_process::terminated_abnormally
-```
-
-This message reports abnormal termination of a managed peer. It is useful for
-observation, while recovery policy and runner hooks control respawn behavior.
-
-Threading:
-- `Recovery_policy` and `Lifecycle_handler` run on the coordinator thread.
-- `Recovery_runner` runs on a recovery thread.
-- Default recovery, when no runner is configured, also spawns on a
-  coordinator-owned recovery thread.
-- `Recovery_control::should_cancel()` becomes true when shutdown begins.
-- Callback code must be thread-safe.
-
-Compiled tests:
-- [`tests/recovery_policy_test.cpp`](../tests/recovery_policy_test.cpp)
-- [`tests/recovery_runner_thread_test.cpp`](../tests/recovery_runner_thread_test.cpp)
-- [`tests/lifecycle_handler_test.cpp`](../tests/lifecycle_handler_test.cpp)
+These coordinator-only hooks filter or delay recovery and observe committed
+process retirement. A runner receives a one-shot `Recovery_control`; a retained
+control becomes inert when shutdown starts or its exact custody closes. The
+normative contracts are in [`sintra::recovery`](reference/recovery.md) and
+[`sintra::set_lifecycle_handler`](reference/lifecycle_hooks.md).
 
 ## Direct Ring Helpers
 
@@ -1408,7 +1203,6 @@ sources.
 | `sintra::Lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::Lifetime_policy` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::Log_stream` | [Errors and Diagnostics](#errors-and-diagnostics) |
-| `sintra::Managed_process::terminated_abnormally` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::Named_instance<T>` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::Process_descriptor` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::Recovery_control` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |

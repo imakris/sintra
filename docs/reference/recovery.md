@@ -30,9 +30,9 @@ struct Recovery_control
 extern uint32_t s_recovery_occurrence; // process-local
 ```
 
-Description: The recovery API opts a process into automatic respawn on
-abnormal exit and configures the coordinator-side decision and execution
-callbacks. `enable_recovery()` is called by the candidate process. The
+Description: The recovery API opts a managed-child custody into automatic
+respawn after abnormal exit and configures the coordinator-side decision and
+execution callbacks. `enable_recovery()` is called by the candidate child. The
 coordinator then decides whether to respawn through
 `set_recovery_policy(...)` and performs any custom delay or gating in a
 `set_recovery_runner(...)` callback. The detected recovery occurrence
@@ -78,8 +78,16 @@ custody, not a process-instance-id generation counter.
 ## Contract
 
 - `enable_recovery()` operates on the local managed process. It marks the
-  process as recoverable and records the command line used to launch it, so
-  the coordinator can respawn it later.
+  exact custody identified by that process's authenticated message context.
+  The custody's structured launch recipe was committed before its original
+  child or publication became visible; recovery reuses that recipe rather than
+  reconstructing a command from the process instance id.
+- Recovery authority is custody-scoped. Once enabled, it is inherited by later
+  occurrences of the same custody. A fresh custody starts with recovery
+  disabled, even if another custody in the active runtime used the same process
+  instance id. Externally attached processes have no managed custody and are
+  never recovered; calling `enable_recovery()` from one has no effect and logs
+  a warning.
 - `set_recovery_policy` and `set_recovery_runner` only take effect inside
   the coordinator process. Calls from non-coordinator processes are no-ops.
 - The default behaviour, when no policy is configured, is to recover the
@@ -89,6 +97,12 @@ custody, not a process-instance-id generation counter.
   coordinator-owned recovery thread. A custom runner runs on its own recovery
   thread and decides when to call `Recovery_control::spawn()`. Calling
   `spawn()` more than once is ignored.
+- Crash handling captures the exact custody, predecessor occurrence, and
+  structured launch recipe before policy or runner code runs. A retained
+  `Recovery_control::spawn()` revalidates that the captured custody remains
+  open, opted in, and still owns that predecessor. It is inert after custody
+  release or retirement, process-id reuse, or runtime teardown, and cannot
+  redirect recovery to a newer custody.
 - `Recovery_control::should_cancel()` becomes `true` when the coordinator
   has begun shutting down. Runners must check it and return promptly to let
   teardown progress.
@@ -101,7 +115,9 @@ custody, not a process-instance-id generation counter.
   set the local managed process up.
 - A recovery event is also surfaced through
   [`sintra::set_lifecycle_handler`](lifecycle_hooks.md) as a
-  `process_lifecycle_event::reason::crash` when the process crashed.
+  `process_lifecycle_event::reason::crash` when the process crashed. The
+  lifecycle callback runs after exact publication retirement and notification
+  enqueueing; recovery is considered only after that callback returns.
 
 ## Threading and lifecycle
 
@@ -113,15 +129,14 @@ custody, not a process-instance-id generation counter.
   coordinator state it touches.
 - Default recovery uses the same coordinator-owned recovery-thread mechanism,
   even though it calls `spawn()` immediately on that thread.
-- Recovery is opt-in per process. Processes that did not call
-  `enable_recovery()` are not respawned even when a policy or runner is
-  configured.
+- A custody that did not call `enable_recovery()` is not respawned even when a
+  policy or runner is configured.
 
 ## Failure modes
 
 - Misconfiguration shows up as a missed recovery: the policy returned
-  `false`, the runner did not call `spawn`, or the process exited without
-  enabling recovery.
+  `false`, the runner did not call `spawn`, the custody exited without enabling
+  recovery, or a retained control was invoked after its exact custody closed.
 
 ## Example source
 

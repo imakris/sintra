@@ -1,4 +1,4 @@
-﻿# Sintra
+# Sintra
 
 <table>
   <thead>
@@ -94,8 +94,9 @@ suitable for latency-sensitive workloads.
 * **No RTTI required** - type ids are derived from compile-time signatures (or
   explicit ids when pinned).
 * **Cross-platform design** - shared-memory transport on Linux, macOS, Windows, and FreeBSD.
-* **Opt-in crash recovery** - mark critical workers with `sintra::enable_recovery()` so
-  the coordinator automatically respawns them after an unexpected exit.
+* **Opt-in crash recovery** - managed children call `sintra::enable_recovery()`
+  to let the coordinator respawn later occurrences of that custody after an
+  unexpected exit.
 * **Lifeline ownership for spawned processes** - child processes monitor a lifeline
   pipe/handle and hard-exit if the owner disappears (timeout and exit code are configurable).
 
@@ -282,14 +283,16 @@ catch (const std::exception& e) {
 ### Observe abnormal exits from managed peers
 
 ```cpp
-auto crash_monitor = sintra::activate_slot(
-    [](const sintra::Managed_process::terminated_abnormally& crash) {
+sintra::set_lifecycle_handler(
+    [](const sintra::process_lifecycle_event& event) {
+        if (event.why != sintra::process_lifecycle_event::reason::crash) {
+            return;
+        }
         sintra::console()
             << "Process "
-            << sintra::process_of(crash.sender_instance_id)
-            << " crashed with status " << crash.status << '\n';
-    },
-    sintra::Typed_instance_id<sintra::Managed_process>(sintra::any_remote));
+            << event.process_iid
+            << " crashed with status " << event.status << '\n';
+    });
 ```
 
 ### Lifeline process ownership

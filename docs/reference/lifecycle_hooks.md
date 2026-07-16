@@ -13,9 +13,8 @@ invoked once per process lifecycle event (crash, normal exit, or
 unpublished without prior signal). The callback receives a
 `process_lifecycle_event` with the affected process's identity and the
 reason. Crash events also carry the platform-dependent exit status. The
-related signal `Managed_process::terminated_abnormally` is sent before the
-unpublish notification and is the underlying message that crash guards
-observe.
+internal `Managed_process::terminated_abnormally` message carries the exact
+reader generation that authorizes the crash retirement transaction.
 
 Signature:
 
@@ -59,32 +58,40 @@ Contract:
 
 - Effective only on the coordinator process. Calls from non-coordinator
   processes are no-ops.
-- The handler is invoked once per event. When a crash status was
-  recorded for a process, the subsequent unpublish does not produce an
-  additional `unpublished` event.
+- The handler is invoked once for each successful process-publication
+  retirement. Crash status is passed directly into that exact transaction; it
+  is not cached by process instance id for a later unpublish. A duplicate or
+  stale crash message therefore cannot produce another event or retire a
+  replacement generation.
 - `process_iid` is the affected process's instance id; `process_slot`
   is the stable slot index for correlation across recoveries.
 - `status` is non-zero for crash events when the platform supplies an
   exit signal; it is zero on `normal_exit` and `unpublished` paths.
 - The reasons map to the lifecycle as follows:
-  - `crash`: the managed process crash handler called the coordinator.
+  - `crash`: an exact abnormal-termination message retired its matching
+    managed-child or external-reader generation with native status.
   - `normal_exit`: the process called `shutdown()`, `leave()`, or
     `detail::finalize()` and the coordinator observed the draining bit.
-  - `unpublished`: the process unpublished without crash status or
-    draining bit (the catch-all for abrupt teardowns that did not flow
-    through either path).
+  - `unpublished`: the exact unpublish transaction carried neither crash
+    information nor a draining bit (the catch-all for abrupt teardown outside
+    the other paths).
 - `Managed_process::terminated_abnormally` is an internal reserved
-  message sent by the coordinator before the corresponding
-  `instance_unpublished` for an abnormally terminated process. It is
-  declared with `SINTRA_MESSAGE_RESERVED` and is not part of the user
-  message surface; use the `Lifecycle_handler` callback for crash
-  observation in user code.
+  message emitted by the abnormal process path. Its message prefix carries
+  managed custody identity and occurrence, or the external invitation
+  occurrence. The coordinator revalidates that identity against the registry
+  and reader before committing unpublish. It is not part of the user message
+  surface; use the `Lifecycle_handler` callback for crash observation.
 
 Threading and lifecycle:
 
-- The handler runs on a coordinator thread. Keep work bounded and
-  thread-safe; the same handler may be invoked from different events on
-  different threads.
+- Publication registry removal is committed atomically before the handler.
+  `instance_unpublished` and any released delayed publications are enqueued on
+  the coordinator request-ring FIFO before a replacement publication can be
+  enqueued. The handler then runs outside coordinator publication, group,
+  custody, and reader locks. Recovery, when eligible, is scheduled only after
+  the handler returns.
+- The handler runs on a coordinator thread. Keep work bounded and thread-safe;
+  different events may invoke it from different threads.
 - The handler is set globally on the coordinator. Replacing it with a
   new value supersedes the previous one; passing an empty
   `std::function` clears it.

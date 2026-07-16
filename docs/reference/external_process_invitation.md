@@ -25,10 +25,11 @@ struct External_process_invitation_options
 
 struct External_process_invitation
 {
-    sintra::instance_id_type               process_instance_id;
-    uint64_t                               swarm_id;
-    sintra::instance_id_type               coordinator_id;
-    std::chrono::steady_clock::time_point  expires_at;
+    sintra::instance_id_type               process_instance_id = sintra::invalid_instance_id;
+    uint64_t                               swarm_id = 0;
+    sintra::instance_id_type               coordinator_id = sintra::invalid_instance_id;
+    uint32_t                               occurrence = 0;
+    std::chrono::steady_clock::time_point  expires_at{};
     std::string                            token;
 
     bool valid() const;
@@ -61,18 +62,24 @@ Contract:
   `sintra::init` has returned.
 - If `process_instance_id` is `invalid_instance_id`, Sintra allocates a fresh
   process instance id. If a specific id is supplied, it must be a process id
-  and must not already be reserved, active, joining, or otherwise known.
+  and must not already be reserved, active, joining, retained by managed-child
+  custody, or fenced by an unquiesced reader generation.
 - `timeout` must be positive. Pending invitations expire automatically and are
   cleaned up; shutdown also cancels pending invitations.
+- Each accepted reservation receives a monotonically increasing, non-zero
+  `occurrence` for that process instance id. Together with the process id it
+  identifies one exact external reader generation; it is distinct from the
+  custody-relative recovery occurrence of a managed child.
 - `External_process_invitation::sintra_args()` returns the `--swarm_id`,
-  `--instance_id`, `--coordinator_id`, and attach-token arguments for the
-  external process. Append those arguments to the executable's normal command
-  line.
+  `--instance_id`, `--coordinator_id`, external occurrence, and attach-token
+  arguments. Append them to the executable's normal command line.
 - The external process calls normal `sintra::init(argc, argv)`. During init it
   claims the invitation with the token. The claim is accepted once; later
   attempts with the same arguments fail.
 - Wrong-token, canceled, expired, duplicate-id, and wrong-sender attempts are
-  rejected.
+  rejected. The claim message must also carry the reserved external occurrence,
+  so stale arguments cannot claim or retire a newer generation that reused the
+  same process id.
 - Canceling by `External_process_invitation` checks the invitation token as
   well as the process id, so an older invitation object cannot cancel a newer
   pending invitation that reused the same explicit id. Canceling by process id
@@ -84,7 +91,16 @@ Contract:
 - The external process may call `sintra::leave()` to depart while the swarm
   keeps running.
 - External invitations do not create a lifeline pipe/handle and do not provide
-  an automatic recovery launch command.
+  managed-child custody. Externally attached processes are never recovered;
+  `enable_recovery()` has no effect for them.
+- Cancel and expiry use a rejection grace period before destroying the pending
+  reader. The invitation record is removed only after that exact reader has
+  stopped, so the same process id cannot be reserved while an earlier reader
+  generation can still consume its rings.
+- After an admitted external process leaves or crashes, unpublish validates its
+  stored occurrence against the current reader. Retirement requests stop, wait
+  for, and erase only that exact reader. A same-id replacement remains rejected
+  until the predecessor reader is quiescent.
 
 Example:
 
@@ -130,6 +146,12 @@ Failures:
 - In the external process, `sintra::init` throws `std::runtime_error` when the
   invitation claim is rejected or cannot be completed within the bounded claim
   wait.
+- If the background reader-retirement worker cannot start, Sintra logs a
+  warning and retries after the current handler. If that retry also cannot
+  start, it logs an error and deliberately retains the old reader as an
+  availability fence: the process id cannot be invited again until runtime
+  shutdown destroys the reader. This fail-safe sacrifices same-id availability
+  rather than allowing two generations to share transport authority.
 
 Example source:
 

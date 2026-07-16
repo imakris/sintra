@@ -235,13 +235,16 @@ Threading and lifecycle:
 - Exit observations and subscriptions are move-only. Their boolean conversion
   reports successful registration. Destroying the subscription or calling
   `unsubscribe()` cancels pending delivery; an external unsubscribe waits for
-  an executing callback, while self-unsubscription completes after the
-  callback returns.
+  an executing callback. After it returns, that callback is not running and
+  cannot start. Self-unsubscription does not wait on itself; removal completes
+  after the callback returns.
 - Exit callbacks run once on a Sintra-managed lifecycle thread without custody
-  locks held. Delivery may start before registration returns, observer ordering
-  is unspecified, and callback exceptions are logged without retry. Callbacks
-  must not initiate Sintra teardown and should post application work to the
-  caller's executor. `shutdown()`, `leave()`, and `detail::finalize()` throw
+  or native-observer locks held. Delivery may start before registration
+  returns, observer ordering is unspecified, and callback exceptions are logged
+  without retry and never escape the worker. Non-teardown Sintra APIs may be
+  reentered subject to their normal thread rules. Callbacks must not initiate
+  Sintra teardown and should post longer application work to the caller's
+  executor. `shutdown()`, `leave()`, and `detail::finalize()` throw
   `std::logic_error` before teardown admission changes when called there.
 - `readiness_state` is `not_requested` when no readiness name was configured,
   `pending` while the exact target may still be observed, `reached` once the
@@ -317,5 +320,6 @@ See also:
 
 - [sintra::join_swarm](join_swarm.md)
 - [sintra::create_external_process_invitation](external_process_invitation.md)
+- [sintra::recovery](recovery.md)
 - [sintra::Process_descriptor](process_descriptor.md)
 - [sintra::init](init.md)
