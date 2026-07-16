@@ -87,6 +87,7 @@ struct Managed_child_occurrence_identity
 {
     instance_id_type process_instance_id = invalid_instance_id;
     std::uint32_t occurrence = 0;
+    std::uint64_t custody_identity = 0;
 };
 
 enum class Managed_child_exit_status_kind
@@ -183,15 +184,32 @@ Contract:
   while retained cleanup continues through exact exit confirmation.
 - Calls made while a lifecycle teardown protocol is active are rejected and
   return an empty handle with a warning logged; rejection creates no child.
+- Calling `observe_latest_created_exit()` with an empty callback returns an
+  empty observation without starting the exit dispatcher or retaining state.
 - `observe_latest_created_exit()` atomically selects the most recently admitted
   occurrence for which OS creation actually succeeded. The returned immutable
-  `(process_instance_id, occurrence)` identifies that exact occurrence. The
+  `(process_instance_id, occurrence, custody_identity)` identifies that exact
+  occurrence. `occurrence` is relative to one custody: `0` is its original
+  launch, `1` its first recovery, and so on. A fresh custody starts again at
+  `0`, including when it reuses a process instance id or is created by a
+  mid-flight swarm join.
+- `custody_identity` is an opaque, runtime-scoped token. It distinguishes fresh
+  custodies that use the same process instance id and occurrence number, and is
+  shared by all recovery occurrences in one custody. It is unique only among
+  custodies owned by the same active runtime; values may repeat after shutdown
+  and a later runtime initialization. Do not infer ordering or persist the token
+  as a cross-runtime identifier.
+- Identity equality includes all three fields. The
   subscription never follows a later recovery occurrence; call the method
   again after a newer occurrence is created to observe that occurrence.
 - A newer admitted no-child occurrence does not displace the latest created
   occurrence. If no occurrence was created, the observation is empty and the
   callback is not retained. Older exited occurrences may be skipped by the
   latest-created selection.
+- Registration establishes dispatcher custody before retaining the callback.
+  If the dispatcher thread cannot start, registration returns an empty
+  observation and retains no callback, including when the selected occurrence
+  has already exited.
 - Exit observation requires the active coordinator runtime that created the
   custody. Registration during teardown, after `shutdown()`, or after a later
   `init()` when the custody belongs to an earlier runtime returns an empty
@@ -223,13 +241,16 @@ Threading and lifecycle:
 - Exit observations and subscriptions are move-only. Their boolean conversion
   reports successful registration. Destroying the subscription or calling
   `unsubscribe()` cancels pending delivery; an external unsubscribe waits for
-  an executing callback, while self-unsubscription completes after the
-  callback returns.
+  an executing callback. After it returns, that callback is not running and
+  cannot start. Self-unsubscription does not wait on itself; removal completes
+  after the callback returns.
 - Exit callbacks run once on a Sintra-managed lifecycle thread without custody
-  locks held. Delivery may start before registration returns, observer ordering
-  is unspecified, and callback exceptions are logged without retry. Callbacks
-  must not initiate Sintra teardown and should post application work to the
-  caller's executor. `shutdown()`, `leave()`, and `detail::finalize()` throw
+  or native-observer locks held. Delivery may start before registration
+  returns, observer ordering is unspecified, and callback exceptions are logged
+  without retry and never escape the worker. Non-teardown Sintra APIs may be
+  reentered subject to their normal thread rules. Callbacks must not initiate
+  Sintra teardown and should post longer application work to the caller's
+  executor. `shutdown()`, `leave()`, and `detail::finalize()` throw
   `std::logic_error` before teardown admission changes when called there.
 - `readiness_state` is `not_requested` when no readiness name was configured,
   `pending` while the exact target may still be observed, `reached` once the
@@ -279,9 +300,10 @@ Failures:
   facts without minting a failure. An exception in readiness observation may
   instead be recorded as `readiness_observation`.
 - `last_failure` is a retained historical diagnostic, not the current custody
-  state. Its `occurrence` identifies the recovery occurrence to which `kind`,
-  `native_error`, and `message` apply. Later successful progress, including
-  complete release, does not erase an earlier report.
+  state. Its custody-relative `occurrence` identifies the original launch (`0`)
+  or recovery (`1`, `2`, ...) to which `kind`, `native_error`, and `message`
+  apply. Later successful progress, including complete release, does not erase
+  an earlier report.
 - Failure to start a release worker is reported as `release_worker_start`; an
   exception escaping its lifecycle work is reported as
   `release_worker_execution`. Both retain custody and permit a later release or
@@ -304,5 +326,6 @@ See also:
 
 - [sintra::join_swarm](join_swarm.md)
 - [sintra::create_external_process_invitation](external_process_invitation.md)
+- [sintra::recovery](recovery.md)
 - [sintra::Process_descriptor](process_descriptor.md)
 - [sintra::init](init.md)

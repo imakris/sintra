@@ -63,6 +63,7 @@ managed_child_custody_finalize_race_contract_test        1
 managed_child_custody_name_retirement_contract_test      1
 managed_child_custody_occurrence_isolation_contract_test 1
 managed_child_custody_setup_race_contract_test           1
+managed_child_crash_provenance_reuse_contract_test       1
 managed_child_exact_exit_observation_contract_test       1
 managed_child_occurrence_identity_reuse_contract_test    1
 managed_child_failed_readiness_contract_test             1
@@ -71,6 +72,7 @@ managed_child_native_observer_exception_contract_test    1
 managed_child_predecessor_retirement_contract_test       1
 managed_child_public_cleanup_contract_test               1
 managed_child_readiness_deadline_contract_test           1
+managed_child_recovery_authority_reuse_contract_test      1
 managed_child_release_retry_state_test                    1
 managed_child_spawn_admission_contract_test               1
 managed_child_stale_unpublish_contract_test               1

@@ -15,7 +15,6 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <optional>
 #include <string_view>
 #include <thread>
@@ -24,20 +23,15 @@ namespace {
 
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
+using sintra::test::managed_child::child_identity_t;
+using sintra::test::managed_child::read_child_identity;
+using sintra::test::managed_child::write_child_identity;
 using Managed_child_invariant =
     sintra::detail::test_hooks::Managed_child_invariant;
 
 constexpr std::string_view k_child_flag = "--f03-invariant-child";
 
 enum class Target { none, exact_occurrence, posix_reap_reservation };
-
-struct Child_identity
-{
-    sintra::instance_id_type process_iid = sintra::invalid_instance_id;
-    uint32_t occurrence = 0;
-    int pid = -1;
-    uint64_t start_stamp = 0;
-};
 
 std::atomic<Target> s_target{Target::none};
 std::atomic<sintra::instance_id_type> s_expected_iid{
@@ -51,20 +45,6 @@ std::atomic<int> s_reap_status{0};
 std::atomic<bool> s_cleanup_entered{false};
 std::atomic<bool> s_cleanup_release{false};
 fs::path s_marker;
-
-std::optional<Child_identity> read_identity(const fs::path& path)
-{
-    std::ifstream in(path, std::ios::binary);
-    unsigned long long process_iid = 0;
-    unsigned long long start_stamp = 0;
-    Child_identity identity;
-    if (!(in >> process_iid >> identity.occurrence >> identity.pid >> start_stamp)) {
-        return std::nullopt;
-    }
-    identity.process_iid = static_cast<sintra::instance_id_type>(process_iid);
-    identity.start_stamp = static_cast<uint64_t>(start_stamp);
-    return identity;
-}
 
 bool force_invariant_miss(
     Managed_child_invariant invariant,
@@ -97,7 +77,7 @@ bool force_invariant_miss(
             std::this_thread::sleep_for(2ms);
         }
         try {
-            if (const auto identity = read_identity(s_marker)) {
+            if (const auto identity = read_child_identity(s_marker)) {
                 s_expected_pid.store(identity->pid, std::memory_order_release);
             }
         }
@@ -149,14 +129,10 @@ void gate_automatic_cleanup(
 
 int child_main(const fs::path& marker)
 {
-    const auto stamp = sintra::current_process_start_stamp();
-    if (!stamp) return 2;
-    const std::string contents =
-        std::to_string(static_cast<unsigned long long>(sintra::s_mproc_id)) + " " +
-        std::to_string(sintra::s_recovery_occurrence) + " " +
-        std::to_string(sintra::test::get_pid()) + " " +
-        std::to_string(static_cast<unsigned long long>(*stamp)) + "\n";
-    if (!sintra::test::managed_child::write_complete_file(marker, contents)) {
+    if (!sintra::current_process_start_stamp()) {
+        return 2;
+    }
+    if (!write_child_identity(marker)) {
         return 3;
     }
     std::this_thread::sleep_for(15s);
@@ -217,11 +193,11 @@ Case_result run_case(
         }
 
         const auto before = custody.status();
-        std::optional<Child_identity> identity;
+        std::optional<child_identity_t> identity;
         if (before.created_occurrences != 0 &&
             sintra::test::wait_for_file(s_marker, 3s, 5ms))
         {
-            identity = read_identity(s_marker);
+            identity = read_child_identity(s_marker);
             if (identity) {
                 s_expected_pid.store(identity->pid, std::memory_order_release);
             }

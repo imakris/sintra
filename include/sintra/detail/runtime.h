@@ -690,10 +690,21 @@ inline bool lifecycle_teardown_requested()
         s_shutdown_state.load(std::memory_order_acquire) != shutdown_protocol_state::idle;
 }
 
+inline void validate_managed_child_exit_callback_teardown(
+    const char* api_name)
+{
+    if (tl_in_managed_child_exit_callback) {
+        throw std::logic_error(
+            std::string(api_name) +
+            " must not be called from a managed-child exit callback.");
+    }
+}
+
 inline void close_teardown_admission_and_claim_state(
     shutdown_protocol_state    desired_state,
     const char*                api_name)
 {
+    validate_managed_child_exit_callback_teardown(api_name);
     std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
     if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
         if (s_shutdown_state.load(std::memory_order_acquire) == desired_state) {
@@ -709,6 +720,7 @@ inline void close_teardown_admission_and_claim_state(
 
 inline bool close_teardown_admission_for_shutdown(const char* api_name)
 {
+    validate_managed_child_exit_callback_teardown(api_name);
     std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
     if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
         const auto state = s_shutdown_state.load(std::memory_order_acquire);
@@ -745,16 +757,6 @@ inline void validate_leave_context()
     }
 }
 
-inline void validate_managed_child_exit_callback_teardown(
-    const char* api_name)
-{
-    if (tl_in_managed_child_exit_callback) {
-        throw std::logic_error(
-            std::string(api_name) +
-            " must not be called from a managed-child exit callback.");
-    }
-}
-
 /// Low-level teardown for single-process programs, exceptional/error
 /// paths, or test code that cannot participate in a symmetric shutdown.
 /// Ordinary multi-process callers should use `shutdown()` instead.
@@ -764,8 +766,6 @@ inline void validate_managed_child_exit_callback_teardown(
 /// path is an illegal composition.
 inline bool finalize()
 {
-    validate_managed_child_exit_callback_teardown(
-        "sintra::detail::finalize()");
     close_teardown_admission_and_claim_state(
         shutdown_protocol_state::finalizing,
         "sintra::detail::finalize()");
@@ -917,8 +917,6 @@ inline bool shutdown()
 
 inline bool shutdown(const shutdown_options& options)
 {
-    detail::validate_managed_child_exit_callback_teardown(
-        "sintra::shutdown()");
     const bool resume_finalization =
         detail::close_teardown_admission_for_shutdown("sintra::shutdown()");
 
@@ -1032,8 +1030,6 @@ inline bool shutdown(const shutdown_options& options)
 
 inline bool leave()
 {
-    detail::validate_managed_child_exit_callback_teardown(
-        "sintra::leave()");
     detail::validate_leave_context();
     detail::close_teardown_admission_and_claim_state(
         detail::shutdown_protocol_state::local_departure_entered,
@@ -1169,12 +1165,6 @@ inline Managed_child_exit_subscription::~Managed_child_exit_subscription()
 {
     unsubscribe();
 }
-
-inline Managed_child_exit_subscription::Managed_child_exit_subscription(
-    Managed_child_exit_subscription&& other) noexcept
-:
-    m_state(std::move(other.m_state))
-{}
 
 inline Managed_child_exit_subscription&
 Managed_child_exit_subscription::operator=(
@@ -1357,16 +1347,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             return {};
         }
 
-        const auto occurrence =
-            s_mproc->allocate_child_custody_occurrence(piid);
-        if (!occurrence) {
-            Log_stream(log_level::error)
-                << "spawn_swarm_process: occurrence counter exhausted for process "
-                << static_cast<unsigned long long>(piid) << '\n';
-            return {};
-        }
-        spawn_args.occurrence = *occurrence;
-
         auto args = options.args;
         auto argv0_matches = [&]() {
             if (args.empty()) {
@@ -1517,7 +1497,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     spawn_args.occurrence);
             };
         try {
-            custody_owner->start_child_custody_worker(std::move(async_setup));
+            custody_owner->start_owned_lifecycle_worker(std::move(async_setup));
         }
         catch (...) {
             custody_owner->note_child_custody_failure(
@@ -1676,10 +1656,8 @@ Managed_child_custody::observe_latest_created_exit(
             return {};
         }
 
-        identity = {
-            selected->process_instance_id,
-            selected->occurrence,
-        };
+        identity = detail::make_managed_child_occurrence_identity(
+            m_record->identity, *selected);
         state = std::make_shared<
             detail::Managed_child_exit_subscription_state>(
                 m_record,
@@ -1702,13 +1680,7 @@ Managed_child_custody::observe_latest_created_exit(
     observation.occurrence = identity;
     observation.subscription = Managed_child_exit_subscription(state);
     if (replay.has_value()) {
-        try {
-            s_mproc->dispatch_child_exit_subscription(state, *replay);
-        }
-        catch (...) {
-            observation.subscription.unsubscribe();
-            return {};
-        }
+        s_mproc->dispatch_child_exit_subscription(state, *replay);
     }
     return observation;
 }

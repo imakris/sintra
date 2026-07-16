@@ -22,17 +22,14 @@ using namespace std::chrono_literals;
 
 namespace {
 
-using sintra::test::managed_child::exact_process_is_live;
+using sintra::test::managed_child::process_identity_t;
+using sintra::test::managed_child::read_process_identity;
+using sintra::test::managed_child::wait_for_exact_process_absence;
+using sintra::test::managed_child::write_process_identity;
 
 constexpr const char* k_worker_flag           = "--atom3-worker";
 constexpr const char* k_unexpected_child_flag = "--atom3-unexpected-child";
 constexpr const char* k_owned_child_flag      = "--atom3-owned-child";
-
-struct child_identity_t
-{
-    int      pid = -1;
-    uint64_t start_stamp = 0;
-};
 
 struct Failure_plan
 {
@@ -151,51 +148,6 @@ bool settle_finalize()
     return sintra::detail::finalize();
 }
 
-bool write_child_identity(const std::filesystem::path& path)
-{
-    const auto pid = sintra::test::get_pid();
-    const auto stamp = sintra::query_process_start_stamp(
-        static_cast<uint32_t>(pid));
-    if (!stamp) {
-        return false;
-    }
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    out << pid << ' ' << *stamp << '\n';
-    out.flush();
-    return out.good();
-}
-
-std::optional<child_identity_t> read_child_identity(
-    const std::filesystem::path& path)
-{
-    child_identity_t identity;
-    std::ifstream in(path, std::ios::binary);
-    in >> identity.pid >> identity.start_stamp;
-    if (!in || identity.pid <= 0 || identity.start_stamp == 0) {
-        return std::nullopt;
-    }
-    return identity;
-}
-
-bool exact_child_absent(const child_identity_t& identity)
-{
-    return !exact_process_is_live(identity.pid, identity.start_stamp);
-}
-
-bool wait_for_exact_child_absence(
-    const child_identity_t& identity,
-    std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (exact_child_absent(identity)) {
-            return true;
-        }
-        std::this_thread::sleep_for(10ms);
-    }
-    return exact_child_absent(identity);
-}
-
 bool run_malformed_id_rejections(
     const std::string& binary_path,
     const std::filesystem::path& marker)
@@ -290,10 +242,11 @@ bool run_post_native_exception(
         threw = true;
     }
     reset_failure_hook();
-    const auto identity = read_child_identity(marker);
+    const auto identity = read_process_identity(marker);
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 15s);
-    const bool survivor_absent = identity && wait_for_exact_child_absence(*identity, 2s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 2s);
     return
         !threw                                              &&
         identity                                            &&
@@ -472,7 +425,7 @@ int main(int argc, char* argv[])
             return 2;
         }
         if (arg == k_owned_child_flag && i + 1 < argc) {
-            if (!write_child_identity(argv[i + 1])) {
+            if (!write_process_identity(argv[i + 1])) {
                 return 3;
             }
             std::this_thread::sleep_for(30s);

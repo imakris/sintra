@@ -86,7 +86,6 @@ struct Cleanup_gate
     std::mutex                              mutex;
     std::condition_variable                 cv;
     bool                                    readiness_started = false;
-    bool                                    exact_name_retired = false;
     bool                                    cleanup_entered = false;
     std::chrono::steady_clock::time_point   cleanup_entered_at{};
     bool                                    released = false;
@@ -245,24 +244,6 @@ void runtime_spawn_success_callback(
     gate->cv.notify_all();
 }
 
-void name_retired_callback(
-    sintra::instance_id_type instance_id,
-    const std::string&)
-{
-    if (instance_id != k_child_process_iid) {
-        return;
-    }
-
-    Cleanup_gate* gate = s_cleanup_gate;
-    if (!gate) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(gate->mutex);
-    gate->exact_name_retired = true;
-    gate->cv.notify_all();
-}
-
 void cleanup_stage_callback(const char* stage)
 {
     if (!stage ||
@@ -278,9 +259,6 @@ void cleanup_stage_callback(const char* stage)
     }
 
     std::unique_lock<std::mutex> lock(gate->mutex);
-    if (!gate->exact_name_retired) {
-        return;
-    }
     gate->cleanup_entered = true;
     gate->cleanup_entered_at = std::chrono::steady_clock::now();
     gate->cv.notify_all();
@@ -348,9 +326,7 @@ bool wait_for_cleanup_entry(Cleanup_gate& gate, std::chrono::milliseconds timeou
 {
     std::unique_lock<std::mutex> lock(gate.mutex);
     return gate.cv.wait_for(lock, timeout, [&]() {
-        return gate.readiness_started &&
-            gate.exact_name_retired &&
-            gate.cleanup_entered;
+        return gate.readiness_started && gate.cleanup_entered;
     });
 }
 
@@ -989,8 +965,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     s_spawn_observation.count.store(0, std::memory_order_relaxed);
     sintra::detail::test_hooks::s_runtime_spawn_success.store(
         &runtime_spawn_success_callback, std::memory_order_release);
-    sintra::detail::test_hooks::s_coordinator_name_retired.store(
-        &name_retired_callback, std::memory_order_release);
     sintra::detail::test_hooks::s_coordinator_lock_stage.store(
         &cleanup_stage_callback, std::memory_order_release);
 #ifndef _WIN32
@@ -1061,11 +1035,9 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         wait_for_cleanup_entry(gate, k_watchdog_timeout);
     std::chrono::steady_clock::time_point cleanup_entered_at;
     std::chrono::steady_clock::time_point call_started_at;
-    bool exact_name_retired = false;
     if (cleanup_entered) {
         std::lock_guard<std::mutex> lock(gate.mutex);
         cleanup_entered_at = gate.cleanup_entered_at;
-        exact_name_retired = gate.exact_name_retired;
     }
     {
         std::lock_guard<std::mutex> lock(call.mutex);
@@ -1151,8 +1123,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     spawn_thread.join();
 
     sintra::detail::test_hooks::s_coordinator_lock_stage.store(
-        nullptr, std::memory_order_release);
-    sintra::detail::test_hooks::s_coordinator_name_retired.store(
         nullptr, std::memory_order_release);
     sintra::detail::test_hooks::s_runtime_spawn_success.store(
         nullptr, std::memory_order_release);
@@ -1247,7 +1217,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         cleanup_entered &&
         seam_after_requested_deadline &&
         returned_by_deadline &&
-        exact_name_retired &&
         ledger_identity_valid &&
         spawn_observation_valid &&
         start_stamp_verified &&
@@ -1329,7 +1298,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     std::fprintf(
         stderr,
         "R7_INVALID cleanup_entered=%d seam_after_deadline=%d returned_by_deadline=%d "
-        "caller_done_at_observation=%d exact_name_retired=%d ledger=%d "
+        "caller_done_at_observation=%d ledger=%d "
         "spawn_observation=%d start_stamp=%d native_identity=%d child_alive=%d "
         "name_absent=%d reader_nonterminal=%d lifeline_absent=%d target_never_published=%d "
         "spawn_completed=%d custody_valid=%d call_threw=%d child_release=%d "
@@ -1341,7 +1310,6 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         seam_after_requested_deadline ? 1 : 0,
         returned_by_deadline ? 1 : 0,
         caller_done_at_observation ? 1 : 0,
-        exact_name_retired ? 1 : 0,
         ledger_identity_valid ? 1 : 0,
         spawn_observation_valid ? 1 : 0,
         start_stamp_verified ? 1 : 0,

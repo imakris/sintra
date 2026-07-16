@@ -807,6 +807,12 @@ void Process_message_reader::request_reader_function()
             s_mproc->notify_delivery_progress();
         }
     };
+    auto relay_to_coordinator = [this](const Message_prefix& message) {
+        s_mproc->m_out_req_c->relay(
+            message,
+            m_managed_child_custody_identity,
+            m_occurrence);
+    };
 
     begin_reading_session(m_in_req_c, m_req_running);
 
@@ -856,10 +862,7 @@ void Process_message_reader::request_reader_function()
                 if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c) &&
                     is_service_instance(m->receiver_instance_id))
                 {
-                    s_mproc->m_out_req_c->relay(
-                        *m,
-                        m_managed_child_custody_identity,
-                        m_occurrence);
+                    relay_to_coordinator(*m);
                     publish_request_progress(m_in_req_c->get_message_reading_sequence());
                     continue;
                 }
@@ -961,7 +964,7 @@ void Process_message_reader::request_reader_function()
 
             // if the coordinator is in this process, relay
             if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c)) {
-                s_mproc->m_out_req_c->relay(*m);
+                relay_to_coordinator(*m);
             }
         }
         else {
@@ -973,7 +976,7 @@ void Process_message_reader::request_reader_function()
             // if the coordinator is in this process, relay
             if (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c)) {
                 // the message type is specified, thus it is a request
-                s_mproc->m_out_req_c->relay(*m);
+                relay_to_coordinator(*m);
             }
         }
 

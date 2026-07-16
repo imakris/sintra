@@ -1,5 +1,29 @@
 # Release Notes
 
+## Unreleased
+
+### Highlights
+
+- Added exact managed-child exit observation with immutable occurrence
+  identity, late exactly-once delivery, quiescent cancellation, normalized and
+  native status, and lifecycle-thread exception containment.
+- Scoped recovery authority and retained launch recipes to managed-child
+  custody, preventing opt-in or delayed runners from crossing process-id reuse.
+- Hardened managed and external publication retirement with exact reader
+  generation checks and ordered publication notifications.
+
+### Compatibility
+
+- Restored custody-relative recovery numbering: every fresh managed-child
+  custody, including process-id reuse and mid-flight joins, starts at occurrence
+  `0`; its first recovery is `1`.
+- Exact managed-child exit identities now include an opaque runtime-scoped
+  custody identity so separate custodies remain distinct without redefining
+  recovery occurrence semantics.
+- Bumped the ring ABI to version 8 for the internal joined-process startup
+  protocol. All processes in a swarm must use binaries built against the same
+  Sintra ring ABI.
+
 ## v1.2.0 (2026-04-28)
 
 ### Highlights

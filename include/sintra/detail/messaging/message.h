@@ -447,8 +447,10 @@ struct Message_prefix
     // used by the serializer, set in communicators
     instance_id_type   receiver_instance_id = invalid_instance_id;
 
-    // Coordinator-stamped internal metadata for managed-child service RPCs.
-    // These fields are zero for ordinary messages and are never caller authority.
+    // Coordinator-stamped internal request-reader identity. Managed children
+    // carry custody plus recovery occurrence; externally invited processes carry
+    // zero custody plus their nonzero invitation occurrence. Callers never supply
+    // this authority.
     uint64_t           managed_child_custody_identity = 0;
     uint32_t           managed_child_occurrence       = 0;
 };

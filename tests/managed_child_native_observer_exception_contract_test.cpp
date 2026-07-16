@@ -18,7 +18,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -28,9 +27,12 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::process_identity_t;
+using sintra::test::managed_child::read_process_identity;
 using sintra::test::managed_child::Scoped_test_hook;
 using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
+using sintra::test::managed_child::write_process_identity;
 
 constexpr std::string_view k_child_flag =
     "--managed-child-native-observer-exception-child";
@@ -41,12 +43,6 @@ constexpr std::uint32_t k_high_bit_exit_status = 0xc0000005u;
 
 struct Ready_target : sintra::Derived_transceiver<Ready_target>
 {};
-
-struct Child_identity
-{
-    int      pid = -1;
-    uint64_t start_stamp = 0;
-};
 
 struct Failure_plan
 {
@@ -170,12 +166,9 @@ fs::path case_file(
         (std::string(stem) + '_' + std::to_string(case_number) + ".complete");
 }
 
-Child_identity read_identity(const fs::path& path)
+process_identity_t read_identity(const fs::path& path)
 {
-    Child_identity identity;
-    std::ifstream in(path);
-    in >> identity.pid >> identity.start_stamp;
-    return identity;
+    return read_process_identity(path).value_or(process_identity_t{});
 }
 
 int run_child(
@@ -195,11 +188,8 @@ int run_child(
     if (!ready.assign_name("native_observer_ready_" + nonce)) {
         return 2;
     }
-    const auto start_stamp = sintra::current_process_start_stamp();
-    if (!start_stamp || !write_complete_file(
-            case_file(shared_directory, "identity", case_number),
-            std::to_string(sintra::test::get_pid()) + ' ' +
-                std::to_string(*start_stamp)))
+    if (!write_process_identity(
+            case_file(shared_directory, "identity", case_number)))
     {
         return 2;
     }
@@ -228,6 +218,7 @@ struct Case_result
     bool handle_closed_once = false;
     bool survivor_absent = false;
     bool registration_ordered = false;
+    bool failure_ordered = false;
     bool exit_observation = false;
     bool callback_reentry = false;
 
@@ -236,7 +227,7 @@ struct Case_result
         return setup && failure_injected && typed_failure &&
             fallback_available && release_complete && exact_exit_once &&
             handle_closed_once && survivor_absent && registration_ordered &&
-            exit_observation && callback_reentry;
+            failure_ordered && exit_observation && callback_reentry;
     }
 };
 
@@ -248,7 +239,8 @@ Case_result run_case(
     bool              verify_finalize_retry,
     bool              cancel_before_registration = false,
     bool              reenter_release = false,
-    bool              reenter_terminate = false)
+    bool              reenter_terminate = false,
+    bool              exit_before_failure = false)
 {
     Case_result result;
     const auto process_iid = sintra::compose_instance(61u + case_number, 1ull);
@@ -311,6 +303,10 @@ Case_result run_case(
         });
         result.registration_ordered = !cancel_before_registration ||
             gate.observer_registered == 0;
+        if (exit_before_failure) {
+            result.registration_ordered = gate.registration_complete &&
+                gate.observer_registered == 1;
+        }
     }
     result.setup = result.setup && custody && identity_seen &&
         identity.pid > 0 && identity.start_stamp != 0 &&
@@ -360,6 +356,25 @@ Case_result run_case(
         result.first_finalize_incomplete = !first_finalize && custody &&
             elapsed < 2s;
     }
+    bool exit_requested = false;
+    bool child_exited = false;
+#ifdef _WIN32
+    DWORD exit_code = STILL_ACTIVE;
+    if (exit_before_failure) {
+        exit_requested = write_complete_file(exit_path, "exit\n");
+        child_exited = child_handle &&
+            WaitForSingleObject(child_handle, 5000) == WAIT_OBJECT_0 &&
+            GetExitCodeProcess(child_handle, &exit_code) != 0 &&
+            exit_code != STILL_ACTIVE;
+        result.failure_ordered = exit_requested && child_exited &&
+            exit_code == k_high_bit_exit_status;
+    }
+#else
+    result.failure_ordered = !exit_before_failure;
+#endif
+    if (!exit_before_failure) {
+        result.failure_ordered = true;
+    }
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
         gate.release_observer = true;
@@ -376,20 +391,22 @@ Case_result run_case(
         failure_plan.hits.load(std::memory_order_relaxed) == 1;
     result.typed_failure = failed.last_failure.kind ==
         sintra::Managed_child_failure_kind::native_observer &&
-        failed.created_occurrences == 1 && failed.exited_occurrences == 0;
+        failed.created_occurrences == 1 &&
+        (exit_before_failure || failed.exited_occurrences == 0);
 
-    const bool exit_requested = write_complete_file(exit_path, "exit\n");
+    if (!exit_before_failure) {
+        exit_requested = write_complete_file(exit_path, "exit\n");
+    }
     const auto terminated = custody.terminate_until(
         std::chrono::steady_clock::now() + k_timeout);
     passive_caller.join();
 #ifdef _WIN32
-    DWORD exit_code = STILL_ACTIVE;
-    const bool child_exited = child_handle &&
-        WaitForSingleObject(child_handle, 5000) == WAIT_OBJECT_0 &&
-        GetExitCodeProcess(child_handle, &exit_code) != 0 &&
-        exit_code != STILL_ACTIVE;
-#else
-    const bool child_exited = false;
+    if (!child_exited) {
+        child_exited = child_handle &&
+            WaitForSingleObject(child_handle, 5000) == WAIT_OBJECT_0 &&
+            GetExitCodeProcess(child_handle, &exit_code) != 0 &&
+            exit_code != STILL_ACTIVE;
+    }
 #endif
     {
         std::unique_lock<std::mutex> lock(gate.mutex);
@@ -398,6 +415,8 @@ Case_result run_case(
         });
         result.handle_closed_once = result.handle_closed_once &&
             gate.handle_closed == 1;
+        result.fallback_available = result.fallback_available &&
+            gate.fallback_available == 1;
     }
     const auto complete = custody.status();
     result.release_complete = exit_requested && child_exited &&
@@ -437,6 +456,7 @@ Case_result run_case(
             exit_code == k_high_bit_exit_status;
 #endif
         result.exit_observation = exit_callback_count == 1 &&
+            exit_event.occurrence == exit_observation.occurrence &&
             exit_event.occurrence.process_instance_id == process_iid &&
             exit_event.occurrence.occurrence == 0 &&
             exit_status_valid;
@@ -478,27 +498,30 @@ int run_root(
             k_managed_child_fail_native_observer_before_wait,
         sintra::detail::test_hooks::
             k_managed_child_fail_native_observer_after_registration,
+        sintra::detail::test_hooks::
+            k_managed_child_fail_native_observer_after_registration,
         sintra::detail::test_hooks::k_managed_child_fail_native_observer_wait};
-    Case_result results[4];
-    for (unsigned i = 0; i != 4; ++i) {
+    Case_result results[5];
+    for (unsigned i = 0; i != 5; ++i) {
         results[i] = run_case(
             binary_path,
             shared_directory,
             i,
             failure_stages[i],
-            i == 3,
+            i == 4,
             i == 2,
             i == 0,
-            i == 1);
+            i == 1,
+            i == 3);
         if (!results[i].passed() ||
-            (i == 3 && !results[i].first_finalize_incomplete))
+            (i == 4 && !results[i].first_finalize_incomplete))
         {
             std::fprintf(
                 stderr,
                 "NATIVE_OBSERVER_EXCEPTION_INVALID case=%u setup=%d "
                 "injected=%d typed=%d fallback=%d finalize=%d release=%d "
                 "exit=%d close=%d survivor_absent=%d registration=%d "
-                "observation=%d callback_reentry=%d\n",
+                "failure_order=%d observation=%d callback_reentry=%d\n",
                 i,
                 results[i].setup ? 1 : 0,
                 results[i].failure_injected ? 1 : 0,
@@ -510,6 +533,7 @@ int run_root(
                 results[i].handle_closed_once ? 1 : 0,
                 results[i].survivor_absent ? 1 : 0,
                 results[i].registration_ordered ? 1 : 0,
+                results[i].failure_ordered ? 1 : 0,
                 results[i].exit_observation ? 1 : 0,
                 results[i].callback_reentry ? 1 : 0);
             return 2;
@@ -523,7 +547,7 @@ int run_root(
         return 2;
     }
     std::printf(
-        "NATIVE_OBSERVER_EXCEPTION_GREEN cases=4 typed=1 fallback=1 "
+        "NATIVE_OBSERVER_EXCEPTION_GREEN cases=5 typed=1 fallback=1 "
         "terminate_retry=1 finalize_retry=1 close_once=1 survivor_absent=1\n");
     return 0;
 #endif

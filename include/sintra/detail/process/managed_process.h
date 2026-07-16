@@ -31,7 +31,6 @@
 #include <memory>
 #include <mutex>
 #include <cstdint>
-#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -167,7 +166,10 @@ class Managed_child_exit_subscription_state;
 struct Managed_child_occurrence_identity
 {
     instance_id_type process_instance_id = invalid_instance_id;
+    // Custody-relative: 0 is the original launch and 1 is its first recovery.
     uint32_t         occurrence = 0;
+    // Opaque and unique only among custodies owned by one active runtime.
+    uint64_t         custody_identity = 0;
 
     bool operator==(const Managed_child_occurrence_identity&) const = default;
 };
@@ -204,7 +206,7 @@ public:
     ~Managed_child_exit_subscription();
 
     Managed_child_exit_subscription(
-        Managed_child_exit_subscription&& other) noexcept;
+        Managed_child_exit_subscription&& other) noexcept = default;
     Managed_child_exit_subscription& operator=(
         Managed_child_exit_subscription&& other) noexcept;
 
@@ -251,6 +253,7 @@ namespace detail {
 
 inline constexpr const char* k_external_attach_token_arg      = "--external_attach_token";
 inline constexpr const char* k_external_attach_occurrence_arg = "--external_attach_occurrence";
+inline constexpr const char* k_skip_startup_barrier_arg       = "--sintra_skip_startup_barrier";
 inline constexpr auto        k_external_attach_claim_timeout  = std::chrono::seconds(5);
 
 enum class Managed_child_post_spawn_stage
@@ -625,7 +628,6 @@ private:
     std::condition_variable                     m_quiesced;
     Managed_child_exit_callback                 m_callback;
     std::thread::id                             m_callback_thread;
-    bool                                        m_active = true;
     bool                                        m_callback_running = false;
 
     Managed_child_exit                         m_dispatch_event;
@@ -649,7 +651,12 @@ Managed_child_exit make_managed_child_exit(
     std::uint32_t                     wait_status,
     bool                              wait_status_available) noexcept;
 
+Managed_child_occurrence_identity make_managed_child_occurrence_identity(
+    uint64_t                               custody_identity,
+    const Managed_child_occurrence_record& occurrence) noexcept;
+
 Managed_child_exit_publication record_managed_child_exit_locked(
+    uint64_t                         custody_identity,
     Managed_child_occurrence_record& occurrence,
     std::uint32_t                    wait_status,
     bool                             wait_status_available);
@@ -850,6 +857,7 @@ struct Managed_child_custody_record
     std::weak_ptr<const Managed_process_lifetime>
                                                 runtime_lifetime;
     uint64_t                                   identity = 0;
+    bool                                       recovery_requested = false;
     Readiness_phase                            readiness = Readiness_phase::not_requested;
     std::atomic<bool>                          readiness_cancelled{false};
     Managed_child_release_state                release_state;
@@ -1261,6 +1269,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void remove_process_reader(
         instance_id_type   process_instance_id,
         double             waiting_period = 1.0);
+    void retire_external_process_reader(
+        const std::shared_ptr<Process_message_reader>& reader);
 
     bool has_process_reader(
         instance_id_type   process_instance_id) const;
@@ -1323,8 +1333,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     instance_id_type                    m_group_external        = invalid_instance_id;
 
     // recovery
-    bool                                m_recoverable           = false;
-    std::string                         m_recovery_cmd;
+    bool                                m_skip_startup_barrier  = false;
 
 
     struct Spawn_swarm_process_args
@@ -1383,9 +1392,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
-    std::optional<uint32_t> allocate_child_custody_occurrence(
-        instance_id_type process_instance_id,
-        uint32_t minimum = 0);
     detail::Managed_child_launch_attempt admit_child_custody_occurrence(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         instance_id_type process_instance_id,
@@ -1419,7 +1425,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool wait_for_all_child_custodies(
         std::chrono::steady_clock::time_point deadline);
     bool all_child_custodies_released() const;
-    bool child_custody_allows_recovery(instance_id_type process_instance_id) const;
     detail::Managed_child_occurrence_token child_custody_occurrence_token(
         instance_id_type process_instance_id) const;
     detail::Managed_child_occurrence_token child_custody_occurrence_token_exact(
@@ -1491,12 +1496,12 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::chrono::steady_clock::time_point deadline);
     bool cleanup_child_native(
         const detail::Managed_child_occurrence_token& token);
-    void start_child_custody_worker(
+    void start_owned_lifecycle_worker(
         std::function<void()> worker,
         const char* failure_stage = nullptr,
         instance_id_type failure_process_instance_id = invalid_instance_id,
         uint32_t failure_occurrence = 0);
-    void join_child_custody_workers();
+    void join_owned_lifecycle_workers();
     void retire_child_custody_if_complete(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody);
 
@@ -1514,14 +1519,14 @@ struct Managed_process: Derived_transceiver<Managed_process>
                                         m_child_custodies;
     std::map<instance_id_type, detail::Managed_child_active_occurrence>
                                         m_child_custody_by_process;
-    std::map<instance_id_type, uint32_t> m_next_child_occurrence_by_process;
-    mutable std::mutex                  m_child_custody_workers_mutex;
-    struct Child_custody_worker
+    mutable std::mutex                  m_owned_lifecycle_workers_mutex;
+    bool                                m_owned_lifecycle_worker_admission_open = true;
+    struct Owned_lifecycle_worker
     {
         std::thread                         thread;
         std::shared_ptr<std::atomic<bool>>  complete;
     };
-    std::vector<Child_custody_worker>   m_child_custody_workers;
+    std::vector<Owned_lifecycle_worker> m_owned_lifecycle_workers;
     std::mutex                          m_child_exit_dispatch_mutex;
     std::condition_variable             m_child_exit_dispatch_changed;
     std::thread                         m_child_exit_dispatch_thread;

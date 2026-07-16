@@ -199,6 +199,33 @@ The `Coordinator` is a **special transceiver** that runs in process index 0 (the
 - **Process groups and barriers**
 - **Draining state tracking**
 
+### Publication identity and ordering
+
+Each process publication retains the reader identity that authorized it. A
+managed child uses `(custody_identity, process_instance_id, occurrence)`; an
+externally attached process uses its process instance id and invitation
+occurrence with a zero custody identity. Unpublish revalidates that identity
+against both the registry entry and the captured reader, so a stale managed
+occurrence or external invitation generation cannot retire its replacement.
+
+Publication state is committed under `m_publish_mutex`. The separate
+`m_publication_notifications_mutex` serializes that transaction with the
+disposition of its notification. Immediate notifications are enqueued on the
+coordinator request-ring FIFO while that sequencing mutex remains held. During
+initialization, a publication can instead be recorded in the delayed list; a
+later initialization-complete or unpublish transaction takes any ready batch
+under the same sequencing mutex and enqueues its surviving entries. An
+unpublish transaction discards the retiring process's entries from a batch it
+releases. A registry commit therefore does not always imply an immediate
+notification enqueue, but a replacement still cannot enqueue ahead of its
+predecessor's unpublish notification.
+
+Lifecycle callbacks run after the registry transaction and notification
+disposition have released their locks. Managed-child communication retirement
+has been requested by then, but its reader join runs asynchronously and can
+remain incomplete. The callback does not certify communication quiescence or
+custody release; recovery is considered only after the callback returns.
+
 ### Barrier Mechanism
 
 #### Process_group Structure
@@ -268,10 +295,17 @@ bool is_process_draining(instance_id_type process_iid) const {
 
 **Lock Hierarchy**: To prevent deadlocks:
 ```
-m_external_process_invitations_mutex -> m_groups_mutex -> m_publish_mutex -> m_init_tracking_mutex
+m_external_process_invitations_mutex
+    -> m_groups_mutex
+    -> m_publication_notifications_mutex
+    -> m_publish_mutex
+    -> m_init_tracking_mutex
 m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m -> atomics
 ```
-Threads may skip hierarchy levels. Other coordinator mutexes are leaf locks and do not nest with these.
+Threads may skip hierarchy levels. `m_type_resolution_mutex`,
+`m_lifecycle_mutex`, `m_recovery_threads_mutex`, and
+`m_draining_state_mutex` are leaf locks; no coordinator lock may be acquired
+while one of them is held.
 
 ---
 
@@ -506,48 +540,33 @@ Maps `(type_id, handler_type)` -> handler functions. Handlers are activated with
 
 ## Process Recovery
 
-1. A worker opts into crash recovery by calling `sintra::enable_recovery()`, which forwards the request to the
-   coordinator (`Managed_process::enable_recovery`). The coordinator records the process slot in
-   `Coordinator::m_requested_recovery`, so a later abnormal termination routes through `Coordinator::recover_if_required()`
-   instead of being treated as a permanent shutdown.
-2. The managed-child custody supervisor accepts one durable logical record before
-   `Managed_process::spawn_swarm_process()` receives OS-creation authority. Each
-   launch or recovery appends an immutable occurrence and binds the returned
-   native identity immediately on success. The spawn path caches the executable
-   + argument vector for each spawned child in `m_cached_spawns` and increments a per-process occurrence counter. The counter is appended to the `req`/`rep` ring
-   filenames (`Message_ring_{R,W}::get_base_filename`) so every recovery attempt attaches to a fresh pair of shared-memory
-   files while previous rings remain available for post-mortem inspection.
-3. Before launching the replacement child the coordinator spins up new `Process_message_reader` instances for the target
-   process, ensuring its request/reply channels are mapped and ready the moment the binary starts executing.
-4. We dismantle the previous occurrence's plumbing before a respawn. `spawn_swarm_process()` explicitly erases any
-   existing `Process_message_reader` for the crashing slot, which drops the shared_ptr references and unmaps the old
-   occurrence's rings before new readers are created. Only the currently active occurrence consumes address space; there is
-   no "bank" of pre-reserved mappings for future recoveries.
-5. Each IPC ring is double-mapped (`Ring_data::attach`) by reserving a 2 x span and mapping the 2 MiB data file twice. The
-   contiguous view is what makes zero-copy wrap-around reads work; it is unrelated to recovery itself but explains the
-   large "guard"/reserved ranges seen in macOS cores. Every request/reply channel therefore claims ~4 MiB of virtual
-   address space. Prior to 2025-03 we saw ~4.24 GiB logical cores in CI because those spans appeared alongside the
-   platform's 4 GiB `__PAGEZERO` reservation. On Linux we call `madvise(..., MADV_DONTDUMP)` on both the data and control
-   mappings so the rings are excluded from future cores by default; stack/code/heap pages still participate, so stack
-   traces remain intact while the dumps shrink to the tens-of-megabytes range. macOS does not expose `MADV_DONTDUMP`, so
-   the recovery test itself sets `RLIMIT_CORE` to zero just before its intentional `std::abort()` to keep GitHub Actions
-   runners from filling their disks with multi-gigabyte Mach-O cores.
+Recovery authority belongs to one `Managed_child_custody_record`. An exact
+managed-child message identity authorizes `enable_recovery()`, which latches the
+opt-in on that custody. Later occurrences of the same custody inherit it; a
+fresh custody starts disabled even if it reuses the process instance id.
+Externally attached processes have no managed custody and never enter recovery.
 
-Recovery admission also consults the retained custody record and is refused
-after release closes recovery. Publication retirement, communication
-retirement, and OS exit are reported by their authoritative owners into the
-matching occurrence; a replacement never completes its predecessor's facts.
+The shared spawn producer commits a structured launch recipe before exposing
+the native child or publication path. The recipe includes the binary,
+arguments, environment overrides, lifeline policy, custody, and next
+custody-relative occurrence. Occurrence `0` is the original launch and `1` is
+its first recovery; a mid-flight join is also a fresh occurrence `0`. The ring
+ABI carries the internal startup-barrier disposition separately, so recovery
+numbering is not overloaded with launch-protocol state.
 
-**What "safe respawn" means**: by pre-mapping the request/reply readers before `spawn_detached()` the coordinator guarantees
-that the recovering child sees ready-to-use channels as soon as it reaches user code. No address-space layout promises are
-required beyond the double-mapped rings themselves, and the respawned process inherits only the fresh occurrence's mappings.
+Crash handling captures the exact custody token, predecessor occurrence, and
+structured recipe before invoking policy or runner code. A retained
+`Recovery_control::spawn()` revalidates that the captured custody remains open,
+opted in, and still owns that predecessor; it becomes inert after custody
+release, retirement, shutdown, or process-id reuse. At most one call admits the
+next occurrence.
 
-**How many rings stay mapped during `recovery_test`?** The watchdog, coordinator, and crasher each hold two outgoing rings
-(`Message_ring_W`) plus request/reply readers for every other live process. At the point where the crasher aborts that
-amounts to a few dozen 4 MiB spans in total-on the order of 250 MiB of virtual address space. Those ranges used to inflate
-macOS cores to ~4.24 GiB (4 GiB `__PAGEZERO` + ~0.25 GiB of double-mapped rings + stacks/segments). Linux skips the ring
-spans thanks to `MADV_DONTDUMP`; macOS still records them, which is why the recovery test suppresses its intentional core
-file entirely.
+Before native spawn, Sintra creates fresh request/reply readers for the next
+occurrence. Publication retirement, communication retirement, and OS exit are
+then recorded by their authoritative owners against exact occurrence identity;
+a replacement cannot satisfy its predecessor's facts. The public exit identity
+adds the opaque runtime-scoped custody identity so separate custodies can share
+the same process id and occurrence number without ambiguity.
 
 ---
 
