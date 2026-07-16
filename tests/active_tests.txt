@@ -71,6 +71,7 @@ managed_child_native_observer_exception_contract_test    1
 managed_child_predecessor_retirement_contract_test       1
 managed_child_public_cleanup_contract_test               1
 managed_child_readiness_deadline_contract_test           1
+managed_child_recovery_authority_reuse_contract_test      1
 managed_child_release_retry_state_test                    1
 managed_child_spawn_admission_contract_test               1
 managed_child_stale_unpublish_contract_test               1

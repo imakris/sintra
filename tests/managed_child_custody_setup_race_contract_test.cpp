@@ -883,23 +883,24 @@ bool run_recovery_create_release_race(
     args.lifetime.enable_lifeline = false;
 
     sintra::Managed_process::Spawn_result result;
-    bool cache_reserved = false;
     std::thread create([&]() {
         auto launch_attempt = sintra::s_mproc->admit_child_custody_occurrence(
             custody, piid, args.occurrence);
-        if (launch_attempt) {
-            auto cached_args = args;
-            cached_args.occurrence = 2;
-            std::lock_guard<std::mutex> lock(
-                sintra::s_mproc->m_cached_spawns_mutex);
-            sintra::s_mproc->m_cached_spawns[piid] =
-                std::move(cached_args);
-            cache_reserved = true;
-        }
         result = sintra::s_mproc->spawn_swarm_process(args, launch_attempt);
     });
 
     const bool setup_held = wait_for_gate(gate);
+    bool production_cache_committed = false;
+    {
+        std::lock_guard<std::mutex> lock(
+            sintra::s_mproc->m_cached_spawns_mutex);
+        const auto cached = sintra::s_mproc->m_cached_spawns.find(piid);
+        production_cache_committed =
+            cached != sintra::s_mproc->m_cached_spawns.end() &&
+            cached->second.piid == piid &&
+            cached->second.custody == custody &&
+            cached->second.occurrence == 2;
+    }
     bool pending_before_release = false;
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
@@ -959,7 +960,7 @@ bool run_recovery_create_release_race(
     const bool no_child_after = marker_absent(marker);
     std::filesystem::remove(marker, ec);
 
-    const bool valid = cache_reserved && setup_held &&
+    const bool valid = production_cache_committed && setup_held &&
         pending_before_release && incomplete_while_held &&
         no_child_while_held && !result.success && !result.os_process_created &&
         resolved_no_child && release_completed && registry_retired &&
@@ -968,12 +969,12 @@ bool run_recovery_create_release_race(
     if (!valid) {
         std::fprintf(
             stderr,
-            "RECOVERY_CACHE_RETIREMENT_INVALID cache_reserved=%d setup=%d "
+            "RECOVERY_CACHE_RETIREMENT_INVALID production_cache=%d setup=%d "
             "pending=%d incomplete=%d no_child_held=%d spawn_success=%d "
             "os_created=%d resolved_no_child=%d release=%d registry=%d "
             "cache_absent=%d invitation=%d cancelled=%d finalized=%d "
             "no_child_after=%d\n",
-            cache_reserved ? 1 : 0,
+            production_cache_committed ? 1 : 0,
             setup_held ? 1 : 0,
             pending_before_release ? 1 : 0,
             incomplete_while_held ? 1 : 0,
