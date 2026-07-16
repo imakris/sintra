@@ -40,7 +40,7 @@ namespace {
 namespace fs = std::filesystem;
 
 using namespace std::chrono_literals;
-using sintra::test::managed_child::terminate_exact_process;
+using sintra::test::managed_child::terminate_process_by_pid;
 
 constexpr const char* k_child_flag =
     "--managed_child_exact_exit_observation_child";
@@ -602,7 +602,7 @@ int run_root(
         replacement_observation.occurrence != observation.occurrence;
     const bool replacement_terminated = replacement_pid > 0 &&
         replacement_pid != pid &&
-        terminate_exact_process(replacement_pid, k_exit_code);
+        terminate_process_by_pid(replacement_pid, k_exit_code);
     bool replacement_observed = false;
     {
         std::unique_lock<std::mutex> lock(replacement_mutex);

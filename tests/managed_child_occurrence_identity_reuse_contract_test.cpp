@@ -22,7 +22,7 @@ namespace fs = std::filesystem;
 
 using namespace std::chrono_literals;
 using sintra::test::managed_child::Managed_child_exit_capture;
-using sintra::test::managed_child::terminate_exact_process;
+using sintra::test::managed_child::terminate_process_by_pid;
 
 constexpr const char* k_child_a_flag =
     "--managed_child_occurrence_identity_a";
@@ -182,7 +182,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     Managed_child_exit_capture recovery_capture;
     auto recovery_observation = observe(custody_b, recovery_capture);
     const bool recovery_terminated = recovery_observation &&
-        recovery_marker.pid > 0 && terminate_exact_process(
+        recovery_marker.pid > 0 && terminate_process_by_pid(
             recovery_marker.pid, k_terminated_status);
     const bool recovery_exit_seen = recovery_capture.wait_for_one(5s);
     const auto released_b = custody_b.release_until(

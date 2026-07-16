@@ -445,7 +445,7 @@ inline std::optional<child_identity_t> wait_for_child_identity(
         path, std::chrono::steady_clock::now() + timeout, poll);
 }
 
-inline bool terminate_exact_process(
+inline bool terminate_process_by_pid(
     int                            pid,
     std::uint32_t                  windows_exit_code,
     std::chrono::milliseconds      wait_timeout = std::chrono::seconds(5))
