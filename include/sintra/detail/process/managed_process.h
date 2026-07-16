@@ -858,6 +858,7 @@ struct Managed_child_custody_record
     std::weak_ptr<const Managed_process_lifetime>
                                                 runtime_lifetime;
     uint64_t                                   identity = 0;
+    bool                                       recovery_requested = false;
     Readiness_phase                            readiness = Readiness_phase::not_requested;
     std::atomic<bool>                          readiness_cancelled{false};
     Managed_child_release_state                release_state;
@@ -1331,7 +1332,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     instance_id_type                    m_group_external        = invalid_instance_id;
 
     // recovery
-    bool                                m_recoverable           = false;
     bool                                m_skip_startup_barrier  = false;
     std::string                         m_recovery_cmd;
 
@@ -1425,7 +1425,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool wait_for_all_child_custodies(
         std::chrono::steady_clock::time_point deadline);
     bool all_child_custodies_released() const;
-    bool child_custody_allows_recovery(instance_id_type process_instance_id) const;
     detail::Managed_child_occurrence_token child_custody_occurrence_token(
         instance_id_type process_instance_id) const;
     detail::Managed_child_occurrence_token child_custody_occurrence_token_exact(

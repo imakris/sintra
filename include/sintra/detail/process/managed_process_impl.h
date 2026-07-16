@@ -2270,10 +2270,10 @@ void Managed_process::enable_recovery()
     /*
      * Recovery overview
      * -----------------
-     *  - enable_recovery() RPCs the coordinator so the caller's process slot is
-     *    added to Coordinator::m_requested_recovery. When a crash is observed the
-     *    coordinator routes the cached Spawn_swarm_process_args back through
-     *    Coordinator::recover_if_required(), which in turn calls
+     *  - enable_recovery() RPCs the coordinator, which authenticates the
+     *    caller's exact occurrence and records the opt-in on its custody. When
+     *    a crash is observed the coordinator captures that custody's cached
+     *    Spawn_swarm_process_args and routes it through
      *    Managed_process::spawn_swarm_process().
      *  - spawn_swarm_process() persists the executable + argument vector in
      *    m_cached_spawns and bumps the occurrence counter so every respawn uses a
@@ -2294,10 +2294,7 @@ void Managed_process::enable_recovery()
      *    recovery harness crashes the process often enough that the platform
      *    keeps dumping them.
      */
-    // Mark this process as recoverable in the coordinator
-    // so that abnormal termination triggers a respawn.
     Coordinator::rpc_enable_recovery(s_coord_id, process_of(m_instance_id));
-    m_recoverable = true;
 }
 
 inline
@@ -3301,6 +3298,9 @@ void Managed_process::init(int argc, const char* const* argv)
                 }
             };
 
+            const auto recovery_occurrence =
+                s_mproc->child_custody_occurrence_token(
+                    msg.sender_instance_id);
             const auto crash_index = get_process_index(msg.sender_instance_id);
             if (crash_index == 0 || crash_index > static_cast<uint64_t>(max_process_index)) {
                 Crash_info info;
@@ -3309,7 +3309,7 @@ void Managed_process::init(int argc, const char* const* argv)
                 info.status       = msg.status;
                 s_coord->note_process_crash(info);
                 s_coord->unpublish_transceiver(msg.sender_instance_id);
-                s_coord->recover_if_required(info);
+                s_coord->recover_if_required(info, recovery_occurrence);
                 return;
             }
 
@@ -3327,7 +3327,7 @@ void Managed_process::init(int argc, const char* const* argv)
             info.status       = msg.status;
             s_coord->note_process_crash(info);
             s_coord->unpublish_transceiver(msg.sender_instance_id);
-            s_coord->recover_if_required(info);
+            s_coord->recover_if_required(info, recovery_occurrence);
         };
         activate<Managed_process>(unpublish_notify_handler, any_remote);
         activate<Managed_process>(cr_handler, any_remote);
@@ -4464,25 +4464,6 @@ inline bool Managed_process::wait_for_all_child_custodies(
     std::unique_lock<std::mutex> lock(m_child_custody_mutex);
     return m_child_custody_changed.wait_until(
         lock, deadline, [this] { return m_child_custodies.empty(); });
-}
-
-inline bool Managed_process::child_custody_allows_recovery(
-    instance_id_type process_instance_id) const
-{
-    std::shared_ptr<detail::Managed_child_custody_record> custody;
-    {
-        std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-        auto it = m_child_custody_by_process.find(process_instance_id);
-        if (it == m_child_custody_by_process.end()) {
-            return false;
-        }
-        custody = it->second.custody.lock();
-    }
-    if (!custody) {
-        return false;
-    }
-    std::lock_guard<std::mutex> lock(custody->mutex);
-    return custody->release_state.open();
 }
 
 inline detail::Managed_child_occurrence_token

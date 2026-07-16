@@ -15,7 +15,6 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -28,13 +27,13 @@ namespace sintra {
 // Forward declaration for friend access from Coordinator.
 namespace detail {
 inline bool finalize_impl();
+struct Managed_child_occurrence_token;
 struct Managed_child_readiness_access;
 }
 
 using std::condition_variable;
 using std::map;
 using std::mutex;
-using std::set;
 using std::shared_ptr;
 using std::string;
 using std::unordered_map;
@@ -389,13 +388,14 @@ private:
         const string&                          name,
         const unordered_set<instance_id_type>& member_process_ids);
  
-    // Record that a process opted into crash recovery; recover_if_required()
-    // ignores processes that did not call enable_recovery().
+    // Record that an exact managed-child custody opted into crash recovery.
     void enable_recovery(instance_id_type piid);
 
     // Apply recovery policy and spawn replacement if required. Delegates any
     // delay/logic to the recovery runner and obeys shutdown state.
-    void recover_if_required(const Crash_info& info);
+    void recover_if_required(
+        const Crash_info&                              info,
+        const detail::Managed_child_occurrence_token& occurrence);
 
     // Release join_swarm in-flight tracking and flush delayed publications once
     // all processes finish initialization.
@@ -561,9 +561,6 @@ public:
         string,
         waited_instance_info
     >                                              m_instances_waited;
-
-    // access only after acquiring m_lifecycle_mutex
-    set<instance_id_type>                          m_requested_recovery;
 
     // access only after acquiring m_publish_mutex
     unordered_set<instance_id_type>                m_external_attached_processes;

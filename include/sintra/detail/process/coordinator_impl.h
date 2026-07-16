@@ -1554,7 +1554,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             info.process_iid  = process_iid;
             info.process_slot = static_cast<uint32_t>(draining_index);
             info.status       = crash_status;
-            recover_if_required(info);
+            recover_if_required(info, custody_occurrence);
         }
     }
 
@@ -2064,7 +2064,6 @@ void Coordinator::print(const string& str)
 inline
 void Coordinator::enable_recovery(instance_id_type piid)
 {
-    // enable crash recovery for the calling process
     assert(is_process(piid));
     bool externally_attached = false;
     {
@@ -2078,12 +2077,36 @@ void Coordinator::enable_recovery(instance_id_type piid)
             << " because Sintra does not have a recovery launch command for it.\n";
         return;
     }
-    std::lock_guard<mutex> lifecycle_lock(m_lifecycle_mutex);
-    m_requested_recovery.insert(piid);
+
+    if (!s_mproc || !s_tl_current_message ||
+        process_of(s_tl_current_message->sender_instance_id) != piid ||
+        s_tl_current_message->managed_child_custody_identity == 0)
+    {
+        return;
+    }
+
+    const auto occurrence = s_mproc->child_custody_occurrence_token_exact(
+        s_tl_current_message->managed_child_custody_identity,
+        piid,
+        s_tl_current_message->managed_child_occurrence);
+    auto custody = occurrence.custody.lock();
+    if (!custody) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> custody_lock(custody->mutex);
+    if (!custody->release_state.open() ||
+        !custody->find_occurrence_locked(piid, occurrence.occurrence))
+    {
+        return;
+    }
+    custody->recovery_requested = true;
 }
 
 inline
-void Coordinator::recover_if_required(const Crash_info& info)
+void Coordinator::recover_if_required(
+    const Crash_info&                              info,
+    const detail::Managed_child_occurrence_token& occurrence)
 {
     assert(is_process(info.process_iid));
 
@@ -2096,7 +2119,53 @@ void Coordinator::recover_if_required(const Crash_info& info)
         return;
     }
 
-    if (!s_mproc || !s_mproc->child_custody_allows_recovery(info.process_iid)) {
+    if (!s_mproc || occurrence.process_instance_id != info.process_iid) {
+        return;
+    }
+
+    auto custody = occurrence.custody.lock();
+    if (!custody) {
+        return;
+    }
+
+    auto custody_allows_recovery = [&]() {
+        std::lock_guard<std::mutex> custody_lock(custody->mutex);
+        if (!custody->release_state.open() || !custody->recovery_requested) {
+            return false;
+        }
+        return custody->find_occurrence_locked(
+            occurrence.process_instance_id,
+            occurrence.occurrence) != nullptr;
+    };
+    if (!custody_allows_recovery()) {
+        return;
+    }
+
+    Managed_process::Spawn_swarm_process_args spawn_args;
+    bool recovery_recipe_available = false;
+    {
+        std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+        const auto spawn_it = s_mproc->m_cached_spawns.find(info.process_iid);
+        const auto next_occurrence =
+            occurrence.occurrence == std::numeric_limits<uint32_t>::max()
+                ? occurrence.occurrence
+                : occurrence.occurrence + 1;
+        if (spawn_it != s_mproc->m_cached_spawns.end() &&
+            spawn_it->second.custody == custody &&
+            spawn_it->second.piid == info.process_iid &&
+            spawn_it->second.occurrence == next_occurrence)
+        {
+            spawn_args = spawn_it->second;
+            recovery_recipe_available = true;
+        }
+    }
+    if (!recovery_recipe_available || !custody_allows_recovery()) {
+        if (!recovery_recipe_available) {
+            Log_stream(log_level::warning)
+                << "Recovery skipped for process "
+                << static_cast<unsigned long long>(info.process_iid)
+                << " because no exact recovery launch command is available.\n";
+        }
         return;
     }
 
@@ -2104,9 +2173,6 @@ void Coordinator::recover_if_required(const Crash_info& info)
     Recovery_runner runner;
     {
         std::lock_guard<mutex> lock(m_lifecycle_mutex);
-        if (!m_requested_recovery.count(info.process_iid)) {
-            return;
-        }
         policy = m_recovery_policy;
         runner = m_recovery_runner;
     }
@@ -2137,30 +2203,33 @@ void Coordinator::recover_if_required(const Crash_info& info)
     };
 
     auto spawned = std::make_shared<std::atomic<bool>>(false);
-    auto spawn_now = [this, info, should_cancel, spawned]() {
+    auto spawn_now = [
+            this,
+            custody,
+            occurrence,
+            should_cancel,
+            spawn_args,
+            spawned
+        ]() mutable
+    {
         std::unique_lock<mutex> admission_lock(
             detail::s_teardown_admission_mutex);
-        if (should_cancel()) {
+        if (should_cancel() || !s_mproc) {
             return;
         }
-        if (!s_mproc || !s_mproc->child_custody_allows_recovery(info.process_iid)) {
-            return;
+        {
+            std::lock_guard<std::mutex> custody_lock(custody->mutex);
+            if (!custody->release_state.open() ||
+                !custody->recovery_requested ||
+                !custody->find_occurrence_locked(
+                    occurrence.process_instance_id,
+                    occurrence.occurrence))
+            {
+                return;
+            }
         }
         if (spawned->exchange(true)) {
             return;
-        }
-        Managed_process::Spawn_swarm_process_args spawn_args;
-        {
-            std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
-            auto spawn_it = s_mproc->m_cached_spawns.find(info.process_iid);
-            if (spawn_it == s_mproc->m_cached_spawns.end()) {
-                Log_stream(log_level::warning)
-                    << "Recovery skipped for process "
-                    << static_cast<unsigned long long>(info.process_iid)
-                    << " because no recovery launch command is available.\n";
-                return;
-            }
-            spawn_args = spawn_it->second;
         }
         if (spawn_args.occurrence == std::numeric_limits<uint32_t>::max()) {
             s_mproc->note_child_custody_failure(
