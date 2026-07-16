@@ -1334,7 +1334,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     // recovery
     bool                                m_skip_startup_barrier  = false;
-    std::string                         m_recovery_cmd;
 
 
     struct Spawn_swarm_process_args

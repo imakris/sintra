@@ -2252,33 +2252,8 @@ static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 inline
 void Managed_process::enable_recovery()
 {
-    /*
-     * Recovery overview
-     * -----------------
-     *  - enable_recovery() RPCs the coordinator, which authenticates the
-     *    caller's exact occurrence and records the opt-in on its custody. When
-     *    a crash is observed the coordinator captures that custody's cached
-     *    Spawn_swarm_process_args and routes it through
-     *    Managed_process::spawn_swarm_process().
-     *  - spawn_swarm_process() persists the executable + argument vector in
-     *    m_cached_spawns and bumps the occurrence counter so every respawn uses a
-     *    fresh ``req``/``rep`` ring name (see Message_ring_{R,W}::get_base_filename
-     *    adding the ``_occN`` suffix). Before a replacement child is launched we
-     *    tear down any previous Process_message_reader for that slot (see the
-     *    erase() call just above) so the old occurrence's shared memory is
-     *    unmapped before a fresh reader is created.
-     *  - The coordinator pre-attaches new Process_message_reader instances before
-     *    the child is launched, ensuring the new process sees ready request/reply
-     *    channels the moment it starts. There is no pre-allocation for future
-     *    occurrences; only the rings for the active occurrence stay mapped.
-     *  - Each reader/writer ring is implemented via Ring_data::attach(), which
-     *    reserves a 2× span and double maps the 2 MiB data file so wrap-around is
-     *    linear for zero-copy reads. Those double-mapped spans are what appear as
-     *    "guard"/reserved regions inside Mach-O cores-the mapping design is
-     *    required for the ring abstraction rather than recovery itself, but the
-     *    recovery harness crashes the process often enough that the platform
-     *    keeps dumping them.
-     */
+    // Recovery authority and its structured launch recipe belong to the exact
+    // custody, so reusing a process instance id cannot inherit either one.
     Coordinator::rpc_enable_recovery(s_coord_id, process_of(m_instance_id));
 }
 
@@ -2734,87 +2709,6 @@ inline void Managed_process::reap_finished_children()
 
 #endif
 
-// returns the argc/argv as a vector of strings
-inline
-std::vector<std::string> argc_argv_to_vector(int argc, const char* const* argv)
-{
-    std::vector<std::string> ret;
-    for (int i = 0; i < argc; i++) {
-        ret.push_back(argv[i]);
-    }
-    return ret;
-}
-
-struct filtered_args_t
-{
-    vector<string> remained;
-    vector<string> extracted;
-};
-
-inline std::string join_strings(const std::vector<std::string>& parts, const std::string& delimiter)
-{
-    if (parts.empty()) {
-        return std::string();
-    }
-
-    std::string result;
-    size_t total_size = delimiter.size() * (parts.size() - 1);
-    for (const auto& part : parts) {
-        total_size += part.size();
-    }
-    result.reserve(total_size);
-
-    auto it = parts.begin();
-    result += *it++;
-    for (; it != parts.end(); ++it) {
-        result += delimiter;
-        result += *it;
-    }
-
-    return result;
-}
-
-inline
-filtered_args_t filter_option(
-    std::vector<std::string>   in_args,
-    std::string                in_option,
-    unsigned int               num_args)
-{
-    filtered_args_t ret;
-    const std::string option_prefix = in_option + "=";
-    for (size_t i = 0; i < in_args.size(); ++i) {
-        const auto& e = in_args[i];
-        if (e == in_option) {
-            ret.extracted.clear();
-            ret.extracted.push_back(e);
-            for (unsigned int picked = 0; picked < num_args && i + 1 < in_args.size(); ++picked) {
-                ret.extracted.push_back(in_args[++i]);
-            }
-            continue;
-        }
-        if (num_args == 1 && e.rfind(option_prefix, 0) == 0) {
-            ret.extracted.clear();
-            ret.extracted.push_back(in_option);
-            ret.extracted.push_back(e.substr(option_prefix.size()));
-            continue;
-        }
-        ret.remained.push_back(e);
-    }
-    return ret;
-}
-
-/// Strips a sequence of options from args, discarding their extracted values
-/// and returning only the leftover argv tokens. Each entry is {option_name, num_args}.
-inline std::vector<std::string> strip_options(
-    std::vector<std::string>                                          args,
-    std::initializer_list<std::pair<std::string_view, unsigned int>>  options)
-{
-    for (const auto& [name, n] : options) {
-        args = filter_option(std::move(args), std::string(name), n).remained;
-    }
-    return args;
-}
-
 inline
 void Managed_process::init(int argc, const char* const* argv)
 {
@@ -2833,33 +2727,6 @@ void Managed_process::init(int argc, const char* const* argv)
     std::string coordinator_id_arg;
     std::string external_attach_token_arg;
     uint32_t    external_attach_occurrence = 0;
-    std::string recovery_arg;
-
-    size_t recovery_occurrence_value = 0;
-    auto fa = filter_option(argc_argv_to_vector(argc, argv), "--recovery_occurrence", 1);
-
-    if (fa.extracted.size() == 2) {
-        try {
-            recovery_occurrence_value =  std::stoul(fa.extracted[1]);
-        }
-        catch (...) {
-            assert(!"not implemented");
-        }
-    }
-
-    // Filter out non-reusable runtime arguments from remained - lifeline values
-    // contain stale handles, and external attach tokens are single-use.
-    auto reusable_args = strip_options(std::move(fa.remained), {
-        {detail::k_external_attach_token_arg,      1},
-        {detail::k_external_attach_occurrence_arg, 1},
-        {k_lifeline_handle_arg,                    1},
-        {k_lifeline_exit_code_arg,                 1},
-        {k_lifeline_timeout_arg,                   1},
-        {k_lifeline_disable_arg,                   0},
-    });
-
-    m_recovery_cmd = join_strings(reusable_args, " ") + " --recovery_occurrence " +
-        std::to_string(recovery_occurrence_value+1);
 
     auto option_value = [&](
         const std::string& arg,
@@ -2983,7 +2850,6 @@ void Managed_process::init(int argc, const char* const* argv)
 
             if (auto value = option_value(arg, "--recovery_occurrence", 'e', true, i)) {
                 try {
-                    recovery_arg = *value;
                     s_recovery_occurrence = static_cast<uint32_t>(std::stoul(*value));
                 }
                 catch (...) {
@@ -3769,16 +3635,9 @@ inline void Managed_process::retire_child_custody_if_complete(
         std::erase_if(m_cached_spawns, [&](const auto& entry) {
             return entry.second.custody == custody;
         });
-        for (auto it = m_child_custody_by_process.begin();
-             it != m_child_custody_by_process.end();)
-        {
-            if (it->second.custody.lock() == custody) {
-                it = m_child_custody_by_process.erase(it);
-            }
-            else {
-                ++it;
-            }
-        }
+        std::erase_if(m_child_custody_by_process, [&](const auto& entry) {
+            return entry.second.custody.lock() == custody;
+        });
         m_child_custodies.erase(record_it);
     }
     m_child_custody_changed.notify_all();

@@ -2166,9 +2166,7 @@ void Coordinator::enable_recovery(instance_id_type piid)
     }
 
     std::lock_guard<std::mutex> custody_lock(custody->mutex);
-    if (!custody->release_state.open() ||
-        !custody->find_occurrence_locked(piid, occurrence.occurrence))
-    {
+    if (!custody->release_state.open()) {
         return;
     }
     custody->recovery_requested = true;
@@ -2199,19 +2197,6 @@ void Coordinator::recover_if_required(
         return;
     }
 
-    auto custody_allows_recovery = [&]() {
-        std::lock_guard<std::mutex> custody_lock(custody->mutex);
-        if (!custody->release_state.open() || !custody->recovery_requested) {
-            return false;
-        }
-        return custody->find_occurrence_locked(
-            occurrence.process_instance_id,
-            occurrence.occurrence) != nullptr;
-    };
-    if (!custody_allows_recovery()) {
-        return;
-    }
-
     Managed_process::Spawn_swarm_process_args spawn_args;
     bool recovery_recipe_available = false;
     {
@@ -2223,21 +2208,28 @@ void Coordinator::recover_if_required(
                 : occurrence.occurrence + 1;
         if (spawn_it != s_mproc->m_cached_spawns.end() &&
             spawn_it->second.custody == custody &&
-            spawn_it->second.piid == info.process_iid &&
             spawn_it->second.occurrence == next_occurrence)
         {
             spawn_args = spawn_it->second;
             recovery_recipe_available = true;
         }
     }
-    if (!recovery_recipe_available || !custody_allows_recovery()) {
-        if (!recovery_recipe_available) {
-            Log_stream(log_level::warning)
-                << "Recovery skipped for process "
-                << static_cast<unsigned long long>(info.process_iid)
-                << " because no exact recovery launch command is available.\n";
-        }
+    if (!recovery_recipe_available) {
+        Log_stream(log_level::warning)
+            << "Recovery skipped for process "
+            << static_cast<unsigned long long>(info.process_iid)
+            << " because no exact recovery launch command is available.\n";
         return;
+    }
+    {
+        std::lock_guard<std::mutex> custody_lock(custody->mutex);
+        if (!custody->release_state.open() || !custody->recovery_requested ||
+            !custody->find_occurrence_locked(
+                occurrence.process_instance_id,
+                occurrence.occurrence))
+        {
+            return;
+        }
     }
 
     Recovery_policy policy;
