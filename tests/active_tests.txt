@@ -63,6 +63,7 @@ managed_child_custody_finalize_race_contract_test        1
 managed_child_custody_name_retirement_contract_test      1
 managed_child_custody_occurrence_isolation_contract_test 1
 managed_child_custody_setup_race_contract_test           1
+managed_child_crash_provenance_reuse_contract_test       1
 managed_child_exact_exit_observation_contract_test       1
 managed_child_occurrence_identity_reuse_contract_test    1
 managed_child_failed_readiness_contract_test             1
