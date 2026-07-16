@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -40,6 +41,7 @@ constexpr const char* k_role_alive   = "admitted_alive";
 constexpr const char* k_role_crash   = "crash_after_init";
 constexpr const char* k_role_recover = "enable_recovery_after_init";
 constexpr const char* k_role_reuse   = "reuse_attach";
+constexpr int         k_stale_external_crash_status = 71;
 
 constexpr const char* k_failure_prefix = "external_process_invitation_lifecycle_negative_test: ";
 constexpr const char* k_external_attach_rejected_message =
@@ -513,6 +515,44 @@ bool external_process_state_absent(sintra::instance_id_type process_iid)
     return
         sintra::s_coord->m_transceiver_registry.count(process_iid) == 0 &&
         sintra::s_coord->m_external_attached_processes.count(process_iid) == 0;
+}
+
+bool external_process_state_present(sintra::instance_id_type process_iid)
+{
+    std::lock_guard lock(sintra::s_coord->m_publish_mutex);
+    return
+        sintra::s_coord->m_transceiver_registry.count(process_iid) == 1 &&
+        sintra::s_coord->m_external_attached_processes.count(process_iid) == 1;
+}
+
+bool remove_exact_external_reader_for_reuse(
+    sintra::instance_id_type process_iid,
+    std::uint32_t            occurrence)
+{
+    {
+        std::shared_lock lock(sintra::s_mproc->m_readers_mutex);
+        const auto found = sintra::s_mproc->m_readers.find(process_iid);
+        if (found == sintra::s_mproc->m_readers.end()) {
+            return true;
+        }
+        if (!found->second ||
+            found->second->get_process_instance_id() != process_iid ||
+            found->second->get_occurrence() != occurrence ||
+            found->second->get_managed_child_custody_identity() != 0)
+        {
+            return false;
+        }
+    }
+
+    sintra::s_mproc->remove_process_reader(process_iid, 1.0);
+    return !sintra::s_mproc->has_process_reader(process_iid);
+}
+
+bool exact_process_is_live(int pid, std::uint64_t start_stamp)
+{
+    const auto observed = sintra::query_process_start_stamp(
+        static_cast<std::uint32_t>(pid));
+    return observed && *observed == start_stamp;
 }
 
 std::vector<std::string> helper_args(
@@ -1090,6 +1130,233 @@ bool run_enable_recovery_after_admission_case(
     return ok;
 }
 
+bool run_stale_external_generation_case(
+    int                            argc,
+    char*                          argv[],
+    const std::string&             binary_path,
+    const std::filesystem::path&   dir)
+{
+    sintra::init(argc, argv);
+    Runtime_guard guard{true};
+    Shutdown_watchdog watchdog("stale-external-generation", 35s);
+    bool ok = true;
+
+    const auto process_iid = sintra::make_process_instance_id();
+    std::mutex lifecycle_mutex;
+    std::condition_variable lifecycle_changed;
+    std::vector<sintra::process_lifecycle_event> lifecycle_events;
+    std::atomic<unsigned> recovery_policy_calls{0};
+    sintra::set_lifecycle_handler(
+        [&](const sintra::process_lifecycle_event& event) {
+            if (event.process_iid != process_iid) {
+                return;
+            }
+            {
+                std::lock_guard lock(lifecycle_mutex);
+                lifecycle_events.push_back(event);
+            }
+            lifecycle_changed.notify_all();
+        });
+    sintra::set_recovery_policy([&](const sintra::Crash_info&) {
+        recovery_policy_calls.fetch_add(1, std::memory_order_release);
+        return false;
+    });
+
+    auto invitation_a = make_invitation(process_iid, 30s);
+    ok &= sintra::test::assert_true(
+        invitation_a && invitation_a.occurrence > 0,
+        k_failure_prefix,
+        "stale-generation A should receive a nonzero external occurrence");
+
+    sintra::test::Exact_child helper_a(2s);
+    ok &= sintra::test::assert_true(
+        launch_direct_process(
+            binary_path,
+            helper_args(dir, k_role_reuse, "stale_generation_a", invitation_a),
+            helper_a),
+        k_failure_prefix,
+        "stale-generation A helper should launch");
+    ok &= wait_for_marker(dir, "stale_generation_a", "ready", 5s);
+    const auto a_start_stamp = sintra::query_process_start_stamp(
+        static_cast<std::uint32_t>(helper_a.pid()));
+    const bool a_exact_live = a_start_stamp &&
+        exact_process_is_live(helper_a.pid(), *a_start_stamp);
+
+    write_control_file(dir, "stale_generation_a", ".release");
+    ok &= wait_for_marker(dir, "stale_generation_a_done", "left", 5s);
+    ok &= wait_for_expected_exit(
+        helper_a,
+        Expected_child_exit::clean,
+        5s,
+        "stale-generation A helper should leave cleanly");
+    {
+        std::unique_lock lock(lifecycle_mutex);
+        ok &= sintra::test::assert_true(
+            lifecycle_changed.wait_for(
+                lock,
+                5s,
+                [&] { return !lifecycle_events.empty(); }),
+            k_failure_prefix,
+            "stale-generation A should emit a lifecycle event");
+    }
+    sintra::s_mproc->wait_for_delivery_fence();
+
+    bool a_lifecycle_exact = false;
+    {
+        std::lock_guard lock(lifecycle_mutex);
+        a_lifecycle_exact =
+            lifecycle_events.size() == 1 &&
+            lifecycle_events.front().process_iid == process_iid &&
+            lifecycle_events.front().why ==
+                sintra::process_lifecycle_event::reason::normal_exit &&
+            lifecycle_events.front().status == 0;
+        lifecycle_events.clear();
+    }
+    ok &= sintra::test::assert_true(
+        a_exact_live && a_lifecycle_exact &&
+            external_process_state_absent(process_iid) &&
+            !exact_process_is_live(helper_a.pid(), a_start_stamp.value_or(0)),
+        k_failure_prefix,
+        "stale-generation A should retire normally without a survivor");
+    ok &= sintra::test::assert_true(
+        remove_exact_external_reader_for_reuse(
+            process_iid, invitation_a.occurrence),
+        k_failure_prefix,
+        "stale-generation fixture should remove only A's stopped exact reader");
+
+    auto invitation_b = make_invitation(process_iid, 30s);
+    ok &= sintra::test::assert_true(
+        invitation_b && invitation_b.occurrence > invitation_a.occurrence,
+        k_failure_prefix,
+        "stale-generation B should reuse the IID with a later exact occurrence");
+
+    sintra::test::Exact_child helper_b(2s);
+    ok &= sintra::test::assert_true(
+        launch_direct_process(
+            binary_path,
+            helper_args(dir, k_role_reuse, "stale_generation_b", invitation_b),
+            helper_b),
+        k_failure_prefix,
+        "stale-generation B helper should launch");
+    ok &= wait_for_marker(dir, "stale_generation_b", "ready", 5s);
+    const auto b_start_stamp = sintra::query_process_start_stamp(
+        static_cast<std::uint32_t>(helper_b.pid()));
+    const bool b_exact_live_before = a_start_stamp && b_start_stamp &&
+        exact_process_is_live(helper_b.pid(), *b_start_stamp) &&
+        (helper_b.pid() != helper_a.pid() || *b_start_stamp != *a_start_stamp);
+    ok &= sintra::test::assert_true(
+        b_exact_live_before && external_process_state_present(process_iid),
+        k_failure_prefix,
+        "stale-generation B should be exactly live and published before injection");
+
+    std::mutex relay_mutex;
+    std::condition_variable relay_changed;
+    bool relay_seen = false;
+    std::uint64_t relayed_custody_identity = 1;
+    std::uint32_t relayed_occurrence = 0;
+    auto deactivate_relay = sintra::s_mproc->activate<sintra::Managed_process>(
+        [&](const sintra::Managed_process::terminated_abnormally& message) {
+            if (message.sender_instance_id != process_iid ||
+                message.status != k_stale_external_crash_status)
+            {
+                return;
+            }
+            {
+                std::lock_guard lock(relay_mutex);
+                relay_seen = true;
+                relayed_custody_identity =
+                    message.managed_child_custody_identity;
+                relayed_occurrence = message.managed_child_occurrence;
+            }
+            relay_changed.notify_all();
+        },
+        sintra::Typed_instance_id<sintra::Managed_process>(sintra::any_remote));
+
+    sintra::Managed_process::terminated_abnormally stale(
+        k_stale_external_crash_status);
+    stale.sender_instance_id   = process_iid;
+    stale.receiver_instance_id = sintra::any_remote;
+    sintra::s_mproc->m_out_req_c->relay(
+        stale, 0, invitation_a.occurrence);
+    {
+        std::unique_lock lock(relay_mutex);
+        ok &= sintra::test::assert_true(
+            relay_changed.wait_for(lock, 5s, [&] { return relay_seen; }),
+            k_failure_prefix,
+            "stale external crash should cross the coordinator relay");
+    }
+    sintra::s_mproc->wait_for_delivery_fence();
+
+    std::vector<sintra::process_lifecycle_event> after_stale;
+    {
+        std::lock_guard lock(lifecycle_mutex);
+        after_stale = lifecycle_events;
+    }
+    const bool stale_relay_exact =
+        relay_seen &&
+        relayed_custody_identity == 0 &&
+        relayed_occurrence == invitation_a.occurrence;
+    const bool b_exact_live_after = b_start_stamp &&
+        exact_process_is_live(helper_b.pid(), *b_start_stamp);
+    ok &= sintra::test::assert_true(
+        stale_relay_exact && after_stale.empty() &&
+            recovery_policy_calls.load(std::memory_order_acquire) == 0 &&
+            b_exact_live_after && external_process_state_present(process_iid),
+        k_failure_prefix,
+        "stale external generation must not retire or recover the live replacement");
+
+    write_control_file(dir, "stale_generation_b", ".release");
+    ok &= wait_for_marker_in(
+        dir,
+        "stale_generation_b_done",
+        {"left", "leave_failed", "timeout"},
+        5s);
+    ok &= wait_for_expected_exit(
+        helper_b,
+        Expected_child_exit::clean,
+        5s,
+        "stale-generation B helper should leave cleanly");
+    {
+        std::unique_lock lock(lifecycle_mutex);
+        (void)lifecycle_changed.wait_for(
+            lock,
+            5s,
+            [&] { return !lifecycle_events.empty(); });
+    }
+    sintra::s_mproc->wait_for_delivery_fence();
+
+    std::vector<sintra::process_lifecycle_event> final_events;
+    {
+        std::lock_guard lock(lifecycle_mutex);
+        final_events = lifecycle_events;
+    }
+    const bool b_lifecycle_exact =
+        final_events.size() == 1 &&
+        final_events.front().process_iid == process_iid &&
+        final_events.front().why ==
+            sintra::process_lifecycle_event::reason::normal_exit &&
+        final_events.front().status == 0;
+    const bool survivors_absent =
+        a_start_stamp && b_start_stamp &&
+        !exact_process_is_live(helper_a.pid(), *a_start_stamp) &&
+        !exact_process_is_live(helper_b.pid(), *b_start_stamp);
+    ok &= sintra::test::assert_true(
+        b_lifecycle_exact && external_process_state_absent(process_iid) &&
+            recovery_policy_calls.load(std::memory_order_acquire) == 0 &&
+            survivors_absent,
+        k_failure_prefix,
+        "stale-generation B should terminate normally with complete cleanup");
+
+    deactivate_relay();
+    sintra::set_lifecycle_handler(sintra::Lifecycle_handler{});
+    sintra::set_recovery_policy(sintra::Recovery_policy{});
+    ok &= sintra::test::assert_true(
+        shutdown_with_watchdog(guard, "stale-external-generation"),
+        k_failure_prefix,
+        "shutdown after stale external generation should complete");
+    return ok;
+}
+
 bool attach_and_release_for_reuse(
     const std::string&                         binary_path,
     const std::filesystem::path&               dir,
@@ -1207,6 +1474,7 @@ int main(int argc, char* argv[])
     ok &= run_shutdown_with_admitted_alive_case(argc, argv, binary_path, dir);
     ok &= run_crash_after_init_case(argc, argv, binary_path, dir);
     ok &= run_enable_recovery_after_admission_case(argc, argv, binary_path, dir);
+    ok &= run_stale_external_generation_case(argc, argv, binary_path, dir);
     ok &= run_cancel_expire_reuse_case(argc, argv, binary_path, dir);
     ok &= run_shutdown_hook_claim_rejection_preserves_invitation_case(argc, argv, binary_path, dir);
     ok &= run_create_invitation_after_finalize_reopens_case(argc, argv);
