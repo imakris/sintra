@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -361,6 +362,10 @@ private:
     // groups, marks draining, stops readers, emits lifecycle events, and may
     // trigger recovery.
     bool unpublish_transceiver(instance_id_type instance_id);
+    bool unpublish_transceiver_exact(
+        instance_id_type instance_id,
+        const std::optional<Managed_child_publication_identity>& expected_identity,
+        const std::optional<Crash_info>& crash_info);
 
     // Mark a process as draining, remove it from in-flight barriers, and return
     // the coordinator reply-ring watermark for the caller to flush.
@@ -404,10 +409,6 @@ private:
     // Signal shutdown to cancel delayed recovery and future spawns. Recovery
     // threads check this flag before running or respawning.
     void begin_shutdown();
-
-    // Track crash status so unpublish can distinguish crash vs normal exit,
-    // then emit the crash lifecycle event.
-    void note_process_crash(const Crash_info& info);
 
     // Dispatch lifecycle events to the configured handler (if any).
     void emit_lifecycle_event(const process_lifecycle_event& event);
@@ -526,7 +527,7 @@ public:
     //   m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m
     // The remaining coordinator mutexes are leaves; no other coordinator
     // mutex may be acquired while holding one of them:
-    //   m_type_resolution_mutex, m_lifecycle_mutex, m_crash_mutex,
+    //   m_type_resolution_mutex, m_lifecycle_mutex,
     //   m_recovery_threads_mutex, m_draining_state_mutex
     mutex                                          m_type_resolution_mutex;
     detail::Coordinator_publish_mutex             m_publish_mutex;
@@ -568,8 +569,6 @@ public:
     Recovery_policy                                m_recovery_policy;
     Recovery_runner                                m_recovery_runner;
     Lifecycle_handler                              m_lifecycle_handler;
-    mutable std::mutex                             m_crash_mutex;
-    std::unordered_map<instance_id_type, int>      m_recent_crash_status;
     std::mutex                                     m_recovery_threads_mutex;
     std::vector<std::thread>                       m_recovery_threads;
     std::atomic<bool>                              m_shutdown{false};
@@ -625,10 +624,6 @@ public:
 
     void emit_pending_barrier_completions(
         const std::vector<Pending_completion>& pending_completions);
-
-    void collect_and_schedule_barrier_completions(
-        instance_id_type   process_iid,
-        bool               remove_process);
 
     bool draining_slot_of_index(
         uint64_t           draining_index,

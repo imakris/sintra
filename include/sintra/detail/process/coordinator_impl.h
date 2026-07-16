@@ -1310,27 +1310,32 @@ inline instance_id_type Coordinator::publish_transceiver_with_managed_child_iden
 inline
 bool Coordinator::unpublish_transceiver(instance_id_type iid)
 {
-    // The Managed_process branch below removes the process from groups, which
-    // requires m_groups_mutex. The canonical order (see coordinator.h) is
-    // m_groups_mutex before m_publish_mutex, so for process unpublishes the
-    // groups mutex is acquired first and held across the whole cleanup. This
-    // keeps the registry erase, the group/barrier removal, the
-    // lifecycle/recovery decision and the instance_unpublished broadcast
-    // atomic with respect to a concurrent re-publish of the same process slot
-    // (e.g. a recovery respawn or an external re-attach reusing the id).
-    const auto process_iid = process_of(iid);
-    Managed_child_publication_identity incoming_managed_child_identity;
-    const bool has_incoming_managed_child_context =
-        s_tl_current_message &&
-        s_tl_current_message->managed_child_custody_identity != 0;
-    if (has_incoming_managed_child_context)
+    std::optional<Managed_child_publication_identity> expected_identity;
+    if (s_tl_current_message &&
+        s_tl_current_message->managed_child_custody_identity != 0)
     {
-        incoming_managed_child_identity.custody_identity =
+        expected_identity.emplace();
+        expected_identity->custody_identity =
             s_tl_current_message->managed_child_custody_identity;
-        incoming_managed_child_identity.process_iid =
+        expected_identity->process_iid =
             process_of(s_tl_current_message->sender_instance_id);
-        incoming_managed_child_identity.occurrence =
+        expected_identity->occurrence =
             s_tl_current_message->managed_child_occurrence;
+    }
+    return unpublish_transceiver_exact(iid, expected_identity, std::nullopt);
+}
+
+inline bool Coordinator::unpublish_transceiver_exact(
+    instance_id_type iid,
+    const std::optional<Managed_child_publication_identity>& expected_identity,
+    const std::optional<Crash_info>& crash_info)
+{
+    const auto process_iid = process_of(iid);
+    if (crash_info &&
+        (iid != process_iid || !expected_identity || !*expected_identity ||
+         crash_info->process_iid != process_iid))
+    {
+        return false;
     }
 
     // Read the process publication identity before taking m_groups_mutex so
@@ -1339,6 +1344,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     // immediately before it is extracted below.
     Managed_child_publication_identity process_publication_identity;
     detail::Managed_child_occurrence_token custody_occurrence;
+    std::shared_ptr<detail::Managed_child_custody_record> custody_lifetime;
     if (iid == process_iid) {
         {
             std::lock_guard publish_lock(m_publish_mutex);
@@ -1352,17 +1358,17 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             }
             process_publication_identity =
                 publication->second.managed_child_identity;
-            if (has_incoming_managed_child_context &&
-                !process_publication_identity.matches(
-                    incoming_managed_child_identity.custody_identity,
-                    incoming_managed_child_identity.process_iid,
-                    incoming_managed_child_identity.occurrence))
+            if (expected_identity &&
+                process_publication_identity != *expected_identity)
             {
                 return false;
             }
         }
 
-        if (process_publication_identity && s_mproc) {
+        if (process_publication_identity) {
+            if (!s_mproc) {
+                return false;
+            }
             custody_occurrence =
                 s_mproc->child_custody_occurrence_token_exact(
                     process_publication_identity.custody_identity,
@@ -1371,11 +1377,10 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
             if (!custody_occurrence) {
                 return false;
             }
-        }
-        else
-        if (!has_incoming_managed_child_context && s_mproc) {
-            custody_occurrence =
-                s_mproc->child_custody_occurrence_token(process_iid);
+            custody_lifetime = custody_occurrence.custody.lock();
+            if (!custody_lifetime) {
+                return false;
+            }
         }
     }
 
@@ -1383,7 +1388,7 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     if (iid == process_iid) {
         groups_lock.lock();
     }
-    std::lock_guard publish_lock(m_publish_mutex);
+    std::unique_lock publish_lock(m_publish_mutex);
 
     // the process of the transceiver must have been registered
     auto pr_it = m_transceiver_registry.find(process_iid);
@@ -1400,14 +1405,8 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     }
 
     const auto& stored_identity = it->second.managed_child_identity;
-    if (has_incoming_managed_child_context) {
-        if (!stored_identity.matches(
-                incoming_managed_child_identity.custody_identity,
-                incoming_managed_child_identity.process_iid,
-                incoming_managed_child_identity.occurrence))
-        {
-            return false;
-        }
+    if (expected_identity && stored_identity != *expected_identity) {
+        return false;
     }
     if (iid == process_iid &&
         stored_identity != process_publication_identity)
@@ -1430,11 +1429,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
     auto publication = pr.extract(it);
     auto tn = std::move(publication.mapped());
 
-    coordinator_name_retired_for_test(iid, tn.name);
-
     std::vector<Pending_instance_publication> ready_notifications;
-    bool     crash_seen     = false;
-    int      crash_status   = 0;
+    std::vector<Pending_completion>            pending_completions;
+    std::shared_ptr<Process_message_reader>    retiring_reader;
     uint64_t draining_index = 0;
     bool     was_draining   = false;
 
@@ -1448,9 +1445,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         }
 
         ready_notifications = finalize_initialization_tracking(process_iid);
-        if (s_mproc) {
-            s_mproc->note_child_initialization_complete(custody_occurrence);
-        }
         if (!ready_notifications.empty()) {
             ready_notifications.erase(
                 std::remove_if(
@@ -1477,13 +1471,6 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         // remove the unpublished process's remaining registry entries
         m_transceiver_registry.erase(pr_it);
         m_external_attached_processes.erase(process_iid);
-        if (s_mproc) {
-            s_mproc->note_child_publication_retired(custody_occurrence);
-        }
-
-        if (s_mproc) {
-            s_mproc->release_lifeline(process_iid);
-        }
 
         // CRITICAL: Mark as draining BEFORE removing from groups to prevent barriers
         // from including this process. This handles both graceful shutdown (where
@@ -1494,29 +1481,49 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
         coordinator_lock_stage_for_test(
             detail::test_hooks::k_stage_unpublish_pre_barrier_collection);
 
-        // Drop the process from groups and in-flight barriers. m_groups_mutex
-        // is already held (acquired before m_publish_mutex above).
-        collect_and_schedule_barrier_completions(
-            process_iid,
-            true);
+        pending_completions = collect_pending_barrier_completions_unlocked(
+            process_iid, true);
 
         // Keep the draining bit set; it will be re-initialized to 0 (ACTIVE)
         // when a new process is published into this slot. This prevents the race
         // where resetting too early allows concurrent barriers to include a dying process.
 
         //// and finally, if the process was being read, stop reading from it
-        std::shared_ptr<Process_message_reader> retiring_reader;
         if (iid != s_mproc_id) {
             Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
             auto reader_it = s_mproc->m_readers.find(process_iid);
             if (reader_it != s_mproc->m_readers.end()) {
-                if (auto& reader = reader_it->second) {
-                    reader->stop_nowait();
-                    retiring_reader = reader;
-                }
+                retiring_reader = reader_it->second;
             }
         }
+    }
 
+    publish_lock.unlock();
+    if (groups_lock.owns_lock()) {
+        groups_lock.unlock();
+    }
+
+    coordinator_name_retired_for_test(iid, tn.name);
+
+    if (iid == process_iid) {
+        if (!pending_completions.empty() && s_mproc) {
+            s_mproc->run_after_current_handler([
+                    this,
+                    pending = std::move(pending_completions)
+                ]() mutable
+                {
+                    emit_pending_barrier_completions(pending);
+                });
+        }
+
+        if (s_mproc) {
+            s_mproc->note_child_initialization_complete(custody_occurrence);
+            s_mproc->note_child_publication_retired(custody_occurrence);
+            s_mproc->release_lifeline(process_iid);
+        }
+        if (retiring_reader) {
+            retiring_reader->stop_nowait();
+        }
         note_draining_state_change();
         if (s_mproc) {
             // Publication retirement was committed by the registry transaction
@@ -1528,34 +1535,33 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 custody_occurrence,
                 std::move(retiring_reader));
         }
-        {
-            std::lock_guard<mutex> crash_lock(m_crash_mutex);
-            auto crash_it = m_recent_crash_status.find(process_iid);
-            if (crash_it != m_recent_crash_status.end()) {
-                crash_seen = true;
-                crash_status = crash_it->second;
-                m_recent_crash_status.erase(crash_it);
-            }
-        }
     }
 
-    if (iid == process_iid && !crash_seen) {
+    std::optional<Crash_info> recovery_info;
+    if (iid == process_iid) {
         process_lifecycle_event event;
-        event.process_iid  = process_iid;
-        event.process_slot = static_cast<uint32_t>(draining_index);
-        event.status       = 0;
-        event.why          = was_draining
-            ? process_lifecycle_event::reason::normal_exit
-            : process_lifecycle_event::reason::unpublished;
-        emit_lifecycle_event(event);
-
-        if (!was_draining) {
-            Crash_info info;
-            info.process_iid  = process_iid;
-            info.process_slot = static_cast<uint32_t>(draining_index);
-            info.status       = crash_status;
-            recover_if_required(info, custody_occurrence);
+        if (crash_info) {
+            event.process_iid  = crash_info->process_iid;
+            event.process_slot = crash_info->process_slot;
+            event.status       = crash_info->status;
+            event.why          = process_lifecycle_event::reason::crash;
+            recovery_info      = crash_info;
         }
+        else {
+            event.process_iid  = process_iid;
+            event.process_slot = static_cast<uint32_t>(draining_index);
+            event.status       = 0;
+            event.why          = was_draining
+                ? process_lifecycle_event::reason::normal_exit
+                : process_lifecycle_event::reason::unpublished;
+            if (!was_draining) {
+                recovery_info = Crash_info{
+                    process_iid,
+                    static_cast<uint32_t>(draining_index),
+                    0};
+            }
+        }
+        emit_lifecycle_event(event);
     }
 
     emit_global<instance_unpublished>(tn.type_id, iid, tn.name);
@@ -1567,6 +1573,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
                 publication.instance_id,
                 publication.assigned_name);
         }
+    }
+    if (recovery_info) {
+        recover_if_required(*recovery_info, custody_occurrence);
     }
 
     return true;
@@ -2324,21 +2333,6 @@ void Coordinator::begin_shutdown()
 }
 
 inline
-void Coordinator::note_process_crash(const Crash_info& info)
-{
-    {
-        std::lock_guard<mutex> lock(m_crash_mutex);
-        m_recent_crash_status[info.process_iid] = info.status;
-    }
-    process_lifecycle_event event;
-    event.process_iid  = info.process_iid;
-    event.process_slot = info.process_slot;
-    event.why          = process_lifecycle_event::reason::crash;
-    event.status       = info.status;
-    emit_lifecycle_event(event);
-}
-
-inline
 void Coordinator::emit_lifecycle_event(const process_lifecycle_event& event)
 {
     Lifecycle_handler handler;
@@ -2429,24 +2423,6 @@ void Coordinator::emit_pending_barrier_completions(
             group_it->second.emit_barrier_completions(entry.completions);
         }
     }
-}
-
-inline
-void Coordinator::collect_and_schedule_barrier_completions(
-    instance_id_type   process_iid,
-    bool               remove_process)
-{
-    // Caller must hold m_groups_mutex.
-    auto pending_completions =
-        collect_pending_barrier_completions_unlocked(process_iid, remove_process);
-    if (pending_completions.empty() || !s_mproc) {
-        return;
-    }
-
-    s_mproc->run_after_current_handler(
-        [this, pending = std::move(pending_completions)]() mutable {
-            emit_pending_barrier_completions(pending);
-        });
 }
 
 inline

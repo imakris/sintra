@@ -3282,52 +3282,28 @@ void Managed_process::init(int argc, const char* const* argv)
             }
         };
 
-        // Deduplication for terminated_abnormally: the coordinator can see the same
-        // crash notification from both the crashed process ring and its own relay.
-        // A per-process atomic flag suppresses concurrent duplicates without locks.
-        static std::array<std::atomic<uint8_t>, max_process_index + 1> s_crash_inflight{};
-
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
-            struct Crash_dedup_guard
-            {
-                std::atomic<uint8_t>* flag;
-                ~Crash_dedup_guard()
-                {
-                    flag->store(0, std::memory_order_release);
-                }
-            };
-
-            const auto recovery_occurrence =
-                s_mproc->child_custody_occurrence_token(
-                    msg.sender_instance_id);
-            const auto crash_index = get_process_index(msg.sender_instance_id);
-            if (crash_index == 0 || crash_index > static_cast<uint64_t>(max_process_index)) {
-                Crash_info info;
-                info.process_iid  = msg.sender_instance_id;
-                info.process_slot = static_cast<uint32_t>(crash_index);
-                info.status       = msg.status;
-                s_coord->note_process_crash(info);
-                s_coord->unpublish_transceiver(msg.sender_instance_id);
-                s_coord->recover_if_required(info, recovery_occurrence);
+            if (!s_coord || msg.managed_child_custody_identity == 0) {
                 return;
             }
 
-            auto&   inflight = s_crash_inflight[static_cast<size_t>(crash_index)];
-            uint8_t expected = 0;
-            if (!inflight.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
-                // Duplicate crash notification - already being handled
-                return;
-            }
+            Coordinator::Managed_child_publication_identity expected_identity;
+            expected_identity.custody_identity =
+                msg.managed_child_custody_identity;
+            expected_identity.process_iid =
+                process_of(msg.sender_instance_id);
+            expected_identity.occurrence = msg.managed_child_occurrence;
 
-            Crash_dedup_guard guard{&inflight};
             Crash_info info;
             info.process_iid  = msg.sender_instance_id;
-            info.process_slot = static_cast<uint32_t>(crash_index);
+            info.process_slot = static_cast<uint32_t>(
+                get_process_index(msg.sender_instance_id));
             info.status       = msg.status;
-            s_coord->note_process_crash(info);
-            s_coord->unpublish_transceiver(msg.sender_instance_id);
-            s_coord->recover_if_required(info, recovery_occurrence);
+            s_coord->unpublish_transceiver_exact(
+                msg.sender_instance_id,
+                expected_identity,
+                info);
         };
         activate<Managed_process>(unpublish_notify_handler, any_remote);
         activate<Managed_process>(cr_handler, any_remote);
