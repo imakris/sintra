@@ -384,6 +384,8 @@ struct Child_identity
 {
     int       pid = -1;
     uint64_t  start_stamp = 0;
+
+    bool operator==(const Child_identity&) const = default;
 };
 
 #ifndef _WIN32
@@ -1340,9 +1342,9 @@ bool run_post_native_recovery_occurrence_advance(
     const auto identity_1 = read_child_identity(occurrence_1_marker);
     const auto identity_2 = read_child_identity(occurrence_2_marker);
     const bool distinct_children = identity_0 && identity_1 && identity_2 &&
-        identity_0->pid != identity_1->pid &&
-        identity_1->pid != identity_2->pid &&
-        identity_0->pid != identity_2->pid;
+        *identity_0 != *identity_1 &&
+        *identity_1 != *identity_2 &&
+        *identity_0 != *identity_2;
     const bool setup_failure_retained =
         released.last_failure.kind ==
             sintra::Managed_child_failure_kind::setup_exception &&
@@ -1372,6 +1374,7 @@ bool run_post_native_recovery_occurrence_advance(
             "released2=%d exit2=%d exit_count=%u observed_occurrence=%u "
             "admitted=%zu created=%zu exited=%zu release_complete=%d "
             "failure_kind=%d failure_occurrence=%u failure_stage=%d "
+            "identity0=(%d,%llu) identity1=(%d,%llu) identity2=(%d,%llu) "
             "distinct=%d finalized=%d\n",
             custody ? 1 : 0,
             occurrence_0_seen ? 1 : 0,
@@ -1392,6 +1395,15 @@ bool run_post_native_recovery_occurrence_advance(
             static_cast<int>(released.last_failure.kind),
             released.last_failure.occurrence,
             setup_failure_retained ? 1 : 0,
+            identity_0 ? identity_0->pid : -1,
+            identity_0 ?
+                static_cast<unsigned long long>(identity_0->start_stamp) : 0,
+            identity_1 ? identity_1->pid : -1,
+            identity_1 ?
+                static_cast<unsigned long long>(identity_1->start_stamp) : 0,
+            identity_2 ? identity_2->pid : -1,
+            identity_2 ?
+                static_cast<unsigned long long>(identity_2->start_stamp) : 0,
             distinct_children ? 1 : 0,
             finalized ? 1 : 0);
     }
