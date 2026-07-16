@@ -582,6 +582,7 @@ Notification_order_result run_notification_order_contract(
     Retirement_gate retirement;
     Threaded_result a_call;
     Threaded_result b_call;
+    Observer_snapshot b_snapshot;
     std::thread a_thread;
     std::thread b_thread;
 
@@ -613,6 +614,9 @@ Notification_order_result run_notification_order_contract(
                     try {
                         b_call.value = publish_synthetic_process(
                             custody_b, k_replacement_process_name);
+                        if (b_call.value) {
+                            b_snapshot = observe_remote_snapshot(true);
+                        }
                     }
                     catch (...) {
                         b_call.threw = true;
@@ -636,10 +640,9 @@ Notification_order_result run_notification_order_contract(
                 result.a_hook_auto_released       = auto_released;
                 result.b_published                = b_done && b_call.value && !b_call.threw;
                 if (result.b_published) {
-                    const auto first = observe_remote_snapshot(true);
-                    result.first_snapshot_valid = first.valid &&
-                        first.resolved == k_reused_process_iid &&
-                        first.order.find("B+") != std::string::npos;
+                    result.first_snapshot_valid = b_snapshot.valid &&
+                        b_snapshot.resolved == k_reused_process_iid &&
+                        b_snapshot.order.find("B+") != std::string::npos;
                 }
             }
 
