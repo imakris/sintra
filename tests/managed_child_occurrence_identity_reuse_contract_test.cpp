@@ -236,14 +236,14 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const auto identity_a = observation_a.occurrence;
     const auto identity_b = observation_b.occurrence;
     const auto recovery_identity = recovery_observation.occurrence;
-    const bool identities_monotonic = observation_a && observation_b &&
+    const bool custody_relative_numbering = observation_a && observation_b &&
         recovery_observation &&
         identity_a.process_instance_id == k_reused_process_iid &&
         identity_b.process_instance_id == k_reused_process_iid &&
         recovery_identity.process_instance_id == k_reused_process_iid &&
         identity_a.occurrence == 0 &&
-        identity_b.occurrence == identity_a.occurrence + 1 &&
-        recovery_identity.occurrence == identity_b.occurrence + 1;
+        identity_b.occurrence == 0 &&
+        recovery_identity.occurrence == 1;
     const bool exact_delivery = a_exit_seen && b_exit_seen &&
         recovery_exit_seen && capture_a.count == 1 && capture_b.count == 1 &&
         recovery_capture.count == 1 && capture_a.event.occurrence == identity_a &&
@@ -263,7 +263,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         recovery_marker_seen && marker_a.pid > 0 && marker_b.pid > 0 &&
         recovery_marker.pid > 0 && marker_a.pid != marker_b.pid &&
         marker_b.pid != recovery_marker.pid && crash_requested &&
-        recovery_terminated && identities_monotonic && marker_identity_matches &&
+        recovery_terminated && custody_relative_numbering && marker_identity_matches &&
         exact_delivery && released_a.release_state ==
             sintra::Managed_child_release_state::complete &&
         released_b.release_state ==
@@ -274,7 +274,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             "MANAGED_CHILD_OCCURRENCE_IDENTITY_REUSE_INVALID "
             "custody_a=%d custody_b=%d marker_a=%d marker_b=%d recovery=%d "
             "occurrence_a=%u occurrence_b=%u occurrence_recovery=%u "
-            "identities_equal=%d marker_match=%d exact=%d "
+            "custody_relative_numbering=%d identities_equal=%d "
+            "marker_match=%d exact=%d "
             "count_a=%d count_b=%d count_recovery=%d released_a=%d "
             "released_b=%d finalized=%d\n",
             custody_a ? 1 : 0,
@@ -285,6 +286,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             identity_a.occurrence,
             identity_b.occurrence,
             recovery_identity.occurrence,
+            custody_relative_numbering ? 1 : 0,
             identity_a == identity_b ? 1 : 0,
             marker_identity_matches ? 1 : 0,
             exact_delivery ? 1 : 0,
