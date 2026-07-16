@@ -21,6 +21,10 @@ TEST_TIMEOUT_OVERRIDES = {
     "crash_capture_self_test_release": 120.0,
     "crash_capture_child_test_debug": 120.0,
     "crash_capture_child_test_release": 120.0,
+    # The contract has a 120s internal watchdog; leave the runner enough time
+    # to report that diagnostic and reap its managed children.
+    "managed_child_crash_provenance_reuse_contract_test_debug": 130.0,
+    "managed_child_crash_provenance_reuse_contract_test_release": 130.0,
     "spinlock_recovery_test": 45.0,
     # R7 serializes three 6.25s grace/soft passes, two 5s hard waits,
     # two 0.55s readiness bounds, and three 5s finalization-drain bounds.

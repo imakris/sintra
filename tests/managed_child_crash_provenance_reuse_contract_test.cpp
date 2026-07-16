@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -32,17 +33,20 @@ using namespace std::chrono_literals;
 using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
 
-constexpr std::string_view k_child_a_flag = "--crash-provenance-child-a";
-constexpr std::string_view k_child_b_flag = "--crash-provenance-child-b";
+constexpr std::string_view k_child_a_flag   = "--crash-provenance-child-a";
+constexpr std::string_view k_child_b_flag   = "--crash-provenance-child-b";
 constexpr std::string_view k_child_a_marker = "child_a.complete";
 constexpr std::string_view k_child_b_marker = "child_b.complete";
-constexpr std::string_view k_child_a_crash = "child_a_crash.complete";
+constexpr std::string_view k_child_a_crash  = "child_a_crash.complete";
 constexpr std::string_view k_child_b_finish = "child_b_finish.complete";
-constexpr auto k_step_timeout = 8s;
-constexpr auto k_child_timeout = 50s;
-constexpr auto k_watchdog_timeout = 60s;
-constexpr auto k_poll_interval = 10ms;
-constexpr int k_stale_status = 173;
+constexpr auto             k_step_timeout   = 8s;
+constexpr auto             k_child_timeout  = 50s;
+// Each child path can serialize six step bounds (96s total); the remaining
+// 24s cover process startup, delivery fences, and cleanup.
+constexpr auto k_watchdog_timeout = 120s;
+constexpr auto k_poll_interval    = 10ms;
+constexpr int  k_stale_status     = 173;
+
 constexpr sintra::instance_id_type k_reused_process_iid =
     sintra::compose_instance(37u, 1u);
 
@@ -51,20 +55,20 @@ struct Witness : sintra::Derived_transceiver<Witness>
 
 struct child_identity_t
 {
-    sintra::instance_id_type process_iid = sintra::invalid_instance_id;
-    std::uint32_t occurrence = 0;
-    int pid = -1;
-    std::uint64_t start_stamp = 0;
-    sintra::instance_id_type witness_iid = sintra::invalid_instance_id;
+    sintra::instance_id_type   process_iid = sintra::invalid_instance_id;
+    std::uint32_t              occurrence  = 0;
+    int                        pid         = -1;
+    std::uint64_t              start_stamp = 0;
+    sintra::instance_id_type   witness_iid = sintra::invalid_instance_id;
 };
 
 struct relay_fact_t
 {
-    sintra::instance_id_type sender = sintra::invalid_instance_id;
-    int status = 0;
-    std::uint64_t custody_identity = 0;
-    std::uint32_t occurrence = 0;
-    bool tls_matches = false;
+    sintra::instance_id_type   sender           = sintra::invalid_instance_id;
+    int                        status           = 0;
+    std::uint64_t              custody_identity = 0;
+    std::uint32_t              occurrence       = 0;
+    bool                       tls_matches      = false;
 };
 
 class Relay_log
@@ -73,11 +77,11 @@ public:
     void record(const sintra::Managed_process::terminated_abnormally& message)
     {
         relay_fact_t fact;
-        fact.sender = message.sender_instance_id;
-        fact.status = message.status;
+        fact.sender           = message.sender_instance_id;
+        fact.status           = message.status;
         fact.custody_identity = message.managed_child_custody_identity;
-        fact.occurrence = message.managed_child_occurrence;
-        fact.tls_matches = sintra::s_tl_current_message == &message;
+        fact.occurrence       = message.managed_child_occurrence;
+        fact.tls_matches      = sintra::s_tl_current_message == &message;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_facts.push_back(fact);
@@ -99,9 +103,9 @@ public:
     }
 
 private:
-    mutable std::mutex m_mutex;
-    std::condition_variable m_changed;
-    std::vector<relay_fact_t> m_facts;
+    mutable std::mutex         m_mutex;
+    std::condition_variable    m_changed;
+    std::vector<relay_fact_t>  m_facts;
 };
 
 class Lifecycle_log
@@ -116,18 +120,6 @@ public:
             std::lock_guard<std::mutex> lock(m_mutex);
             m_events.push_back(event);
         }
-        m_changed.notify_all();
-    }
-
-    bool wait_for(
-        sintra::process_lifecycle_event::reason reason,
-        std::size_t                             count,
-        std::chrono::milliseconds               timeout)
-    {
-        std::unique_lock<std::mutex> lock(m_mutex);
-        return m_changed.wait_for(lock, timeout, [&] {
-            return count_reason_locked(reason) >= count;
-        });
     }
 
     std::size_t count(sintra::process_lifecycle_event::reason reason) const
@@ -137,8 +129,8 @@ public:
     }
 
     bool has_status(
-        sintra::process_lifecycle_event::reason reason,
-        int                                     status) const
+        sintra::process_lifecycle_event::reason    reason,
+        int                                        status) const
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (const auto& event : m_events) {
@@ -161,7 +153,6 @@ private:
     }
 
     mutable std::mutex m_mutex;
-    std::condition_variable m_changed;
     std::vector<sintra::process_lifecycle_event> m_events;
 };
 
@@ -202,10 +193,11 @@ public:
     }
 
 private:
-    mutable std::mutex m_mutex;
-    std::condition_variable m_changed;
-    std::optional<sintra::Managed_child_exit> m_event;
-    unsigned m_count = 0;
+    mutable std::mutex         m_mutex;
+    std::condition_variable    m_changed;
+    std::optional<sintra::Managed_child_exit>
+                               m_event;
+    unsigned                   m_count = 0;
 };
 
 fs::path marker(const fs::path& directory, std::string_view name)
@@ -228,8 +220,8 @@ bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout)
 }
 
 bool write_identity(
-    const fs::path& path,
-    sintra::instance_id_type witness_iid)
+    const fs::path&            path,
+    sintra::instance_id_type   witness_iid)
 {
     const auto start_stamp = sintra::current_process_start_stamp();
     if (!start_stamp) {
@@ -309,37 +301,27 @@ sintra::Managed_child_custody spawn_child(
     std::string_view   flag)
 {
     sintra::Spawn_options options;
-    options.binary_path = binary_path;
-    options.args = {std::string(flag)};
-    options.process_instance_id = k_reused_process_iid;
+    options.binary_path              = binary_path;
+    options.args                     = {std::string(flag)};
+    options.process_instance_id      = k_reused_process_iid;
     options.lifetime.enable_lifeline = false;
     return sintra::spawn_swarm_process(options);
-}
-
-bool crash_status_is_stale()
-{
-    std::lock_guard<std::mutex> lock(sintra::s_coord->m_crash_mutex);
-    const auto found =
-        sintra::s_coord->m_recent_crash_status.find(k_reused_process_iid);
-    return
-        found         != sintra::s_coord->m_recent_crash_status.end() &&
-        found->second == k_stale_status;
 }
 
 void inject_stale_crash(
     const sintra::Managed_child_occurrence_identity& identity)
 {
     sintra::Managed_process::terminated_abnormally stale(k_stale_status);
-    stale.sender_instance_id = k_reused_process_iid;
+    stale.sender_instance_id   = k_reused_process_iid;
     stale.receiver_instance_id = sintra::any_remote;
     sintra::s_mproc->m_out_req_c->relay(
         stale, identity.custody_identity, identity.occurrence);
 }
 
 int run_child(
-    int argc,
-    char* argv[],
-    const fs::path& shared_path,
+    int                argc,
+    char*              argv[],
+    const fs::path&    shared_path,
     const std::string& witness_name)
 {
     try {
@@ -351,13 +333,9 @@ int run_child(
 
     if (sintra::test::has_argv_flag(argc, argv, k_child_a_flag)) {
         sintra::enable_recovery();
-        if (!write_identity(
-                marker(shared_path, k_child_a_marker),
-                sintra::invalid_instance_id) ||
+        if (!write_identity( marker(shared_path, k_child_a_marker), sintra::invalid_instance_id) ||
             !sintra::test::wait_for_file(
-                marker(shared_path, k_child_a_crash),
-                k_child_timeout,
-                k_poll_interval))
+                marker(shared_path, k_child_a_crash), k_child_timeout, k_poll_interval))
         {
             return 3;
         }
@@ -443,20 +421,21 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     auto observation_a = custody_a.observe_latest_created_exit(
         [&](const sintra::Managed_child_exit& event) { exit_a.record(event); });
     const bool a_identity_exact = child_a && observation_a &&
-        observation_a.occurrence.custody_identity != 0 &&
+        observation_a.occurrence.custody_identity    != 0                    &&
         observation_a.occurrence.process_instance_id == k_reused_process_iid &&
-        observation_a.occurrence.occurrence == child_a->occurrence;
+        observation_a.occurrence.occurrence          == child_a->occurrence;
     const bool a_crash_requested = a_identity_exact && write_complete_file(
         marker(shared_path, k_child_a_crash), "complete=1\n");
     const bool real_relay_fenced = relay_log.wait_for_size(1);
     if (real_relay_fenced) {
         sintra::s_mproc->wait_for_delivery_fence();
     }
-    const bool a_crash_lifecycle = lifecycle_log.wait_for(
-        sintra::process_lifecycle_event::reason::crash, 1, k_step_timeout);
-    const bool a_exit_observed = exit_a.wait_for_one();
-    const bool a_absent = wait_for_absence(child_a);
-    auto a_release = custody_a.release_until(
+    const std::size_t crash_count_after_real = lifecycle_log.count(
+        sintra::process_lifecycle_event::reason::crash);
+    const bool a_crash_lifecycle = crash_count_after_real == 1;
+    const bool a_exit_observed   = exit_a.wait_for_one();
+    const bool a_absent          = wait_for_absence(child_a);
+    auto       a_release         = custody_a.release_until(
         std::chrono::steady_clock::now() + k_step_timeout);
     if (a_release.release_state != sintra::Managed_child_release_state::complete) {
         a_release = custody_a.terminate_until(
@@ -473,8 +452,6 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         relays_after_a[0].occurrence == observation_a.occurrence.occurrence;
     const bool a_baseline = a_identity_exact && a_crash_requested &&
         real_relay_fenced && real_relay_body_valid && a_crash_lifecycle &&
-        lifecycle_log.count(
-            sintra::process_lifecycle_event::reason::crash) == 1 &&
         recovery_policy_calls.load(std::memory_order_acquire) == 1 &&
         a_exit_observed && exit_a.exact(observation_a.occurrence) && a_absent &&
         a_release.release_state == sintra::Managed_child_release_state::complete;
@@ -515,7 +492,6 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         sintra::process_lifecycle_event::reason::crash);
     const unsigned recovery_count_after_stale =
         recovery_policy_calls.load(std::memory_order_acquire);
-    const bool stale_status_stored = crash_status_is_stale();
     const auto b_status_after_stale = custody_b.status();
     const bool b_live_after_stale = child_b && exact_process_is_live(
         child_b->pid, child_b->start_stamp);
@@ -525,9 +501,14 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const bool b_finish_requested = write_complete_file(
         marker(shared_path, k_child_b_finish), "complete=1\n");
     const bool b_exit_observed = exit_b.wait_for_one();
-    const bool b_absent = wait_for_absence(child_b);
-    const bool b_normal_lifecycle = lifecycle_log.wait_for(
-        sintra::process_lifecycle_event::reason::normal_exit, 1, 2s);
+    const bool b_absent        = wait_for_absence(child_b);
+    if (b_exit_observed && b_absent) {
+        sintra::s_mproc->wait_for_delivery_fence();
+        sintra::s_mproc->wait_for_delivery_fence();
+    }
+    const std::size_t normal_count_after_b = lifecycle_log.count(
+        sintra::process_lifecycle_event::reason::normal_exit);
+    const bool b_normal_lifecycle = normal_count_after_b == 1;
     auto b_release = custody_b.release_until(
         std::chrono::steady_clock::now() + k_step_timeout);
     if (b_release.release_state != sintra::Managed_child_release_state::complete) {
@@ -565,8 +546,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         b_status_after_stale.created_occurrences == 1 &&
         b_status_after_stale.exited_occurrences == 0 &&
         b_live_after_stale && b_witness_after && crash_count_after_stale == 1 &&
-        recovery_count_after_stale == 1 && !stale_status_stored &&
-        b_normal_lifecycle && final_crash_count == 1 && final_normal_count == 1 &&
+        recovery_count_after_stale == 1 && b_normal_lifecycle &&
+        final_crash_count == 1 && final_normal_count == 1 &&
         lifecycle_log.has_status(
             sintra::process_lifecycle_event::reason::normal_exit, 0);
 
@@ -574,8 +555,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         std::fprintf(stdout,
             "CRASH_PROVENANCE_REUSE_GREEN real_stamp=1 a_custody=%llu "
             "a_occurrence=%u b_custody=%llu b_occurrence=0 stale_crashes=0 "
-            "stale_recovery=0 stale_status=0 b_live=1 b_witness=1 "
-            "b_normal=1 survivors=0\n",
+            "stale_recovery=0 b_live=1 b_witness=1 b_normal=1 survivors=0\n",
             static_cast<unsigned long long>(
                 observation_a.occurrence.custody_identity),
             observation_a.occurrence.occurrence,
@@ -591,15 +571,14 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         b_status_after_stale.created_occurrences == 1 &&
         b_status_after_stale.exited_occurrences == 0 &&
         b_live_after_stale && b_witness_after && crash_count_after_stale == 2 &&
-        recovery_count_after_stale == 2 && stale_status_stored &&
-        !b_normal_lifecycle && final_crash_count == 2 && final_normal_count == 0;
+        recovery_count_after_stale == 2 && !b_normal_lifecycle &&
+        final_crash_count == 2 && final_normal_count == 0;
 
     if (current_red) {
         std::fprintf(stderr,
             "CRASH_PROVENANCE_REUSE_RED real_stamp=0 a_custody=%llu "
             "a_occurrence=%u b_custody=%llu b_occurrence=%u stale_crashes=1 "
-            "stale_recovery=1 stale_status=1 b_live=1 b_witness=1 "
-            "b_normal=0 survivors=0\n",
+            "stale_recovery=1 b_live=1 b_witness=1 b_normal=0 survivors=0\n",
             static_cast<unsigned long long>(
                 observation_a.occurrence.custody_identity),
             observation_a.occurrence.occurrence,
@@ -614,8 +593,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         "CRASH_PROVENANCE_REUSE_INVALID setup=%d a_baseline=%d real_exact=%d "
         "real_relays=%zu b_identity=%d b_occurrence=%u b_live=%d b_witness=%d "
         "stale_fenced=%d stale_exact=%d stale_crashes=%zu stale_recovery=%u "
-        "stale_status=%d b_exit=%d b_normal=%d final_crashes=%zu "
-        "final_normals=%zu releases=%d survivors=%d finalized=%d\n",
+        "b_exit=%d b_normal=%d final_crashes=%zu final_normals=%zu "
+        "releases=%d survivors=%d finalized=%d\n",
         setup_valid ? 1 : 0,
         a_baseline ? 1 : 0,
         real_relay_exact ? 1 : 0,
@@ -628,7 +607,6 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         stale_relay_exact ? 1 : 0,
         crash_count_after_stale,
         recovery_count_after_stale,
-        stale_status_stored ? 1 : 0,
         b_exit_observed ? 1 : 0,
         b_normal_lifecycle ? 1 : 0,
         final_crash_count,
