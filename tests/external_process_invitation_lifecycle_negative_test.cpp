@@ -507,6 +507,14 @@ sintra::External_process_invitation make_invitation(
     return sintra::create_external_process_invitation(options);
 }
 
+bool external_process_state_absent(sintra::instance_id_type process_iid)
+{
+    std::lock_guard lock(sintra::s_coord->m_publish_mutex);
+    return
+        sintra::s_coord->m_transceiver_registry.count(process_iid) == 0 &&
+        sintra::s_coord->m_external_attached_processes.count(process_iid) == 0;
+}
+
 std::vector<std::string> helper_args(
     const std::filesystem::path&               dir,
     const std::string&                         role,
@@ -924,12 +932,34 @@ bool run_crash_after_init_case(
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
+    Shutdown_watchdog watchdog("crash-after-init-provenance", 25s);
+
+    std::mutex lifecycle_mutex;
+    std::condition_variable lifecycle_changed;
+    std::vector<sintra::process_lifecycle_event> lifecycle_events;
+    std::atomic<unsigned> recovery_policy_calls{0};
 
     auto invitation = make_invitation(sintra::invalid_instance_id, 30s);
     bool ok = sintra::test::assert_true(
         static_cast<bool>(invitation),
         k_failure_prefix,
         "crash-after-init should create an invitation");
+
+    sintra::set_lifecycle_handler(
+        [&](const sintra::process_lifecycle_event& event) {
+            if (event.process_iid != invitation.process_instance_id) {
+                return;
+            }
+            {
+                std::lock_guard lock(lifecycle_mutex);
+                lifecycle_events.push_back(event);
+            }
+            lifecycle_changed.notify_all();
+        });
+    sintra::set_recovery_policy([&](const sintra::Crash_info&) {
+        recovery_policy_calls.fetch_add(1, std::memory_order_release);
+        return false;
+    });
 
     sintra::test::Exact_child helper(2s);
     const bool helper_launched = launch_direct_process(
@@ -951,12 +981,48 @@ bool run_crash_after_init_case(
     ok &= wait_for_marker(dir, "crash_abort_reached", "reached", 1s);
     ok &= wait_for_marker(dir, "crash_abort_signal", "caught", 1s);
 
-    std::this_thread::sleep_for(500ms);
+    bool lifecycle_delivered = false;
+    {
+        std::unique_lock lock(lifecycle_mutex);
+        lifecycle_delivered = lifecycle_changed.wait_for(
+            lock,
+            5s,
+            [&] { return !lifecycle_events.empty(); });
+    }
+    sintra::s_mproc->wait_for_delivery_fence();
+
+    std::vector<sintra::process_lifecycle_event> lifecycle_snapshot;
+    {
+        std::lock_guard lock(lifecycle_mutex);
+        lifecycle_snapshot = lifecycle_events;
+    }
+    const bool exact_crash_lifecycle =
+        lifecycle_snapshot.size() == 1 &&
+        lifecycle_snapshot.front().process_iid == invitation.process_instance_id &&
+        lifecycle_snapshot.front().why ==
+            sintra::process_lifecycle_event::reason::crash &&
+        lifecycle_snapshot.front().status != 0;
+
+    ok &= sintra::test::assert_true(
+        lifecycle_delivered && exact_crash_lifecycle,
+        k_failure_prefix,
+        "external crash should emit exactly one exact-IID nonzero-status crash lifecycle event");
+    ok &= sintra::test::assert_true(
+        external_process_state_absent(invitation.process_instance_id),
+        k_failure_prefix,
+        "external crash lifecycle should retire the process registry and attachment atomically");
+    ok &= sintra::test::assert_true(
+        recovery_policy_calls.load(std::memory_order_acquire) == 0,
+        k_failure_prefix,
+        "external crash must not enter managed-child recovery policy");
     ok &= sintra::test::assert_true(
         !std::filesystem::exists(marker_path(dir, "crash_respawned")) &&
             !std::filesystem::exists(marker_path(dir, "crash_entry_1")),
         k_failure_prefix,
         "external crash should not trigger automatic recovery");
+
+    sintra::set_lifecycle_handler(sintra::Lifecycle_handler{});
+    sintra::set_recovery_policy(sintra::Recovery_policy{});
     ok &= sintra::test::assert_true(
         shutdown_with_watchdog(guard, "crash-after-init"),
         k_failure_prefix,
