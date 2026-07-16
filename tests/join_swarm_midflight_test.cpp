@@ -70,12 +70,13 @@ void trace_event(
 int worker()
 {
     const sintra::test::Shared_directory shared("SINTRA_JOIN_SWARM_DIR", "join_swarm_midflight");
-    const auto               dir              = shared.path();
-    const auto               log_path         = dir / "hello.log";
-    const auto               trace_path       = dir / "trace.log";
-    const auto               initiator_marker = dir / "initiator_claimed";
-    const auto               process_iid      = sintra::process_of(s_mproc_id);
-    sintra::instance_id_type joined_process   = sintra::invalid_instance_id;
+    const auto               dir                    = shared.path();
+    const auto               log_path               = dir / "hello.log";
+    const auto               trace_path             = dir / "trace.log";
+    const auto               initiator_marker       = dir / "initiator_claimed";
+    const auto               joined_occurrence_path = dir / "joined_occurrence.log";
+    const auto               process_iid            = sintra::process_of(s_mproc_id);
+    sintra::instance_id_type joined_process         = sintra::invalid_instance_id;
 
     auto hello_slot = [log_path](hello_t h) {
         std::ostringstream oss;
@@ -111,6 +112,13 @@ int worker()
         if (joined_process == sintra::invalid_instance_id) {
             return 1;
         }
+    }
+    else
+    if (!sintra::test::append_line(
+            joined_occurrence_path,
+            std::to_string(sintra::s_recovery_occurrence)))
+    {
+        trace_event(trace_path, "joined_occurrence.error", "failed to record occurrence");
     }
 
     // Ensure both the existing worker and the newly joined worker rendezvous.
@@ -199,9 +207,10 @@ int worker()
 int main(int argc, char* argv[])
 {
     sintra::test::Shared_directory shared("SINTRA_JOIN_SWARM_DIR", "join_swarm_midflight");
-    const auto dir        = shared.path();
-    const auto log_path   = dir / "hello.log";
-    const auto trace_path = dir / "trace.log";
+    const auto dir                    = shared.path();
+    const auto log_path               = dir / "hello.log";
+    const auto trace_path             = dir / "trace.log";
+    const auto joined_occurrence_path = dir / "joined_occurrence.log";
 
     trace_event(trace_path, "coordinator_start",
         std::string("dir=") + dir.string());
@@ -250,7 +259,22 @@ int main(int argc, char* argv[])
         trace_event(trace_path, "coordinator_exit", "seen=" + std::to_string(seen));
     }
 
+    bool joined_occurrence_ok = true;
+    if (sintra::process_index() == 0) {
+        const auto joined_occurrences =
+            sintra::test::read_lines(joined_occurrence_path);
+        joined_occurrence_ok =
+            joined_occurrences.size() == 1 && joined_occurrences.front() == "0";
+        if (!joined_occurrence_ok) {
+            std::cerr
+                << "[join_swarm_midflight] fresh joined process recovery occurrence"
+                << " expected=0 observed="
+                << (joined_occurrences.empty() ? "<missing>" : joined_occurrences.front())
+                << " records=" << joined_occurrences.size() << std::endl;
+        }
+    }
+
     sintra::shutdown();
 
-    return seen >= 2 ? 0 : 1;
+    return seen >= 2 && joined_occurrence_ok ? 0 : 1;
 }
