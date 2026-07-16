@@ -1,6 +1,7 @@
 #include <sintra/sintra.h>
 
 #include "exact_child_test_support.h"
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #include <atomic>
@@ -30,6 +31,8 @@
 #endif
 
 namespace {
+
+using sintra::test::managed_child::make_invitation;
 
 using namespace std::chrono_literals;
 
@@ -615,16 +618,6 @@ bool reader_retirement_worker_start_failure_hook(
     return g_reader_retirement_start_failures.fetch_add(
         1,
         std::memory_order_acq_rel) == 0;
-}
-
-sintra::External_process_invitation make_invitation(
-    sintra::instance_id_type   process_iid,
-    std::chrono::milliseconds  timeout)
-{
-    sintra::External_process_invitation_options options;
-    options.process_instance_id = process_iid;
-    options.timeout             = timeout;
-    return sintra::create_external_process_invitation(options);
 }
 
 bool external_process_state_absent(sintra::instance_id_type process_iid)

@@ -3,6 +3,7 @@
 
 #include <sintra/sintra.h>
 
+#include "managed_child_test_support.h"
 #include "test_environment.h"
 
 #include <algorithm>
@@ -26,6 +27,11 @@
 namespace {
 
 using namespace std::chrono_literals;
+using sintra::test::managed_child::exact_process_is_absent;
+using sintra::test::managed_child::process_identity_t;
+using sintra::test::managed_child::read_process_identity;
+using sintra::test::managed_child::wait_for_exact_process_absence;
+using sintra::test::managed_child::write_process_identity;
 
 constexpr const char* k_child_flag = "--managed-child-setup-race-child";
 constexpr const char* k_native_bound_child_flag =
@@ -382,14 +388,6 @@ unsigned failure_hits(Failure_plan& plan)
     return plan.hits;
 }
 
-struct Child_identity
-{
-    int       pid = -1;
-    uint64_t  start_stamp = 0;
-
-    bool operator==(const Child_identity&) const = default;
-};
-
 #ifndef _WIN32
 struct Posix_reap_observation
 {
@@ -552,103 +550,6 @@ bool write_signal_marker(const std::filesystem::path& marker, const char* signal
     return static_cast<bool>(out);
 }
 
-bool write_child_identity(const std::filesystem::path& marker)
-{
-    const auto stamp = sintra::current_process_start_stamp();
-    if (!stamp) {
-        return false;
-    }
-
-    const auto publishing = std::filesystem::path(
-        marker.string() + ".publishing." +
-        std::to_string(sintra::detail::get_current_process_id()));
-    std::error_code ec;
-    std::filesystem::remove(publishing, ec);
-    ec.clear();
-
-    std::ofstream out(publishing, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        return false;
-    }
-    out << "pid=" << sintra::detail::get_current_process_id() << '\n'
-        << "start_stamp=" << *stamp << '\n'
-        << "complete=1\n";
-    out.flush();
-    bool complete = static_cast<bool>(out);
-    out.close();
-    complete = complete && !out.fail();
-    if (!complete) {
-        std::filesystem::remove(publishing, ec);
-        return false;
-    }
-
-    std::filesystem::rename(publishing, marker, ec);
-    if (ec) {
-        std::error_code cleanup_ec;
-        std::filesystem::remove(publishing, cleanup_ec);
-        return false;
-    }
-    return true;
-}
-
-std::optional<Child_identity> read_child_identity(const std::filesystem::path& marker)
-{
-    std::ifstream in(marker, std::ios::binary);
-    Child_identity identity;
-    bool complete = false;
-    std::string line;
-    try {
-        while (std::getline(in, line)) {
-            const auto split = line.find('=');
-            if (split == std::string::npos) {
-                return std::nullopt;
-            }
-            const auto key = line.substr(0, split);
-            const auto value = line.substr(split + 1);
-            if (key == "pid") {
-                identity.pid = std::stoi(value);
-            }
-            else if (key == "start_stamp") {
-                identity.start_stamp = std::stoull(value);
-            }
-            else if (key == "complete") {
-                complete = value == "1";
-            }
-        }
-    }
-    catch (...) {
-        return std::nullopt;
-    }
-    if (!complete || identity.pid <= 0 || identity.start_stamp == 0) {
-        return std::nullopt;
-    }
-    return identity;
-}
-
-bool exact_child_absent(const Child_identity& identity)
-{
-    if (!sintra::is_process_alive(static_cast<uint32_t>(identity.pid))) {
-        return true;
-    }
-    const auto observed = sintra::query_process_start_stamp(
-        static_cast<uint32_t>(identity.pid));
-    return !observed || *observed != identity.start_stamp;
-}
-
-bool wait_for_child_absent(
-    const Child_identity& identity,
-    std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (exact_child_absent(identity)) {
-            return true;
-        }
-        std::this_thread::sleep_for(10ms);
-    }
-    return exact_child_absent(identity);
-}
-
 bool assigned_name_absent(const std::string& name)
 {
     auto names = sintra::s_mproc->m_instance_id_of_assigned_name.scoped();
@@ -741,7 +642,7 @@ bool observed_setup_exception(
 }
 
 #ifndef _WIN32
-void arm_posix_reap(const Child_identity& identity)
+void arm_posix_reap(const process_identity_t& identity)
 {
     s_posix_reap.expected_pid.store(
         static_cast<pid_t>(identity.pid), std::memory_order_release);
@@ -779,10 +680,10 @@ void clear_posix_reap()
 }
 
 void arm_concurrent_posix_reaps(
-    const Child_identity& first,
-    const Child_identity& second)
+    const process_identity_t& first,
+    const process_identity_t& second)
 {
-    const std::array<Child_identity, 2> identities{first, second};
+    const std::array<process_identity_t, 2> identities{first, second};
     for (size_t i = 0; i < 2; ++i) {
         s_concurrent_posix_reap.expected_pid[i].store(
             static_cast<pid_t>(identities[i].pid), std::memory_order_release);
@@ -1081,8 +982,8 @@ bool run_recovery_recipe_exposure_race(
     s_gate = nullptr;
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 8s);
-    const auto identity_0 = read_child_identity(occurrence_0_marker);
-    const auto identity_1 = read_child_identity(occurrence_1_marker);
+    const auto identity_0 = read_process_identity(occurrence_0_marker);
+    const auto identity_1 = read_process_identity(occurrence_1_marker);
     const bool exact_distinct_children = identity_0 && identity_1 &&
         *identity_0 != *identity_1;
     const bool finalized = settle_detail_finalize(
@@ -1400,7 +1301,7 @@ bool run_owned_native_exception(
     }
     const bool identity_written = wait_for_file(marker, 5s);
     const auto identity = identity_written
-        ? read_child_identity(marker)
+        ? read_process_identity(marker)
         : std::nullopt;
 #ifndef _WIN32
     if (identity) {
@@ -1425,7 +1326,8 @@ bool run_owned_native_exception(
             unrelated_publications.load(std::memory_order_acquire) == 1;
     }
     sintra::deactivate_all_slots();
-    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 5s);
     const auto hits = failure_hits(plan);
     reset_failure_hook();
 #ifndef _WIN32
@@ -1540,9 +1442,9 @@ bool run_post_native_recovery_occurrence_advance(
         exit_event.occurrence == exit_observation.occurrence;
     exit_observation.subscription.unsubscribe();
 
-    const auto identity_0 = read_child_identity(occurrence_0_marker);
-    const auto identity_1 = read_child_identity(occurrence_1_marker);
-    const auto identity_2 = read_child_identity(occurrence_2_marker);
+    const auto identity_0 = read_process_identity(occurrence_0_marker);
+    const auto identity_1 = read_process_identity(occurrence_1_marker);
+    const auto identity_2 = read_process_identity(occurrence_2_marker);
     const bool distinct_children = identity_0 && identity_1 && identity_2 &&
         *identity_0 != *identity_1 &&
         *identity_1 != *identity_2 &&
@@ -1669,7 +1571,7 @@ Release_worker_retry_result run_release_worker_retry(
 
     const bool identity_written = wait_for_file(marker, 5s);
     const auto identity = identity_written
-        ? read_child_identity(marker)
+        ? read_process_identity(marker)
         : std::nullopt;
 #ifndef _WIN32
     if (identity) {
@@ -1793,7 +1695,8 @@ Release_worker_retry_result run_release_worker_retry(
             custody.terminate_until(std::chrono::steady_clock::now() + 5s);
         }
     }
-    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 5s);
     reset_failure_hook();
 #ifndef _WIN32
     const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
@@ -1862,7 +1765,7 @@ bool run_prepublication_exit_convergence(
     auto custody = sintra::spawn_swarm_process(options);
     const bool identity_written = wait_for_file(marker, 5s);
     const auto identity = identity_written
-        ? read_child_identity(marker)
+        ? read_process_identity(marker)
         : std::nullopt;
 #ifndef _WIN32
     if (identity) {
@@ -1881,7 +1784,8 @@ bool run_prepublication_exit_convergence(
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 5s);
     const bool initialization_retired = initialization_tracking_absent(piid);
-    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 5s);
 #ifndef _WIN32
     const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
     const bool reap_normal = reap_seen && posix_reap_normal();
@@ -1951,7 +1855,7 @@ bool run_split_transport_retirement(
 
     const bool identity_written = wait_for_file(marker, 5s);
     const auto identity = identity_written
-        ? read_child_identity(marker)
+        ? read_process_identity(marker)
         : std::nullopt;
 #ifndef _WIN32
     if (identity) {
@@ -2019,7 +1923,8 @@ bool run_split_transport_retirement(
     sintra::detail::test_hooks::s_managed_child_transport_retirement.store(
         nullptr, std::memory_order_release);
     s_transport_retirement_gate = nullptr;
-    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 5s);
 #ifndef _WIN32
     const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
     const bool reap_normal = reap_seen && posix_reap_normal();
@@ -2061,7 +1966,7 @@ bool run_split_transport_retirement(
     auto retry_custody = sintra::spawn_swarm_process(retry_options);
     const bool retry_identity_written = wait_for_file(retry_marker, 5s);
     const auto retry_identity = retry_identity_written
-        ? read_child_identity(retry_marker)
+        ? read_process_identity(retry_marker)
         : std::nullopt;
 #ifndef _WIN32
     if (retry_identity) {
@@ -2136,7 +2041,7 @@ bool run_split_transport_retirement(
         !(*retry_held_facts)[2];
     const bool worker_native_held_after_finalize =
         worker_finalize_completed && retry_identity &&
-        !exact_child_absent(*retry_identity);
+        !exact_process_is_absent(*retry_identity);
 
     bool worker_park_released = false;
     bool worker_park_watchdog_released = false;
@@ -2205,7 +2110,7 @@ bool run_split_transport_retirement(
         retry_exit_written = write_signal_marker(retry_exit, "exit");
     }
     const bool retry_survivor_absent = retry_identity &&
-        wait_for_child_absent(*retry_identity, 10s);
+        wait_for_exact_process_absence(*retry_identity, 10s);
     const auto retried = retry_custody.release_until(
         std::chrono::steady_clock::now() + 5s);
 #ifndef _WIN32
@@ -2392,7 +2297,7 @@ bool run_prepublication_publish_race(
 
     const bool identity_written = wait_for_file(marker, 5s);
     const auto identity = identity_written
-        ? read_child_identity(marker)
+        ? read_process_identity(marker)
         : std::nullopt;
 #ifndef _WIN32
     if (identity) {
@@ -2409,7 +2314,8 @@ bool run_prepublication_publish_race(
 
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 5s);
-    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 5s);
     const bool canonical_absence =
         assigned_name_absent(published_name) && process_registry_absent(piid);
 
@@ -2565,7 +2471,7 @@ bool run_unrelated_readiness_rejection(
 
         const auto observed = custody.status();
         const auto identity = wait_for_file(marker, 5s)
-            ? read_child_identity(marker)
+            ? read_process_identity(marker)
             : std::nullopt;
         identity_written = identity.has_value();
         spawn_observed = identity && custody &&
@@ -2605,7 +2511,8 @@ bool run_unrelated_readiness_rejection(
         release_written = write_release_marker(marker);
         released = custody.release_until(
             std::chrono::steady_clock::now() + 5s);
-        survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+        survivor_absent = identity &&
+            wait_for_exact_process_absence(*identity, 5s);
 #ifndef _WIN32
         reap_seen = identity && wait_for_exact_posix_reap(5s);
         reap_normal = reap_seen && posix_reap_normal();
@@ -2685,7 +2592,7 @@ bool run_exact_readiness_acceptance(
     const bool exact_publication = resolved != sintra::invalid_instance_id &&
         sintra::process_of(resolved) == piid;
     const auto identity = wait_for_file(marker, 5s)
-        ? read_child_identity(marker)
+        ? read_process_identity(marker)
         : std::nullopt;
 #ifndef _WIN32
     if (identity) {
@@ -2695,7 +2602,8 @@ bool run_exact_readiness_acceptance(
     const bool release_written = write_release_marker(marker);
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 5s);
-    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 5s);
 #ifndef _WIN32
     const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
     const bool reap_normal = reap_seen && posix_reap_normal();
@@ -2768,7 +2676,7 @@ bool run_unbounded_readiness_cancellation(
     });
 
     const auto identity = wait_for_file(marker, 5s)
-        ? read_child_identity(marker)
+        ? read_process_identity(marker)
         : std::nullopt;
 #ifndef _WIN32
     if (identity) {
@@ -2827,7 +2735,8 @@ bool run_unbounded_readiness_cancellation(
     spawn_caller.join();
 
     const auto released = custody.status();
-    const bool survivor_absent = identity && wait_for_child_absent(*identity, 5s);
+    const bool survivor_absent = identity &&
+        wait_for_exact_process_absence(*identity, 5s);
 #ifndef _WIN32
     const bool reap_seen = identity && wait_for_exact_posix_reap(5s);
     const bool reap_normal = reap_seen && posix_reap_normal();
@@ -3199,10 +3108,10 @@ bool run_concurrent_posix_roster_reservations(
         nullptr, std::memory_order_release);
     s_roster_gate = nullptr;
 
-    std::array<std::optional<Child_identity>, 2> identities;
+    std::array<std::optional<process_identity_t>, 2> identities;
     for (size_t i = 0; i < 2; ++i) {
         if (wait_for_file(markers[i], 5s)) {
-            identities[i] = read_child_identity(markers[i]);
+            identities[i] = read_process_identity(markers[i]);
         }
     }
     if (identities[0] && identities[1]) {
@@ -3237,7 +3146,7 @@ bool run_concurrent_posix_roster_reservations(
     bool survivors_absent = releases_terminal;
     for (size_t i = 0; i < 2; ++i) {
         survivors_absent = survivors_absent && identities[i] &&
-            exact_child_absent(*identities[i]);
+            exact_process_is_absent(*identities[i]);
     }
     const bool reaps_normal = identities[0] && identities[1] &&
         concurrent_posix_reaps_normal();
@@ -3287,7 +3196,7 @@ int main(int argc, char* argv[])
                 sintra::enable_recovery();
             }
             const auto exact_marker = occurrence_marker(marker, occurrence);
-            const bool identity_written = write_child_identity(exact_marker);
+            const bool identity_written = write_process_identity(exact_marker);
             if (occurrence == 0) {
                 const bool crash_requested = wait_for_file(
                     exit_marker(exact_marker), 15s);
@@ -3313,7 +3222,7 @@ int main(int argc, char* argv[])
                 sintra::enable_recovery();
             }
             const auto exact_marker = occurrence_marker(marker, occurrence);
-            const bool identity_written = write_child_identity(exact_marker);
+            const bool identity_written = write_process_identity(exact_marker);
             if (occurrence < 2) {
                 const bool crash_requested =
                     wait_for_file(exit_marker(exact_marker), 15s);
@@ -3339,7 +3248,7 @@ int main(int argc, char* argv[])
         }
         if (std::string(argv[i]) == k_native_bound_child_flag) {
             const std::filesystem::path marker = argv[i + 1];
-            const bool identity_written = write_child_identity(marker);
+            const bool identity_written = write_process_identity(marker);
             const bool released = wait_for_file(release_marker(marker), 10s);
             return identity_written && released ? 0 : 3;
         }
@@ -3349,7 +3258,7 @@ int main(int argc, char* argv[])
                 i + 2 < argc &&
                 std::string(argv[i + 2]) == k_hold_after_finalize_flag;
             sintra::init(argc, argv);
-            const bool identity_written = write_child_identity(marker);
+            const bool identity_written = write_process_identity(marker);
             const bool released = wait_for_file(release_marker(marker), 10s);
             const bool finalized = settle_detail_finalize("owned_child");
             const bool finalized_written =
@@ -3363,7 +3272,7 @@ int main(int argc, char* argv[])
         }
         if (std::string(argv[i]) == k_prepublication_exit_child_flag) {
             const std::filesystem::path marker = argv[i + 1];
-            const bool identity_written = write_child_identity(marker);
+            const bool identity_written = write_process_identity(marker);
             std::this_thread::sleep_for(250ms);
             return identity_written ? 0 : 3;
         }
@@ -3382,7 +3291,7 @@ int main(int argc, char* argv[])
             {
                 Unrelated_publication_target target;
                 assigned = target.assign_name(target_name);
-                identity_written = write_child_identity(marker);
+                identity_written = write_process_identity(marker);
                 released = wait_for_file(release_marker(marker), 10s);
             }
             const bool finalized = settle_detail_finalize("readiness_identity_child");
@@ -3390,7 +3299,7 @@ int main(int argc, char* argv[])
         }
         if (std::string(argv[i]) == k_readiness_cancellation_child_flag) {
             const std::filesystem::path marker = argv[i + 1];
-            const bool identity_written = write_child_identity(marker);
+            const bool identity_written = write_process_identity(marker);
             std::this_thread::sleep_for(1s);
             return identity_written ? 0 : 3;
         }

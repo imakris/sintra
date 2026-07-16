@@ -16,10 +16,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -28,8 +26,11 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
-using sintra::test::managed_child::exact_process_is_live;
+using sintra::test::managed_child::child_identity_t;
+using sintra::test::managed_child::wait_for_child_identity;
+using sintra::test::managed_child::wait_for_exact_process_absence;
 using sintra::test::managed_child::write_complete_file;
+using sintra::test::managed_child::write_child_identity;
 
 constexpr std::string_view k_opt_in_a_flag  = "--recovery-authority-opt-in-a";
 constexpr std::string_view k_opt_in_b_flag  = "--recovery-authority-opt-in-b";
@@ -56,14 +57,6 @@ constexpr sintra::instance_id_type k_opt_in_iid =
     sintra::compose_instance(35u, 1u);
 constexpr sintra::instance_id_type k_delayed_iid =
     sintra::compose_instance(36u, 1u);
-
-struct Child_identity
-{
-    sintra::instance_id_type   process_iid = sintra::invalid_instance_id;
-    std::uint32_t              occurrence  = 0;
-    int                        pid         = -1;
-    std::uint64_t              start_stamp = 0;
-};
 
 struct Retirement_fence
 {
@@ -123,62 +116,13 @@ fs::path marker(const fs::path& directory, std::string_view name)
     return directory / std::string(name);
 }
 
-template <typename Predicate>
-bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout)
+std::optional<child_identity_t> wait_for_identity(const fs::path& path)
 {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    do {
-        if (predicate()) {
-            return true;
-        }
-        std::this_thread::sleep_for(k_poll_interval);
-    }
-    while (std::chrono::steady_clock::now() < deadline);
-    return predicate();
-}
-
-bool write_child_identity(const fs::path& path)
-{
-    const auto start_stamp = sintra::current_process_start_stamp();
-    if (!start_stamp) {
-        return false;
-    }
-    std::ostringstream contents;
-    contents
-        << static_cast<unsigned long long>(sintra::s_mproc_id) << ' '
-        << sintra::s_recovery_occurrence << ' '
-        << sintra::test::get_pid() << ' '
-        << static_cast<unsigned long long>(*start_stamp) << '\n';
-    return write_complete_file(path, contents.str());
-}
-
-std::optional<Child_identity> read_child_identity(const fs::path& path)
-{
-    Child_identity identity;
-    unsigned long long process_iid = 0;
-    unsigned long long start_stamp = 0;
-    std::ifstream input(path, std::ios::binary);
-    if (!(input >> process_iid >> identity.occurrence >> identity.pid >> start_stamp)) {
-        return std::nullopt;
-    }
-    identity.process_iid =
-        static_cast<sintra::instance_id_type>(process_iid);
-    identity.start_stamp = static_cast<std::uint64_t>(start_stamp);
-    return identity;
-}
-
-std::optional<Child_identity> wait_for_identity(const fs::path& path)
-{
-    if (!sintra::test::wait_for_file(
-            path, k_step_timeout, k_poll_interval))
-    {
-        return std::nullopt;
-    }
-    return read_child_identity(path);
+    return wait_for_child_identity(path, k_step_timeout, k_poll_interval);
 }
 
 bool identity_is_live_occurrence(
-    const std::optional<Child_identity>&   identity,
+    const std::optional<child_identity_t>& identity,
     sintra::instance_id_type               expected_iid,
     std::uint32_t                          expected_occurrence)
 {
@@ -186,11 +130,11 @@ bool identity_is_live_occurrence(
         identity                                    &&
         identity->process_iid == expected_iid       &&
         identity->occurrence == expected_occurrence &&
-        exact_process_is_live(identity->pid, identity->start_stamp);
+        sintra::test::managed_child::exact_process_is_live(*identity);
 }
 
 bool identity_is_occurrence(
-    const std::optional<Child_identity>&   identity,
+    const std::optional<child_identity_t>& identity,
     sintra::instance_id_type               expected_iid,
     std::uint32_t                          expected_occurrence)
 {
@@ -202,17 +146,10 @@ bool identity_is_occurrence(
         identity->start_stamp != 0;
 }
 
-bool wait_for_absence(const std::optional<Child_identity>& identity)
+bool wait_for_absence(const std::optional<child_identity_t>& identity)
 {
-    if (!identity) {
-        return false;
-    }
-    return wait_until(
-        [&]() {
-            return !exact_process_is_live(
-                identity->pid, identity->start_stamp);
-        },
-        k_step_timeout);
+    return identity && wait_for_exact_process_absence(
+        *identity, k_step_timeout, k_poll_interval);
 }
 
 std::optional<std::uint64_t> capture_custody_identity(
@@ -562,7 +499,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const bool delayed_b_has_extra_occurrence =
         delayed_b_status.admitted_occurrences > 1 ||
         delayed_b_status.created_occurrences > 1;
-    std::optional<Child_identity> delayed_b_recovery_identity;
+    std::optional<child_identity_t> delayed_b_recovery_identity;
     if (delayed_b_has_extra_occurrence) {
         delayed_b_recovery_identity = wait_for_identity(
             marker(shared_path, k_delayed_b_recovery_marker));

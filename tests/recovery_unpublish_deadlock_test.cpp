@@ -15,10 +15,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -27,7 +25,9 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::child_identity_t;
 using sintra::test::managed_child::exact_process_is_live;
+using sintra::test::managed_child::Managed_child_exit_capture;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_flag =
@@ -57,23 +57,6 @@ struct scenario_spec_t
     Probed_callback          callback;
     sintra::instance_id_type child_iid;
     sintra::instance_id_type probe_iid;
-};
-
-struct child_identity_t
-{
-    sintra::instance_id_type   process_iid = sintra::invalid_instance_id;
-    std::uint32_t              occurrence  = 0;
-    int                        pid         = -1;
-    std::uint64_t              start_stamp = 0;
-};
-
-struct Exit_capture
-{
-    std::mutex                 mutex;
-    std::condition_variable    changed;
-    std::optional<sintra::Managed_child_exit>
-                               event;
-    unsigned                   deliveries = 0;
 };
 
 class Public_api_probe
@@ -253,40 +236,8 @@ fs::path marker_path(const fs::path& directory, std::string_view marker)
 
 bool write_child_identity(const fs::path& directory)
 {
-    const auto start_stamp = sintra::current_process_start_stamp();
-    if (!start_stamp) {
-        return false;
-    }
-
-    std::ostringstream contents;
-    contents
-        << static_cast<unsigned long long>(sintra::s_mproc_id) << ' '
-        << sintra::s_recovery_occurrence << ' '
-        << sintra::test::get_pid() << ' '
-        << static_cast<unsigned long long>(*start_stamp) << '\n';
-    return write_complete_file(
-        identity_path(directory, sintra::s_recovery_occurrence),
-        contents.str());
-}
-
-std::optional<child_identity_t> read_child_identity(const fs::path& path)
-{
-    child_identity_t identity;
-    unsigned long long process_iid = 0;
-    unsigned long long start_stamp = 0;
-    std::ifstream input(path, std::ios::binary);
-    if (!(input
-        >> process_iid
-        >> identity.occurrence
-        >> identity.pid
-        >> start_stamp))
-    {
-        return std::nullopt;
-    }
-    identity.process_iid =
-        static_cast<sintra::instance_id_type>(process_iid);
-    identity.start_stamp = static_cast<std::uint64_t>(start_stamp);
-    return identity;
+    return sintra::test::managed_child::write_child_identity(
+        identity_path(directory, sintra::s_recovery_occurrence));
 }
 
 std::optional<child_identity_t> wait_for_child_identity(
@@ -294,11 +245,8 @@ std::optional<child_identity_t> wait_for_child_identity(
     std::uint32_t                             occurrence,
     std::chrono::steady_clock::time_point      deadline)
 {
-    const auto path = identity_path(directory, occurrence);
-    if (!sintra::test::wait_for_file_until(path, deadline, k_poll_interval)) {
-        return std::nullopt;
-    }
-    return read_child_identity(path);
+    return sintra::test::managed_child::wait_for_child_identity(
+        identity_path(directory, occurrence), deadline, k_poll_interval);
 }
 
 template <typename Predicate>
@@ -422,7 +370,7 @@ bool run_scenario(
     std::atomic<bool> probe_done{false};
     std::atomic<bool> probe_contract{false};
 
-    Exit_capture exit_capture;
+    Managed_child_exit_capture exit_capture;
     sintra::Managed_child_custody custody;
     sintra::Managed_child_exit_observation exit_observation;
     std::optional<child_identity_t> initial;
@@ -513,12 +461,7 @@ bool run_scenario(
             ](
             const sintra::Managed_child_exit& event)
             {
-                {
-                    std::lock_guard<std::mutex> lock(exit_capture.mutex);
-                    exit_capture.event = event;
-                    ++exit_capture.deliveries;
-                }
-                exit_capture.changed.notify_all();
+                exit_capture.record(event);
             });
         if (!sintra::test::assert_true(
                 static_cast<bool>(exit_observation),
@@ -585,22 +528,14 @@ bool run_scenario(
         }
 
         sintra::Managed_child_exit initial_exit;
-        bool initial_exit_delivered = false;
-        unsigned initial_exit_deliveries = 0;
-        {
-            std::unique_lock<std::mutex> lock(exit_capture.mutex);
-            initial_exit_delivered = exit_capture.changed.wait_until(
-                lock,
-                deadline,
-                [&exit_capture] { return exit_capture.event.has_value(); });
-            if (exit_capture.event) {
-                initial_exit = *exit_capture.event;
-            }
-            initial_exit_deliveries = exit_capture.deliveries;
+        const bool initial_exit_delivered = exit_capture.wait_for_one_until(deadline);
+        const auto initial_exit_capture = exit_capture.snapshot();
+        if (initial_exit_capture.event) {
+            initial_exit = *initial_exit_capture.event;
         }
         if (!sintra::test::assert_true(
                 initial_exit_delivered                              &&
-                    initial_exit_deliveries == 1                    &&
+                    initial_exit_capture.deliveries == 1            &&
                     initial_exit.occurrence == exit_observation.occurrence &&
                     initial_exit.occurrence.process_instance_id ==
                         scenario.child_iid &&

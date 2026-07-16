@@ -30,7 +30,10 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::current_child_identity;
 using sintra::test::managed_child::exact_process_is_live;
+using sintra::test::managed_child::Managed_child_exit_capture;
+using sintra::test::managed_child::wait_for_exact_process_absence;
 using sintra::test::managed_child::write_complete_file;
 
 constexpr std::string_view k_child_a_flag   = "--crash-provenance-child-a";
@@ -55,7 +58,7 @@ constexpr sintra::instance_id_type k_reused_process_iid =
 struct Witness : sintra::Derived_transceiver<Witness>
 {};
 
-struct child_identity_t
+struct witnessed_child_identity_t
 {
     sintra::instance_id_type   process_iid = sintra::invalid_instance_id;
     std::uint32_t              occurrence  = 0;
@@ -158,109 +161,44 @@ private:
     std::vector<sintra::process_lifecycle_event> m_events;
 };
 
-class Exit_capture
-{
-public:
-    void record(const sintra::Managed_child_exit& event)
-    {
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_event = event;
-            ++m_count;
-        }
-        m_changed.notify_all();
-    }
-
-    bool wait_for_one()
-    {
-        std::unique_lock<std::mutex> lock(m_mutex);
-        return m_changed.wait_for(
-            lock, k_step_timeout, [&] { return m_count == 1; });
-    }
-
-    bool exact(const sintra::Managed_child_occurrence_identity& identity) const
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_count == 1 && m_event && m_event->occurrence == identity;
-    }
-
-    bool normal_zero() const
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return
-            m_count == 1                                                           &&
-            m_event                                                                &&
-            m_event->status_kind == sintra::Managed_child_exit_status_kind::exited &&
-            m_event->status == 0;
-    }
-
-private:
-    mutable std::mutex         m_mutex;
-    std::condition_variable    m_changed;
-    std::optional<sintra::Managed_child_exit>
-                               m_event;
-    unsigned                   m_count = 0;
-};
-
 fs::path marker(const fs::path& directory, std::string_view name)
 {
     return directory / std::string(name);
-}
-
-template <typename Predicate>
-bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout)
-{
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    do {
-        if (predicate()) {
-            return true;
-        }
-        std::this_thread::sleep_for(k_poll_interval);
-    }
-    while (std::chrono::steady_clock::now() < deadline);
-    return predicate();
 }
 
 bool write_identity(
     const fs::path&            path,
     sintra::instance_id_type   witness_iid)
 {
-    const auto start_stamp = sintra::current_process_start_stamp();
-    if (!start_stamp) {
+    const auto identity = current_child_identity();
+    if (!identity) {
         return false;
     }
     std::ostringstream contents;
-    contents
-        << static_cast<unsigned long long>(sintra::s_mproc_id) << ' '
-        << sintra::s_recovery_occurrence << ' '
-        << sintra::test::get_pid() << ' '
-        << static_cast<unsigned long long>(*start_stamp) << ' '
-        << static_cast<unsigned long long>(witness_iid) << '\n';
+    sintra::test::managed_child::write_child_identity(contents, *identity);
+    contents << ' ' << static_cast<unsigned long long>(witness_iid) << '\n';
     return write_complete_file(path, contents.str());
 }
 
-std::optional<child_identity_t> read_identity(const fs::path& path)
+std::optional<witnessed_child_identity_t> read_identity(const fs::path& path)
 {
-    child_identity_t identity;
-    unsigned long long process_iid = 0;
-    unsigned long long start_stamp = 0;
+    witnessed_child_identity_t identity;
     unsigned long long witness_iid = 0;
     std::ifstream input(path, std::ios::binary);
-    if (!(
-        input >> process_iid >> identity.occurrence >> identity.pid >>
-        start_stamp >> witness_iid))
-    {
+    const auto base = sintra::test::managed_child::read_child_identity(input);
+    if (!base || !(input >> witness_iid)) {
         return std::nullopt;
     }
-    identity.process_iid =
-        static_cast<sintra::instance_id_type>(process_iid);
-    identity.start_stamp = static_cast<std::uint64_t>(start_stamp);
+    identity.process_iid = base->process_iid;
+    identity.occurrence  = base->occurrence;
+    identity.pid         = base->pid;
+    identity.start_stamp = base->start_stamp;
     identity.witness_iid =
         static_cast<sintra::instance_id_type>(witness_iid);
     return identity;
 }
 
-std::optional<child_identity_t> wait_for_identity(const fs::path& path)
+std::optional<witnessed_child_identity_t> wait_for_identity(const fs::path& path)
 {
     if (!sintra::test::wait_for_file(path, k_step_timeout, k_poll_interval)) {
         return std::nullopt;
@@ -275,16 +213,10 @@ std::optional<child_identity_t> wait_for_identity(const fs::path& path)
     return identity;
 }
 
-bool wait_for_absence(const std::optional<child_identity_t>& identity)
+bool wait_for_absence(const std::optional<witnessed_child_identity_t>& identity)
 {
-    return
-        identity &&
-        wait_until(
-            [&] {
-                return !exact_process_is_live(
-                    identity->pid, identity->start_stamp);
-            },
-            k_step_timeout);
+    return identity && wait_for_exact_process_absence(
+        identity->pid, identity->start_stamp, k_step_timeout, k_poll_interval);
 }
 
 sintra::instance_id_type resolve_name(const std::string& name)
@@ -445,7 +377,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     auto custody_a = spawn_child(binary_path, k_child_a_flag);
     const auto child_a = wait_for_identity(
         marker(shared_path, k_child_a_marker));
-    Exit_capture exit_a;
+    Managed_child_exit_capture exit_a;
     auto observation_a = custody_a.observe_latest_created_exit(
         [&](const sintra::Managed_child_exit& event) { exit_a.record(event); });
     const bool a_identity_exact = child_a && observation_a &&
@@ -461,7 +393,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const std::size_t crash_count_after_real = lifecycle_log.count(
         sintra::process_lifecycle_event::reason::crash);
     const bool a_crash_lifecycle = crash_count_after_real == 1;
-    const bool a_exit_observed   = exit_a.wait_for_one();
+    const bool a_exit_observed   = exit_a.wait_for_one(k_step_timeout);
     const bool a_absent          = wait_for_absence(child_a);
     auto       a_release         = custody_a.release_until(
         std::chrono::steady_clock::now() + k_step_timeout);
@@ -487,7 +419,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     auto custody_b = spawn_child(binary_path, k_child_b_flag);
     const auto child_b = wait_for_identity(
         marker(shared_path, k_child_b_marker));
-    Exit_capture exit_b;
+    Managed_child_exit_capture exit_b;
     auto observation_b = custody_b.observe_latest_created_exit(
         [&](const sintra::Managed_child_exit& event) { exit_b.record(event); });
     const bool b_identity_exact = child_b && observation_b &&
@@ -529,7 +461,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             [&] { return recovery_runner_complete; });
     }
     const auto b_status_after_stale = custody_b.status();
-    std::optional<child_identity_t> child_b_recovery;
+    std::optional<witnessed_child_identity_t> child_b_recovery;
     if (b_status_after_stale.created_occurrences > 1) {
         child_b_recovery = wait_for_identity(
             marker(shared_path, k_child_b_recovery_marker));
@@ -547,7 +479,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
 
     const bool b_finish_requested = write_complete_file(
         marker(shared_path, k_child_b_finish), "complete=1\n");
-    const bool b_exit_observed = exit_b.wait_for_one();
+    const bool b_exit_observed = exit_b.wait_for_one(k_step_timeout);
     const bool b_absent        = wait_for_absence(child_b);
     const bool b_recovery_absent = !child_b_recovery ||
         wait_for_absence(child_b_recovery);

@@ -8,33 +8,21 @@
 #include "managed_child_test_support.h"
 #include "test_utils.h"
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <signal.h>
-#include <sys/types.h>
-#include <unistd.h>
-#endif
-
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <string>
-#include <thread>
 
 namespace {
 
 namespace fs = std::filesystem;
 
 using namespace std::chrono_literals;
+using sintra::test::managed_child::Managed_child_exit_capture;
+using sintra::test::managed_child::terminate_exact_process;
 
 constexpr const char* k_child_a_flag =
     "--managed_child_occurrence_identity_a";
@@ -66,14 +54,6 @@ struct Child_marker
     int           pid = -1;
 };
 
-struct Exit_capture
-{
-    std::mutex                 mutex;
-    std::condition_variable    changed;
-    sintra::Managed_child_exit event;
-    int                        count = 0;
-};
-
 bool write_marker(const fs::path& path)
 {
     return sintra::test::managed_child::write_complete_file(
@@ -88,37 +68,6 @@ Child_marker read_marker(const fs::path& path)
     std::ifstream input(path, std::ios::binary);
     input >> marker.occurrence >> marker.pid;
     return marker;
-}
-
-bool wait_for_exit(Exit_capture& capture)
-{
-    std::unique_lock<std::mutex> lock(capture.mutex);
-    return capture.changed.wait_for(
-        lock,
-        5s,
-        [&]() { return capture.count == 1; });
-}
-
-bool terminate_child(int pid)
-{
-#ifdef _WIN32
-    HANDLE process = OpenProcess(
-        PROCESS_TERMINATE | SYNCHRONIZE,
-        FALSE,
-        static_cast<DWORD>(pid));
-    if (!process) {
-        return false;
-    }
-    const bool terminated =
-        TerminateProcess(process, k_terminated_status) != 0;
-    if (terminated) {
-        (void)WaitForSingleObject(process, 5000);
-    }
-    CloseHandle(process);
-    return terminated;
-#else
-    return ::kill(static_cast<pid_t>(pid), SIGKILL) == 0;
-#endif
 }
 
 int run_child_a(int argc, char* argv[], const fs::path& shared_path)
@@ -193,13 +142,10 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         return sintra::spawn_swarm_process(options);
     };
     auto observe = [](const sintra::Managed_child_custody& custody,
-                      Exit_capture& capture) {
+                      Managed_child_exit_capture& capture) {
         return custody.observe_latest_created_exit(
             [&](const sintra::Managed_child_exit& event) {
-                std::lock_guard<std::mutex> lock(capture.mutex);
-                capture.event = event;
-                ++capture.count;
-                capture.changed.notify_all();
+                capture.record(event);
             });
     };
 
@@ -209,9 +155,9 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const auto marker_a = a_marker_seen
         ? read_marker(shared_path / k_child_a_file)
         : Child_marker{};
-    Exit_capture capture_a;
+    Managed_child_exit_capture capture_a;
     auto observation_a = observe(custody_a, capture_a);
-    const bool a_exit_seen = wait_for_exit(capture_a);
+    const bool a_exit_seen = capture_a.wait_for_one(5s);
     const auto released_a = custody_a.release_until(
         std::chrono::steady_clock::now() + 5s);
 
@@ -221,23 +167,24 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const auto marker_b = b_marker_seen
         ? read_marker(shared_path / k_child_b_file)
         : Child_marker{};
-    Exit_capture capture_b;
+    Managed_child_exit_capture capture_b;
     auto observation_b = observe(custody_b, capture_b);
     const bool crash_requested = observation_b &&
         sintra::test::managed_child::write_complete_file(
             shared_path / k_child_b_crash_file, "1\n");
-    const bool b_exit_seen = wait_for_exit(capture_b);
+    const bool b_exit_seen = capture_b.wait_for_one(5s);
 
     const bool recovery_marker_seen = sintra::test::wait_for_file(
         shared_path / k_child_b_recovery_file, 10s, 10ms);
     const auto recovery_marker = recovery_marker_seen
         ? read_marker(shared_path / k_child_b_recovery_file)
         : Child_marker{};
-    Exit_capture recovery_capture;
+    Managed_child_exit_capture recovery_capture;
     auto recovery_observation = observe(custody_b, recovery_capture);
     const bool recovery_terminated = recovery_observation &&
-        recovery_marker.pid > 0 && terminate_child(recovery_marker.pid);
-    const bool recovery_exit_seen = wait_for_exit(recovery_capture);
+        recovery_marker.pid > 0 && terminate_exact_process(
+            recovery_marker.pid, k_terminated_status);
+    const bool recovery_exit_seen = recovery_capture.wait_for_one(5s);
     const auto released_b = custody_b.release_until(
         std::chrono::steady_clock::now() + 5s);
 
@@ -259,11 +206,12 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         identity_b.custody_identity == recovery_identity.custody_identity &&
         identity_a != identity_b && identity_a != recovery_identity &&
         identity_b != recovery_identity;
+    const auto capture_a_snapshot        = capture_a.snapshot();
+    const auto capture_b_snapshot        = capture_b.snapshot();
+    const auto recovery_capture_snapshot = recovery_capture.snapshot();
     const bool exact_delivery = a_exit_seen && b_exit_seen &&
-        recovery_exit_seen && capture_a.count == 1 && capture_b.count == 1 &&
-        recovery_capture.count == 1 && capture_a.event.occurrence == identity_a &&
-        capture_b.event.occurrence == identity_b &&
-        recovery_capture.event.occurrence == recovery_identity;
+        recovery_exit_seen && capture_a.exact(identity_a) &&
+        capture_b.exact(identity_b) && recovery_capture.exact(recovery_identity);
     const bool marker_identity_matches =
         marker_a.occurrence == identity_a.occurrence &&
         marker_b.occurrence == identity_b.occurrence &&
@@ -311,9 +259,9 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             custody_identity_relationship ? 1 : 0,
             marker_identity_matches ? 1 : 0,
             exact_delivery ? 1 : 0,
-            capture_a.count,
-            capture_b.count,
-            recovery_capture.count,
+            static_cast<int>(capture_a_snapshot.deliveries),
+            static_cast<int>(capture_b_snapshot.deliveries),
+            static_cast<int>(recovery_capture_snapshot.deliveries),
             released_a.release_state ==
                 sintra::Managed_child_release_state::complete ? 1 : 0,
             released_b.release_state ==
@@ -330,11 +278,7 @@ int main(int argc, char* argv[])
     sintra::test::Shared_directory shared(
         "SINTRA_TEST_SHARED_DIR",
         "occurrence_identity_reuse");
-    if (sintra::test::has_argv_flag(argc, argv, k_child_a_flag)) {
-        return run_child_a(argc, argv, shared.path());
-    }
-    if (sintra::test::has_argv_flag(argc, argv, k_child_b_flag)) {
-        return run_child_b(argc, argv, shared.path());
-    }
+    if (sintra::test::has_argv_flag(argc, argv, k_child_a_flag)) { return run_child_a(argc, argv, shared.path()); }
+    if (sintra::test::has_argv_flag(argc, argv, k_child_b_flag)) { return run_child_b(argc, argv, shared.path()); }
     return run_root(argc, argv, shared.path());
 }

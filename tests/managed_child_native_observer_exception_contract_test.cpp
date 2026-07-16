@@ -18,7 +18,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -28,9 +27,12 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using sintra::test::managed_child::process_identity_t;
+using sintra::test::managed_child::read_process_identity;
 using sintra::test::managed_child::Scoped_test_hook;
 using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::write_complete_file;
+using sintra::test::managed_child::write_process_identity;
 
 constexpr std::string_view k_child_flag =
     "--managed-child-native-observer-exception-child";
@@ -41,12 +43,6 @@ constexpr std::uint32_t k_high_bit_exit_status = 0xc0000005u;
 
 struct Ready_target : sintra::Derived_transceiver<Ready_target>
 {};
-
-struct Child_identity
-{
-    int      pid = -1;
-    uint64_t start_stamp = 0;
-};
 
 struct Failure_plan
 {
@@ -170,12 +166,9 @@ fs::path case_file(
         (std::string(stem) + '_' + std::to_string(case_number) + ".complete");
 }
 
-Child_identity read_identity(const fs::path& path)
+process_identity_t read_identity(const fs::path& path)
 {
-    Child_identity identity;
-    std::ifstream in(path);
-    in >> identity.pid >> identity.start_stamp;
-    return identity;
+    return read_process_identity(path).value_or(process_identity_t{});
 }
 
 int run_child(
@@ -195,11 +188,8 @@ int run_child(
     if (!ready.assign_name("native_observer_ready_" + nonce)) {
         return 2;
     }
-    const auto start_stamp = sintra::current_process_start_stamp();
-    if (!start_stamp || !write_complete_file(
-            case_file(shared_directory, "identity", case_number),
-            std::to_string(sintra::test::get_pid()) + ' ' +
-                std::to_string(*start_stamp)))
+    if (!write_process_identity(
+            case_file(shared_directory, "identity", case_number)))
     {
         return 2;
     }

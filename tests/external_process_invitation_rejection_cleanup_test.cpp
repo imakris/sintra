@@ -1,6 +1,7 @@
 #include <sintra/sintra.h>
 
 #include "exact_child_test_support.h"
+#include "managed_child_test_support.h"
 #include "test_utils.h"
 
 #include <chrono>
@@ -18,6 +19,8 @@
 #include <vector>
 
 namespace {
+
+using sintra::test::managed_child::make_invitation;
 
 constexpr const char* k_role_arg       = "--external_attach_cleanup_role";
 constexpr const char* k_dir_arg        = "--external_attach_cleanup_dir";
@@ -229,16 +232,6 @@ std::vector<std::string> helper_args(
     auto sintra_args = invitation.sintra_args();
     args.insert(args.end(), sintra_args.begin(), sintra_args.end());
     return args;
-}
-
-sintra::External_process_invitation make_invitation(
-    sintra::instance_id_type   process_iid,
-    std::chrono::milliseconds  timeout)
-{
-    sintra::External_process_invitation_options options;
-    options.process_instance_id = process_iid;
-    options.timeout             = timeout;
-    return sintra::create_external_process_invitation(options);
 }
 
 sintra::External_process_invitation wait_for_invitation_reuse(
