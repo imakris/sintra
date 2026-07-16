@@ -3560,6 +3560,9 @@ inline void Managed_process::start_owned_lifecycle_worker(
     uint32_t failure_occurrence)
 {
     std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+    if (!m_owned_lifecycle_worker_admission_open) {
+        throw std::runtime_error("Sintra lifecycle worker admission is closed.");
+    }
     for (auto it = m_owned_lifecycle_workers.begin(); it != m_owned_lifecycle_workers.end();) {
         if (it->complete->load(std::memory_order_acquire)) {
             if (it->thread.joinable()) {
@@ -3736,6 +3739,7 @@ inline void Managed_process::join_owned_lifecycle_workers()
     std::vector<Owned_lifecycle_worker> workers;
     {
         std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+        m_owned_lifecycle_worker_admission_open = false;
         workers.swap(m_owned_lifecycle_workers);
     }
     for (auto& worker : workers) {

@@ -1522,6 +1522,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     std::map<instance_id_type, detail::Managed_child_active_occurrence>
                                         m_child_custody_by_process;
     mutable std::mutex                  m_owned_lifecycle_workers_mutex;
+    bool                                m_owned_lifecycle_worker_admission_open = true;
     struct Owned_lifecycle_worker
     {
         std::thread                         thread;
