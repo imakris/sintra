@@ -578,9 +578,9 @@ void reserve_invitation_stage_hook(const char* stage)
 }
 
 void reader_retirement_stop_hook(
-    const char*               stage,
-    sintra::instance_id_type  process_iid,
-    std::uint32_t             occurrence)
+    const char*                stage,
+    sintra::instance_id_type   process_iid,
+    std::uint32_t              occurrence)
 {
     if (std::string_view(stage) ==
         sintra::detail::test_hooks::k_process_reader_rpc_unblock_entered &&
@@ -604,9 +604,9 @@ void reader_retirement_stop_hook(
 }
 
 bool reader_retirement_worker_start_failure_hook(
-    const char*               stage,
-    sintra::instance_id_type  process_iid,
-    std::uint32_t             occurrence) noexcept
+    const char*                stage,
+    sintra::instance_id_type   process_iid,
+    std::uint32_t              occurrence) noexcept
 {
     if (std::string_view(stage) != k_reader_retirement_worker_start_stage ||
         process_iid != g_reader_retirement_process_iid.load(
@@ -639,8 +639,8 @@ bool external_process_state_present(sintra::instance_id_type process_iid)
 }
 
 bool remove_exact_external_reader_for_reuse(
-    sintra::instance_id_type process_iid,
-    std::uint32_t            occurrence)
+    sintra::instance_id_type   process_iid,
+    std::uint32_t              occurrence)
 {
     {
         std::shared_lock lock(sintra::s_mproc->m_readers_mutex);
@@ -1397,9 +1397,10 @@ bool run_stale_external_generation_case(
     std::mutex relay_mutex;
     std::condition_variable relay_changed;
     bool relay_seen = false;
+
     std::uint64_t relayed_custody_identity = 1;
-    std::uint32_t relayed_occurrence = 0;
-    auto deactivate_relay = sintra::s_mproc->activate<sintra::Managed_process>(
+    std::uint32_t relayed_occurrence       = 0;
+    auto          deactivate_relay         = sintra::s_mproc->activate<sintra::Managed_process>(
         [&](const sintra::Managed_process::terminated_abnormally& message) {
             if (message.sender_instance_id != process_iid ||
                 message.status != k_stale_external_crash_status)
@@ -1580,12 +1581,12 @@ bool wait_for_reusable_invitation(
 }
 
 bool run_reader_retirement_case(
-    int                            argc,
-    char*                          argv[],
-    const std::string&             binary_path,
-    const std::filesystem::path&   dir,
-    bool                           inject_worker_start_failure = false,
-    bool                           close_worker_admission_before_retry = false)
+    int                                    argc,
+    char*                                  argv[],
+    const std::string&                     binary_path,
+    const std::filesystem::path&           dir,
+    bool                                   inject_worker_start_failure = false,
+    bool                                   close_worker_admission_before_retry = false)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -1666,7 +1667,7 @@ bool run_reader_retirement_case(
         5s,
         "reader-retirement helper should exit after intentional crash");
 
-    bool teardown_gate_reached = false;
+    bool teardown_gate_reached       = false;
     bool workers_empty_at_join_close = false;
     if (close_worker_admission_before_retry) {
         teardown_gate_reached = teardown_gate.wait(5s);
@@ -1682,8 +1683,8 @@ bool run_reader_retirement_case(
         teardown_gate.release();
     }
 
-    const bool gate_reached = gate.wait(5s);
-    bool old_running_while_blocked = false;
+    const bool gate_reached              = gate.wait(5s);
+    bool       old_running_while_blocked = false;
     {
         std::lock_guard lock(gate.mutex);
         old_running_while_blocked = gate.reader_running;
@@ -1833,7 +1834,7 @@ bool run_reader_retirement_isolated(const std::string& binary_path)
     sintra::test::Exact_child root(2s);
     const bool launched = launch_direct_process(
         binary_path,
-        {k_root_case_arg, k_root_case_reader_retirement},
+        { k_root_case_arg, k_root_case_reader_retirement },
         root);
     bool ok = sintra::test::assert_true(
         launched,
@@ -1857,7 +1858,7 @@ bool run_reader_retirement_start_failure_isolated(
     sintra::test::Exact_child root(2s);
     const bool launched = launch_direct_process(
         binary_path,
-        {k_root_case_arg, k_root_case_reader_start_failure},
+        { k_root_case_arg, k_root_case_reader_start_failure },
         root);
     bool ok = sintra::test::assert_true(
         launched,
@@ -1881,7 +1882,7 @@ bool run_reader_retirement_teardown_race_isolated(
     sintra::test::Exact_child root(2s);
     const bool launched = launch_direct_process(
         binary_path,
-        {k_root_case_arg, k_root_case_reader_teardown_race},
+        { k_root_case_arg, k_root_case_reader_teardown_race },
         root);
     bool ok = sintra::test::assert_true(
         launched,

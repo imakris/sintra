@@ -1198,9 +1198,9 @@ instance_id_type Coordinator::publish_transceiver(
 
 
 inline instance_id_type Coordinator::publish_transceiver_with_reader_identity(
-    type_id_type                  tid,
-    instance_id_type              iid,
-    const string&                 assigned_name,
+    type_id_type                   tid,
+    instance_id_type               iid,
+    const string&                  assigned_name,
     const Process_reader_identity& reader_identity)
 {
     coordinator_lock_stage_for_test(
@@ -1353,9 +1353,9 @@ bool Coordinator::unpublish_transceiver(instance_id_type iid)
 }
 
 inline bool Coordinator::unpublish_transceiver_exact(
-    instance_id_type iid,
-    const std::optional<Process_reader_identity>& expected_identity,
-    const std::optional<Crash_info>& crash_info)
+    instance_id_type                               iid,
+    const std::optional<Process_reader_identity>&  expected_identity,
+    const std::optional<Crash_info>&               crash_info)
 {
     const auto process_iid = process_of(iid);
     if (crash_info &&
@@ -2174,8 +2174,9 @@ void Coordinator::enable_recovery(instance_id_type piid)
 
 inline
 void Coordinator::recover_if_required(
-    const Crash_info&                              info,
-    const detail::Managed_child_occurrence_token& occurrence)
+    const Crash_info&      info,
+    const detail::Managed_child_occurrence_token&
+                           occurrence)
 {
     assert(is_process(info.process_iid));
 

@@ -211,16 +211,16 @@ struct Case_result
     bool setup = false;
     bool failure_injected = false;
     bool typed_failure = false;
-    bool fallback_available = false;
+    bool fallback_available        = false;
     bool first_finalize_incomplete = false;
-    bool release_complete = false;
-    bool exact_exit_once = false;
-    bool handle_closed_once = false;
-    bool survivor_absent = false;
-    bool registration_ordered = false;
-    bool failure_ordered = false;
-    bool exit_observation = false;
-    bool callback_reentry = false;
+    bool release_complete          = false;
+    bool exact_exit_once           = false;
+    bool handle_closed_once        = false;
+    bool survivor_absent           = false;
+    bool registration_ordered      = false;
+    bool failure_ordered           = false;
+    bool exit_observation          = false;
+    bool callback_reentry          = false;
 
     bool passed() const noexcept
     {
@@ -233,14 +233,14 @@ struct Case_result
 
 Case_result run_case(
     const std::string& binary_path,
-    const fs::path&   shared_directory,
-    unsigned          case_number,
-    const char*       failure_stage,
-    bool              verify_finalize_retry,
-    bool              cancel_before_registration = false,
-    bool              reenter_release = false,
-    bool              reenter_terminate = false,
-    bool              exit_before_failure = false)
+    const fs::path&    shared_directory,
+    unsigned           case_number,
+    const char*        failure_stage,
+    bool               verify_finalize_retry,
+    bool               cancel_before_registration = false,
+    bool               reenter_release = false,
+    bool               reenter_terminate = false,
+    bool               exit_before_failure = false)
 {
     Case_result result;
     const auto process_iid = sintra::compose_instance(61u + case_number, 1ull);
@@ -357,12 +357,12 @@ Case_result run_case(
             elapsed < 2s;
     }
     bool exit_requested = false;
-    bool child_exited = false;
+    bool child_exited   = false;
 #ifdef _WIN32
     DWORD exit_code = STILL_ACTIVE;
     if (exit_before_failure) {
-        exit_requested = write_complete_file(exit_path, "exit\n");
-        child_exited = child_handle &&
+        exit_requested         = write_complete_file(exit_path, "exit\n");
+        child_exited           = child_handle &&
             WaitForSingleObject(child_handle, 5000) == WAIT_OBJECT_0 &&
             GetExitCodeProcess(child_handle, &exit_code) != 0 &&
             exit_code != STILL_ACTIVE;

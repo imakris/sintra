@@ -78,8 +78,10 @@ struct Failure_plan
     uint32_t                    expected_occurrence = 0;
     unsigned                    remaining = 0;
     unsigned                    hits = 0;
+
     std::filesystem::path       wait_for_marker;
-    bool                        marker_seen = false;
+    bool                        marker_seen         = false;
+
     bool                        parked = false;
     bool                        park_released = false;
     bool                        park_watchdog_released = false;
@@ -505,8 +507,8 @@ std::filesystem::path release_marker(const std::filesystem::path& marker)
 }
 
 std::filesystem::path occurrence_marker(
-    const std::filesystem::path& marker,
-    uint32_t occurrence)
+    const std::filesystem::path&   marker,
+    uint32_t                       occurrence)
 {
     return marker.string() + ".occurrence." + std::to_string(occurrence);
 }
@@ -522,8 +524,8 @@ std::filesystem::path exit_marker(const std::filesystem::path& marker)
 }
 
 bool wait_for_file(
-    const std::filesystem::path& path,
-    std::chrono::milliseconds timeout) noexcept
+    const std::filesystem::path&   path,
+    std::chrono::milliseconds      timeout) noexcept
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::error_code ec;
@@ -680,8 +682,8 @@ void clear_posix_reap()
 }
 
 void arm_concurrent_posix_reaps(
-    const process_identity_t& first,
-    const process_identity_t& second)
+    const process_identity_t&  first,
+    const process_identity_t&  second)
 {
     const std::array<process_identity_t, 2> identities{first, second};
     for (size_t i = 0; i < 2; ++i) {
@@ -790,8 +792,8 @@ bool run_recovery_create_release_race(
         result = sintra::s_mproc->spawn_swarm_process(args, launch_attempt);
     });
 
-    const bool setup_held = wait_for_gate(gate);
-    bool production_cache_committed = false;
+    const bool setup_held                 = wait_for_gate(gate);
+    bool       production_cache_committed = false;
     {
         std::lock_guard<std::mutex> lock(
             sintra::s_mproc->m_cached_spawns_mutex);
@@ -851,7 +853,7 @@ bool run_recovery_create_release_race(
     }
     sintra::External_process_invitation_options invitation_options;
     invitation_options.process_instance_id = piid;
-    invitation_options.timeout = 5s;
+    invitation_options.timeout             = 5s;
     const auto invitation = sintra::create_external_process_invitation(
         invitation_options);
     const bool invitation_created = static_cast<bool>(invitation);
@@ -895,15 +897,15 @@ bool run_recovery_create_release_race(
 }
 
 bool run_recovery_recipe_exposure_race(
-    int argc,
-    char* argv[],
+    int                argc,
+    char*              argv[],
     const std::string& binary_path)
 {
     sintra::init(argc, argv);
-    const auto marker = unique_marker("recovery_recipe_exposure");
-    const auto occurrence_0_marker = occurrence_marker(marker, 0);
-    const auto occurrence_1_marker = occurrence_marker(marker, 1);
-    const auto occurrence_0_crash = exit_marker(occurrence_0_marker);
+    const auto marker               = unique_marker("recovery_recipe_exposure");
+    const auto occurrence_0_marker  = occurrence_marker(marker, 0);
+    const auto occurrence_1_marker  = occurrence_marker(marker, 1);
+    const auto occurrence_0_crash   = exit_marker(occurrence_0_marker);
     const auto occurrence_1_release = release_marker(occurrence_1_marker);
     const std::array paths{
         occurrence_0_marker,
@@ -920,32 +922,32 @@ bool run_recovery_recipe_exposure_race(
     Failure_plan plan;
     plan.stage =
         sintra::detail::test_hooks::k_managed_child_fail_post_native_setup;
-    plan.park_stage = plan.stage;
-    plan.expected_iid = piid;
+    plan.park_stage          = plan.stage;
+    plan.expected_iid        = piid;
     plan.expected_occurrence = 0;
-    plan.wait_for_marker = occurrence_0_marker;
+    plan.wait_for_marker     = occurrence_0_marker;
     s_failure_plan.store(&plan, std::memory_order_release);
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &inject_managed_child_failure, std::memory_order_release);
 
     Setup_gate gate;
-    gate.expected_iid = piid;
+    gate.expected_iid        = piid;
     gate.expected_occurrence = 1;
-    s_gate = &gate;
+    s_gate                   = &gate;
     sintra::detail::test_hooks::s_managed_child_reader_setup.store(
         &hold_reader_setup, std::memory_order_release);
 
     sintra::Spawn_options options;
-    options.binary_path = binary_path;
-    options.args = {k_recovery_recipe_exposure_child_flag, marker.string()};
-    options.process_instance_id = piid;
+    options.binary_path              = binary_path;
+    options.args                     = {k_recovery_recipe_exposure_child_flag, marker.string()};
+    options.process_instance_id      = piid;
     options.lifetime.enable_lifeline = false;
     sintra::Managed_child_custody custody;
     std::thread initial_spawn([&]() {
         custody = sintra::spawn_swarm_process(options);
     });
 
-    bool initial_parked = false;
+    bool initial_parked           = false;
     bool occurrence_0_initialized = false;
     {
         std::unique_lock<std::mutex> lock(plan.mutex);
@@ -960,12 +962,12 @@ bool run_recovery_recipe_exposure_race(
     const bool recovery_reader_entered = occurrence_0_crashed &&
         wait_for_gate(gate);
 
-    bool parent_released_park = false;
+    bool parent_released_park   = false;
     bool park_watchdog_released = false;
     {
         std::lock_guard<std::mutex> lock(plan.mutex);
-        parent_released_park = plan.parked && !plan.park_released;
-        plan.park_released = true;
+        parent_released_park   = plan.parked && !plan.park_released;
+        plan.park_released     = true;
         park_watchdog_released = plan.park_watchdog_released;
         plan.changed.notify_all();
     }
@@ -1352,17 +1354,17 @@ bool run_owned_native_exception(
 }
 
 bool run_post_native_recovery_occurrence_advance(
-    int argc,
-    char* argv[],
+    int                argc,
+    char*              argv[],
     const std::string& binary_path)
 {
     sintra::init(argc, argv);
-    const auto marker = unique_marker("post_native_recovery_advance");
-    const auto occurrence_0_marker = occurrence_marker(marker, 0);
-    const auto occurrence_1_marker = occurrence_marker(marker, 1);
-    const auto occurrence_2_marker = occurrence_marker(marker, 2);
-    const auto occurrence_0_crash = exit_marker(occurrence_0_marker);
-    const auto occurrence_1_crash = exit_marker(occurrence_1_marker);
+    const auto marker               = unique_marker("post_native_recovery_advance");
+    const auto occurrence_0_marker  = occurrence_marker(marker, 0);
+    const auto occurrence_1_marker  = occurrence_marker(marker, 1);
+    const auto occurrence_2_marker  = occurrence_marker(marker, 2);
+    const auto occurrence_0_crash   = exit_marker(occurrence_0_marker);
+    const auto occurrence_1_crash   = exit_marker(occurrence_1_marker);
     const auto occurrence_2_release = release_marker(occurrence_2_marker);
     const std::array paths{
         occurrence_0_marker,
@@ -1381,25 +1383,25 @@ bool run_post_native_recovery_occurrence_advance(
     Failure_plan plan;
     plan.stage =
         sintra::detail::test_hooks::k_managed_child_fail_post_native_setup;
-    plan.expected_iid = piid;
+    plan.expected_iid        = piid;
     plan.expected_occurrence = 1;
-    plan.remaining = 1;
-    plan.wait_for_marker = occurrence_1_marker;
+    plan.remaining           = 1;
+    plan.wait_for_marker     = occurrence_1_marker;
     s_failure_plan.store(&plan, std::memory_order_release);
     sintra::detail::test_hooks::s_managed_child_failure.store(
         &inject_managed_child_failure, std::memory_order_release);
 
     sintra::Spawn_options options;
-    options.binary_path = binary_path;
-    options.args = {k_post_native_recovery_child_flag, marker.string()};
-    options.process_instance_id = piid;
+    options.binary_path              = binary_path;
+    options.args                     = {k_post_native_recovery_child_flag, marker.string()};
+    options.process_instance_id      = piid;
     options.lifetime.enable_lifeline = false;
     auto custody = sintra::spawn_swarm_process(options);
 
     const bool occurrence_0_seen = wait_for_file(occurrence_0_marker, 5s);
     const bool occurrence_0_crashed = occurrence_0_seen &&
         write_signal_marker(occurrence_0_crash, "crash");
-    bool hook_seen = false;
+    bool hook_seen                = false;
     bool occurrence_1_initialized = false;
     {
         std::unique_lock<std::mutex> lock(plan.mutex);
@@ -2264,7 +2266,7 @@ bool run_prepublication_publish_race(
 
     auto exit_observation = custody.observe_latest_created_exit(
         [](const sintra::Managed_child_exit&) {});
-    const bool observation_valid = static_cast<bool>(exit_observation);
+    const bool observation_valid    = static_cast<bool>(exit_observation);
     const auto publication_identity = exit_observation.occurrence;
     exit_observation.subscription.unsubscribe();
     const bool publication_identity_exact = observation_valid &&
@@ -3195,7 +3197,7 @@ int main(int argc, char* argv[])
             if (occurrence == 0) {
                 sintra::enable_recovery();
             }
-            const auto exact_marker = occurrence_marker(marker, occurrence);
+            const auto exact_marker     = occurrence_marker(marker, occurrence);
             const bool identity_written = write_process_identity(exact_marker);
             if (occurrence == 0) {
                 const bool crash_requested = wait_for_file(
@@ -3221,7 +3223,7 @@ int main(int argc, char* argv[])
             if (occurrence == 0) {
                 sintra::enable_recovery();
             }
-            const auto exact_marker = occurrence_marker(marker, occurrence);
+            const auto exact_marker     = occurrence_marker(marker, occurrence);
             const bool identity_written = write_process_identity(exact_marker);
             if (occurrence < 2) {
                 const bool crash_requested =
@@ -3239,10 +3241,12 @@ int main(int argc, char* argv[])
             const bool finalized = settle_detail_finalize(
                 "post_native_recovery_child");
             return
-                identity_written &&
-                occurrence == 2  &&
-                released         &&
-                finalized
+                (
+                    identity_written &&
+                    occurrence == 2  &&
+                    released         &&
+                    finalized
+                )
                     ? 0
                     : 3;
         }
@@ -3252,9 +3256,9 @@ int main(int argc, char* argv[])
             return 2;
         }
         if (std::string(argv[i]) == k_native_bound_child_flag) {
-            const std::filesystem::path marker = argv[i + 1];
-            const bool identity_written = write_process_identity(marker);
-            const bool released = wait_for_file(release_marker(marker), 10s);
+            const std::filesystem::path marker           = argv[i + 1];
+            const bool                  identity_written = write_process_identity(marker);
+            const bool                  released         = wait_for_file(release_marker(marker), 10s);
             return identity_written && released ? 0 : 3;
         }
         if (std::string(argv[i]) == k_owned_child_flag) {
@@ -3276,8 +3280,8 @@ int main(int argc, char* argv[])
                 finalized_written && exit_released ? 0 : 3;
         }
         if (std::string(argv[i]) == k_prepublication_exit_child_flag) {
-            const std::filesystem::path marker = argv[i + 1];
-            const bool identity_written = write_process_identity(marker);
+            const std::filesystem::path marker           = argv[i + 1];
+            const bool                  identity_written = write_process_identity(marker);
             std::this_thread::sleep_for(250ms);
             return identity_written ? 0 : 3;
         }
@@ -3303,8 +3307,8 @@ int main(int argc, char* argv[])
             return assigned && identity_written && released && finalized ? 0 : 3;
         }
         if (std::string(argv[i]) == k_readiness_cancellation_child_flag) {
-            const std::filesystem::path marker = argv[i + 1];
-            const bool identity_written = write_process_identity(marker);
+            const std::filesystem::path marker           = argv[i + 1];
+            const bool                  identity_written = write_process_identity(marker);
             std::this_thread::sleep_for(1s);
             return identity_written ? 0 : 3;
         }

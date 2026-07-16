@@ -218,10 +218,10 @@ inline Managed_child_occurrence_identity make_managed_child_occurrence_identity(
 }
 
 inline Managed_child_exit_publication record_managed_child_exit_locked(
-    uint64_t                         custody_identity,
-    Managed_child_occurrence_record& occurrence,
-    std::uint32_t                    wait_status,
-    bool                             wait_status_available)
+    uint64_t                           custody_identity,
+    Managed_child_occurrence_record&   occurrence,
+    std::uint32_t                      wait_status,
+    bool                               wait_status_available)
 {
     Managed_child_exit_publication publication;
     const bool was_exited = occurrence.native.exited();
@@ -387,8 +387,8 @@ inline constexpr const char* k_managed_child_custody_retirement_complete =
 } // namespace test_hooks
 
 inline void managed_child_custody_retirement_for_test(
-    const char* stage,
-    uint64_t    custody_identity) noexcept
+    const char*        stage,
+    uint64_t           custody_identity) noexcept
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_managed_child_custody_retirement.load(
@@ -3430,7 +3430,7 @@ inline void Managed_process::start_owned_lifecycle_worker(
     // construction fails, erasing this slot is safe; no joinable local thread
     // can escape registration and trigger std::terminate during unwinding.
     m_owned_lifecycle_workers.emplace_back();
-    auto& owned = m_owned_lifecycle_workers.back();
+    auto& owned    = m_owned_lifecycle_workers.back();
     owned.complete = complete;
     try {
         if (failure_stage) {
@@ -5280,12 +5280,14 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
                 : s.occurrence + 1;
         auto cached = m_cached_spawns.find(s.piid);
         const auto next_occurrence =
-            cached != m_cached_spawns.end() &&
+            (
+                cached != m_cached_spawns.end() &&
                 cached->second.custody == custody
+            )
                 ? std::max(cached->second.occurrence, completed_next)
                 : completed_next;
-        m_cached_spawns[s.piid] = s;
-        m_cached_spawns[s.piid].custody = custody;
+        m_cached_spawns[s.piid]            = s;
+        m_cached_spawns[s.piid].custody    = custody;
         m_cached_spawns[s.piid].occurrence = next_occurrence;
     }
 
