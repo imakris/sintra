@@ -37,13 +37,15 @@ constexpr std::string_view k_child_a_flag   = "--crash-provenance-child-a";
 constexpr std::string_view k_child_b_flag   = "--crash-provenance-child-b";
 constexpr std::string_view k_child_a_marker = "child_a.complete";
 constexpr std::string_view k_child_b_marker = "child_b.complete";
+constexpr std::string_view k_child_b_recovery_marker =
+    "child_b_recovery.complete";
 constexpr std::string_view k_child_a_crash  = "child_a_crash.complete";
 constexpr std::string_view k_child_b_finish = "child_b_finish.complete";
 constexpr auto             k_step_timeout   = 8s;
 constexpr auto             k_child_timeout  = 50s;
-// Each child path can serialize six step bounds (96s total); the remaining
-// 24s cover process startup, delivery fences, and cleanup.
-constexpr auto k_watchdog_timeout = 120s;
+// The predecessor can serialize six step bounds (48s), and the replacement
+// can serialize nine (72s). The remaining 30s cover startup and fences.
+constexpr auto k_watchdog_timeout = 150s;
 constexpr auto k_poll_interval    = 10ms;
 constexpr int  k_stale_status     = 173;
 
@@ -348,13 +350,24 @@ int run_child(
     if (!sintra::test::has_argv_flag(argc, argv, k_child_b_flag)) {
         return 4;
     }
+    sintra::enable_recovery();
     bool child_valid = true;
-    {
+    if (sintra::s_recovery_occurrence == 0) {
         Witness witness;
         child_valid = witness.assign_name(witness_name) &&
             write_identity(
                 marker(shared_path, k_child_b_marker),
                 witness.instance_id()) &&
+            sintra::test::wait_for_file(
+                marker(shared_path, k_child_b_finish),
+                k_child_timeout,
+                k_poll_interval);
+    }
+    else {
+        child_valid = sintra::s_recovery_occurrence == 1 &&
+            write_identity(
+                marker(shared_path, k_child_b_recovery_marker),
+                sintra::invalid_instance_id) &&
             sintra::test::wait_for_file(
                 marker(shared_path, k_child_b_finish),
                 k_child_timeout,
@@ -396,6 +409,10 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     Relay_log relay_log;
     Lifecycle_log lifecycle_log;
     std::atomic<unsigned> recovery_policy_calls{0};
+    std::atomic<unsigned> recovery_runner_calls{0};
+    std::mutex              recovery_runner_mutex;
+    std::condition_variable recovery_runner_changed;
+    bool                    recovery_runner_complete = false;
     auto deactivate_relay = sintra::s_mproc->activate<sintra::Managed_process>(
         [&](const sintra::Managed_process::terminated_abnormally& message) {
             relay_log.record(message);
@@ -406,8 +423,19 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             lifecycle_log.record(event);
         });
     sintra::set_recovery_policy([&](const sintra::Crash_info&) {
-        recovery_policy_calls.fetch_add(1, std::memory_order_release);
-        return false;
+        return recovery_policy_calls.fetch_add(1, std::memory_order_acq_rel) != 0;
+    });
+    sintra::set_recovery_runner([&](
+        const sintra::Crash_info&,
+        const sintra::Recovery_control& control)
+    {
+        recovery_runner_calls.fetch_add(1, std::memory_order_release);
+        control.spawn();
+        {
+            std::lock_guard<std::mutex> lock(recovery_runner_mutex);
+            recovery_runner_complete = true;
+        }
+        recovery_runner_changed.notify_all();
     });
 
     const std::string witness_name =
@@ -492,7 +520,26 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         sintra::process_lifecycle_event::reason::crash);
     const unsigned recovery_count_after_stale =
         recovery_policy_calls.load(std::memory_order_acquire);
+    bool stale_recovery_fenced = recovery_count_after_stale == 1;
+    if (recovery_count_after_stale > 1) {
+        std::unique_lock<std::mutex> lock(recovery_runner_mutex);
+        stale_recovery_fenced = recovery_runner_changed.wait_for(
+            lock,
+            k_step_timeout,
+            [&] { return recovery_runner_complete; });
+    }
     const auto b_status_after_stale = custody_b.status();
+    std::optional<child_identity_t> child_b_recovery;
+    if (b_status_after_stale.created_occurrences > 1) {
+        child_b_recovery = wait_for_identity(
+            marker(shared_path, k_child_b_recovery_marker));
+    }
+    const bool b_has_recovery_occurrence =
+        b_status_after_stale.admitted_occurrences > 1 ||
+        b_status_after_stale.created_occurrences > 1;
+    const bool b_recovery_identity_valid =
+        b_status_after_stale.created_occurrences <= 1 ||
+        (child_b_recovery && child_b_recovery->occurrence == 1);
     const bool b_live_after_stale = child_b && exact_process_is_live(
         child_b->pid, child_b->start_stamp);
     const bool b_witness_after = child_b &&
@@ -502,7 +549,9 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         marker(shared_path, k_child_b_finish), "complete=1\n");
     const bool b_exit_observed = exit_b.wait_for_one();
     const bool b_absent        = wait_for_absence(child_b);
-    if (b_exit_observed && b_absent) {
+    const bool b_recovery_absent = !child_b_recovery ||
+        wait_for_absence(child_b_recovery);
+    if (b_exit_observed && b_absent && b_recovery_absent) {
         sintra::s_mproc->wait_for_delivery_fence();
         sintra::s_mproc->wait_for_delivery_fence();
     }
@@ -519,6 +568,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     observation_a.subscription.unsubscribe();
     observation_b.subscription.unsubscribe();
     deactivate_relay();
+    sintra::set_recovery_runner(sintra::Recovery_runner{});
     sintra::set_recovery_policy(sintra::Recovery_policy{});
     sintra::set_lifecycle_handler(sintra::Lifecycle_handler{});
     const bool finalized = sintra::shutdown();
@@ -532,11 +582,15 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const bool releases_complete =
         a_release.release_state == sintra::Managed_child_release_state::complete &&
         b_release.release_state == sintra::Managed_child_release_state::complete;
-    const bool survivors_absent = a_absent && b_absent && child_a && child_b &&
+    const bool survivors_absent = a_absent && b_absent && b_recovery_absent &&
+        child_a && child_b &&
         !exact_process_is_live(child_a->pid, child_a->start_stamp) &&
-        !exact_process_is_live(child_b->pid, child_b->start_stamp);
+        !exact_process_is_live(child_b->pid, child_b->start_stamp) &&
+        (!child_b_recovery || !exact_process_is_live(
+            child_b_recovery->pid, child_b_recovery->start_stamp));
     const bool setup_valid = a_baseline && custody_b && b_identity_exact &&
         b_witness_before && stale_relay_fenced && stale_relay_exact &&
+        stale_recovery_fenced && b_recovery_identity_valid &&
         b_finish_requested && b_exit_observed &&
         exit_b.exact(observation_b.occurrence) && exit_b.normal_zero() &&
         releases_complete && survivors_absent && finalized;
@@ -546,7 +600,9 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         b_status_after_stale.created_occurrences == 1 &&
         b_status_after_stale.exited_occurrences == 0 &&
         b_live_after_stale && b_witness_after && crash_count_after_stale == 1 &&
-        recovery_count_after_stale == 1 && b_normal_lifecycle &&
+        recovery_count_after_stale == 1 &&
+        recovery_runner_calls.load(std::memory_order_acquire) == 0 &&
+        !b_has_recovery_occurrence && !child_b_recovery && b_normal_lifecycle &&
         final_crash_count == 1 && final_normal_count == 1 &&
         lifecycle_log.has_status(
             sintra::process_lifecycle_event::reason::normal_exit, 0);
@@ -555,7 +611,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         std::fprintf(stdout,
             "CRASH_PROVENANCE_REUSE_GREEN real_stamp=1 a_custody=%llu "
             "a_occurrence=%u b_custody=%llu b_occurrence=0 stale_crashes=0 "
-            "stale_recovery=0 b_live=1 b_witness=1 b_normal=1 survivors=0\n",
+            "stale_recovery=0 stale_recipe=0 b_recovery=0 b_live=1 "
+            "b_witness=1 b_normal=1 survivors=0\n",
             static_cast<unsigned long long>(
                 observation_a.occurrence.custody_identity),
             observation_a.occurrence.occurrence,
@@ -567,24 +624,32 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
 
     const bool current_red = setup_valid && !real_relay_exact &&
         relays_after_a[0].custody_identity == 0 &&
-        child_b->occurrence == 0 && b_status_after_stale.admitted_occurrences == 1 &&
-        b_status_after_stale.created_occurrences == 1 &&
+        child_b->occurrence == 0 &&
+        b_status_after_stale.admitted_occurrences == 2 &&
+        b_status_after_stale.created_occurrences ==
+            (child_b_recovery ? 2u : 1u) &&
         b_status_after_stale.exited_occurrences == 0 &&
         b_live_after_stale && b_witness_after && crash_count_after_stale == 2 &&
-        recovery_count_after_stale == 2 && !b_normal_lifecycle &&
-        final_crash_count == 2 && final_normal_count == 0;
+        recovery_count_after_stale == 2 &&
+        recovery_runner_calls.load(std::memory_order_acquire) == 1 &&
+        (child_b_recovery ? b_normal_lifecycle : !b_normal_lifecycle) &&
+        final_crash_count == 2 &&
+        final_normal_count == (child_b_recovery ? 1u : 0u);
 
     if (current_red) {
         std::fprintf(stderr,
             "CRASH_PROVENANCE_REUSE_RED real_stamp=0 a_custody=%llu "
             "a_occurrence=%u b_custody=%llu b_occurrence=%u stale_crashes=1 "
-            "stale_recovery=1 b_live=1 b_witness=1 b_normal=0 survivors=0\n",
+            "stale_recovery=1 stale_recipe=1 b_admitted=2 b_created=%zu "
+            "b_live=1 b_witness=1 b_normal=%zu survivors=0\n",
             static_cast<unsigned long long>(
                 observation_a.occurrence.custody_identity),
             observation_a.occurrence.occurrence,
             static_cast<unsigned long long>(
                 observation_b.occurrence.custody_identity),
-            child_b->occurrence);
+            child_b->occurrence,
+            b_status_after_stale.created_occurrences,
+            final_normal_count);
         std::fflush(stderr);
         return 2;
     }
@@ -593,6 +658,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         "CRASH_PROVENANCE_REUSE_INVALID setup=%d a_baseline=%d real_exact=%d "
         "real_relays=%zu b_identity=%d b_occurrence=%u b_live=%d b_witness=%d "
         "stale_fenced=%d stale_exact=%d stale_crashes=%zu stale_recovery=%u "
+        "recipe_fenced=%d runner_calls=%u b_admitted=%zu b_created=%zu "
+        "b_recovery=%d "
         "b_exit=%d b_normal=%d final_crashes=%zu final_normals=%zu "
         "releases=%d survivors=%d finalized=%d\n",
         setup_valid ? 1 : 0,
@@ -607,6 +674,11 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         stale_relay_exact ? 1 : 0,
         crash_count_after_stale,
         recovery_count_after_stale,
+        stale_recovery_fenced ? 1 : 0,
+        recovery_runner_calls.load(std::memory_order_acquire),
+        b_status_after_stale.admitted_occurrences,
+        b_status_after_stale.created_occurrences,
+        child_b_recovery ? 1 : 0,
         b_exit_observed ? 1 : 0,
         b_normal_lifecycle ? 1 : 0,
         final_crash_count,
