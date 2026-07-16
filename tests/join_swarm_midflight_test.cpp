@@ -264,7 +264,8 @@ int main(int argc, char* argv[])
         const auto joined_occurrences =
             sintra::test::read_lines(joined_occurrence_path);
         joined_occurrence_ok =
-            joined_occurrences.size() == 1 && joined_occurrences.front() == "0";
+            joined_occurrences.size() == 1 &&
+            joined_occurrences.front() == "0";
         if (!joined_occurrence_ok) {
             std::cerr
                 << "[join_swarm_midflight] fresh joined process recovery occurrence"

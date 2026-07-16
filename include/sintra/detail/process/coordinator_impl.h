@@ -2099,6 +2099,21 @@ void Coordinator::recover_if_required(const Crash_info& info)
 
     auto spawned = std::make_shared<std::atomic<bool>>(false);
     auto spawn_now = [this, info, should_cancel, spawned]() {
+        auto same_recipe = [](
+            const Managed_process::Spawn_swarm_process_args& lhs,
+            const Managed_process::Spawn_swarm_process_args& rhs)
+        {
+            return lhs.binary_name == rhs.binary_name &&
+                lhs.args == rhs.args &&
+                lhs.env_overrides == rhs.env_overrides &&
+                lhs.piid == rhs.piid &&
+                lhs.occurrence == rhs.occurrence &&
+                lhs.lifetime.enable_lifeline == rhs.lifetime.enable_lifeline &&
+                lhs.lifetime.hard_exit_code == rhs.lifetime.hard_exit_code &&
+                lhs.lifetime.hard_exit_timeout_ms ==
+                    rhs.lifetime.hard_exit_timeout_ms &&
+                lhs.custody == rhs.custody;
+        };
         std::unique_lock<mutex> admission_lock(
             detail::s_teardown_admission_mutex);
         if (should_cancel()) {
@@ -2143,6 +2158,27 @@ void Coordinator::recover_if_required(const Crash_info& info)
                  spawn_args.occurrence,
                  0,
                  "Managed child custody is closed"});
+            return;
+        }
+        bool cache_advanced = false;
+        {
+            std::lock_guard<std::mutex> cache_lock(
+                s_mproc->m_cached_spawns_mutex);
+            auto cached = s_mproc->m_cached_spawns.find(spawn_args.piid);
+            if (cached != s_mproc->m_cached_spawns.end() &&
+                same_recipe(cached->second, spawn_args))
+            {
+                cached->second.occurrence = spawn_args.occurrence + 1;
+                cache_advanced = true;
+            }
+        }
+        if (!cache_advanced) {
+            s_mproc->note_child_custody_failure(
+                spawn_args.custody,
+                {Managed_child_failure_kind::occurrence_admission,
+                 spawn_args.occurrence,
+                 0,
+                 "Managed child recovery recipe changed after occurrence admission"});
             return;
         }
         admission_lock.unlock();

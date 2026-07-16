@@ -22,6 +22,7 @@
 #include <fstream>
 #include <functional>
 #include <list>
+#include <limits>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -116,17 +117,24 @@ inline void Managed_child_exit_subscription_state::deliver(
             << "Managed-child exit callback threw for process_instance_id="
             << static_cast<unsigned long long>(
                 event.occurrence.process_instance_id)
-            << " occurrence=" << event.occurrence.occurrence
-            << " custody_identity=" << event.occurrence.custody_identity
-            << " message='" << error.what() << "'\n";
+            << " occurrence="
+            << event.occurrence.occurrence
+            << " custody_identity="
+            << event.occurrence.custody_identity
+            << " message='"
+            << error.what()
+            << "'\n";
     }
     catch (...) {
         Log_stream(log_level::error)
             << "Managed-child exit callback threw for process_instance_id="
             << static_cast<unsigned long long>(
                 event.occurrence.process_instance_id)
-            << " occurrence=" << event.occurrence.occurrence
-            << " custody_identity=" << event.occurrence.custody_identity << "\n";
+            << " occurrence="
+            << event.occurrence.occurrence
+            << " custody_identity="
+            << event.occurrence.custody_identity
+            << "\n";
     }
     tl_in_managed_child_exit_callback = previous_callback_context;
 
@@ -190,8 +198,8 @@ inline Managed_child_exit make_managed_child_exit(
     bool                              wait_status_available) noexcept
 {
     Managed_child_exit event;
-    event.occurrence = occurrence;
-    event.native_status = wait_status;
+    event.occurrence              = occurrence;
+    event.native_status           = wait_status;
     event.native_status_available = wait_status_available;
     if (!wait_status_available) {
         return event;
@@ -221,8 +229,8 @@ inline Managed_child_occurrence_identity make_managed_child_occurrence_identity(
 {
     Managed_child_occurrence_identity identity;
     identity.process_instance_id = occurrence.process_instance_id;
-    identity.occurrence = occurrence.occurrence;
-    identity.custody_identity = custody_identity;
+    identity.occurrence          = occurrence.occurrence;
+    identity.custody_identity    = custody_identity;
     return identity;
 }
 
@@ -5709,9 +5717,19 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
 
         {
             std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
+            const auto completed_next =
+                s.occurrence == std::numeric_limits<uint32_t>::max()
+                    ? s.occurrence
+                    : s.occurrence + 1;
+            auto cached = m_cached_spawns.find(s.piid);
+            const auto next_occurrence =
+                cached != m_cached_spawns.end() &&
+                    cached->second.custody == custody
+                    ? std::max(cached->second.occurrence, completed_next)
+                    : completed_next;
             m_cached_spawns[s.piid] = s;
             m_cached_spawns[s.piid].custody = custody;
-            m_cached_spawns[s.piid].occurrence++;
+            m_cached_spawns[s.piid].occurrence = next_occurrence;
         }
         launch_attempt.transfer_initialization_reservation();
     }

@@ -52,11 +52,13 @@ constexpr std::uint32_t k_terminated_status = 0xc0000005u;
 constexpr sintra::instance_id_type k_reused_process_iid =
     sintra::compose_instance(34u, 1ull);
 constexpr sintra::Managed_child_occurrence_identity k_two_field_identity{
-    k_reused_process_iid, 7};
+    k_reused_process_iid, 7
+};
 static_assert(
     k_two_field_identity.process_instance_id == k_reused_process_iid &&
     k_two_field_identity.occurrence == 7 &&
-    k_two_field_identity.custody_identity == 0);
+    k_two_field_identity.custody_identity == 0
+);
 
 struct Child_marker
 {
