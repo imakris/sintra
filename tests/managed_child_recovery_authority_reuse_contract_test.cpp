@@ -148,8 +148,9 @@ bool identity_is_occurrence(
 
 bool wait_for_absence(const std::optional<child_identity_t>& identity)
 {
-    return identity && wait_for_exact_process_absence(
-        *identity, k_step_timeout, k_poll_interval);
+    return
+        identity &&
+        wait_for_exact_process_absence(*identity, k_step_timeout, k_poll_interval);
 }
 
 std::optional<std::uint64_t> capture_custody_identity(

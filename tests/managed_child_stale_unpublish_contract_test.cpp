@@ -541,7 +541,8 @@ int run_observer(int argc, char* argv[])
     {
         Observation_service observer;
         const auto ack_iid = sintra::Coordinator::rpc_resolve_instance(
-            sintra::s_coord_id, std::string(k_observer_ack_name));
+            sintra::s_coord_id,
+            std::string(k_observer_ack_name));
         auto published = [&observer, ack_iid](
             const sintra::Coordinator::instance_published& event)
         {
@@ -549,9 +550,8 @@ int run_observer(int argc, char* argv[])
                 static_cast<std::string>(event.assigned_name) ==
                     k_replacement_process_name)
             {
-                const auto resolved =
-                    sintra::get_instance_id<Observation_service>(
-                        std::string(k_replacement_process_name));
+                const auto resolved = sintra::get_instance_id<Observation_service>(
+                    std::string(k_replacement_process_name));
                 observer.record("B+");
                 Observation_ack::rpc_acknowledge_b(
                     ack_iid, resolved == k_reused_process_iid);

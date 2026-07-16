@@ -54,9 +54,9 @@ enum class Probed_callback
 
 struct scenario_spec_t
 {
-    Probed_callback          callback;
-    sintra::instance_id_type child_iid;
-    sintra::instance_id_type probe_iid;
+    Probed_callback            callback;
+    sintra::instance_id_type   child_iid;
+    sintra::instance_id_type   probe_iid;
 };
 
 class Public_api_probe
@@ -241,18 +241,21 @@ bool write_child_identity(const fs::path& directory)
 }
 
 std::optional<child_identity_t> wait_for_child_identity(
-    const fs::path&                            directory,
-    std::uint32_t                             occurrence,
-    std::chrono::steady_clock::time_point      deadline)
+    const fs::path&                        directory,
+    std::uint32_t                          occurrence,
+    std::chrono::steady_clock::time_point  deadline)
 {
-    return sintra::test::managed_child::wait_for_child_identity(
-        identity_path(directory, occurrence), deadline, k_poll_interval);
+    return
+        sintra::test::managed_child::wait_for_child_identity(
+            identity_path(directory, occurrence),
+            deadline,
+            k_poll_interval);
 }
 
 template <typename Predicate>
 bool wait_until(
-    Predicate&&                                 predicate,
-    std::chrono::steady_clock::time_point       deadline)
+    Predicate&&                            predicate,
+    std::chrono::steady_clock::time_point  deadline)
 {
     do {
         if (predicate()) {
@@ -322,9 +325,7 @@ int run_child(int argc, char* argv[])
 
     if (sintra::s_recovery_occurrence == 0) {
         if (!sintra::test::wait_for_file(
-                marker_path(directory, k_go_marker),
-                k_child_timeout,
-                k_poll_interval))
+                marker_path(directory, k_go_marker), k_child_timeout, k_poll_interval))
         {
             return 4;
         }
@@ -344,9 +345,7 @@ int run_child(int argc, char* argv[])
     }
 
     if (!sintra::test::wait_for_file(
-            marker_path(directory, k_release_marker),
-            k_child_timeout,
-            k_poll_interval))
+            marker_path(directory, k_release_marker), k_child_timeout, k_poll_interval))
     {
         return 6;
     }
@@ -354,7 +353,7 @@ int run_child(int argc, char* argv[])
 }
 
 bool run_scenario(
-    const fs::path& binary_path,
+    const fs::path&        binary_path,
     const scenario_spec_t& scenario)
 {
     const std::string scenario_name = callback_name(scenario.callback);
@@ -376,10 +375,10 @@ bool run_scenario(
     std::optional<child_identity_t> initial;
     std::optional<child_identity_t> recovered;
     sintra::Managed_child_status status_before_release;
-    bool probe_eventual = false;
-    bool invitation_valid = false;
+    bool probe_eventual       = false;
+    bool invitation_valid     = false;
     bool invitation_cancelled = false;
-    bool release_complete = false;
+    bool release_complete     = false;
 
     sintra::set_lifecycle_handler([
         &lifecycle_seen,
@@ -415,9 +414,9 @@ bool run_scenario(
         ](
         const sintra::Crash_info& info)
         {
-            if (info.process_iid == child_iid &&
+            if (info.process_iid == child_iid                            &&
                 !recovery_seen.exchange(true, std::memory_order_acq_rel) &&
-                callback == Probed_callback::RECOVERY)
+                callback         == Probed_callback::RECOVERY)
             {
                 probe_contract.store(
                     probe.run_inside_callback(),
@@ -429,7 +428,7 @@ bool run_scenario(
 
     bool scenario_ok = [&]() {
         if (!sintra::test::assert_true(
-                scenario.child_iid != sintra::invalid_instance_id &&
+                scenario.child_iid     != sintra::invalid_instance_id &&
                     scenario.probe_iid != sintra::invalid_instance_id &&
                     scenario.child_iid != scenario.probe_iid,
                 k_failure_prefix,
@@ -447,11 +446,9 @@ bool run_scenario(
         };
         options.process_instance_id      = scenario.child_iid;
         options.lifetime.enable_lifeline = false;
-        custody = sintra::spawn_swarm_process(options);
+        custody                          = sintra::spawn_swarm_process(options);
         if (!sintra::test::assert_true(
-                static_cast<bool>(custody),
-                k_failure_prefix,
-                scenario_name + " public spawn must return custody"))
+                static_cast<bool>(custody), k_failure_prefix, scenario_name + " public spawn must return custody"))
         {
             return false;
         }
@@ -464,8 +461,7 @@ bool run_scenario(
                 exit_capture.record(event);
             });
         if (!sintra::test::assert_true(
-                static_cast<bool>(exit_observation),
-                k_failure_prefix,
+                static_cast<bool>(exit_observation), k_failure_prefix,
                 scenario_name + " initial child must expose exact exit"))
         {
             return false;
@@ -481,8 +477,7 @@ bool run_scenario(
             return false;
         }
         if (!sintra::test::assert_true(
-                write_marker(directory, k_go_marker),
-                k_failure_prefix,
+                write_marker(directory, k_go_marker), k_failure_prefix,
                 scenario_name + " initial go marker must be written"))
         {
             return false;
@@ -494,9 +489,7 @@ bool run_scenario(
             },
             deadline);
         if (!sintra::test::assert_true(
-                callback_finished,
-                k_failure_prefix,
-                scenario_name + " selected callback must finish"))
+                callback_finished, k_failure_prefix, scenario_name + " selected callback must finish"))
         {
             return false;
         }
@@ -504,42 +497,37 @@ bool run_scenario(
         probe_eventual = probe.wait_until_completed(deadline);
         probe.join();
         if (!sintra::test::assert_true(
-                probe_eventual && !probe.threw(),
-                k_failure_prefix,
+                probe_eventual && !probe.threw(), k_failure_prefix,
                 scenario_name + " public API probe must eventually complete"))
         {
             return false;
         }
         invitation_valid = probe.invitation_is_valid();
         if (!sintra::test::assert_true(
-                invitation_valid,
-                k_failure_prefix,
-                scenario_name + " public API probe must return an invitation"))
+                invitation_valid, k_failure_prefix, scenario_name + " public API probe must return an invitation"))
         {
             return false;
         }
         invitation_cancelled = probe.cancel_invitation();
         if (!sintra::test::assert_true(
-                invitation_cancelled,
-                k_failure_prefix,
-                scenario_name + " invitation must remain cancellable"))
+                invitation_cancelled, k_failure_prefix, scenario_name + " invitation must remain cancellable"))
         {
             return false;
         }
 
         sintra::Managed_child_exit initial_exit;
         const bool initial_exit_delivered = exit_capture.wait_for_one_until(deadline);
-        const auto initial_exit_capture = exit_capture.snapshot();
+        const auto initial_exit_capture   = exit_capture.snapshot();
         if (initial_exit_capture.event) {
             initial_exit = *initial_exit_capture.event;
         }
         if (!sintra::test::assert_true(
-                initial_exit_delivered                              &&
-                    initial_exit_capture.deliveries == 1            &&
-                    initial_exit.occurrence == exit_observation.occurrence &&
+                initial_exit_delivered &&
+                    initial_exit_capture.deliveries          == 1 &&
+                    initial_exit.occurrence                  == exit_observation.occurrence &&
                     initial_exit.occurrence.process_instance_id ==
                         scenario.child_iid &&
-                    initial_exit.occurrence.occurrence == 0         &&
+                    initial_exit.occurrence.occurrence       == 0 &&
                     initial_exit.occurrence.custody_identity != 0,
                 k_failure_prefix,
                 scenario_name + " native exit must identify occurrence 0"))
@@ -559,8 +547,7 @@ bool run_scenario(
             return false;
         }
         if (!sintra::test::assert_true(
-                write_marker(directory, k_release_marker),
-                k_failure_prefix,
+                write_marker(directory, k_release_marker), k_failure_prefix,
                 scenario_name + " recovery release marker must be written"))
         {
             return false;
@@ -574,9 +561,7 @@ bool run_scenario(
             },
             deadline);
         if (!sintra::test::assert_true(
-                exact_children_absent,
-                k_failure_prefix,
-                scenario_name + " exact PID/start identities must be absent"))
+                exact_children_absent, k_failure_prefix, scenario_name + " exact PID/start identities must be absent"))
         {
             return false;
         }
@@ -607,9 +592,7 @@ bool run_scenario(
             released.release_state ==
                 sintra::Managed_child_release_state::complete;
         if (!sintra::test::assert_true(
-                release_complete,
-                k_failure_prefix,
-                scenario_name + " custody release must complete"))
+                release_complete, k_failure_prefix, scenario_name + " custody release must complete"))
         {
             return false;
         }

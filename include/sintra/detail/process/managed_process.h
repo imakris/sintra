@@ -167,9 +167,9 @@ struct Managed_child_occurrence_identity
 {
     instance_id_type process_instance_id = invalid_instance_id;
     // Custody-relative: 0 is the original launch and 1 is its first recovery.
-    uint32_t         occurrence = 0;
+    uint32_t           occurrence = 0;
     // Opaque and unique only among custodies owned by one active runtime.
-    uint64_t         custody_identity = 0;
+    uint64_t           custody_identity = 0;
 
     bool operator==(const Managed_child_occurrence_identity&) const = default;
 };
@@ -656,10 +656,10 @@ Managed_child_occurrence_identity make_managed_child_occurrence_identity(
     const Managed_child_occurrence_record& occurrence) noexcept;
 
 Managed_child_exit_publication record_managed_child_exit_locked(
-    uint64_t                         custody_identity,
-    Managed_child_occurrence_record& occurrence,
-    std::uint32_t                    wait_status,
-    bool                             wait_status_available);
+    uint64_t                           custody_identity,
+    Managed_child_occurrence_record&   occurrence,
+    std::uint32_t                      wait_status,
+    bool                               wait_status_available);
 
 enum class Readiness_phase
 {
@@ -1270,7 +1270,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type   process_instance_id,
         double             waiting_period = 1.0);
     void retire_external_process_reader(
-        const std::shared_ptr<Process_message_reader>& reader);
+        const std::shared_ptr<Process_message_reader>&
+                               reader);
 
     bool has_process_reader(
         instance_id_type   process_instance_id) const;
@@ -1502,8 +1503,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type failure_process_instance_id = invalid_instance_id,
         uint32_t failure_occurrence = 0);
     void join_owned_lifecycle_workers();
+
     void retire_child_custody_if_complete(
-        const std::shared_ptr<detail::Managed_child_custody_record>& custody);
+        const std::shared_ptr<detail::Managed_child_custody_record>&   custody);
 
     map<instance_id_type, Spawn_swarm_process_args>
                                         m_cached_spawns;
