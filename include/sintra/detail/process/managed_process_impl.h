@@ -3773,6 +3773,12 @@ inline void Managed_process::retire_child_custody_if_complete(
             }
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(m_cached_spawns_mutex);
+        std::erase_if(m_cached_spawns, [&](const auto& entry) {
+            return entry.second.custody == custody;
+        });
+    }
     m_child_custody_changed.notify_all();
 }
 
@@ -4142,21 +4148,6 @@ inline void Managed_process::execute_child_custody_release_attempt(
                     it->second.occurrence == exact.occurrence;
             }
         }
-        if (!exact.slot_current) {
-            continue;
-        }
-
-        {
-            std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
-            auto cached = m_cached_spawns.find(exact.process_instance_id);
-            if (cached != m_cached_spawns.end() &&
-                cached->second.custody == custody &&
-                cached->second.occurrence == exact.occurrence + 1)
-            {
-                m_cached_spawns.erase(cached);
-            }
-        }
-
     }
 
     auto release_attempt_active = [&]() {
@@ -5436,6 +5427,23 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         }
     }
 
+    {
+        std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
+        const auto completed_next =
+            s.occurrence == std::numeric_limits<uint32_t>::max()
+                ? s.occurrence
+                : s.occurrence + 1;
+        auto cached = m_cached_spawns.find(s.piid);
+        const auto next_occurrence =
+            cached != m_cached_spawns.end() &&
+                cached->second.custody == custody
+                ? std::max(cached->second.occurrence, completed_next)
+                : completed_next;
+        m_cached_spawns[s.piid] = s;
+        m_cached_spawns[s.piid].custody = custody;
+        m_cached_spawns[s.piid].occurrence = next_occurrence;
+    }
+
     auto args = s.args;
     if (s.occurrence != 0 &&
         std::find(
@@ -5715,22 +5723,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         // which might take some time. At this stage, we do not have to wait
         // until they are ready for messages.
 
-        {
-            std::lock_guard<std::mutex> cache_lock(m_cached_spawns_mutex);
-            const auto completed_next =
-                s.occurrence == std::numeric_limits<uint32_t>::max()
-                    ? s.occurrence
-                    : s.occurrence + 1;
-            auto cached = m_cached_spawns.find(s.piid);
-            const auto next_occurrence =
-                cached != m_cached_spawns.end() &&
-                    cached->second.custody == custody
-                    ? std::max(cached->second.occurrence, completed_next)
-                    : completed_next;
-            m_cached_spawns[s.piid] = s;
-            m_cached_spawns[s.piid].custody = custody;
-            m_cached_spawns[s.piid].occurrence = next_occurrence;
-        }
         launch_attempt.transfer_initialization_reservation();
     }
     else {
