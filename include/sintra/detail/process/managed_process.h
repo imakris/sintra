@@ -206,7 +206,7 @@ public:
     ~Managed_child_exit_subscription();
 
     Managed_child_exit_subscription(
-        Managed_child_exit_subscription&& other) noexcept;
+        Managed_child_exit_subscription&& other) noexcept = default;
     Managed_child_exit_subscription& operator=(
         Managed_child_exit_subscription&& other) noexcept;
 
@@ -628,7 +628,6 @@ private:
     std::condition_variable                     m_quiesced;
     Managed_child_exit_callback                 m_callback;
     std::thread::id                             m_callback_thread;
-    bool                                        m_active = true;
     bool                                        m_callback_running = false;
 
     Managed_child_exit                         m_dispatch_event;

@@ -97,10 +97,9 @@ inline void Managed_child_exit_subscription_state::deliver(
     Managed_child_exit_callback callback;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (!m_active || !m_callback) {
+        if (!m_callback) {
             return;
         }
-        m_active = false;
         m_callback_running = true;
         m_callback_thread = std::this_thread::get_id();
         callback = std::move(m_callback);
@@ -115,26 +114,17 @@ inline void Managed_child_exit_subscription_state::deliver(
     catch (const std::exception& error) {
         Log_stream(log_level::error)
             << "Managed-child exit callback threw for process_instance_id="
-            << static_cast<unsigned long long>(
-                event.occurrence.process_instance_id)
-            << " occurrence="
-            << event.occurrence.occurrence
-            << " custody_identity="
-            << event.occurrence.custody_identity
-            << " message='"
-            << error.what()
-            << "'\n";
+            << static_cast<unsigned long long>(event.occurrence.process_instance_id)
+            << " occurrence=" << event.occurrence.occurrence
+            << " custody_identity=" << event.occurrence.custody_identity
+            << " message='" << error.what() << "'\n";
     }
     catch (...) {
         Log_stream(log_level::error)
             << "Managed-child exit callback threw for process_instance_id="
-            << static_cast<unsigned long long>(
-                event.occurrence.process_instance_id)
-            << " occurrence="
-            << event.occurrence.occurrence
-            << " custody_identity="
-            << event.occurrence.custody_identity
-            << "\n";
+            << static_cast<unsigned long long>(event.occurrence.process_instance_id)
+            << " occurrence=" << event.occurrence.occurrence
+            << " custody_identity=" << event.occurrence.custody_identity << "\n";
     }
     tl_in_managed_child_exit_callback = previous_callback_context;
 
@@ -151,7 +141,6 @@ inline void Managed_child_exit_subscription_state::unsubscribe() noexcept
     bool called_from_callback = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_active = false;
         m_callback = {};
         called_from_callback =
             m_callback_running && m_callback_thread == std::this_thread::get_id();
@@ -181,15 +170,9 @@ remove_from_occurrence() noexcept
     if (!occurrence) {
         return;
     }
-    auto& subscriptions = occurrence->exit_subscriptions;
-    subscriptions.erase(
-        std::remove_if(
-            subscriptions.begin(),
-            subscriptions.end(),
-            [this](const auto& candidate) {
-                return candidate.get() == this;
-            }),
-        subscriptions.end());
+    std::erase_if(
+        occurrence->exit_subscriptions,
+        [this](const auto& candidate) { return candidate.get() == this; });
 }
 
 inline Managed_child_exit make_managed_child_exit(
