@@ -148,8 +148,9 @@ enum class Coordinator_mutex_rank: unsigned
 {
     external_process_invitations = 1,
     groups                       = 2,
-    publish                      = 3,
-    init_tracking                = 4,
+    publication_notifications    = 3,
+    publish                      = 4,
+    init_tracking                = 5,
 };
 
 #ifndef NDEBUG
@@ -213,6 +214,8 @@ using Coordinator_condition_variable = std::condition_variable;
 
 using Coordinator_external_process_invitations_mutex =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::external_process_invitations>;
+using Coordinator_publication_notifications_mutex =
+    Coordinator_ranked_mutex<Coordinator_mutex_rank::publication_notifications>;
 using Coordinator_groups_mutex =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::groups>;
 using Coordinator_publish_mutex =
@@ -245,6 +248,7 @@ private:
     {
         std::string                            token;
         std::chrono::steady_clock::time_point  expires_at;
+        uint32_t                               occurrence = 0;
         External_process_invitation_state      state = External_process_invitation_state::pending;
     };
 
@@ -265,7 +269,7 @@ private:
     // to trigger the deferral path.
     instance_id_type wait_for_instance(const string& assigned_name);
 
-    struct Managed_child_publication_identity
+    struct Process_reader_identity
     {
         uint64_t          custody_identity = 0;
         instance_id_type  process_iid      = invalid_instance_id;
@@ -283,28 +287,40 @@ private:
 
         explicit operator bool() const noexcept
         {
+            return process_iid != invalid_instance_id &&
+                (custody_identity != 0 || occurrence != 0);
+        }
+
+        bool is_managed_child() const noexcept
+        {
             return custody_identity != 0 &&
                 process_iid != invalid_instance_id;
         }
 
-        bool operator==(const Managed_child_publication_identity&) const = default;
+        bool is_external_process() const noexcept
+        {
+            return custody_identity == 0 && occurrence != 0 &&
+                process_iid != invalid_instance_id;
+        }
+
+        bool operator==(const Process_reader_identity&) const = default;
     };
 
     struct Transceiver_publication
     {
-        type_id_type                       type_id = 0;
-        string                             name;
-        Managed_child_publication_identity managed_child_identity;
+        type_id_type            type_id = 0;
+        string                  name;
+        Process_reader_identity reader_identity;
 
         Transceiver_publication() = default;
 
         Transceiver_publication(
-            type_id_type                              published_type_id,
-            const string&                             assigned_name,
-            const Managed_child_publication_identity& identity)
+            type_id_type                  published_type_id,
+            const string&                 assigned_name,
+            const Process_reader_identity& identity)
             : type_id(published_type_id),
               name(assigned_name),
-              managed_child_identity(identity)
+              reader_identity(identity)
         {
         }
 
@@ -318,7 +334,7 @@ private:
         {
             type_id = publication.type_id;
             name = publication.name;
-            managed_child_identity = {};
+            reader_identity = {};
             return *this;
         }
     };
@@ -351,11 +367,11 @@ private:
         type_id_type       type_id,
         instance_id_type   instance_id,
         const string&      assigned_name);
-    instance_id_type publish_transceiver_with_managed_child_identity(
-        type_id_type                              type_id,
-        instance_id_type                          instance_id,
-        const string&                             assigned_name,
-        const Managed_child_publication_identity& managed_child_identity);
+    instance_id_type publish_transceiver_with_reader_identity(
+        type_id_type                  type_id,
+        instance_id_type              instance_id,
+        const string&                 assigned_name,
+        const Process_reader_identity& reader_identity);
 
     // Unpublish a transceiver, erase name mappings, and emit instance_unpublished.
     // If the unpublished instance is a Managed_process, this also drops it from
@@ -364,7 +380,7 @@ private:
     bool unpublish_transceiver(instance_id_type instance_id);
     bool unpublish_transceiver_exact(
         instance_id_type instance_id,
-        const std::optional<Managed_child_publication_identity>& expected_identity,
+        const std::optional<Process_reader_identity>& expected_identity,
         const std::optional<Crash_info>& crash_info);
 
     // Mark a process as draining, remove it from in-flight barriers, and return
@@ -450,11 +466,11 @@ public:
         instance_id_type   process_iid,
         uint32_t           occurrence)
     {
-        return publish_transceiver_with_managed_child_identity(
+        return publish_transceiver_with_reader_identity(
             tid,
             iid,
             assigned_name,
-            Managed_child_publication_identity{
+            Process_reader_identity{
                 custody_identity,
                 process_iid,
                 occurrence});
@@ -521,8 +537,9 @@ public:
     //      (held across the "is this process known" checks during invitation
     //      reservation)
     //   2. m_groups_mutex
-    //   3. m_publish_mutex
-    //   4. m_init_tracking_mutex
+    //   3. m_publication_notifications_mutex
+    //   4. m_publish_mutex
+    //   5. m_init_tracking_mutex
     // Process_group locks nest below m_groups_mutex:
     //   m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m
     // The remaining coordinator mutexes are leaves; no other coordinator
@@ -530,6 +547,8 @@ public:
     //   m_type_resolution_mutex, m_lifecycle_mutex,
     //   m_recovery_threads_mutex, m_draining_state_mutex
     mutex                                          m_type_resolution_mutex;
+    detail::Coordinator_publication_notifications_mutex
+                                                   m_publication_notifications_mutex;
     detail::Coordinator_publish_mutex             m_publish_mutex;
     detail::Coordinator_groups_mutex              m_groups_mutex;
     detail::Coordinator_init_tracking_mutex       m_init_tracking_mutex;
@@ -564,7 +583,7 @@ public:
     >                                              m_instances_waited;
 
     // access only after acquiring m_publish_mutex
-    unordered_set<instance_id_type>                m_external_attached_processes;
+    unordered_map<instance_id_type, uint32_t>      m_external_attached_processes;
     mutable std::mutex                             m_lifecycle_mutex;
     Recovery_policy                                m_recovery_policy;
     Recovery_runner                                m_recovery_runner;

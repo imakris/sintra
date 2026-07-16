@@ -808,11 +808,10 @@ void Process_message_reader::request_reader_function()
         }
     };
     auto relay_to_coordinator = [this](const Message_prefix& message) {
-        const auto custody_identity = m_managed_child_custody_identity;
         s_mproc->m_out_req_c->relay(
             message,
-            custody_identity,
-            custody_identity == 0 ? 0 : m_occurrence);
+            m_managed_child_custody_identity,
+            m_occurrence);
     };
 
     begin_reading_session(m_in_req_c, m_req_running);

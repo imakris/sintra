@@ -1507,7 +1507,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                     spawn_args.occurrence);
             };
         try {
-            custody_owner->start_child_custody_worker(std::move(async_setup));
+            custody_owner->start_owned_lifecycle_worker(std::move(async_setup));
         }
         catch (...) {
             custody_owner->note_child_custody_failure(
