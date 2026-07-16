@@ -161,9 +161,9 @@ public:
     void mark_scheduled() noexcept { m_scheduled = true; }
 
 private:
-    instance_id_type m_process_iid;
-    int              m_uncaught_exceptions;
-    bool             m_scheduled = false;
+    instance_id_type   m_process_iid;
+    int                m_uncaught_exceptions;
+    bool               m_scheduled = false;
 };
 #endif
 
@@ -1569,8 +1569,8 @@ inline bool Coordinator::unpublish_transceiver_exact(
     if (iid == process_iid) {
         if (!pending_completions.empty() && s_mproc) {
             s_mproc->run_after_current_handler([
-                    this,
-                    pending = std::move(pending_completions)
+                this,
+                pending = std::move(pending_completions)
                 ]() mutable
                 {
                     emit_pending_barrier_completions(pending);

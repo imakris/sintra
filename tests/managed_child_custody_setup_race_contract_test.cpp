@@ -116,8 +116,8 @@ struct Publication_identity_gate
 Publication_identity_gate* s_publication_identity_gate = nullptr;
 
 bool wait_for_file(
-    const std::filesystem::path& path,
-    std::chrono::milliseconds timeout) noexcept;
+    const std::filesystem::path&   path,
+    std::chrono::milliseconds      timeout) noexcept;
 
 struct Transport_retirement_gate
 {
@@ -3238,8 +3238,13 @@ int main(int argc, char* argv[])
                 release_marker(exact_marker), 15s);
             const bool finalized = settle_detail_finalize(
                 "post_native_recovery_child");
-            return identity_written && occurrence == 2 && released && finalized
-                ? 0 : 3;
+            return
+                identity_written &&
+                occurrence == 2  &&
+                released         &&
+                finalized
+                    ? 0
+                    : 3;
         }
         if (std::string(argv[i]) == k_child_flag) {
             std::ofstream out(argv[i + 1], std::ios::binary | std::ios::trunc);

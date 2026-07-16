@@ -54,9 +54,9 @@ enum class Probed_callback
 
 struct scenario_spec_t
 {
-    Probed_callback          callback;
-    sintra::instance_id_type child_iid;
-    sintra::instance_id_type probe_iid;
+    Probed_callback            callback;
+    sintra::instance_id_type   child_iid;
+    sintra::instance_id_type   probe_iid;
 };
 
 class Public_api_probe
@@ -241,9 +241,9 @@ bool write_child_identity(const fs::path& directory)
 }
 
 std::optional<child_identity_t> wait_for_child_identity(
-    const fs::path&                            directory,
-    std::uint32_t                             occurrence,
-    std::chrono::steady_clock::time_point      deadline)
+    const fs::path&                        directory,
+    std::uint32_t                          occurrence,
+    std::chrono::steady_clock::time_point  deadline)
 {
     return sintra::test::managed_child::wait_for_child_identity(
         identity_path(directory, occurrence), deadline, k_poll_interval);
@@ -376,10 +376,10 @@ bool run_scenario(
     std::optional<child_identity_t> initial;
     std::optional<child_identity_t> recovered;
     sintra::Managed_child_status status_before_release;
-    bool probe_eventual = false;
-    bool invitation_valid = false;
+    bool probe_eventual       = false;
+    bool invitation_valid     = false;
     bool invitation_cancelled = false;
-    bool release_complete = false;
+    bool release_complete     = false;
 
     sintra::set_lifecycle_handler([
         &lifecycle_seen,

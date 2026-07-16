@@ -115,7 +115,7 @@ inline void Managed_child_exit_subscription_state::deliver(
         Log_stream(log_level::error)
             << "Managed-child exit callback threw for process_instance_id="
             << static_cast<unsigned long long>(event.occurrence.process_instance_id)
-            << " occurrence=" << event.occurrence.occurrence
+            << " occurrence="       << event.occurrence.occurrence
             << " custody_identity=" << event.occurrence.custody_identity
             << " message='" << error.what() << "'\n";
     }
@@ -123,7 +123,7 @@ inline void Managed_child_exit_subscription_state::deliver(
         Log_stream(log_level::error)
             << "Managed-child exit callback threw for process_instance_id="
             << static_cast<unsigned long long>(event.occurrence.process_instance_id)
-            << " occurrence=" << event.occurrence.occurrence
+            << " occurrence="       << event.occurrence.occurrence
             << " custody_identity=" << event.occurrence.custody_identity << "\n";
     }
     tl_in_managed_child_exit_callback = previous_callback_context;

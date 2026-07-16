@@ -214,13 +214,13 @@ using Coordinator_condition_variable = std::condition_variable;
 
 using Coordinator_external_process_invitations_mutex =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::external_process_invitations>;
-using Coordinator_publication_notifications_mutex =
+using Coordinator_publication_notifications_mutex    =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::publication_notifications>;
-using Coordinator_groups_mutex =
+using Coordinator_groups_mutex                       =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::groups>;
-using Coordinator_publish_mutex =
+using Coordinator_publish_mutex                      =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::publish>;
-using Coordinator_init_tracking_mutex =
+using Coordinator_init_tracking_mutex                =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::init_tracking>;
 
 } // namespace detail
@@ -299,8 +299,10 @@ private:
 
         bool is_external_process() const noexcept
         {
-            return custody_identity == 0 && occurrence != 0 &&
-                process_iid != invalid_instance_id;
+            return
+                custody_identity == 0 &&
+                occurrence       != 0 &&
+                process_iid      != invalid_instance_id;
         }
 
         bool operator==(const Process_reader_identity&) const = default;
