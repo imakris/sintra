@@ -33,6 +33,8 @@ constexpr std::string_view k_observer_flag       =
     "--managed_child_unpublish_order_observer";
 constexpr std::string_view k_observer_name =
     "managed_child_unpublish_order_observer";
+constexpr std::string_view k_observer_ack_name =
+    "managed_child_unpublish_order_observer_ack";
 constexpr std::string_view k_predecessor_name =
     "managed_child_unpublish_order_predecessor";
 constexpr std::string_view k_replacement_process_name =
@@ -154,6 +156,36 @@ private:
     bool                       m_finished = false;
 };
 
+class Observation_ack : public sintra::Derived_transceiver<Observation_ack>
+{
+public:
+    void acknowledge_b(bool cache_exact)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_b_seen = true;
+            m_cache_exact = cache_exact;
+        }
+        m_changed.notify_all();
+    }
+
+    bool wait_for_b(std::chrono::steady_clock::time_point deadline)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return
+            m_changed.wait_until(lock, deadline, [this]() { return m_b_seen; }) &&
+            m_cache_exact;
+    }
+
+    SINTRA_UNICAST(acknowledge_b)
+
+private:
+    std::mutex                 m_mutex;
+    std::condition_variable    m_changed;
+    bool                       m_b_seen      = false;
+    bool                       m_cache_exact = false;
+};
+
 struct Retirement_gate
 {
     std::mutex                 mutex;
@@ -185,6 +217,7 @@ struct Notification_order_result
     bool                       a_unpublished              = false;
     bool                       b_published                = false;
     bool                       b_completed_while_a_parked = false;
+    bool                       b_observer_acknowledged    = false;
     bool                       a_hook_auto_released       = false;
     bool                       first_snapshot_valid       = false;
     bool                       final_snapshot_valid       = false;
@@ -507,14 +540,21 @@ int run_observer(int argc, char* argv[])
     bool finished = false;
     {
         Observation_service observer;
-        auto published = [&observer](
+        const auto ack_iid = sintra::Coordinator::rpc_resolve_instance(
+            sintra::s_coord_id, std::string(k_observer_ack_name));
+        auto published = [&observer, ack_iid](
             const sintra::Coordinator::instance_published& event)
         {
             if (event.instance_id == k_reused_process_iid &&
                 static_cast<std::string>(event.assigned_name) ==
                     k_replacement_process_name)
             {
+                const auto resolved =
+                    sintra::get_instance_id<Observation_service>(
+                        std::string(k_replacement_process_name));
                 observer.record("B+");
+                Observation_ack::rpc_acknowledge_b(
+                    ack_iid, resolved == k_reused_process_iid);
             }
         };
         auto unpublished = [&observer](
@@ -534,7 +574,8 @@ int run_observer(int argc, char* argv[])
             unpublished,
             sintra::Typed_instance_id<sintra::Coordinator>(sintra::s_coord_id));
 
-        assigned = observer.assign_name(std::string(k_observer_name));
+        assigned = ack_iid != sintra::invalid_instance_id &&
+            observer.assign_name(std::string(k_observer_name));
         if (assigned) {
             sintra::Coordinator::rpc_mark_initialization_complete(
                 sintra::s_coord_id, sintra::s_mproc_id);
@@ -558,6 +599,9 @@ Notification_order_result run_notification_order_contract(
     const std::string& binary_path)
 {
     Notification_order_result result;
+    Observation_ack observer_ack;
+    const bool ack_available = observer_ack.assign_name(
+        std::string(k_observer_ack_name));
 
     sintra::Spawn_options observer_options;
     observer_options.binary_path              = binary_path;
@@ -569,7 +613,7 @@ Notification_order_result run_notification_order_contract(
     auto observer = sintra::spawn_swarm_process(observer_options);
     const auto observer_ready = observer.wait_for_readiness_until(
         std::chrono::steady_clock::now() + k_step_timeout);
-    const bool observer_available = observer &&
+    const bool observer_available = ack_available && observer &&
         observer_ready.readiness_state ==
             sintra::Managed_child_readiness_state::reached;
 
@@ -614,9 +658,6 @@ Notification_order_result run_notification_order_contract(
                     try {
                         b_call.value = publish_synthetic_process(
                             custody_b, k_replacement_process_name);
-                        if (b_call.value) {
-                            b_snapshot = observe_remote_snapshot(true);
-                        }
                     }
                     catch (...) {
                         b_call.threw = true;
@@ -640,7 +681,13 @@ Notification_order_result run_notification_order_contract(
                 result.a_hook_auto_released       = auto_released;
                 result.b_published                = b_done && b_call.value && !b_call.threw;
                 if (result.b_published) {
-                    result.first_snapshot_valid = b_snapshot.valid &&
+                    result.b_observer_acknowledged = observer_ack.wait_for_b(
+                        std::chrono::steady_clock::now() + k_step_timeout);
+                    if (result.b_observer_acknowledged) {
+                        b_snapshot = observe_remote_snapshot(false);
+                    }
+                    result.first_snapshot_valid =
+                        result.b_observer_acknowledged && b_snapshot.valid &&
                         b_snapshot.resolved == k_reused_process_iid &&
                         b_snapshot.order.find("B+") != std::string::npos;
                 }
@@ -691,7 +738,8 @@ Notification_order_result run_notification_order_contract(
     result.no_survivors           = no_managed_child_authority();
 
     result.valid = observer_available && a_published && result.a_unpublished &&
-        result.b_published && result.first_snapshot_valid &&
+        result.b_published && result.b_observer_acknowledged &&
+        result.first_snapshot_valid &&
         result.final_snapshot_valid && result.final_order_exact &&
         result.final_name_exact && result.b_cleanup && a_released && b_released &&
         result.observer_released && result.all_custodies_released &&
@@ -809,6 +857,7 @@ int main(int argc, char* argv[])
         notification_order.a_unpublished                                 &&
         notification_order.b_published                                   &&
         notification_order.b_completed_while_a_parked                    &&
+        notification_order.b_observer_acknowledged                       &&
         notification_order.first_snapshot_valid                          &&
         notification_order.final_snapshot_valid                          &&
         notification_order.final_order == "B+,A-"                        &&
@@ -845,7 +894,8 @@ int main(int argc, char* argv[])
         std::fprintf(
             stderr,
             "UNPUBLISH_NOTIFICATION_ORDER_RED order=%s resolved=%llu "
-            "b_while_a_parked=1 cleanup=1 observer_released=1 survivors=0\n",
+            "b_while_a_parked=1 observer_ack=1 cleanup=1 "
+            "observer_released=1 survivors=0\n",
             notification_order.final_order.c_str(),
             static_cast<unsigned long long>(notification_order.final_resolved));
         std::fflush(stderr);
@@ -878,8 +928,8 @@ int main(int argc, char* argv[])
         "fixed_green=%d current_red=%d cleanup_result=%d registry_absent=%d "
         "cleanup_valid=%d "
         "notification_valid=%d notification_red=%d order=%s resolved=%llu "
-        "b_while_a_parked=%d hook_auto_release=%d first_snapshot=%d "
-        "final_snapshot=%d b_cleanup=%d observer_released=%d "
+        "b_while_a_parked=%d hook_auto_release=%d observer_ack=%d "
+        "first_snapshot=%d final_snapshot=%d b_cleanup=%d observer_released=%d "
         "all_custodies=%d survivors_absent=%d finalized=%d runtime_gone=%d\n",
         baseline_valid ? 1 : 0,
         stale_result ? 1 : 0,
@@ -903,6 +953,7 @@ int main(int argc, char* argv[])
         static_cast<unsigned long long>(notification_order.final_resolved),
         notification_order.b_completed_while_a_parked ? 1 : 0,
         notification_order.a_hook_auto_released ? 1 : 0,
+        notification_order.b_observer_acknowledged ? 1 : 0,
         notification_order.first_snapshot_valid ? 1 : 0,
         notification_order.final_snapshot_valid ? 1 : 0,
         notification_order.b_cleanup ? 1 : 0,
