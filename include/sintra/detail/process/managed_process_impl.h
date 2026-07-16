@@ -309,6 +309,11 @@ using Managed_child_transport_retirement_callback =
     void (*)(const char*, instance_id_type, uint32_t);
 inline std::atomic<Managed_child_transport_retirement_callback>
     s_managed_child_transport_retirement{nullptr};
+
+using Managed_child_custody_retirement_callback =
+    void (*)(const char*, uint64_t) noexcept;
+inline std::atomic<Managed_child_custody_retirement_callback>
+    s_managed_child_custody_retirement{nullptr};
 #endif
 
 inline constexpr const char* k_managed_child_fail_pre_create_setup =
@@ -389,8 +394,28 @@ inline constexpr const char*
         "managed_child_communication_terminal_before_reader_erase";
 inline constexpr const char* k_managed_child_communication_join_incomplete =
     "managed_child_communication_join_incomplete";
+inline constexpr const char* k_managed_child_custody_retirement_before_cache_erase =
+    "managed_child_custody_retirement/before_cache_erase";
+inline constexpr const char* k_managed_child_custody_retirement_complete =
+    "managed_child_custody_retirement/complete";
 
 } // namespace test_hooks
+
+inline void managed_child_custody_retirement_for_test(
+    const char* stage,
+    uint64_t    custody_identity) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_managed_child_custody_retirement.load(
+            std::memory_order_acquire))
+    {
+        callback(stage, custody_identity);
+    }
+#else
+    (void)stage;
+    (void)custody_identity;
+#endif
+}
 
 inline void managed_child_reader_setup_for_test(
     instance_id_type process_instance_id,
@@ -3773,6 +3798,9 @@ inline void Managed_process::retire_child_custody_if_complete(
             }
         }
     }
+    detail::managed_child_custody_retirement_for_test(
+        detail::test_hooks::k_managed_child_custody_retirement_before_cache_erase,
+        custody->identity);
     {
         std::lock_guard<std::mutex> lock(m_cached_spawns_mutex);
         std::erase_if(m_cached_spawns, [&](const auto& entry) {
@@ -3780,6 +3808,9 @@ inline void Managed_process::retire_child_custody_if_complete(
         });
     }
     m_child_custody_changed.notify_all();
+    detail::managed_child_custody_retirement_for_test(
+        detail::test_hooks::k_managed_child_custody_retirement_complete,
+        custody->identity);
 }
 
 namespace detail {

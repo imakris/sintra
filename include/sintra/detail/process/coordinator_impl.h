@@ -11,6 +11,9 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+#include <exception>
+#endif
 #include <functional>
 #include <limits>
 #include <mutex>
@@ -131,6 +134,37 @@ using Coordinator_destroying_publication_callback =
     void (*)(instance_id_type process_iid) noexcept;
 inline std::atomic<Coordinator_destroying_publication_callback>
     s_coordinator_destroying_publication{nullptr};
+
+using Recovery_decision_callback =
+    void (*)(instance_id_type process_iid, bool scheduled) noexcept;
+inline std::atomic<Recovery_decision_callback> s_recovery_decision{nullptr};
+
+class Recovery_decision_for_test
+{
+public:
+    explicit Recovery_decision_for_test(instance_id_type process_iid) noexcept
+    :
+        m_process_iid(process_iid),
+        m_uncaught_exceptions(std::uncaught_exceptions())
+    {}
+
+    ~Recovery_decision_for_test() noexcept
+    {
+        if (std::uncaught_exceptions() != m_uncaught_exceptions) {
+            return;
+        }
+        if (auto callback = s_recovery_decision.load(std::memory_order_acquire)) {
+            callback(m_process_iid, m_scheduled);
+        }
+    }
+
+    void mark_scheduled() noexcept { m_scheduled = true; }
+
+private:
+    instance_id_type m_process_iid;
+    int              m_uncaught_exceptions;
+    bool             m_scheduled = false;
+};
 #endif
 
 }} // namespace detail::test_hooks
@@ -2053,6 +2087,11 @@ void Coordinator::recover_if_required(const Crash_info& info)
 {
     assert(is_process(info.process_iid));
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    detail::test_hooks::Recovery_decision_for_test recovery_decision(
+        info.process_iid);
+#endif
+
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         return;
     }
@@ -2154,6 +2193,9 @@ void Coordinator::recover_if_required(const Crash_info& info)
         std::lock_guard<mutex> lock(m_recovery_threads_mutex);
         m_recovery_threads.emplace_back(detail::Exception_boundary{"recovery_runner"}.wrap(
             [spawn_now]() mutable { spawn_now(); }));
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        recovery_decision.mark_scheduled();
+#endif
         return;
     }
 
@@ -2165,6 +2207,9 @@ void Coordinator::recover_if_required(const Crash_info& info)
         m_recovery_threads.emplace_back(detail::Exception_boundary{"recovery_runner"}.wrap(
             [info, runner, control]() mutable { runner(info, control); }));
     }
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    recovery_decision.mark_scheduled();
+#endif
 }
 
 inline
