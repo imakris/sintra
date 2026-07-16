@@ -2357,10 +2357,26 @@ bool run_prepublication_publish_race(
         });
     }
 
+    auto exit_observation = custody.observe_latest_created_exit(
+        [](const sintra::Managed_child_exit&) {});
+    const bool observation_valid = static_cast<bool>(exit_observation);
+    const auto publication_identity = exit_observation.occurrence;
+    exit_observation.subscription.unsubscribe();
+    const bool publication_identity_exact = observation_valid &&
+        publication_identity.custody_identity != 0 &&
+        publication_identity.process_instance_id == piid &&
+        publication_identity.occurrence == 0;
+
     sintra::instance_id_type publish_result = sintra::invalid_instance_id;
     std::thread publisher([&]() {
-        publish_result = sintra::s_coord->publish_transceiver_for_test(
-            sintra::make_user_type_id(1001), piid, published_name);
+        publish_result =
+            sintra::s_coord->publish_managed_child_transceiver_for_test(
+                sintra::make_user_type_id(1001),
+                piid,
+                published_name,
+                publication_identity.custody_identity,
+                publication_identity.process_instance_id,
+                publication_identity.occurrence);
     });
 
     bool reader_terminal = false;
@@ -2415,7 +2431,8 @@ bool run_prepublication_publish_race(
     std::filesystem::remove(marker, ec);
     std::filesystem::remove(release, ec);
 
-    const bool valid = first_miss && reader_terminal && publish_held &&
+    const bool valid = first_miss && publication_identity_exact &&
+        reader_terminal && publish_held &&
         held_observation.release_state ==
             sintra::Managed_child_release_state::requested && publish_result == piid &&
         release_written && released.release_state ==
@@ -2423,11 +2440,14 @@ bool run_prepublication_publish_race(
         survivor_absent && reap_seen && reap_normal && finalized;
     if (!valid) {
         std::fprintf(stderr,
-            "PREPUBLICATION_INVALID first_miss=%d reader_terminal=%d publish_held=%d "
+            "PREPUBLICATION_INVALID first_miss=%d identity_exact=%d "
+            "reader_terminal=%d publish_held=%d "
             "held_incomplete=%d publish_result=%d release_written=%d release_complete=%d "
             "canonical_absence=%d survivor_absent=%d reap_seen=%d reap_normal=%d "
             "finalized=%d\n",
-            first_miss ? 1 : 0, reader_terminal ? 1 : 0, publish_held ? 1 : 0,
+            first_miss ? 1 : 0,
+            publication_identity_exact ? 1 : 0,
+            reader_terminal ? 1 : 0, publish_held ? 1 : 0,
             held_observation.release_state !=
                 sintra::Managed_child_release_state::complete ? 1 : 0,
             publish_result == piid ? 1 : 0, release_written ? 1 : 0,
