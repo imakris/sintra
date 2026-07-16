@@ -359,6 +359,8 @@ inline constexpr const char* k_managed_child_fail_cleanup_actions =
     "managed_child_cleanup_actions";
 inline constexpr const char* k_managed_child_fail_communication_worker_start =
     "managed_child_communication_worker_start";
+inline constexpr const char* k_external_process_fail_reader_retirement_worker_start =
+    "external_process_reader_retirement_worker_start";
 inline constexpr const char* k_managed_child_fail_exit_dispatcher_start =
     "managed_child_exit_dispatcher_start";
 inline constexpr const char* k_managed_child_force_exit_status_unavailable =
@@ -1781,7 +1783,7 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
         reinterpret_cast<HANDLE>(process_handle_value);
     auto observer_complete = std::make_shared<std::atomic<bool>>(false);
 
-    m_owner->start_child_custody_worker(
+    m_owner->start_owned_lifecycle_worker(
         [owner = m_owner, custody, process_instance_id, occurrence_number,
          process_handle, process_handle_value, observer_complete]() {
             struct Windows_native_observer_guard
@@ -2513,7 +2515,7 @@ Managed_process::~Managed_process()
     // finalize_impl() only reaches destruction after every retained custody
     // record is terminal, so the owned observers/cleanup workers are bounded
     // joins here and cannot outlive the runtime they report into.
-    join_child_custody_workers();
+    join_owned_lifecycle_workers();
     drain_child_exit_dispatcher();
 
     // The coordinating process will be removing its readers whenever
@@ -3284,11 +3286,14 @@ void Managed_process::init(int argc, const char* const* argv)
 
         auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
         {
-            if (!s_coord || msg.managed_child_custody_identity == 0) {
+            if (!s_coord ||
+                (msg.managed_child_custody_identity == 0 &&
+                 msg.managed_child_occurrence == 0))
+            {
                 return;
             }
 
-            Coordinator::Managed_child_publication_identity expected_identity;
+            Coordinator::Process_reader_identity expected_identity;
             expected_identity.custody_identity =
                 msg.managed_child_custody_identity;
             expected_identity.process_iid =
@@ -3548,32 +3553,32 @@ inline void Managed_process::record_release_attempt_blocker(
         << " message='" << message << "'\n";
 }
 
-inline void Managed_process::start_child_custody_worker(
+inline void Managed_process::start_owned_lifecycle_worker(
     std::function<void()> worker,
     const char* failure_stage,
     instance_id_type failure_process_instance_id,
     uint32_t failure_occurrence)
 {
-    std::lock_guard<std::mutex> lock(m_child_custody_workers_mutex);
-    for (auto it = m_child_custody_workers.begin(); it != m_child_custody_workers.end();) {
+    std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+    for (auto it = m_owned_lifecycle_workers.begin(); it != m_owned_lifecycle_workers.end();) {
         if (it->complete->load(std::memory_order_acquire)) {
             if (it->thread.joinable()) {
                 it->thread.join();
             }
-            it = m_child_custody_workers.erase(it);
+            it = m_owned_lifecycle_workers.erase(it);
         }
         else {
             ++it;
         }
     }
     auto complete = std::make_shared<std::atomic<bool>>(false);
-    auto guarded = detail::Exception_boundary{"managed_child_custody"}.wrap(
+    auto guarded = detail::Exception_boundary{"owned_lifecycle_worker"}.wrap(
         std::move(worker));
     // Register a nonjoinable owned slot first. If injection or std::thread
     // construction fails, erasing this slot is safe; no joinable local thread
     // can escape registration and trigger std::terminate during unwinding.
-    m_child_custody_workers.emplace_back();
-    auto& owned = m_child_custody_workers.back();
+    m_owned_lifecycle_workers.emplace_back();
+    auto& owned = m_owned_lifecycle_workers.back();
     owned.complete = complete;
     try {
         if (failure_stage) {
@@ -3591,7 +3596,7 @@ inline void Managed_process::start_child_custody_worker(
             });
     }
     catch (...) {
-        m_child_custody_workers.pop_back();
+        m_owned_lifecycle_workers.pop_back();
         throw;
     }
 }
@@ -3726,12 +3731,12 @@ inline void Managed_process::dispatch_child_exit_subscription(
     m_child_exit_dispatch_changed.notify_one();
 }
 
-inline void Managed_process::join_child_custody_workers()
+inline void Managed_process::join_owned_lifecycle_workers()
 {
-    std::vector<Child_custody_worker> workers;
+    std::vector<Owned_lifecycle_worker> workers;
     {
-        std::lock_guard<std::mutex> lock(m_child_custody_workers_mutex);
-        workers.swap(m_child_custody_workers);
+        std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+        workers.swap(m_owned_lifecycle_workers);
     }
     for (auto& worker : workers) {
         if (worker.thread.joinable()) {
@@ -4081,7 +4086,7 @@ inline void Managed_process::start_child_custody_release_worker(
     }
 
     try {
-        start_child_custody_worker(
+        start_owned_lifecycle_worker(
             std::bind(
                 &Managed_process::execute_child_custody_release_attempt,
                 this,
@@ -4992,7 +4997,7 @@ inline void Managed_process::retire_child_communication(
         return;
     }
     try {
-        start_child_custody_worker(
+        start_owned_lifecycle_worker(
             [this, token, release_attempt_generation,
              reader = std::move(claimed_reader)]() mutable {
             try {
@@ -6272,6 +6277,49 @@ inline void Managed_process::remove_process_reader(
 
     if (reader) {
         reader->stop_and_wait(waiting_period);
+    }
+}
+
+inline void Managed_process::retire_external_process_reader(
+    const std::shared_ptr<Process_message_reader>& reader)
+{
+    if (!reader || reader->get_managed_child_custody_identity() != 0) {
+        return;
+    }
+
+    reader->stop_nowait();
+    auto retire = [this, reader]() {
+        while (!reader->stop_and_wait(1.0)) {
+        }
+
+        Dispatch_unique_lock readers_lock(m_readers_mutex);
+        const auto current = m_readers.find(reader->get_process_instance_id());
+        if (current != m_readers.end() && current->second == reader) {
+            m_readers.erase(current);
+        }
+    };
+
+    try {
+        start_owned_lifecycle_worker(
+            retire,
+            detail::test_hooks::
+                k_external_process_fail_reader_retirement_worker_start,
+            reader->get_process_instance_id(),
+            reader->get_occurrence());
+    }
+    catch (...) {
+        Log_stream(log_level::warning)
+            << "External process reader retirement worker failed to start\n";
+        run_after_current_handler(
+            [this, retire = std::move(retire)]() mutable {
+                try {
+                    start_owned_lifecycle_worker(std::move(retire));
+                }
+                catch (...) {
+                    Log_stream(log_level::error)
+                        << "External process reader retirement retry failed to start\n";
+                }
+            });
     }
 }
 

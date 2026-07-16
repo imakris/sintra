@@ -1270,6 +1270,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void remove_process_reader(
         instance_id_type   process_instance_id,
         double             waiting_period = 1.0);
+    void retire_external_process_reader(
+        const std::shared_ptr<Process_message_reader>& reader);
 
     bool has_process_reader(
         instance_id_type   process_instance_id) const;
@@ -1496,12 +1498,12 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::chrono::steady_clock::time_point deadline);
     bool cleanup_child_native(
         const detail::Managed_child_occurrence_token& token);
-    void start_child_custody_worker(
+    void start_owned_lifecycle_worker(
         std::function<void()> worker,
         const char* failure_stage = nullptr,
         instance_id_type failure_process_instance_id = invalid_instance_id,
         uint32_t failure_occurrence = 0);
-    void join_child_custody_workers();
+    void join_owned_lifecycle_workers();
     void retire_child_custody_if_complete(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody);
 
@@ -1519,13 +1521,13 @@ struct Managed_process: Derived_transceiver<Managed_process>
                                         m_child_custodies;
     std::map<instance_id_type, detail::Managed_child_active_occurrence>
                                         m_child_custody_by_process;
-    mutable std::mutex                  m_child_custody_workers_mutex;
-    struct Child_custody_worker
+    mutable std::mutex                  m_owned_lifecycle_workers_mutex;
+    struct Owned_lifecycle_worker
     {
         std::thread                         thread;
         std::shared_ptr<std::atomic<bool>>  complete;
     };
-    std::vector<Child_custody_worker>   m_child_custody_workers;
+    std::vector<Owned_lifecycle_worker> m_owned_lifecycle_workers;
     std::mutex                          m_child_exit_dispatch_mutex;
     std::condition_variable             m_child_exit_dispatch_changed;
     std::thread                         m_child_exit_dispatch_thread;
