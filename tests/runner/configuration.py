@@ -28,10 +28,11 @@ TEST_TIMEOUT_OVERRIDES = {
     "managed_child_adverse_cleanup_contract_test_release": 60.0,
     # This executable serializes 271.6s of explicit Windows failure-reporting
     # bounds. POSIX adds 40s of reap/roster bounds, and post-native recovery
-    # advance adds 41s of sequential parent bounds, for 352.6s total. Keep a
-    # 22.4s process-start/cleanup scheduling margin.
-    "managed_child_custody_setup_race_contract_test_debug": 375.0,
-    "managed_child_custody_setup_race_contract_test_release": 375.0,
+    # advance adds 41s. Recipe exposure and cache retirement add another 41s
+    # of sequential parent bounds, for 393.6s total. Keep a 26.4s scheduling
+    # margin for process start and cleanup.
+    "managed_child_custody_setup_race_contract_test_debug": 420.0,
+    "managed_child_custody_setup_race_contract_test_release": 420.0,
 }
 
 

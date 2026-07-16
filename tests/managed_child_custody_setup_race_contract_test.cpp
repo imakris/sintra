@@ -43,6 +43,8 @@ constexpr const char* k_readiness_cancellation_child_flag =
     "--managed-child-readiness-cancellation-child";
 constexpr const char* k_post_native_recovery_child_flag =
     "--managed-child-post-native-recovery-child";
+constexpr const char* k_recovery_recipe_exposure_child_flag =
+    "--managed-child-recovery-recipe-exposure-child";
 
 struct Unrelated_publication_target :
     sintra::Derived_transceiver<Unrelated_publication_target>
@@ -881,9 +883,19 @@ bool run_recovery_create_release_race(
     args.lifetime.enable_lifeline = false;
 
     sintra::Managed_process::Spawn_result result;
+    bool cache_reserved = false;
     std::thread create([&]() {
         auto launch_attempt = sintra::s_mproc->admit_child_custody_occurrence(
             custody, piid, args.occurrence);
+        if (launch_attempt) {
+            auto cached_args = args;
+            cached_args.occurrence = 2;
+            std::lock_guard<std::mutex> lock(
+                sintra::s_mproc->m_cached_spawns_mutex);
+            sintra::s_mproc->m_cached_spawns[piid] =
+                std::move(cached_args);
+            cache_reserved = true;
+        }
         result = sintra::s_mproc->spawn_swarm_process(args, launch_attempt);
     });
 
@@ -925,13 +937,202 @@ bool run_recovery_create_release_race(
     sintra::detail::test_hooks::s_managed_child_reader_setup.store(
         nullptr, std::memory_order_release);
     s_gate = nullptr;
+    const bool registry_retired = sintra::s_mproc->wait_for_all_child_custodies(
+        std::chrono::steady_clock::now() + 5s);
+    bool cache_absent = false;
+    {
+        std::lock_guard<std::mutex> lock(
+            sintra::s_mproc->m_cached_spawns_mutex);
+        cache_absent =
+            sintra::s_mproc->m_cached_spawns.find(piid) ==
+                sintra::s_mproc->m_cached_spawns.end();
+    }
+    sintra::External_process_invitation_options invitation_options;
+    invitation_options.process_instance_id = piid;
+    invitation_options.timeout = 5s;
+    const auto invitation = sintra::create_external_process_invitation(
+        invitation_options);
+    const bool invitation_created = static_cast<bool>(invitation);
+    const bool invitation_cancelled = invitation_created &&
+        sintra::cancel_external_process_invitation(invitation);
     const bool finalized = settle_detail_finalize("recovery_create_release");
     const bool no_child_after = marker_absent(marker);
     std::filesystem::remove(marker, ec);
 
-    return setup_held && pending_before_release && incomplete_while_held &&
+    const bool valid = cache_reserved && setup_held &&
+        pending_before_release && incomplete_while_held &&
         no_child_while_held && !result.success && !result.os_process_created &&
-        resolved_no_child && release_completed && finalized && no_child_after;
+        resolved_no_child && release_completed && registry_retired &&
+        cache_absent && invitation_created && invitation_cancelled &&
+        finalized && no_child_after;
+    if (!valid) {
+        std::fprintf(
+            stderr,
+            "RECOVERY_CACHE_RETIREMENT_INVALID cache_reserved=%d setup=%d "
+            "pending=%d incomplete=%d no_child_held=%d spawn_success=%d "
+            "os_created=%d resolved_no_child=%d release=%d registry=%d "
+            "cache_absent=%d invitation=%d cancelled=%d finalized=%d "
+            "no_child_after=%d\n",
+            cache_reserved ? 1 : 0,
+            setup_held ? 1 : 0,
+            pending_before_release ? 1 : 0,
+            incomplete_while_held ? 1 : 0,
+            no_child_while_held ? 1 : 0,
+            result.success ? 1 : 0,
+            result.os_process_created ? 1 : 0,
+            resolved_no_child ? 1 : 0,
+            release_completed ? 1 : 0,
+            registry_retired ? 1 : 0,
+            cache_absent ? 1 : 0,
+            invitation_created ? 1 : 0,
+            invitation_cancelled ? 1 : 0,
+            finalized ? 1 : 0,
+            no_child_after ? 1 : 0);
+    }
+    return valid;
+}
+
+bool run_recovery_recipe_exposure_race(
+    int argc,
+    char* argv[],
+    const std::string& binary_path)
+{
+    sintra::init(argc, argv);
+    const auto marker = unique_marker("recovery_recipe_exposure");
+    const auto occurrence_0_marker = occurrence_marker(marker, 0);
+    const auto occurrence_1_marker = occurrence_marker(marker, 1);
+    const auto occurrence_0_crash = exit_marker(occurrence_0_marker);
+    const auto occurrence_1_release = release_marker(occurrence_1_marker);
+    const std::array paths{
+        occurrence_0_marker,
+        occurrence_1_marker,
+        occurrence_0_crash,
+        occurrence_1_release};
+    std::error_code ec;
+    for (const auto& path : paths) {
+        std::filesystem::remove(path, ec);
+        ec.clear();
+    }
+
+    const auto piid = sintra::make_process_instance_id();
+    Failure_plan plan;
+    plan.stage =
+        sintra::detail::test_hooks::k_managed_child_fail_post_native_setup;
+    plan.park_stage = plan.stage;
+    plan.expected_iid = piid;
+    plan.expected_occurrence = 0;
+    plan.wait_for_marker = occurrence_0_marker;
+    s_failure_plan.store(&plan, std::memory_order_release);
+    sintra::detail::test_hooks::s_managed_child_failure.store(
+        &inject_managed_child_failure, std::memory_order_release);
+
+    Setup_gate gate;
+    gate.expected_iid = piid;
+    gate.expected_occurrence = 1;
+    s_gate = &gate;
+    sintra::detail::test_hooks::s_managed_child_reader_setup.store(
+        &hold_reader_setup, std::memory_order_release);
+
+    sintra::Spawn_options options;
+    options.binary_path = binary_path;
+    options.args = {k_recovery_recipe_exposure_child_flag, marker.string()};
+    options.process_instance_id = piid;
+    options.lifetime.enable_lifeline = false;
+    sintra::Managed_child_custody custody;
+    std::thread initial_spawn([&]() {
+        custody = sintra::spawn_swarm_process(options);
+    });
+
+    bool initial_parked = false;
+    bool occurrence_0_initialized = false;
+    {
+        std::unique_lock<std::mutex> lock(plan.mutex);
+        initial_parked = plan.changed.wait_for(lock, 10s, [&]() {
+            return plan.parked;
+        });
+        occurrence_0_initialized = plan.marker_seen;
+    }
+    const bool occurrence_0_crashed = initial_parked &&
+        occurrence_0_initialized &&
+        write_signal_marker(occurrence_0_crash, "crash");
+    const bool recovery_reader_entered = occurrence_0_crashed &&
+        wait_for_gate(gate);
+
+    bool parent_released_park = false;
+    bool park_watchdog_released = false;
+    {
+        std::lock_guard<std::mutex> lock(plan.mutex);
+        parent_released_park = plan.parked && !plan.park_released;
+        plan.park_released = true;
+        park_watchdog_released = plan.park_watchdog_released;
+        plan.changed.notify_all();
+    }
+    initial_spawn.join();
+    release_gate(gate);
+    const bool occurrence_1_seen = recovery_reader_entered &&
+        wait_for_file(occurrence_1_marker, 8s);
+    const bool occurrence_1_released = occurrence_1_seen &&
+        write_signal_marker(occurrence_1_release, "release");
+
+    reset_failure_hook();
+    sintra::detail::test_hooks::s_managed_child_reader_setup.store(
+        nullptr, std::memory_order_release);
+    s_gate = nullptr;
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 8s);
+    const auto identity_0 = read_child_identity(occurrence_0_marker);
+    const auto identity_1 = read_child_identity(occurrence_1_marker);
+    const bool exact_distinct_children = identity_0 && identity_1 &&
+        *identity_0 != *identity_1;
+    const bool finalized = settle_detail_finalize(
+        "recovery_recipe_exposure");
+    for (const auto& path : paths) {
+        std::filesystem::remove(path, ec);
+        ec.clear();
+    }
+
+    const bool valid = custody && initial_parked &&
+        occurrence_0_initialized && occurrence_0_crashed &&
+        recovery_reader_entered && parent_released_park &&
+        !park_watchdog_released && occurrence_1_seen &&
+        occurrence_1_released && exact_distinct_children &&
+        released.admitted_occurrences == 2 &&
+        released.created_occurrences == 2 &&
+        released.exited_occurrences == 2 &&
+        released.release_state == sintra::Managed_child_release_state::complete &&
+        finalized;
+    if (!valid) {
+        std::fprintf(
+            stderr,
+            "RECOVERY_RECIPE_EXPOSURE_INVALID custody=%d parked=%d marker0=%d "
+            "crash0=%d reader1=%d parent_release=%d watchdog=%d marker1=%d "
+            "release1=%d identity0=(%d,%llu) identity1=(%d,%llu) "
+            "distinct=%d admitted=%zu created=%zu exited=%zu complete=%d "
+            "finalized=%d\n",
+            custody ? 1 : 0,
+            initial_parked ? 1 : 0,
+            occurrence_0_initialized ? 1 : 0,
+            occurrence_0_crashed ? 1 : 0,
+            recovery_reader_entered ? 1 : 0,
+            parent_released_park ? 1 : 0,
+            park_watchdog_released ? 1 : 0,
+            occurrence_1_seen ? 1 : 0,
+            occurrence_1_released ? 1 : 0,
+            identity_0 ? identity_0->pid : -1,
+            identity_0 ?
+                static_cast<unsigned long long>(identity_0->start_stamp) : 0,
+            identity_1 ? identity_1->pid : -1,
+            identity_1 ?
+                static_cast<unsigned long long>(identity_1->start_stamp) : 0,
+            exact_distinct_children ? 1 : 0,
+            released.admitted_occurrences,
+            released.created_occurrences,
+            released.exited_occurrences,
+            released.release_state ==
+                sintra::Managed_child_release_state::complete ? 1 : 0,
+            finalized ? 1 : 0);
+    }
+    return valid;
 }
 
 bool run_deadline_setup_shutdown_retry(
@@ -3057,6 +3258,32 @@ bool run_concurrent_posix_roster_reservations(
 int main(int argc, char* argv[])
 {
     for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == k_recovery_recipe_exposure_child_flag) {
+            const std::filesystem::path marker = argv[i + 1];
+            sintra::init(argc, argv);
+            const auto occurrence = sintra::s_recovery_occurrence;
+            if (occurrence == 0) {
+                sintra::enable_recovery();
+            }
+            const auto exact_marker = occurrence_marker(marker, occurrence);
+            const bool identity_written = write_child_identity(exact_marker);
+            if (occurrence == 0) {
+                const bool crash_requested = wait_for_file(
+                    exit_marker(exact_marker), 15s);
+                if (!identity_written || !crash_requested) {
+                    return 3;
+                }
+                sintra::disable_debug_pause_for_current_process();
+                sintra::test::prepare_for_intentional_crash(
+                    "recovery recipe exposure");
+                std::abort();
+            }
+            const bool released = occurrence == 1 && wait_for_file(
+                release_marker(exact_marker), 15s);
+            const bool finalized = settle_detail_finalize(
+                "recovery_recipe_exposure_child");
+            return identity_written && released && finalized ? 0 : 3;
+        }
         if (std::string(argv[i]) == k_post_native_recovery_child_flag) {
             const std::filesystem::path marker = argv[i + 1];
             sintra::init(argc, argv);
@@ -3150,6 +3377,11 @@ int main(int argc, char* argv[])
 
     const std::string binary_path = std::filesystem::absolute(argv[0]).string();
     const bool recovery_race = run_recovery_create_release_race(
+        argc, argv, binary_path);
+    if (!s_teardown_settled) {
+        return 2;
+    }
+    const bool recovery_recipe_exposure = run_recovery_recipe_exposure_race(
         argc, argv, binary_path);
     if (!s_teardown_settled) {
         return 2;
@@ -3250,7 +3482,8 @@ int main(int argc, char* argv[])
     }
 
     const bool unrelated_setup_race_green =
-        recovery_race && deadline_race && pre_create_exception &&
+        recovery_race && recovery_recipe_exposure && deadline_race &&
+        pre_create_exception &&
         post_native_exception && post_native_recovery_advance &&
         observer_start_failure &&
         prepublication_exit && split_transport_retirement &&
@@ -3279,7 +3512,8 @@ int main(int argc, char* argv[])
     {
         std::printf(
             "SETUP_RACE_GREEN_VALID recovery_pending=1 release_waited=1 "
-            "recovery_no_child=1 deadline_bounded=1 shutdown_retry_no_throw=1 "
+            "recovery_no_child=1 recovery_recipe_preexposed=1 "
+            "deadline_bounded=1 shutdown_retry_no_throw=1 "
             "shutdown_retry_resumed_finalize=1 finalize_retained=1 final_shutdown=1 "
             "pre_create_exception_no_child=1 post_native_exception_owned=1 "
             "post_native_recovery_advanced=1 "
@@ -3310,7 +3544,8 @@ int main(int argc, char* argv[])
     }
 
     std::fprintf(stderr,
-        "SETUP_RACE_INVALID recovery_race=%d deadline_race=%d "
+        "SETUP_RACE_INVALID recovery_race=%d recovery_recipe_exposure=%d "
+        "deadline_race=%d "
         "pre_create_exception=%d post_native_exception=%d "
         "post_native_recovery_advance=%d "
         "observer_start_failure=%d release_worker_retry=%s "
@@ -3319,7 +3554,9 @@ int main(int argc, char* argv[])
         "prepublication_publish_race=%d readiness_unrelated=%d "
         "readiness_exact=%d readiness_cancelled=%d immediate_reaped=%d "
         "publication_occurrence=%d concurrent_posix_roster=%d\n",
-        recovery_race ? 1 : 0, deadline_race ? 1 : 0,
+        recovery_race ? 1 : 0,
+        recovery_recipe_exposure ? 1 : 0,
+        deadline_race ? 1 : 0,
         pre_create_exception ? 1 : 0, post_native_exception ? 1 : 0,
         post_native_recovery_advance ? 1 : 0,
         observer_start_failure ? 1 : 0,
