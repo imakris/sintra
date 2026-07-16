@@ -3786,7 +3786,21 @@ inline void Managed_process::retire_child_custody_if_complete(
         {
             return;
         }
-        m_child_custodies.erase(record_it);
+    }
+    detail::managed_child_custody_retirement_for_test(
+        detail::test_hooks::k_managed_child_custody_retirement_before_cache_erase,
+        custody->identity);
+    {
+        std::scoped_lock lock(m_child_custody_mutex, m_cached_spawns_mutex);
+        auto record_it = m_child_custodies.find(custody->identity);
+        if (record_it == m_child_custodies.end() ||
+            record_it->second != custody)
+        {
+            return;
+        }
+        std::erase_if(m_cached_spawns, [&](const auto& entry) {
+            return entry.second.custody == custody;
+        });
         for (auto it = m_child_custody_by_process.begin();
              it != m_child_custody_by_process.end();)
         {
@@ -3797,15 +3811,7 @@ inline void Managed_process::retire_child_custody_if_complete(
                 ++it;
             }
         }
-    }
-    detail::managed_child_custody_retirement_for_test(
-        detail::test_hooks::k_managed_child_custody_retirement_before_cache_erase,
-        custody->identity);
-    {
-        std::lock_guard<std::mutex> lock(m_cached_spawns_mutex);
-        std::erase_if(m_cached_spawns, [&](const auto& entry) {
-            return entry.second.custody == custody;
-        });
+        m_child_custodies.erase(record_it);
     }
     m_child_custody_changed.notify_all();
     detail::managed_child_custody_retirement_for_test(
