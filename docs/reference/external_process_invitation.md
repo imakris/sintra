@@ -66,10 +66,13 @@ Contract:
   custody, or fenced by an unquiesced reader generation.
 - `timeout` must be positive. Pending invitations expire automatically and are
   cleaned up; shutdown also cancels pending invitations.
-- Each accepted reservation receives a monotonically increasing, non-zero
-  `occurrence` for that process instance id. Together with the process id it
-  identifies one exact external reader generation; it is distinct from the
-  custody-relative recovery occurrence of a managed child.
+- Within one active coordinator runtime, each accepted reservation receives a
+  monotonically increasing, non-zero `occurrence` for that process instance
+  id. Together with the process id and owning swarm/runtime, it identifies one
+  exact external reader generation; values can repeat after shutdown and a
+  later runtime initialization. It is distinct from the custody-relative
+  recovery occurrence of a managed child and must not be persisted as a
+  cross-runtime identity.
 - `External_process_invitation::sintra_args()` returns the `--swarm_id`,
   `--instance_id`, `--coordinator_id`, external occurrence, and attach-token
   arguments. Append them to the executable's normal command line.
@@ -85,7 +88,9 @@ Contract:
   pending invitation that reused the same explicit id. Canceling by process id
   cancels the pending invitation for that id.
 - The token is sensitive. Sintra does not log it. Application code should not
-  print the invitation arguments or token to user-visible logs.
+  print the invitation arguments or token to user-visible logs. The token plus
+  swarm and coordinator data authenticates the claim; `occurrence` is neither
+  a secret nor an authenticator.
 - After admission, the process is a normal swarm participant and is added to
   the standard `_sintra_all_processes` and `_sintra_external_processes` groups.
 - The external process may call `sintra::leave()` to depart while the swarm

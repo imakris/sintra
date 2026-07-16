@@ -126,4 +126,4 @@ header set. For guide-style explanations and recipe links, see
 | [README](../../README.md) | Project overview, integration notes, and examples. |
 | [Architecture notes](../architecture.md) | Internal runtime architecture and process model notes. |
 | [Barriers and shutdown](../barriers_and_shutdown.md) | Lifecycle, shutdown, and barrier coordination details. |
-| [Process lifecycle notes](../process_lifecycle_notes.md) | Recovery hooks, lifecycle events, and lifeline ownership notes. |
+| [Process lifecycle notes](../process_lifecycle_notes.md) | Lifecycle event ordering and custody-scoped recovery overview. |

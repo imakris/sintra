@@ -209,12 +209,22 @@ against both the registry entry and the captured reader, so a stale managed
 occurrence or external invitation generation cannot retire its replacement.
 
 Publication state is committed under `m_publish_mutex`. The separate
-`m_publication_notifications_mutex` spans that commit and enqueueing the
-corresponding `instance_published` or `instance_unpublished` message on the
-coordinator request-ring FIFO. A replacement publication therefore cannot
-enqueue ahead of its predecessor's unpublish notification. Lifecycle callbacks
-run only after the registry transaction, notification enqueueing, and internal
-retirement work have released their locks; recovery is scheduled last.
+`m_publication_notifications_mutex` serializes that transaction with the
+disposition of its notification. Immediate notifications are enqueued on the
+coordinator request-ring FIFO while that sequencing mutex remains held. During
+initialization, a publication can instead be recorded in the delayed list; a
+later initialization-complete or unpublish transaction takes any ready batch
+under the same sequencing mutex and enqueues its surviving entries. An
+unpublish transaction discards the retiring process's entries from a batch it
+releases. A registry commit therefore does not always imply an immediate
+notification enqueue, but a replacement still cannot enqueue ahead of its
+predecessor's unpublish notification.
+
+Lifecycle callbacks run after the registry transaction and notification
+disposition have released their locks. Managed-child communication retirement
+has been requested by then, but its reader join runs asynchronously and can
+remain incomplete. The callback does not certify communication quiescence or
+custody release; recovery is considered only after the callback returns.
 
 ### Barrier Mechanism
 

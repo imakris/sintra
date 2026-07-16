@@ -31,12 +31,12 @@ extern uint32_t s_recovery_occurrence; // process-local
 ```
 
 Description: The recovery API opts a managed-child custody into automatic
-respawn after abnormal exit and configures the coordinator-side decision and
-execution callbacks. `enable_recovery()` is called by the candidate child. The
-coordinator then decides whether to respawn through
-`set_recovery_policy(...)` and performs any custom delay or gating in a
-`set_recovery_runner(...)` callback. The detected recovery occurrence
-count is exposed through the process-local global
+respawn after an exact crash or unexpected non-draining unpublish and configures
+the coordinator-side decision and execution callbacks. `enable_recovery()` is
+called by the candidate child. The coordinator then decides whether to respawn
+through `set_recovery_policy(...)` and performs any custom delay or gating in a
+`set_recovery_runner(...)` callback. The detected recovery occurrence count is
+exposed through the process-local global
 `s_recovery_occurrence`. The value is relative to the current managed-child
 custody, not a process-instance-id generation counter.
 
@@ -92,11 +92,15 @@ custody, not a process-instance-id generation counter.
   the coordinator process. Calls from non-coordinator processes are no-ops.
 - The default behaviour, when no policy is configured, is to recover the
   process. A policy that returns `false` from a crash-info inspection skips
-  the recovery for that event.
+  the recovery for that event. If the policy throws, Sintra logs the exception
+  and retains the default-allow decision, so recovery proceeds.
 - The default runner, when none is configured, schedules the spawn on a
   coordinator-owned recovery thread. A custom runner runs on its own recovery
   thread and decides when to call `Recovery_control::spawn()`. Calling
-  `spawn()` more than once is ignored.
+  `spawn()` more than once is ignored. If a custom runner throws, Sintra logs
+  the exception and neither retries the runner nor falls back to the default
+  spawn. A `spawn()` already invoked before the throw retains its normal
+  one-shot behavior.
 - Crash handling captures the exact custody, predecessor occurrence, and
   structured launch recipe before policy or runner code runs. A retained
   `Recovery_control::spawn()` revalidates that the captured custody remains
@@ -118,6 +122,11 @@ custody, not a process-instance-id generation counter.
   `process_lifecycle_event::reason::crash` when the process crashed. The
   lifecycle callback runs after exact publication retirement and notification
   enqueueing; recovery is considered only after that callback returns.
+- When recovery follows an exact abnormal-termination message,
+  `Crash_info::status` is the integer carried by that message; the signal path
+  supplies a signal number. An unexpected non-draining unpublish without that
+  message supplies zero. Neither form is the normalized or native
+  managed-child exit status.
 
 ## Threading and lifecycle
 
@@ -137,6 +146,9 @@ custody, not a process-instance-id generation counter.
 - Misconfiguration shows up as a missed recovery: the policy returned
   `false`, the runner did not call `spawn`, the custody exited without enabling
   recovery, or a retained control was invoked after its exact custody closed.
+- A throwing policy is logged and defaults to recovery. A throwing custom
+  runner is logged without retry or fallback; recovery occurs only if that
+  runner invoked its one-shot `spawn()` before throwing.
 
 ## Example source
 

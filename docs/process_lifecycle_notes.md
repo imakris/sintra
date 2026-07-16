@@ -10,8 +10,12 @@ Sintra has two coordinator-side lifecycle surfaces:
 Crash provenance is carried with the exact managed-child or external-reader
 generation into the same transaction that removes its publication. The
 lifecycle callback runs afterward, outside the publication, group, custody,
-and reader locks. Recovery is considered only after publication and
-communication retirement, notification enqueueing, and the lifecycle callback.
+and reader locks. The registry transaction, its unpublish notification, and any
+delayed publications released by that transaction are enqueued by then.
+Communication retirement has been requested, but its reader join and custody
+release can still be completing asynchronously; the callback does not certify
+either milestone. Recovery is considered only after the lifecycle callback
+returns.
 
 Recovery belongs to a custody, not to a process instance id. A managed child
 calls `enable_recovery()` once to opt in that custody; its recovery occurrences

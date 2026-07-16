@@ -184,6 +184,8 @@ Contract:
   while retained cleanup continues through exact exit confirmation.
 - Calls made while a lifecycle teardown protocol is active are rejected and
   return an empty handle with a warning logged; rejection creates no child.
+- Calling `observe_latest_created_exit()` with an empty callback returns an
+  empty observation without starting the exit dispatcher or retaining state.
 - `observe_latest_created_exit()` atomically selects the most recently admitted
   occurrence for which OS creation actually succeeded. The returned immutable
   `(process_instance_id, occurrence, custody_identity)` identifies that exact
@@ -204,6 +206,10 @@ Contract:
   occurrence. If no occurrence was created, the observation is empty and the
   callback is not retained. Older exited occurrences may be skipped by the
   latest-created selection.
+- Registration establishes dispatcher custody before retaining the callback.
+  If the dispatcher thread cannot start, registration returns an empty
+  observation and retains no callback, including when the selected occurrence
+  has already exited.
 - Exit observation requires the active coordinator runtime that created the
   custody. Registration during teardown, after `shutdown()`, or after a later
   `init()` when the custody belongs to an earlier runtime returns an empty

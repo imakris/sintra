@@ -12,9 +12,9 @@ Summary:
 invoked once per process lifecycle event (crash, normal exit, or
 unpublished without prior signal). The callback receives a
 `process_lifecycle_event` with the affected process's identity and the
-reason. Crash events also carry the platform-dependent exit status. The
-internal `Managed_process::terminated_abnormally` message carries the exact
-reader generation that authorizes the crash retirement transaction.
+reason. A crash event carries the integer supplied by the internal
+`Managed_process::terminated_abnormally` message, whose prefix also carries
+the exact reader generation that authorizes the crash retirement transaction.
 
 Signature:
 
@@ -65,16 +65,24 @@ Contract:
   replacement generation.
 - `process_iid` is the affected process's instance id; `process_slot`
   is the stable slot index for correlation across recoveries.
-- `status` is non-zero for crash events when the platform supplies an
-  exit signal; it is zero on `normal_exit` and `unpublished` paths.
+- For `crash`, `status` is exactly the integer carried by
+  `Managed_process::terminated_abnormally`. The signal-dispatch path supplies
+  the signal number. This field is not a normalized exit code or native wait
+  status and is not guaranteed to be non-zero. It is zero on `normal_exit` and
+  `unpublished` paths. For OS-authoritative normalized and native managed-child
+  status, use
+  [`Managed_child_custody::observe_latest_created_exit()`](spawn_swarm_process.md).
 - The reasons map to the lifecycle as follows:
   - `crash`: an exact abnormal-termination message retired its matching
-    managed-child or external-reader generation with native status.
-  - `normal_exit`: the process called `shutdown()`, `leave()`, or
-    `detail::finalize()` and the coordinator observed the draining bit.
-  - `unpublished`: the exact unpublish transaction carried neither crash
-    information nor a draining bit (the catch-all for abrupt teardown outside
-    the other paths).
+    managed-child or external-reader generation with that message's status.
+  - `normal_exit`: no crash information was supplied and the process slot was
+    already draining when exact unpublish committed. This usually follows the
+    process beginning `shutdown()`, `leave()`, or `detail::finalize()`, but
+    coordinator shutdown also marks admitted external processes as draining.
+    The reason therefore does not prove that the peer called a graceful API or
+    that its OS process exited cleanly.
+  - `unpublished`: no crash information was supplied and the process slot was
+    not previously draining when exact unpublish committed.
 - `Managed_process::terminated_abnormally` is an internal reserved
   message emitted by the abnormal process path. Its message prefix carries
   managed custody identity and occurrence, or the external invitation
@@ -88,8 +96,10 @@ Threading and lifecycle:
   `instance_unpublished` and any released delayed publications are enqueued on
   the coordinator request-ring FIFO before a replacement publication can be
   enqueued. The handler then runs outside coordinator publication, group,
-  custody, and reader locks. Recovery, when eligible, is scheduled only after
-  the handler returns.
+  custody, and reader locks. Managed-child communication retirement has been
+  requested, but its asynchronous reader join can still be incomplete; the
+  handler does not certify communication quiescence or custody release.
+  Recovery, when eligible, is considered only after the handler returns.
 - The handler runs on a coordinator thread. Keep work bounded and thread-safe;
   different events may invoke it from different threads.
 - The handler is set globally on the coordinator. Replacing it with a
