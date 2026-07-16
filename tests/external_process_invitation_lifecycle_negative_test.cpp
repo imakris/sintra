@@ -38,7 +38,10 @@ constexpr const char* k_dir_arg                        = "--external_attach_nega
 constexpr const char* k_marker_arg                     = "--external_attach_negative_marker";
 constexpr const char* k_root_case_arg                  = "--external_attach_negative_root_case";
 constexpr const char* k_root_case_reader_retirement    = "reader_retirement";
+constexpr const char* k_root_case_reader_start_failure = "reader_retirement_worker_start_failure";
 constexpr const char* k_root_case_stale_generation     = "stale_generation";
+constexpr const char* k_reader_retirement_worker_start_stage =
+    "external_process_reader_retirement_worker_start";
 constexpr const char* k_role_delayed                   = "delayed_init";
 constexpr const char* k_role_alive                     = "admitted_alive";
 constexpr const char* k_role_crash                     = "crash_after_init";
@@ -68,6 +71,7 @@ std::atomic<sintra::instance_id_type>
 std::atomic<std::uint32_t>
                         g_reader_retirement_occurrence{0};
 std::atomic<unsigned>   g_reader_retirement_stop_calls{0};
+std::atomic<unsigned>   g_reader_retirement_start_failures{0};
 std::atomic<Reader_retirement_gate*>
                         g_reader_retirement_gate{nullptr};
 
@@ -590,6 +594,25 @@ void reader_retirement_stop_hook(
             }
         }
     }
+}
+
+bool reader_retirement_worker_start_failure_hook(
+    const char*               stage,
+    sintra::instance_id_type  process_iid,
+    std::uint32_t             occurrence) noexcept
+{
+    if (std::string_view(stage) != k_reader_retirement_worker_start_stage ||
+        process_iid != g_reader_retirement_process_iid.load(
+            std::memory_order_acquire) ||
+        occurrence != g_reader_retirement_occurrence.load(
+            std::memory_order_acquire))
+    {
+        return false;
+    }
+
+    return g_reader_retirement_start_failures.fetch_add(
+        1,
+        std::memory_order_acq_rel) == 0;
 }
 
 sintra::External_process_invitation make_invitation(
@@ -1563,7 +1586,8 @@ bool run_reader_retirement_case(
     int                            argc,
     char*                          argv[],
     const std::string&             binary_path,
-    const std::filesystem::path&   dir)
+    const std::filesystem::path&   dir,
+    bool                           inject_worker_start_failure = false)
 {
     sintra::init(argc, argv);
     Runtime_guard guard{true};
@@ -1601,11 +1625,17 @@ bool run_reader_retirement_case(
         invitation.occurrence,
         std::memory_order_release);
     g_reader_retirement_stop_calls.store(0, std::memory_order_release);
+    g_reader_retirement_start_failures.store(0, std::memory_order_release);
     Reader_retirement_gate gate;
     gate.arm(old_reader);
     sintra::detail::test_hooks::s_process_reader_rpc_unblock.store(
         &reader_retirement_stop_hook,
         std::memory_order_release);
+    if (inject_worker_start_failure) {
+        sintra::detail::test_hooks::s_managed_child_failure.store(
+            &reader_retirement_worker_start_failure_hook,
+            std::memory_order_release);
+    }
 
     sintra::test::Exact_child helper(2s);
     ok &= sintra::test::assert_true(
@@ -1635,10 +1665,16 @@ bool run_reader_retirement_case(
     }
     const auto exact_stop_calls = g_reader_retirement_stop_calls.load(
         std::memory_order_acquire);
+    const auto start_failures = g_reader_retirement_start_failures.load(
+        std::memory_order_acquire);
     ok &= sintra::test::assert_true(
         gate_reached && exact_stop_calls >= 2,
         k_failure_prefix,
         "crash retirement should enter the exact old reader stop worker");
+    ok &= sintra::test::assert_true(
+        !inject_worker_start_failure || start_failures == 1,
+        k_failure_prefix,
+        "reader retirement should retry after the injected worker-start failure");
 
     sintra::External_process_invitation blocked_invitation;
     bool replacement_transport_while_blocked = false;
@@ -1653,6 +1689,9 @@ bool run_reader_retirement_case(
             found->second->get_occurrence() == blocked_invitation.occurrence;
     }
     sintra::detail::test_hooks::s_process_reader_rpc_unblock.store(
+        nullptr,
+        std::memory_order_release);
+    sintra::detail::test_hooks::s_managed_child_failure.store(
         nullptr,
         std::memory_order_release);
     g_reader_retirement_process_iid.store(
@@ -1711,10 +1750,12 @@ bool run_reader_retirement_case(
 
     std::printf(
         "EXTERNAL_READER_RETIREMENT gate=%d exact_stop_calls=%u "
+        "start_failures=%u "
         "old_running=%d blocked_rejected=%d replacement_transport=%d "
         "old_stopped=%d replacement_reserved=%d\n",
         gate_reached ? 1 : 0,
         exact_stop_calls,
+        start_failures,
         old_running_while_blocked ? 1 : 0,
         blocked_rejected ? 1 : 0,
         replacement_transport_while_blocked ? 1 : 0,
@@ -1743,6 +1784,30 @@ bool run_reader_retirement_isolated(const std::string& binary_path)
         Expected_child_exit::clean,
         45s,
         "isolated reader-retirement root should complete cleanly");
+    return ok;
+}
+
+bool run_reader_retirement_start_failure_isolated(
+    const std::string& binary_path)
+{
+    sintra::test::Exact_child root(2s);
+    const bool launched = launch_direct_process(
+        binary_path,
+        {k_root_case_arg, k_root_case_reader_start_failure},
+        root);
+    bool ok = sintra::test::assert_true(
+        launched,
+        k_failure_prefix,
+        "reader-retirement start-failure root should launch in an isolated process");
+    if (!launched) {
+        return false;
+    }
+
+    ok &= wait_for_expected_exit(
+        root,
+        Expected_child_exit::clean,
+        45s,
+        "isolated reader-retirement start-failure root should complete cleanly");
     return ok;
 }
 
@@ -1833,6 +1898,13 @@ int main(int argc, char* argv[])
         std::filesystem::remove_all(dir, ec);
         return ok ? 0 : 1;
     }
+    if (root_case == k_root_case_reader_start_failure) {
+        const bool ok = run_reader_retirement_case(
+            argc, argv, binary_path, dir, true);
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        return ok ? 0 : 1;
+    }
 
     bool ok = true;
     ok &= run_shutdown_before_claim_case(argc, argv, binary_path, dir);
@@ -1841,6 +1913,7 @@ int main(int argc, char* argv[])
     ok &= run_enable_recovery_after_admission_case(argc, argv, binary_path, dir);
     ok &= run_stale_external_generation_isolated(binary_path);
     ok &= run_reader_retirement_isolated(binary_path);
+    ok &= run_reader_retirement_start_failure_isolated(binary_path);
     ok &= run_cancel_expire_reuse_case(argc, argv, binary_path, dir);
     ok &= run_shutdown_hook_claim_rejection_preserves_invitation_case(argc, argv, binary_path, dir);
     ok &= run_create_invitation_after_finalize_reopens_case(argc, argv);
