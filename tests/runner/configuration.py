@@ -41,6 +41,8 @@ TEST_TIMEOUT_OVERRIDES = {
     "managed_child_custody_setup_race_contract_test_release": 420.0,
     "managed_child_recovery_authority_reuse_contract_test_debug": 130.0,
     "managed_child_recovery_authority_reuse_contract_test_release": 130.0,
+    "recovery_unpublish_deadlock_test_debug": 30.0,
+    "recovery_unpublish_deadlock_test_release": 30.0,
 }
 
 
