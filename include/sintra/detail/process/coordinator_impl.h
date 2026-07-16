@@ -2145,7 +2145,7 @@ void Coordinator::enable_recovery(instance_id_type piid)
         Log_stream(log_level::warning)
             << "Recovery is not available for externally attached process "
             << static_cast<unsigned long long>(piid)
-            << " because Sintra does not have a recovery launch command for it.\n";
+            << " because it has no Sintra-managed child custody or cached structured launch recipe.\n";
         return;
     }
 
@@ -2218,7 +2218,7 @@ void Coordinator::recover_if_required(
         Log_stream(log_level::warning)
             << "Recovery skipped for process "
             << static_cast<unsigned long long>(info.process_iid)
-            << " because no exact recovery launch command is available.\n";
+            << " because its exact managed-child custody has no cached structured launch recipe.\n";
         return;
     }
     {
