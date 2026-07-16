@@ -51,6 +51,12 @@ constexpr const char* k_child_b_crash_file =
 constexpr std::uint32_t k_terminated_status = 0xc0000005u;
 constexpr sintra::instance_id_type k_reused_process_iid =
     sintra::compose_instance(34u, 1ull);
+constexpr sintra::Managed_child_occurrence_identity k_two_field_identity{
+    k_reused_process_iid, 7};
+static_assert(
+    k_two_field_identity.process_instance_id == k_reused_process_iid &&
+    k_two_field_identity.occurrence == 7 &&
+    k_two_field_identity.custody_identity == 0);
 
 struct Child_marker
 {
@@ -244,6 +250,13 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         identity_a.occurrence == 0 &&
         identity_b.occurrence == 0 &&
         recovery_identity.occurrence == 1;
+    const bool custody_identity_relationship =
+        identity_a.custody_identity != 0 &&
+        identity_b.custody_identity != 0 &&
+        identity_a.custody_identity != identity_b.custody_identity &&
+        identity_b.custody_identity == recovery_identity.custody_identity &&
+        identity_a != identity_b && identity_a != recovery_identity &&
+        identity_b != recovery_identity;
     const bool exact_delivery = a_exit_seen && b_exit_seen &&
         recovery_exit_seen && capture_a.count == 1 && capture_b.count == 1 &&
         recovery_capture.count == 1 && capture_a.event.occurrence == identity_a &&
@@ -263,8 +276,9 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         recovery_marker_seen && marker_a.pid > 0 && marker_b.pid > 0 &&
         recovery_marker.pid > 0 && marker_a.pid != marker_b.pid &&
         marker_b.pid != recovery_marker.pid && crash_requested &&
-        recovery_terminated && custody_relative_numbering && marker_identity_matches &&
-        exact_delivery && released_a.release_state ==
+        recovery_terminated && custody_relative_numbering &&
+        custody_identity_relationship && marker_identity_matches && exact_delivery &&
+        released_a.release_state ==
             sintra::Managed_child_release_state::complete &&
         released_b.release_state ==
             sintra::Managed_child_release_state::complete && finalized;
@@ -274,7 +288,9 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             "MANAGED_CHILD_OCCURRENCE_IDENTITY_REUSE_INVALID "
             "custody_a=%d custody_b=%d marker_a=%d marker_b=%d recovery=%d "
             "occurrence_a=%u occurrence_b=%u occurrence_recovery=%u "
-            "custody_relative_numbering=%d identities_equal=%d "
+            "custody_identity_a=%llu custody_identity_b=%llu "
+            "custody_identity_recovery=%llu custody_relative_numbering=%d "
+            "custody_identity_relationship=%d "
             "marker_match=%d exact=%d "
             "count_a=%d count_b=%d count_recovery=%d released_a=%d "
             "released_b=%d finalized=%d\n",
@@ -286,8 +302,11 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             identity_a.occurrence,
             identity_b.occurrence,
             recovery_identity.occurrence,
+            static_cast<unsigned long long>(identity_a.custody_identity),
+            static_cast<unsigned long long>(identity_b.custody_identity),
+            static_cast<unsigned long long>(recovery_identity.custody_identity),
             custody_relative_numbering ? 1 : 0,
-            identity_a == identity_b ? 1 : 0,
+            custody_identity_relationship ? 1 : 0,
             marker_identity_matches ? 1 : 0,
             exact_delivery ? 1 : 0,
             capture_a.count,

@@ -31,7 +31,6 @@
 #include <memory>
 #include <mutex>
 #include <cstdint>
-#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -167,7 +166,10 @@ class Managed_child_exit_subscription_state;
 struct Managed_child_occurrence_identity
 {
     instance_id_type process_instance_id = invalid_instance_id;
+    // Custody-relative: 0 is the original launch and 1 is its first recovery.
     uint32_t         occurrence = 0;
+    // Opaque and unique only among custodies owned by one active runtime.
+    uint64_t         custody_identity = 0;
 
     bool operator==(const Managed_child_occurrence_identity&) const = default;
 };
@@ -251,6 +253,7 @@ namespace detail {
 
 inline constexpr const char* k_external_attach_token_arg      = "--external_attach_token";
 inline constexpr const char* k_external_attach_occurrence_arg = "--external_attach_occurrence";
+inline constexpr const char* k_skip_startup_barrier_arg       = "--sintra_skip_startup_barrier";
 inline constexpr auto        k_external_attach_claim_timeout  = std::chrono::seconds(5);
 
 enum class Managed_child_post_spawn_stage
@@ -649,7 +652,12 @@ Managed_child_exit make_managed_child_exit(
     std::uint32_t                     wait_status,
     bool                              wait_status_available) noexcept;
 
+Managed_child_occurrence_identity make_managed_child_occurrence_identity(
+    uint64_t                               custody_identity,
+    const Managed_child_occurrence_record& occurrence) noexcept;
+
 Managed_child_exit_publication record_managed_child_exit_locked(
+    uint64_t                         custody_identity,
     Managed_child_occurrence_record& occurrence,
     std::uint32_t                    wait_status,
     bool                             wait_status_available);
@@ -1324,6 +1332,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     // recovery
     bool                                m_recoverable           = false;
+    bool                                m_skip_startup_barrier  = false;
     std::string                         m_recovery_cmd;
 
 
@@ -1383,9 +1392,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     std::shared_ptr<detail::Managed_child_custody_record> accept_child_custody();
     bool can_accept_child_custody(instance_id_type process_instance_id) const;
-    std::optional<uint32_t> allocate_child_custody_occurrence(
-        instance_id_type process_instance_id,
-        uint32_t minimum = 0);
     detail::Managed_child_launch_attempt admit_child_custody_occurrence(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         instance_id_type process_instance_id,
@@ -1514,7 +1520,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
                                         m_child_custodies;
     std::map<instance_id_type, detail::Managed_child_active_occurrence>
                                         m_child_custody_by_process;
-    std::map<instance_id_type, uint32_t> m_next_child_occurrence_by_process;
     mutable std::mutex                  m_child_custody_workers_mutex;
     struct Child_custody_worker
     {

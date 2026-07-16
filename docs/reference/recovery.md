@@ -37,7 +37,8 @@ coordinator then decides whether to respawn through
 `set_recovery_policy(...)` and performs any custom delay or gating in a
 `set_recovery_runner(...)` callback. The detected recovery occurrence
 count is exposed through the process-local global
-`s_recovery_occurrence`.
+`s_recovery_occurrence`. The value is relative to the current managed-child
+custody, not a process-instance-id generation counter.
 
 ## Parameters
 
@@ -93,9 +94,11 @@ count is exposed through the process-local global
   teardown progress.
 - `s_recovery_occurrence` is set in the recovered process at startup before
   the entry function runs. It is `0` for the first run, `1` for the first
-  recovery, and so on. Reading it from a non-recoverable or non-spawned
-  context is meaningful only after `init` has set the local managed process
-  up.
+  recovery, and so on. Every fresh custody starts at `0`, even when another
+  custody in the same runtime previously used the same process instance id or
+  when the process was added by a mid-flight swarm join. Reading the value from
+  a non-recoverable or non-spawned context is meaningful only after `init` has
+  set the local managed process up.
 - A recovery event is also surfaced through
   [`sintra::set_lifecycle_handler`](lifecycle_hooks.md) as a
   `process_lifecycle_event::reason::crash` when the process crashed.

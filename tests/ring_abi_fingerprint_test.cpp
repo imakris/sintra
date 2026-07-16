@@ -27,9 +27,9 @@ constexpr std::string_view k_failure_prefix = "ring_abi_fingerprint_test: ";
 void test_message_prefix_ring_abi()
 {
     sintra::test::require_true(
-        sintra::detail::k_sintra_ring_abi_version == 7,
+        sintra::detail::k_sintra_ring_abi_version == 8,
         k_failure_prefix,
-        "message-prefix layout requires ring ABI version 7");
+        "managed-child startup protocol requires ring ABI version 8");
     sintra::test::require_true(
         sintra::detail::k_ring_lifecycle_anchor_abi_version == 3,
         k_failure_prefix,

@@ -514,7 +514,10 @@ Maps `(type_id, handler_type)` -> handler functions. Handlers are activated with
    `Managed_process::spawn_swarm_process()` receives OS-creation authority. Each
    launch or recovery appends an immutable occurrence and binds the returned
    native identity immediately on success. The spawn path caches the executable
-   + argument vector for each spawned child in `m_cached_spawns` and increments a per-process occurrence counter. The counter is appended to the `req`/`rep` ring
+   + argument vector for each spawned child in `m_cached_spawns` and increments
+   that custody's recovery occurrence. Occurrence `0` is the original launch,
+   `1` is its first recovery, and a fresh custody starts again at `0`. The
+   occurrence is appended to the `req`/`rep` ring
    filenames (`Message_ring_{R,W}::get_base_filename`) so every recovery attempt attaches to a fresh pair of shared-memory
    files while previous rings remain available for post-mortem inspection.
 3. Before launching the replacement child the coordinator spins up new `Process_message_reader` instances for the target
@@ -537,6 +540,17 @@ Recovery admission also consults the retained custody record and is refused
 after release closes recovery. Publication retirement, communication
 retirement, and OS exit are reported by their authoritative owners into the
 matching occurrence; a replacement never completes its predecessor's facts.
+The public exact-exit identity combines the process instance id and
+custody-relative occurrence with an opaque runtime-scoped custody identity, so
+separate custodies remain distinguishable even when they reuse the other two
+values. Custody identity values have no meaning outside their owning runtime and
+may repeat after runtime reinitialization.
+
+A process added by a mid-flight swarm join is also an original occurrence (`0`).
+An internal launch flag, retained in its recovery command, skips only the
+already-completed startup barrier. That launch-protocol distinction is versioned
+by the ring ABI so mixed binaries fail compatibility checks instead of waiting
+on the wrong barrier.
 
 **What "safe respawn" means**: by pre-mapping the request/reply readers before `spawn_detached()` the coordinator guarantees
 that the recovering child sees ready-to-use channels as soon as it reaches user code. No address-space layout promises are

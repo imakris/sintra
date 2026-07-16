@@ -1357,16 +1357,6 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
             return {};
         }
 
-        const auto occurrence =
-            s_mproc->allocate_child_custody_occurrence(piid);
-        if (!occurrence) {
-            Log_stream(log_level::error)
-                << "spawn_swarm_process: occurrence counter exhausted for process "
-                << static_cast<unsigned long long>(piid) << '\n';
-            return {};
-        }
-        spawn_args.occurrence = *occurrence;
-
         auto args = options.args;
         auto argv0_matches = [&]() {
             if (args.empty()) {
@@ -1676,10 +1666,8 @@ Managed_child_custody::observe_latest_created_exit(
             return {};
         }
 
-        identity = {
-            selected->process_instance_id,
-            selected->occurrence,
-        };
+        identity = detail::make_managed_child_occurrence_identity(
+            m_record->identity, *selected);
         state = std::make_shared<
             detail::Managed_child_exit_subscription_state>(
                 m_record,

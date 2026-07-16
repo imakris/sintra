@@ -1,5 +1,19 @@
 # Release Notes
 
+## Unreleased
+
+### Compatibility
+
+- Restored custody-relative recovery numbering: every fresh managed-child
+  custody, including process-id reuse and mid-flight joins, starts at occurrence
+  `0`; its first recovery is `1`.
+- Exact managed-child exit identities now include an opaque runtime-scoped
+  custody identity so separate custodies remain distinct without redefining
+  recovery occurrence semantics.
+- Bumped the ring ABI to version 8 for the internal joined-process startup
+  protocol. All processes in a swarm must use binaries built against the same
+  Sintra ring ABI.
+
 ## v1.2.0 (2026-04-28)
 
 ### Highlights

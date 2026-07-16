@@ -87,6 +87,7 @@ struct Managed_child_occurrence_identity
 {
     instance_id_type process_instance_id = invalid_instance_id;
     std::uint32_t occurrence = 0;
+    std::uint64_t custody_identity = 0;
 };
 
 enum class Managed_child_exit_status_kind
@@ -185,7 +186,18 @@ Contract:
   return an empty handle with a warning logged; rejection creates no child.
 - `observe_latest_created_exit()` atomically selects the most recently admitted
   occurrence for which OS creation actually succeeded. The returned immutable
-  `(process_instance_id, occurrence)` identifies that exact occurrence. The
+  `(process_instance_id, occurrence, custody_identity)` identifies that exact
+  occurrence. `occurrence` is relative to one custody: `0` is its original
+  launch, `1` its first recovery, and so on. A fresh custody starts again at
+  `0`, including when it reuses a process instance id or is created by a
+  mid-flight swarm join.
+- `custody_identity` is an opaque, runtime-scoped token. It distinguishes fresh
+  custodies that use the same process instance id and occurrence number, and is
+  shared by all recovery occurrences in one custody. It is unique only among
+  custodies owned by the same active runtime; values may repeat after shutdown
+  and a later runtime initialization. Do not infer ordering or persist the token
+  as a cross-runtime identifier.
+- Identity equality includes all three fields. The
   subscription never follows a later recovery occurrence; call the method
   again after a newer occurrence is created to observe that occurrence.
 - A newer admitted no-child occurrence does not displace the latest created
@@ -279,9 +291,10 @@ Failures:
   facts without minting a failure. An exception in readiness observation may
   instead be recorded as `readiness_observation`.
 - `last_failure` is a retained historical diagnostic, not the current custody
-  state. Its `occurrence` identifies the recovery occurrence to which `kind`,
-  `native_error`, and `message` apply. Later successful progress, including
-  complete release, does not erase an earlier report.
+  state. Its custody-relative `occurrence` identifies the original launch (`0`)
+  or recovery (`1`, `2`, ...) to which `kind`, `native_error`, and `message`
+  apply. Later successful progress, including complete release, does not erase
+  an earlier report.
 - Failure to start a release worker is reported as `release_worker_start`; an
   exception escaping its lifecycle work is reported as
   `release_worker_execution`. Both retain custody and permit a later release or

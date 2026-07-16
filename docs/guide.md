@@ -348,6 +348,7 @@ struct Managed_child_occurrence_identity
 {
     instance_id_type process_instance_id = invalid_instance_id;
     std::uint32_t occurrence = 0;
+    std::uint64_t custody_identity = 0;
 };
 
 enum class Managed_child_exit_status_kind
@@ -428,7 +429,11 @@ child.
 
 `observe_latest_created_exit()` atomically selects the latest occurrence whose
 OS process was actually created and returns its immutable
-`(process_instance_id, occurrence)` identity. The subscription observes only
+`(process_instance_id, occurrence, custody_identity)` identity. Occurrence `0`
+is the original launch within one custody and later values are its recoveries;
+every fresh custody starts at `0`. The opaque custody token distinguishes fresh
+custodies that reuse the same process id. It is unique only within the owning
+active runtime and may repeat in a later runtime. The subscription observes only
 that exact occurrence and never follows recovery. A newer no-child admission
 does not displace the latest created occurrence; if no occurrence was created,
 the result is empty and the callback is not retained. Register again after a

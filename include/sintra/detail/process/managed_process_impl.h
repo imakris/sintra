@@ -22,7 +22,6 @@
 #include <fstream>
 #include <functional>
 #include <list>
-#include <limits>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -118,6 +117,7 @@ inline void Managed_child_exit_subscription_state::deliver(
             << static_cast<unsigned long long>(
                 event.occurrence.process_instance_id)
             << " occurrence=" << event.occurrence.occurrence
+            << " custody_identity=" << event.occurrence.custody_identity
             << " message='" << error.what() << "'\n";
     }
     catch (...) {
@@ -125,7 +125,8 @@ inline void Managed_child_exit_subscription_state::deliver(
             << "Managed-child exit callback threw for process_instance_id="
             << static_cast<unsigned long long>(
                 event.occurrence.process_instance_id)
-            << " occurrence=" << event.occurrence.occurrence << "\n";
+            << " occurrence=" << event.occurrence.occurrence
+            << " custody_identity=" << event.occurrence.custody_identity << "\n";
     }
     tl_in_managed_child_exit_callback = previous_callback_context;
 
@@ -214,7 +215,19 @@ inline Managed_child_exit make_managed_child_exit(
     return event;
 }
 
+inline Managed_child_occurrence_identity make_managed_child_occurrence_identity(
+    uint64_t                               custody_identity,
+    const Managed_child_occurrence_record& occurrence) noexcept
+{
+    Managed_child_occurrence_identity identity;
+    identity.process_instance_id = occurrence.process_instance_id;
+    identity.occurrence = occurrence.occurrence;
+    identity.custody_identity = custody_identity;
+    return identity;
+}
+
 inline Managed_child_exit_publication record_managed_child_exit_locked(
+    uint64_t                         custody_identity,
     Managed_child_occurrence_record& occurrence,
     std::uint32_t                    wait_status,
     bool                             wait_status_available)
@@ -229,7 +242,7 @@ inline Managed_child_exit_publication record_managed_child_exit_locked(
     }
 
     publication.event = make_managed_child_exit(
-        {occurrence.process_instance_id, occurrence.occurrence},
+        make_managed_child_occurrence_identity(custody_identity, occurrence),
         wait_status,
         wait_status_available);
     publication.subscriptions.swap(occurrence.exit_subscriptions);
@@ -1869,6 +1882,7 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                     const bool exit_code_available =
                         GetExitCodeProcess(process_handle, &exit_code) != 0;
                     exit_publication = record_managed_child_exit_locked(
+                        custody->identity,
                         *occurrence,
                         exit_code,
                         exit_code_available &&
@@ -2790,6 +2804,7 @@ inline
 void Managed_process::init(int argc, const char* const* argv)
 {
     m_binary_name = argv[0];
+    m_skip_startup_barrier = false;
 
     // Reset lifeline state to prevent stale values from a previous init() call
     s_lifeline_handle_value.clear();
@@ -2959,6 +2974,13 @@ void Managed_process::init(int argc, const char* const* argv)
                 catch (...) {
                     throw 1;
                 }
+                continue;
+            }
+
+            if (option_value(
+                    arg, detail::k_skip_startup_barrier_arg, '\0', false, i))
+            {
+                m_skip_startup_barrier = true;
                 continue;
             }
 
@@ -3353,20 +3375,6 @@ inline bool Managed_process::can_accept_child_custody(
     return existing->release_state.released();
 }
 
-inline std::optional<uint32_t>
-Managed_process::allocate_child_custody_occurrence(
-    instance_id_type process_instance_id,
-    uint32_t minimum)
-{
-    std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-    auto& next = m_next_child_occurrence_by_process[process_instance_id];
-    next = std::max(next, minimum);
-    if (next == std::numeric_limits<uint32_t>::max()) {
-        return std::nullopt;
-    }
-    return next++;
-}
-
 inline detail::Managed_child_launch_attempt
 Managed_process::admit_child_custody_occurrence(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
@@ -3374,9 +3382,6 @@ Managed_process::admit_child_custody_occurrence(
     uint32_t occurrence)
 {
     if (!custody) {
-        return {};
-    }
-    if (occurrence == std::numeric_limits<uint32_t>::max()) {
         return {};
     }
     {
@@ -3399,9 +3404,6 @@ Managed_process::admit_child_custody_occurrence(
             occurrence);
         {
             std::lock_guard<std::mutex> lock(m_child_custody_mutex);
-            auto& next =
-                m_next_child_occurrence_by_process[process_instance_id];
-            next = std::max(next, occurrence + 1);
             m_child_custody_by_process[process_instance_id] = {custody, occurrence};
         }
     }
@@ -3990,6 +3992,7 @@ apply_managed_child_windows_fallback_locked(
     const auto& exit = std::get<signaled>(result);
     uintptr_t released_handle = 0;
     exit_publication = record_managed_child_exit_locked(
+        custody.identity,
         *exact,
         exit.exit_status,
         true);
@@ -5053,6 +5056,7 @@ inline void Managed_process::note_child_os_exit(
             return;
         }
         exit_publication = detail::record_managed_child_exit_locked(
+            custody->identity,
             *occurrence,
             static_cast<std::uint32_t>(wait_status),
             wait_status_available);
@@ -5204,6 +5208,7 @@ inline bool Managed_process::cleanup_child_native(
                 token.process_instance_id, token.occurrence);
             if (occurrence) {
                 exit_publication = detail::record_managed_child_exit_locked(
+                    custody->identity,
                     *occurrence,
                     exit_code,
                     true);
@@ -5424,6 +5429,13 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     }
 
     auto args = s.args;
+    if (s.occurrence != 0 &&
+        std::find(
+            args.begin(), args.end(), detail::k_skip_startup_barrier_arg) ==
+            args.end())
+    {
+        args.push_back(detail::k_skip_startup_barrier_arg);
+    }
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)});
 
     // Before spawning the new process, we have to assure that the corresponding
@@ -5900,7 +5912,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 
     // assign_name requires that all group processes are instantiated, in order
     // to receive the instance_published event
-    if (s_recovery_occurrence == 0) {
+    if (!m_skip_startup_barrier) {
         bool all_started = Process_group::rpc_barrier(m_group_all, UIBS, 0);
 
         // If we're the coordinator and have failures to report, throw init_error

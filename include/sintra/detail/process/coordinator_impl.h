@@ -1951,13 +1951,14 @@ instance_id_type Coordinator::join_swarm(
     Managed_process::Spawn_swarm_process_args spawn_args;
     spawn_args.binary_name = binary_name.empty() ? s_mproc->m_binary_name : binary_name;
     spawn_args.piid        = new_instance_id;
-    spawn_args.occurrence  = 1; // mark as non-initial to skip startup barrier
+    spawn_args.occurrence  = 0;
     spawn_args.args        = {
         spawn_args.binary_name,
         "--branch_index",   std::to_string(branch_index),
         "--swarm_id",       std::to_string(s_mproc->m_swarm_id),
         "--instance_id",    std::to_string(new_instance_id),
-        "--coordinator_id", std::to_string(s_coord_id)
+        "--coordinator_id", std::to_string(s_coord_id),
+        detail::k_skip_startup_barrier_arg
     };
     spawn_args.custody = s_mproc->accept_child_custody();
     detail::Managed_child_launch_attempt launch_attempt;
@@ -2122,9 +2123,7 @@ void Coordinator::recover_if_required(const Crash_info& info)
             }
             spawn_args = spawn_it->second;
         }
-        const auto occurrence = s_mproc->allocate_child_custody_occurrence(
-            spawn_args.piid, spawn_args.occurrence);
-        if (!occurrence) {
+        if (spawn_args.occurrence == std::numeric_limits<uint32_t>::max()) {
             s_mproc->note_child_custody_failure(
                 spawn_args.custody,
                 {Managed_child_failure_kind::occurrence_admission,
@@ -2133,7 +2132,6 @@ void Coordinator::recover_if_required(const Crash_info& info)
                  "Managed child occurrence counter exhausted"});
             return;
         }
-        spawn_args.occurrence = *occurrence;
         auto launch_attempt = s_mproc->admit_child_custody_occurrence(
             spawn_args.custody,
             spawn_args.piid,
