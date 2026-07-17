@@ -30,6 +30,10 @@ else()
     )
 endif()
 
+if(MINGW)
+    target_compile_options(sintra_for_tests INTERFACE -Wa,-mbig-obj)
+endif()
+
 if(SINTRA_ENABLE_COVERAGE AND NOT MSVC)
     target_compile_options(sintra_for_tests INTERFACE $<$<CONFIG:Debug>:--coverage>)
     target_link_options(sintra_for_tests INTERFACE $<$<CONFIG:Debug>:--coverage>)
