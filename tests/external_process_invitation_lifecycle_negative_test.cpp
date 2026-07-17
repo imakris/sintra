@@ -455,7 +455,9 @@ bool wait_for_expected_exit(
 #ifdef _WIN32
                 // Sintra terminates with 1 when it owns the end of the chain;
                 // the harness's disabled debug-pause handler re-raises to UCRT's 3.
-                expected_status = child.exited_with_code(1) || child.exited_with_code(3);
+                expected_status =
+                    child.exited_with_code(1) || child.exited_with_code(3) ||
+                    child.exited_with_code(EXCEPTION_ACCESS_VIOLATION);
 #else
                 expected_status = child.exited_from_signal(SIGABRT);
 #endif
@@ -763,10 +765,12 @@ int run_crash_after_init_helper(int argc, char* argv[])
     const auto marker = sintra::test::get_argv_value(argc, argv, k_marker_arg);
 
     sintra::init(argc, argv);
+#ifndef _WIN32
     if (!install_abort_signal_acknowledgement(dir, marker + "_abort_signal")) {
         sintra::detail::finalize();
         return 2;
     }
+#endif
     const auto occurrence = sintra::s_recovery_occurrence;
     write_marker(dir, marker + "_entry_" + std::to_string(occurrence), "ready");
 
@@ -785,7 +789,19 @@ int run_crash_after_init_helper(int argc, char* argv[])
     sintra::disable_debug_pause_for_current_process();
     sintra::test::prepare_for_intentional_crash("external-negative-crash");
     write_marker(dir, marker + "_abort_reached", "reached");
+#ifdef _WIN32
+    void* page = VirtualAlloc(
+        nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    if (!page) {
+        return 2;
+    }
+    std::thread([page]() {
+        *static_cast<volatile unsigned char*>(page) = 1;
+    }).join();
+#else
     std::abort();
+#endif
+    return 2;
 }
 
 int run_enable_recovery_after_init_helper(int argc, char* argv[])
@@ -1133,7 +1149,9 @@ bool run_crash_after_init_case(
         5s,
         "external helper should exit after intentional crash");
     ok &= wait_for_marker(dir, "crash_abort_reached", "reached", 1s);
+#ifndef _WIN32
     ok &= wait_for_marker(dir, "crash_abort_signal", "caught", 1s);
+#endif
 
     bool lifecycle_delivered = false;
     {

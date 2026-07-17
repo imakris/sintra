@@ -607,6 +607,25 @@ namespace {
     // Windows signal dispatcher infrastructure - matches POSIX architecture
     // to prevent blocking in signal handlers and provide timeout guarantees.
 
+    inline int windows_hardware_exception_signal(DWORD code) noexcept
+    {
+        switch (code) {
+            case EXCEPTION_ACCESS_VIOLATION:
+            case EXCEPTION_IN_PAGE_ERROR:
+            case EXCEPTION_STACK_OVERFLOW:
+                return SIGSEGV;
+            case EXCEPTION_ILLEGAL_INSTRUCTION:
+            case EXCEPTION_PRIV_INSTRUCTION:
+                return SIGILL;
+            case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+            case EXCEPTION_FLT_INVALID_OPERATION:
+            case EXCEPTION_INT_DIVIDE_BY_ZERO:
+                return SIGFPE;
+            default:
+                return 0;
+        }
+    }
+
     // Forward declarations - defined after #endif in the common section
     inline std::size_t signal_index(int sig);
     inline void dispatch_signal_number(int sig_number);
@@ -620,7 +639,15 @@ namespace {
 
     inline void wait_for_signal_dispatch_win(uint32_t expected_count);
 
-    inline void queue_signal_dispatch_win(int sig_number, bool wait_for_dispatch = true)
+    inline std::atomic<LPTOP_LEVEL_EXCEPTION_FILTER>&
+    previous_unhandled_exception_filter()
+    {
+        static std::atomic<LPTOP_LEVEL_EXCEPTION_FILTER> filter{nullptr};
+        static_assert(decltype(filter)::is_always_lock_free);
+        return filter;
+    }
+
+    inline void queue_signal_dispatch_win(int sig_number)
     {
         auto*      mproc                    = s_mproc;
         const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
@@ -641,44 +668,34 @@ namespace {
             SetEvent(signal_event());
         }
 
-        if (should_wait_for_dispatch && wait_for_dispatch && can_wait && can_dispatch) {
+        if (should_wait_for_dispatch && can_wait && can_dispatch) {
             wait_for_signal_dispatch_win(dispatched_before);
         }
     }
 
-    inline LONG WINAPI s_vectored_exception_handler(EXCEPTION_POINTERS* exception_info)
+    inline LONG WINAPI s_unhandled_exception_filter(
+        EXCEPTION_POINTERS* exception_info)
     {
+        LONG disposition = EXCEPTION_CONTINUE_SEARCH;
+        if (auto previous = previous_unhandled_exception_filter().load(
+                std::memory_order_acquire))
+        {
+            disposition = previous(exception_info);
+            if (disposition == EXCEPTION_CONTINUE_EXECUTION) {
+                return disposition;
+            }
+        }
+
         if (!exception_info || !exception_info->ExceptionRecord) {
-            return EXCEPTION_CONTINUE_SEARCH;
+            return disposition;
         }
 
-        const DWORD code = exception_info->ExceptionRecord->ExceptionCode;
-        if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP) {
-            return EXCEPTION_CONTINUE_SEARCH;
+        const int signal_number = windows_hardware_exception_signal(
+            exception_info->ExceptionRecord->ExceptionCode);
+        if (signal_number != 0) {
+            queue_signal_dispatch_win(signal_number);
         }
-
-        int sig_number = 0;
-        switch (code) {
-            case EXCEPTION_ACCESS_VIOLATION:
-            case EXCEPTION_IN_PAGE_ERROR:
-            case EXCEPTION_STACK_OVERFLOW:
-                sig_number = SIGSEGV;
-                break;
-            case EXCEPTION_ILLEGAL_INSTRUCTION:
-            case EXCEPTION_PRIV_INSTRUCTION:
-                sig_number = SIGILL;
-                break;
-            case EXCEPTION_FLT_DIVIDE_BY_ZERO:
-            case EXCEPTION_FLT_INVALID_OPERATION:
-            case EXCEPTION_INT_DIVIDE_BY_ZERO:
-                sig_number = SIGFPE;
-                break;
-            default:
-                return EXCEPTION_CONTINUE_SEARCH;
-        }
-
-        queue_signal_dispatch_win(sig_number);
-        return EXCEPTION_CONTINUE_SEARCH;
+        return disposition;
     }
 
     inline void signal_dispatch_loop_win()
@@ -687,8 +704,6 @@ namespace {
             DWORD result = WaitForSingleObject(signal_event(), INFINITE);
             if (result == WAIT_OBJECT_0) {
                 drain_pending_signals();
-                // Reset the event after processing
-                ResetEvent(signal_event());
             }
             else {
                 // Event was closed or error occurred - exit the loop
@@ -700,8 +715,8 @@ namespace {
     inline void ensure_signal_dispatcher_win()
     {
         std::call_once(signal_dispatcher_once_flag(), []() {
-            // Manual-reset event, initially non-signaled
-            signal_event() = CreateEventW(NULL, TRUE, FALSE, NULL);
+            // Auto-reset preserves a wake queued while pending signals drain.
+            signal_event() = CreateEventW(NULL, FALSE, FALSE, NULL);
             if (signal_event() == NULL) {
                 return;
             }
@@ -1919,8 +1934,7 @@ detail::Managed_child_launch_attempt::start_windows_native_observer()
                 }
                 custody->changed.notify_all();
             }
-            owner->dispatch_child_exit_publication(
-                std::move(exit_publication));
+            owner->dispatch_child_exit_publication(std::move(exit_publication));
             if (released_handle != 0) {
                 CloseHandle(reinterpret_cast<HANDLE>(released_handle));
             }
@@ -2272,7 +2286,9 @@ void install_signal_handler()
 
 #ifdef _WIN32
         ensure_signal_dispatcher_win();
-        AddVectoredExceptionHandler(0, s_vectored_exception_handler);
+        previous_unhandled_exception_filter().store(
+            SetUnhandledExceptionFilter(s_unhandled_exception_filter),
+            std::memory_order_release);
 
         for (auto& slot : slot_table) {
             auto previous = std::signal(slot.sig, s_signal_handler);

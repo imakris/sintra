@@ -40,6 +40,7 @@ extreme_choreography_test                                80
 fault_injection_defensive_test                           1
 finalize_async_rpc_lifecycle_test                       10
 finalize_emit_rpc_test                                  10
+handled_exception_survival_contract_test                 1
 handler_lifetime_test                                    5
 id_types_locality_test                                   5
 init_error_spawn_failure_test                            1

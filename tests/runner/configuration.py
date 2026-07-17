@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 
 TEST_TIMEOUT_OVERRIDES = {
+    "handled_exception_survival_contract_test_debug": 40.0,
+    "handled_exception_survival_contract_test_release": 40.0,
     "recovery_test_debug": 120.0,
     "recovery_test_release": 120.0,
     "barrier_complex_choreography_test": 120.0,

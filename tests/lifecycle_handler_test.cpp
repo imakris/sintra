@@ -177,13 +177,25 @@ int process_crash_worker()
         return 1;
     }
 
-    std::fprintf(stderr, "[CRASH_WORKER] About to crash via illegal instruction\n");
+    std::fprintf(stderr, "[CRASH_WORKER] About to crash\n");
     sintra::test::prepare_for_intentional_crash();
 
     sintra::disable_debug_pause_for_current_process();
 
-    // Crash via illegal instruction to exercise crash handling.
+    // On Windows, crash a non-main thread with an access violation. This must
+    // reach Sintra's last-chance path rather than a first-chance callback.
+#ifdef _WIN32
+    void* page = VirtualAlloc(
+        nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    if (!page) {
+        return 1;
+    }
+    std::thread([page]() {
+        *static_cast<volatile unsigned char*>(page) = 1;
+    }).join();
+#else
     sintra::test::trigger_illegal_instruction_crash();
+#endif
 
     // Should never reach here
     return 0;

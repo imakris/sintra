@@ -254,11 +254,22 @@ int process_crasher()
         " pid=" + std::to_string(sintra::test::get_pid()));
 
     if (occurrence == 0) {
-        log << "First run - about to abort!" << std::endl;
+        log << "First run - about to crash!" << std::endl;
         log.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         sintra::disable_debug_pause_for_current_process();
+#ifdef _WIN32
+        void* page = VirtualAlloc(
+            nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+        if (!page) {
+            return 1;
+        }
+        std::thread([page]() {
+            *static_cast<volatile unsigned char*>(page) = 1;
+        }).join();
+#else
         std::abort();
+#endif
     }
 
     log << "Second+ run - sending stop_t" << std::endl;
