@@ -162,6 +162,11 @@ int process_crash_worker()
 {
     std::fprintf(stderr, "[CRASH_WORKER] Starting\n");
 
+#ifdef _WIN32
+    // This host installs its terminal filter after Sintra initialization.
+    sintra::test::install_test_host_terminal_exception_filter();
+#endif
+
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "lifecycle_handler");
     const auto shared_dir = shared.path();
     if (!write_worker_ready(
@@ -394,6 +399,13 @@ int process_coordinator()
         }
 
         std::fprintf(stderr, "[COORDINATOR] Crash exit status: %d\n", crash_evt.status);
+
+#ifdef _WIN32
+        if (test_passed && crash_evt.status != SIGSEGV) {
+            test_passed = false;
+            failure_reason = "Windows access violation must report SIGSEGV";
+        }
+#endif
     }
 
     if (test_passed) {
@@ -473,12 +485,18 @@ int process_coordinator()
     // Final verification: ensure we received all three event types
     if (test_passed) {
         std::lock_guard<std::mutex> lk(g_events_mutex);
-        bool found_crash  = false;
-        bool found_normal = false;
-        bool found_unpub  = false;
+        bool        found_crash          = false;
+        bool        found_normal         = false;
+        bool        found_unpub          = false;
+        std::size_t matching_crash_count = 0;
 
         for (const auto& evt : g_events) {
-            if (evt.why == sintra::process_lifecycle_event::reason::crash)       { found_crash  = true; }
+            if (evt.why == sintra::process_lifecycle_event::reason::crash) {
+                found_crash = true;
+                if (evt.process_iid == crash_worker_iid) {
+                    ++matching_crash_count;
+                }
+            }
             if (evt.why == sintra::process_lifecycle_event::reason::normal_exit) { found_normal = true; }
             if (evt.why == sintra::process_lifecycle_event::reason::unpublished) { found_unpub  = true; }
         }
@@ -496,6 +514,11 @@ int process_coordinator()
         if (!found_unpub) {
             test_passed = false;
             failure_reason = "Missing unpublished event in final verification";
+        }
+        else
+        if (matching_crash_count != 1) {
+            test_passed = false;
+            failure_reason = "Expected exactly one crash event for crash_worker";
         }
         else {
             std::fprintf(

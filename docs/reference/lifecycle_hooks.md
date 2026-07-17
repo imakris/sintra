@@ -105,13 +105,11 @@ Threading and lifecycle:
 - The handler is set globally on the coordinator. Replacing it with a
   new value supersedes the previous one; passing an empty
   `std::function` clears it.
-- On Windows, when a fault reaches Sintra's top-level unhandled-exception
-  filter, the filter already present at initialization gets first refusal. A
-  host that installs another filter later must make its own recovery decision
-  first and call the previous filter only when execution will not continue.
-  Calling the previous filter before that decision can report a recovered
-  exception as a crash; omitting it disables this hardware-exception path.
-  The existing per-thread CRT signal path is separate and unchanged.
+- On Windows, Sintra does not install or own the process unhandled-exception
+  filter. A host that owns the final unhandled disposition may call
+  [`announce_fatal_windows_exception`](announce_fatal_windows_exception.md)
+  only after deciding that execution will not continue. The existing
+  per-thread CRT signal path is separate and unchanged.
 - Crash notification runs inside the failing process and is necessarily
   best-effort if corruption or termination prevents its bounded dispatch from
   completing. Managed-child exit observation remains OS-authoritative for the
@@ -131,6 +129,7 @@ Example source:
 See also:
 
 - [sintra::recovery](recovery.md)
+- [sintra::announce_fatal_windows_exception](announce_fatal_windows_exception.md)
 - [sintra::leave](leave.md)
 - [sintra::shutdown](shutdown.md)
 - [docs/process_lifecycle_notes.md](../process_lifecycle_notes.md)

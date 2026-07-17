@@ -26,6 +26,7 @@
 #include "test_utils.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -44,6 +45,74 @@ namespace {
 struct stop_t {};
 
 std::string g_shared_dir;
+
+#ifdef _WIN32
+std::atomic<bool> g_windows_generation_captured{false};
+std::atomic<bool> g_release_windows_generation{false};
+
+void pause_after_windows_generation_capture(uint64_t generation) noexcept
+{
+    (void)generation;
+    g_windows_generation_captured.store(true, std::memory_order_release);
+    while (!g_release_windows_generation.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
+
+bool run_windows_signal_generation_aba_contract(const char* binary_path)
+{
+    const char* probe_argv[] = {binary_path};
+    sintra::init(1, probe_argv);
+
+    g_windows_generation_captured.store(false, std::memory_order_release);
+    g_release_windows_generation.store(false, std::memory_order_release);
+    const uint32_t dispatch_count_before =
+        sintra::detail::test_hooks::windows_signal_dispatch_count();
+    sintra::detail::test_hooks::s_windows_signal_generation_captured.store(
+        pause_after_windows_generation_capture,
+        std::memory_order_release);
+
+    std::thread delayed_announcement([]() {
+        sintra::announce_fatal_windows_exception(EXCEPTION_ACCESS_VIOLATION);
+    });
+    const auto capture_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!g_windows_generation_captured.load(std::memory_order_acquire) &&
+        std::chrono::steady_clock::now() < capture_deadline)
+    {
+        std::this_thread::yield();
+    }
+
+    const bool captured =
+        g_windows_generation_captured.load(std::memory_order_acquire);
+    const bool runtime_a_finalized = captured && sintra::detail::finalize();
+    if (runtime_a_finalized) {
+        sintra::init(1, probe_argv);
+    }
+
+    g_release_windows_generation.store(true, std::memory_order_release);
+    delayed_announcement.join();
+    sintra::detail::test_hooks::s_windows_signal_generation_captured.store(
+        nullptr,
+        std::memory_order_release);
+
+    if (!runtime_a_finalized) {
+        (void)sintra::detail::finalize_impl();
+        return false;
+    }
+
+    const bool stale_announcement_dropped =
+        sintra::detail::test_hooks::windows_signal_dispatch_count() ==
+            dispatch_count_before &&
+        sintra::detail::test_hooks::
+            windows_signal_slots_match_active_generation();
+    const bool runtime_b_finalized = sintra::detail::finalize();
+    return
+        stale_announcement_dropped &&
+        runtime_b_finalized        &&
+        !sintra::detail::test_hooks::windows_signal_dispatch_is_active();
+}
+#endif
 
 std::filesystem::path current_shared_directory()
 {
@@ -147,9 +216,11 @@ int process_watchdog()
     if (signalled) {
         const auto run_entries = sintra::test::read_lines(shared_dir / "runs.txt");
         std::fprintf(stderr, "[WATCHDOG] Run entries: %zu\n", run_entries.size());
-        bool saw_initial_run         = false;
-        bool saw_recovered_run       = false;
-        bool stop_from_recovered_run = false;
+        bool        saw_initial_run         = false;
+        bool        saw_recovered_run       = false;
+        bool        stop_from_recovered_run = false;
+        std::size_t initial_run_count       = 0;
+        std::size_t recovered_run_count     = 0;
         std::vector<int> recovered_pids;
 
         for (const auto& entry : run_entries) {
@@ -158,9 +229,11 @@ int process_watchdog()
             if (parse_occurrence_and_pid(entry, "run ", occurrence, pid)) {
                 if (occurrence == 0) {
                     saw_initial_run = true;
+                    ++initial_run_count;
                 }
                 else {
                     saw_recovered_run = true;
+                    ++recovered_run_count;
                     recovered_pids.push_back(pid);
                 }
                 continue;
@@ -173,7 +246,8 @@ int process_watchdog()
             }
         }
 
-        ok = saw_initial_run && saw_recovered_run && stop_from_recovered_run;
+        ok = saw_initial_run && saw_recovered_run && stop_from_recovered_run &&
+             initial_run_count == 1 && recovered_run_count == 1;
     }
 
     std::ofstream out(result_path, std::ios::binary | std::ios::trunc);
@@ -351,6 +425,17 @@ int main(int argc, char* argv[])
     processes.emplace_back(process_watchdog, user_opts);
     processes.emplace_back(process_crasher, user_opts);
 
+#ifdef _WIN32
+    if (sintra::detail::test_hooks::windows_signal_dispatch_is_active()) {
+        std::fprintf(stderr, "[MAIN] Signal dispatch active before Sintra init\n");
+        return 1;
+    }
+    sintra::announce_fatal_windows_exception(EXCEPTION_ACCESS_VIOLATION);
+
+    // This host owns the terminal filter before Sintra initialization.
+    sintra::test::install_test_host_terminal_exception_filter();
+#endif
+
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
         state_log << "calling sintra::init, pid="
@@ -359,6 +444,14 @@ int main(int argc, char* argv[])
     }
 
     sintra::init(argc, argv, processes);
+
+#ifdef _WIN32
+    if (!sintra::detail::test_hooks::windows_signal_dispatch_is_active()) {
+        std::fprintf(stderr, "[MAIN] Signal dispatch inactive after Sintra init\n");
+        sintra::detail::finalize();
+        return 1;
+    }
+#endif
 
     {
         std::ofstream state_log(shared_dir / "state.log", std::ios::app);
@@ -380,7 +473,39 @@ int main(int argc, char* argv[])
         }
     }
 
-    sintra::detail::finalize();
+    bool finalized = sintra::detail::finalize();
+
+#ifdef _WIN32
+    if (!finalized &&
+        !sintra::detail::test_hooks::windows_signal_dispatch_is_active())
+    {
+        std::fprintf(
+            stderr,
+            "[MAIN] Signal dispatch inactive while runtime teardown is retained\n");
+        return 1;
+    }
+    const auto finalize_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!finalized && std::chrono::steady_clock::now() < finalize_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        finalized = sintra::detail::finalize_impl();
+    }
+    if (!finalized) {
+        std::fprintf(stderr, "[MAIN] Sintra finalize did not settle\n");
+        return 1;
+    }
+    if (sintra::detail::test_hooks::windows_signal_dispatch_is_active()) {
+        std::fprintf(stderr, "[MAIN] Signal dispatch active after Sintra finalize\n");
+        return 1;
+    }
+    sintra::announce_fatal_windows_exception(EXCEPTION_ACCESS_VIOLATION);
+    if (!is_spawned &&
+        !run_windows_signal_generation_aba_contract(argv[0]))
+    {
+        std::fprintf(stderr, "[MAIN] Windows signal generation ABA contract failed\n");
+        return 1;
+    }
+#endif
 
     if (!is_spawned) {
         const auto result_path = shared_dir / "result.txt";
@@ -388,9 +513,11 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        std::ifstream in(result_path, std::ios::binary);
         std::string status;
-        in >> status;
+        {
+            std::ifstream in(result_path, std::ios::binary);
+            in >> status;
+        }
 
         shared_dir_raii.cleanup();
         return (status == "ok") ? 0 : 1;

@@ -24,6 +24,7 @@
 ///  this facade understand which features they are pulling in.
 
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -319,6 +320,16 @@ void enable_recovery();
 void set_recovery_policy(Recovery_policy policy);
 void set_recovery_runner(Recovery_runner runner);
 void set_lifecycle_handler(Lifecycle_handler handler);
+
+#ifdef _WIN32
+///\brief Notify Sintra that a Windows hardware exception is terminal.
+///
+/// Sintra does not install or own the process unhandled-exception filter. A
+/// Windows host may call this from its own final unhandled-exception path, only
+/// after deciding that execution will not continue. Unknown exception codes
+/// and calls made while the Sintra runtime is inactive are no-ops.
+void announce_fatal_windows_exception(std::uint32_t exception_code) noexcept;
+#endif
 
 } // namespace sintra
 

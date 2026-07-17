@@ -24,8 +24,29 @@
 #include <cerrno>
 #include <cstring>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace sintra::test {
+
+
+#ifdef _WIN32
+inline LONG WINAPI test_host_terminal_exception_filter(
+    EXCEPTION_POINTERS* exception_info) noexcept
+{
+    if (exception_info && exception_info->ExceptionRecord) {
+        sintra::announce_fatal_windows_exception(
+            exception_info->ExceptionRecord->ExceptionCode);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+inline void install_test_host_terminal_exception_filter() noexcept
+{
+    SetUnhandledExceptionFilter(test_host_terminal_exception_filter);
+}
+#endif
 
 
 // ---------------------------------------------------------------------------

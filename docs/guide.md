@@ -934,6 +934,15 @@ control becomes inert when shutdown starts or its exact custody closes. The
 normative contracts are in [`sintra::recovery`](reference/recovery.md) and
 [`sintra::set_lifecycle_handler`](reference/lifecycle_hooks.md).
 
+### Windows Host Crash Notification
+
+Sintra does not own the Windows process unhandled-exception filter. A host that
+does own the final disposition can call
+[`sintra::announce_fatal_windows_exception`](reference/announce_fatal_windows_exception.md)
+after it has decided execution will not continue. Unknown exception codes and
+calls while Sintra is inactive are no-ops. The CRT and POSIX signal paths are
+unchanged.
+
 ## Direct Ring Helpers
 
 Direct rings are advanced public API exposed by:
@@ -1199,6 +1208,7 @@ sources.
 | `SINTRA_TYPE_ID` | [Transceivers](#transceivers), [Type IDs](#type-ids) |
 | `SINTRA_UNICAST` | [Transceivers](#transceivers), [RPC](#rpc) |
 | `sintra::Crash_info` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
+| `sintra::announce_fatal_windows_exception` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::Entry_descriptor` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::Lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::Lifetime_policy` | [Initialization and Process Topology](#initialization-and-process-topology) |

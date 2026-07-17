@@ -261,6 +261,13 @@ inline constexpr const char* managed_child_invariant_name(
 }
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
+#ifdef _WIN32
+using Windows_signal_generation_captured_callback =
+    void (*)(uint64_t) noexcept;
+inline std::atomic<Windows_signal_generation_captured_callback>
+    s_windows_signal_generation_captured{nullptr};
+#endif
+
 using Managed_child_setup_callback = void (*)(instance_id_type, uint32_t);
 inline std::atomic<Managed_child_setup_callback> s_managed_child_reader_setup{nullptr};
 
@@ -583,6 +590,8 @@ namespace {
     {
         int sig;
 
+        std::atomic<uint64_t> generation_state{0};
+
         void (__cdecl* previous)(int) = SIG_DFL;
         bool has_previous = false;
     };
@@ -628,7 +637,9 @@ namespace {
 
     // Forward declarations - defined after #endif in the common section
     inline std::size_t signal_index(int sig);
-    inline void dispatch_signal_number(int sig_number);
+    inline void dispatch_signal_number(
+        int      sig_number,
+        uint64_t generation = 0);
     inline void drain_pending_signals();
 
     inline HANDLE& signal_event()
@@ -637,23 +648,55 @@ namespace {
         return evt;
     }
 
-    inline void wait_for_signal_dispatch_win(uint32_t expected_count);
-
-    inline std::atomic<LPTOP_LEVEL_EXCEPTION_FILTER>&
-    previous_unhandled_exception_filter()
+    inline std::atomic<uint64_t>& windows_signal_dispatch_generation()
     {
-        static std::atomic<LPTOP_LEVEL_EXCEPTION_FILTER> filter{nullptr};
-        static_assert(decltype(filter)::is_always_lock_free);
-        return filter;
+        static std::atomic<uint64_t> generation{0};
+        static_assert(std::atomic<uint64_t>::is_always_lock_free);
+        return generation;
     }
+
+    inline bool windows_signal_generation_is_active(uint64_t generation)
+    {
+        return (generation & 1U) != 0U;
+    }
+
+    inline uint64_t windows_signal_slot_generation_state(
+        uint64_t generation,
+        bool     pending = false)
+    {
+        return (generation << 1U) | (pending ? 1U : 0U);
+    }
+
+    inline void seed_windows_signal_slots(uint64_t generation)
+    {
+        const uint64_t state =
+            windows_signal_slot_generation_state(generation);
+        for (auto& slot : signal_slots()) {
+            slot.generation_state.store(state, std::memory_order_release);
+        }
+    }
+
+    inline void wait_for_signal_dispatch_win(uint32_t expected_count);
 
     inline void queue_signal_dispatch_win(int sig_number)
     {
-        auto*      mproc                    = s_mproc;
-        const bool should_wait_for_dispatch = mproc && mproc->m_out_req_c;
-        const bool can_wait                 = can_wait_for_signal_dispatch();
-        uint32_t   dispatched_before        = 0;
-        if (should_wait_for_dispatch && can_wait) {
+        const uint64_t generation =
+            windows_signal_dispatch_generation().load(std::memory_order_acquire);
+        if (!windows_signal_generation_is_active(generation)) {
+            return;
+        }
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (auto callback = detail::test_hooks::s_windows_signal_generation_captured.load(
+                std::memory_order_acquire))
+        {
+            callback(generation);
+        }
+#endif
+
+        const bool can_wait          = can_wait_for_signal_dispatch();
+        uint32_t   dispatched_before = 0;
+        if (can_wait) {
             dispatched_before = dispatched_signal_counter().load();
         }
 
@@ -661,41 +704,31 @@ namespace {
         if (signal_event() != NULL) {
             auto idx = signal_index(sig_number);
             if (idx < signal_slots().size()) {
-                uint32_t bit = 1U << idx;
-                pending_signal_mask().fetch_or(bit);
-                can_dispatch = true;
+                auto& generation_state = signal_slots()[idx].generation_state;
+                uint64_t expected = windows_signal_slot_generation_state(
+                    generation);
+                const uint64_t desired =
+                    windows_signal_slot_generation_state(generation, true);
+                while (expected == windows_signal_slot_generation_state(
+                        generation) &&
+                    !generation_state.compare_exchange_weak(
+                        expected,
+                        desired,
+                        std::memory_order_release,
+                        std::memory_order_relaxed))
+                {}
+                can_dispatch = expected ==
+                        windows_signal_slot_generation_state(generation) ||
+                    expected == desired;
             }
-            SetEvent(signal_event());
+            if (can_dispatch) {
+                SetEvent(signal_event());
+            }
         }
 
-        if (should_wait_for_dispatch && can_wait && can_dispatch) {
+        if (can_wait && can_dispatch) {
             wait_for_signal_dispatch_win(dispatched_before);
         }
-    }
-
-    inline LONG WINAPI s_unhandled_exception_filter(
-        EXCEPTION_POINTERS* exception_info)
-    {
-        LONG disposition = EXCEPTION_CONTINUE_SEARCH;
-        if (auto previous = previous_unhandled_exception_filter().load(
-                std::memory_order_acquire))
-        {
-            disposition = previous(exception_info);
-            if (disposition == EXCEPTION_CONTINUE_EXECUTION) {
-                return disposition;
-            }
-        }
-
-        if (!exception_info || !exception_info->ExceptionRecord) {
-            return disposition;
-        }
-
-        const int signal_number = windows_hardware_exception_signal(
-            exception_info->ExceptionRecord->ExceptionCode);
-        if (signal_number != 0) {
-            queue_signal_dispatch_win(signal_number);
-        }
-        return disposition;
     }
 
     inline void signal_dispatch_loop_win()
@@ -781,7 +814,9 @@ namespace {
 
     // Forward declarations - defined after #endif in the common section
     inline std::size_t signal_index(int sig);
-    inline void dispatch_signal_number(int sig_number);
+    inline void dispatch_signal_number(
+        int      sig_number,
+        uint64_t generation = 0);
     inline void drain_pending_signals();
 
     inline uint64_t signal_dispatch_now_ns() noexcept
@@ -907,6 +942,23 @@ namespace {
 
     inline void drain_pending_signals()
     {
+#ifdef _WIN32
+        for (auto& slot : signal_slots()) {
+            uint64_t state = slot.generation_state.load(
+                std::memory_order_acquire);
+            while ((state & 1U) != 0U) {
+                if (slot.generation_state.compare_exchange_weak(
+                        state,
+                        state & ~uint64_t{1},
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+                {
+                    dispatch_signal_number(slot.sig, state >> 1U);
+                    break;
+                }
+            }
+        }
+#else
         auto mask = pending_signal_mask().exchange(0U);
         if (mask == 0U) {
             return;
@@ -918,6 +970,7 @@ namespace {
                 dispatch_signal_number(slot_table[idx].sig);
             }
         }
+#endif
     }
 
     inline std::size_t signal_index(int sig)
@@ -931,10 +984,24 @@ namespace {
         return slot_table.size();
     }
 
-    inline void dispatch_signal_number(int sig_number)
+    inline void dispatch_signal_number(
+        int      sig_number,
+        uint64_t generation)
     {
         Dispatch_shared_lock dispatch_lock(dispatch_shutdown_mutex_instance);
 
+#ifdef _WIN32
+        const uint64_t active_generation =
+            windows_signal_dispatch_generation().load(
+                std::memory_order_acquire);
+        if (generation != active_generation ||
+            !windows_signal_generation_is_active(active_generation))
+        {
+            return;
+        }
+#else
+        (void)generation;
+#endif
         auto* mproc = s_mproc;
 #ifndef _WIN32
         if (sig_number == SIGCHLD) {
@@ -1216,6 +1283,48 @@ namespace {
     }
 #endif
 }
+
+#if defined(_WIN32) && defined(SINTRA_ENABLE_TEST_HOOKS)
+namespace detail { namespace test_hooks {
+
+inline bool windows_signal_dispatch_is_active() noexcept
+{
+    return windows_signal_generation_is_active(
+        windows_signal_dispatch_generation().load(std::memory_order_acquire));
+}
+
+inline uint32_t windows_signal_dispatch_count() noexcept
+{
+    return dispatched_signal_counter().load(std::memory_order_acquire);
+}
+
+inline bool windows_signal_slots_match_active_generation() noexcept
+{
+    const uint64_t generation =
+        windows_signal_dispatch_generation().load(std::memory_order_acquire);
+    const uint64_t expected =
+        windows_signal_slot_generation_state(generation);
+    for (const auto& slot : signal_slots()) {
+        if (slot.generation_state.load(std::memory_order_acquire) != expected) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}} // namespace detail::test_hooks
+#endif
+
+#ifdef _WIN32
+inline void announce_fatal_windows_exception(std::uint32_t exception_code) noexcept
+{
+    const int signal_number = windows_hardware_exception_signal(
+        static_cast<DWORD>(exception_code));
+    if (signal_number != 0) {
+        queue_signal_dispatch_win(signal_number);
+    }
+}
+#endif
 
 inline detail::Managed_child_launch_attempt::Managed_child_launch_attempt(
     Managed_process* owner,
@@ -2286,9 +2395,6 @@ void install_signal_handler()
 
 #ifdef _WIN32
         ensure_signal_dispatcher_win();
-        previous_unhandled_exception_filter().store(
-            SetUnhandledExceptionFilter(s_unhandled_exception_filter),
-            std::memory_order_release);
 
         for (auto& slot : slot_table) {
             auto previous = std::signal(slot.sig, s_signal_handler);
@@ -2537,6 +2643,17 @@ Managed_process::~Managed_process()
     // no more writing (prevent signal dispatch from using freed rings)
     {
         Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+#ifdef _WIN32
+        uint64_t generation = windows_signal_dispatch_generation().load(
+            std::memory_order_acquire);
+        if (windows_signal_generation_is_active(generation)) {
+            ++generation;
+            windows_signal_dispatch_generation().store(
+                generation,
+                std::memory_order_release);
+        }
+        seed_windows_signal_slots(generation);
+#endif
         if (m_out_req_c) {
             delete m_out_req_c;
             m_out_req_c = nullptr;
@@ -3220,6 +3337,21 @@ void Managed_process::init(int argc, const char* const* argv)
             throw std::runtime_error("Sintra external process invitation was rejected.");
         }
     }
+
+#ifdef _WIN32
+    {
+        Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
+        const uint64_t inactive_generation =
+            windows_signal_dispatch_generation().load(
+                std::memory_order_acquire);
+        assert(!windows_signal_generation_is_active(inactive_generation));
+        const uint64_t active_generation = inactive_generation + 1U;
+        seed_windows_signal_slots(active_generation);
+        windows_signal_dispatch_generation().store(
+            active_generation,
+            std::memory_order_release);
+    }
+#endif
 }
 
 inline std::shared_ptr<detail::Managed_child_custody_record>

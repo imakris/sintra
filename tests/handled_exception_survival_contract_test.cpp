@@ -114,8 +114,8 @@ int child_process()
 void* g_protected_page = nullptr;
 
 // Application-level top-level filter: makes the inaccessible page writable
-// and resumes the faulting instruction. It is installed before sintra so the
-// library must give the existing process filter first refusal.
+// and resumes the faulting instruction. It is installed before Sintra and
+// must remain the process filter after Sintra initialization.
 LONG WINAPI protected_page_handler(EXCEPTION_POINTERS* info)
 {
     if (!info || !info->ExceptionRecord) {
@@ -254,6 +254,16 @@ int main(int argc, char* argv[])
 
     SetUnhandledExceptionFilter(protected_page_handler);
     sintra::init(argc, argv, processes);
+
+    const auto filter_after_init =
+        SetUnhandledExceptionFilter(protected_page_handler);
+    if (filter_after_init != protected_page_handler) {
+        std::fprintf(
+            stderr,
+            "%sSintra must not replace the host's unhandled-exception filter\n",
+            k_failure_prefix.data());
+        return 1;
+    }
 
     if (is_spawned) {
         return 0;

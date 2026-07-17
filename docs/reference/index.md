@@ -12,6 +12,7 @@
 | [`sintra::join_swarm`](join_swarm.md) | function | `<sintra/sintra.h>` | Join an existing branch at runtime. |
 | [`sintra::create_external_process_invitation`](external_process_invitation.md) | function | `<sintra/sintra.h>` | Pre-admit a manually launched process into an existing swarm. |
 | [`sintra::disable_debug_pause_for_current_process`](disable_debug_pause_for_current_process.md) | function | `<sintra/sintra.h>` | Opt the current process out of debug pause-on-exit behavior. |
+| [`sintra::announce_fatal_windows_exception`](announce_fatal_windows_exception.md) | function | `<sintra/sintra.h>` | Let a Windows host report a terminal hardware exception without transferring filter ownership. |
 
 ## Publish/Subscribe
 

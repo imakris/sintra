@@ -148,7 +148,7 @@ inline void install_debug_pause_handlers()
     Log_stream(log_level::info) << "[SINTRA_DEBUG_PAUSE] Handlers installed\n";
 
 #ifdef _WIN32
-    // AddVectoredExceptionHandler for exceptions (more reliable than SetUnhandledExceptionFilter)
+    // Add a first-chance vectored handler for debug-pause exceptions.
     // First parameter: 1 = add as first handler in chain
     AddVectoredExceptionHandler(1, debug_vectored_exception_handler);
 #endif
