@@ -765,7 +765,9 @@ int run_crash_after_init_helper(int argc, char* argv[])
     const auto marker = sintra::test::get_argv_value(argc, argv, k_marker_arg);
 
     sintra::init(argc, argv);
-#ifndef _WIN32
+#ifdef _WIN32
+    sintra::test::install_test_host_terminal_exception_filter();
+#else
     if (!install_abort_signal_acknowledgement(dir, marker + "_abort_signal")) {
         sintra::detail::finalize();
         return 2;
