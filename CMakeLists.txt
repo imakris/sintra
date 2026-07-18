@@ -102,6 +102,9 @@ else()
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-g>
     )
 endif()
+if(MINGW)
+    target_compile_options(sintra_dev_flags INTERFACE -Wa,-mbig-obj)
+endif()
 
 option(SINTRA_BUILD_EXAMPLES "Build Sintra examples" ON)
 option(SINTRA_BUILD_TESTS "Build Sintra tests" ON)

@@ -1,0 +1,51 @@
+name: Build & Test - Windows (MinGW)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'example/**'
+      - '.github/workflows/**'
+
+jobs:
+  build-and-test:
+    name: MinGW Build & Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Configure CMake
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=g++.exe
+
+      - name: Build
+        run: |
+          cmake --build build --config Debug --parallel
+          cmake --build build --config Release --parallel
+
+      - name: Run tests
+        shell: bash
+        run: |
+          cd tests
+          python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release --time-budget 7200
