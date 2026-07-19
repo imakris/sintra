@@ -92,7 +92,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ env.HEAD_SHA }}
           fetch-depth: 0
@@ -124,7 +124,7 @@ jobs:
 
       - name: Detect changed areas
         id: changed
-        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         with:
           base: ${{ steps.diff-base.outputs.base }}
           filters: |
@@ -143,7 +143,7 @@ jobs:
               - '.github/workflows/**'
 
       - name: Download build artifacts
-        uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: windows-build-${{ env.HEAD_SHA }}
           path: build/
@@ -158,7 +158,7 @@ jobs:
           fi
 
       - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.x'
 
@@ -191,7 +191,7 @@ jobs:
 
       - name: Upload preserved scratch artifacts (failure only)
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-scratch-${{ github.run_id }}
           path: |
@@ -238,7 +238,7 @@ jobs:
 
       - name: Update tests badge
         if: inputs.report_status && always() && inputs.branch == 'master' && inputs.pr_number == ''
-        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.gist-secret }}
           gistID: 38c12e638eddbbfad6962730f6b10d20
