@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "../../shared_mutex.h"
 #include "../config.h"
 #include "../globals.h"
 #include "../ipc/rings.h"
@@ -31,7 +32,6 @@
 #include <memory>
 #include <mutex>
 #include <cstdint>
-#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1250,7 +1250,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         instance_id_type,
         std::shared_ptr<Process_message_reader>
     >                                   m_readers;
-    mutable std::shared_mutex           m_readers_mutex;
+    mutable shared_mutex                m_readers_mutex;
     mutable mutex                       m_delivery_mutex;
     condition_variable                  m_delivery_condition;
 

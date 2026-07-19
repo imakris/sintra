@@ -3,9 +3,10 @@
 
 #pragma once
 
+#include "../../shared_mutex.h"
+
 #include <atomic>
 #include <mutex>
-#include <shared_mutex>
 
 namespace sintra {
 
@@ -44,8 +45,8 @@ private:
     LockT                      m_lock;
 };
 
-using Dispatch_shared_lock = Dispatch_lock_guard<std::shared_lock<std::shared_mutex>>;
-using Dispatch_unique_lock = Dispatch_lock_guard<std::unique_lock<std::shared_mutex>>;
+using Dispatch_shared_lock = Dispatch_lock_guard<std::shared_lock<shared_mutex>>;
+using Dispatch_unique_lock = Dispatch_lock_guard<std::unique_lock<shared_mutex>>;
 
 inline bool can_wait_for_signal_dispatch()
 {

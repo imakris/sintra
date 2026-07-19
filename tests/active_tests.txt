@@ -101,6 +101,7 @@ rpc_bounded_result_test                                  3
 rpc_destruction_race_test                                3
 rpc_unavailable_typed_test                              10
 semaphore_high_contention_stress                        10
+shared_mutex_test                                        1
 shutdown_helper_test                                    10
 shutdown_options_mixed_modes_test                       10
 shutdown_options_test                                   10

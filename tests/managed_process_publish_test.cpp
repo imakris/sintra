@@ -270,7 +270,7 @@ bool ensure_reader_for_process(sintra::instance_id_type process_iid)
         return false;
     }
 
-    sintra::Dispatch_lock_guard<std::unique_lock<std::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
+    sintra::Dispatch_lock_guard<std::unique_lock<sintra::shared_mutex>> readers_lock(s_mproc->m_readers_mutex);
     if (auto existing = s_mproc->m_readers.find(process_iid); existing != s_mproc->m_readers.end()) {
         if (existing->second) {
             existing->second->stop_and_wait(1.0);

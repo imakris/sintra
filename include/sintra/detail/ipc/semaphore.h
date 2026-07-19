@@ -82,6 +82,7 @@ CAVEATS
 #include <limits>
 #include <thread>
 
+#include "../../shared_mutex.h"
 #include "../time_utils.h"
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
@@ -92,7 +93,6 @@ CAVEATS
   #include <mutex>
   #include <unordered_map>
   #include <string>
-  #include <shared_mutex>
 #else
   #include <time.h>
   // Single selection ladder for sub-platform specifics
@@ -244,7 +244,7 @@ static ips_backend_win_state& W(ips_backend& b) noexcept
 
 struct ips_win_handle_cache
 {
-    std::shared_mutex m; // a shared mutex, for this read-mostly workload
+    shared_mutex m; // a shared mutex, for this read-mostly workload
     std::unordered_map<std::wstring, HANDLE> map;
     ~ips_win_handle_cache()
     {
@@ -304,7 +304,7 @@ static HANDLE ips_win_local_handle(ips_backend& b) noexcept
 
     // FAST PATH: Read-only lock
     {
-        std::shared_lock<std::shared_mutex> lock(cache.m);
+        std::shared_lock<shared_mutex> lock(cache.m);
         auto it = cache.map.find(key);
         if (it != cache.map.end()) {
             return it->second;
@@ -313,7 +313,7 @@ static HANDLE ips_win_local_handle(ips_backend& b) noexcept
 
     // SLOW PATH: Exclusive write lock
     {
-        std::unique_lock<std::shared_mutex> lock(cache.m);
+        std::unique_lock<shared_mutex> lock(cache.m);
 
         // Re-assign key from the canonical name to prevent a stale read from before the lock.
         key.assign(st.name);

@@ -15,10 +15,10 @@ Usage:
 
 #if defined(_WIN32)
   #if !defined(_WIN32_WINNT)
-    #define _WIN32_WINNT 0x0600
-  #elif _WIN32_WINNT < 0x0600
+    #define _WIN32_WINNT 0x0601
+  #elif _WIN32_WINNT < 0x0601
     #undef _WIN32_WINNT
-    #define _WIN32_WINNT 0x0600
+    #define _WIN32_WINNT 0x0601
   #endif
   #if !defined(WINVER) || (WINVER < _WIN32_WINNT)
     #undef WINVER

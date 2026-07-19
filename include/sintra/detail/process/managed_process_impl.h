@@ -27,7 +27,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -557,7 +556,7 @@ inline void managed_child_transport_retirement_for_test(
 // On POSIX: The signal dispatch thread takes a shared lock when accessing s_mproc.
 // On Windows: The CRT signal handler thread takes a shared lock when accessing s_mproc.
 // The Managed_process destructor takes an exclusive lock before clearing s_mproc.
-inline std::shared_mutex dispatch_shutdown_mutex_instance;
+inline shared_mutex dispatch_shutdown_mutex_instance;
 
 inline std::once_flag& signal_handler_once_flag()
 {
