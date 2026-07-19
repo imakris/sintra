@@ -31,13 +31,20 @@ jobs:
   build-and-test:
     name: MinGW Build & Test
     runs-on: windows-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+
       - name: Configure CMake
-        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=g++.exe
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=g++.exe -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Build
         run: |
@@ -45,7 +52,7 @@ jobs:
           cmake --build build --config Release --parallel
 
       - name: Run tests
-        shell: bash
+        shell: pwsh
         run: |
-          cd tests
+          Set-Location tests
           python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release --time-budget 7200

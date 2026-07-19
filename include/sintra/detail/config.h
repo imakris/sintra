@@ -6,6 +6,12 @@
 #include <cstddef>
 #include <cstdint>
 
+#if defined(SINTRA_SEPARATE_COMPILATION)
+#define SINTRA_DETAIL_DECL
+#else
+#define SINTRA_DETAIL_DECL inline
+#endif
+
 // Ring reading policy
 // ===================
 

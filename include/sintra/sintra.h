@@ -107,7 +107,9 @@
 // - `SINTRA_RPC_STRICT` always uses the transported RPC path and is therefore
 //   the export to use when the async-handle surface must also work locally
 #include "detail/messaging/message_impl.h"
+#if !defined(SINTRA_SEPARATE_COMPILATION)
 #include "detail/messaging/process_message_reader_impl.h"
+#endif
 #include "detail/transceiver.h"
 #include "detail/transceiver_impl.h"
 

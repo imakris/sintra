@@ -82,6 +82,33 @@ target_include_directories(sintra INTERFACE
 target_compile_features(sintra INTERFACE cxx_std_20)
 target_link_libraries(sintra INTERFACE Threads::Threads)
 
+option(SINTRA_BUILD_COMPILED "Build the optional separately compiled Sintra target" OFF)
+if(SINTRA_BUILD_COMPILED)
+    add_library(sintra_compiled STATIC src/sintra.cpp)
+    add_library(sintra::sintra_compiled ALIAS sintra_compiled)
+    target_link_libraries(sintra_compiled PUBLIC sintra)
+    target_compile_definitions(sintra_compiled PUBLIC SINTRA_SEPARATE_COMPILATION)
+    if(MSVC)
+        target_compile_options(sintra_compiled PRIVATE
+            /bigobj
+            $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
+        )
+    else()
+        target_compile_options(sintra_compiled PRIVATE
+            $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-g>
+        )
+        if(MINGW)
+            target_compile_options(sintra_compiled PRIVATE -Wa,-mbig-obj)
+        endif()
+    endif()
+    set_target_properties(sintra_compiled PROPERTIES
+        OUTPUT_NAME sintra
+        DEBUG_POSTFIX d
+        RELWITHDEBINFO_POSTFIX rd
+        MINSIZEREL_POSTFIX s
+    )
+endif()
+
 # The public sintra target stays flag-neutral: debug/optimization/runtime
 # flags must not leak to consumers through the INTERFACE target. Internal
 # targets (the examples; the tests manage their own flags in
@@ -121,6 +148,13 @@ if(SINTRA_BUILD_EXAMPLES)
 endif()
 
 if(SINTRA_BUILD_TESTS)
+    add_library(sintra_test_core STATIC src/sintra.cpp)
+    target_link_libraries(sintra_test_core PUBLIC sintra)
+    target_compile_definitions(sintra_test_core PUBLIC
+        SINTRA_ENABLE_TEST_HOOKS=1
+        SINTRA_SEPARATE_COMPILATION
+    )
+
     enable_testing()
     add_subdirectory(tests)
 endif()
@@ -142,7 +176,11 @@ if(SINTRA_INSTALL)
     include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
 
-    install(TARGETS sintra EXPORT sintraTargets)
+    set(SINTRA_INSTALL_TARGETS sintra)
+    if(TARGET sintra_compiled)
+        list(APPEND SINTRA_INSTALL_TARGETS sintra_compiled)
+    endif()
+    install(TARGETS ${SINTRA_INSTALL_TARGETS} EXPORT sintraTargets)
 
     install(
         DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/sintra

@@ -1,6 +1,5 @@
-add_library(sintra_for_tests INTERFACE)
-target_link_libraries(sintra_for_tests INTERFACE sintra::sintra)
-target_compile_definitions(sintra_for_tests INTERFACE
+add_library(sintra_test_config INTERFACE)
+target_compile_definitions(sintra_test_config INTERFACE
     "SINTRA_DEBUG_PAUSE_ON_EXIT=(::std::getenv(\"SINTRA_DEBUG_PAUSE_ON_EXIT\") && ::std::getenv(\"SINTRA_DEBUG_PAUSE_ON_EXIT\")[0] != '0')"
     "SINTRA_PRESERVE_SCRATCH=(::std::getenv(\"SINTRA_PRESERVE_SCRATCH\") && ::std::getenv(\"SINTRA_PRESERVE_SCRATCH\")[0] != '0')"
     "SINTRA_TEST_ROOT=::std::getenv(\"SINTRA_TEST_ROOT\")"
@@ -8,7 +7,7 @@ target_compile_definitions(sintra_for_tests INTERFACE
 )
 
 if(MSVC)
-    target_compile_options(sintra_for_tests INTERFACE
+    target_compile_options(sintra_test_config INTERFACE
         /FS
         /bigobj
         $<$<CONFIG:Debug>:/UNDEBUG>
@@ -16,12 +15,12 @@ if(MSVC)
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
         $<$<CONFIG:Release>:/DNDEBUG>
     )
-    target_link_options(sintra_for_tests INTERFACE
+    target_link_options(sintra_test_config INTERFACE
         $<$<CONFIG:Debug>:/DEBUG:FULL>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/DEBUG:FULL>
     )
 else()
-    target_compile_options(sintra_for_tests INTERFACE
+    target_compile_options(sintra_test_config INTERFACE
         $<$<CONFIG:Debug>:-O0>
         $<$<CONFIG:Debug>:-UNDEBUG>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-O0>
@@ -31,17 +30,25 @@ else()
 endif()
 
 if(MINGW)
-    target_compile_options(sintra_for_tests INTERFACE -Wa,-mbig-obj)
+    target_compile_options(sintra_test_config INTERFACE -Wa,-mbig-obj)
 endif()
 
 if(SINTRA_ENABLE_COVERAGE AND NOT MSVC)
-    target_compile_options(sintra_for_tests INTERFACE $<$<CONFIG:Debug>:--coverage>)
-    target_link_options(sintra_for_tests INTERFACE $<$<CONFIG:Debug>:--coverage>)
+    target_compile_options(sintra_test_config INTERFACE $<$<CONFIG:Debug>:--coverage>)
+    target_link_options(sintra_test_config INTERFACE $<$<CONFIG:Debug>:--coverage>)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(sintra_for_tests INTERFACE atomic)
+    target_link_libraries(sintra_test_config INTERFACE atomic)
 endif()
+
+target_link_libraries(sintra_test_core PRIVATE sintra_test_config)
+
+add_library(sintra_for_tests INTERFACE)
+target_link_libraries(sintra_for_tests INTERFACE
+    sintra_test_core
+    sintra_test_config
+)
 
 file(GLOB TEST_FILES CONFIGURE_DEPENDS "*.cpp")
 if(NOT TEST_FILES)

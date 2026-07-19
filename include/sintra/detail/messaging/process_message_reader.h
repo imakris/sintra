@@ -7,6 +7,7 @@
 #include "../messaging/message.h"
 #include <atomic>
 #include <condition_variable>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -117,6 +118,9 @@ inline std::set<Outstanding_rpc_control*>& s_outstanding_rpcs()
     return set_ref;
 }
 
+void dispatch_event_handlers(
+    Message_prefix&                         message,
+    std::initializer_list<instance_id_type> scope_ids);
 
 struct Process_message_reader
 {
@@ -153,24 +157,20 @@ struct Process_message_reader
         bool                       wait_needed         = false;
     };
 
-    inline
     Process_message_reader(instance_id_type process_instance_id,
         Delivery_progress_ptr delivery_progress,
         uint32_t occurrence = 0,
         uint64_t managed_child_custody_identity = 0);
 
-    inline
     ~Process_message_reader();
 
 
     void pause() { m_reader_state = READER_SERVICE; }
 
 
-    inline
     void stop_nowait();
 
 
-    inline
     // `waiting_period` is the total stop budget in seconds across all phases.
     bool stop_and_wait(double waiting_period);
 
@@ -203,17 +203,14 @@ struct Process_message_reader
     //   they may differ across different instances of the same type of receiver type.
 
 
-    inline
     void request_reader_function();
 
 
-    inline
     void reply_reader_function();
 
 
     // this is only meant to be called when the reader is started, to assure that
     // no messages are sent and lost before the thread is ready to process them
-    inline
     void wait_until_ready();
 
 

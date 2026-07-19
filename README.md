@@ -128,6 +128,12 @@ sintra::activate_slot([](const Ping&) {
 Because everything ships as headers, Sintra works well in monorepos or projects that
 prefer vendoring dependencies as git submodules or fetching them during configuration.
 
+Header-only use remains the default. To compile the non-template message-reader core
+once, configure with `-DSINTRA_BUILD_COMPILED=ON` and link
+`sintra::sintra_compiled`. For builds not using CMake, define
+`SINTRA_SEPARATE_COMPILATION` consistently and compile exactly one source file
+containing `#include <sintra/src.hpp>`.
+
 ### CMake integration
 
 If Sintra is already available to your build, link the interface target:

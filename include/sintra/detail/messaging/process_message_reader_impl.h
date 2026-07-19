@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "../config.h"
 #include "../logging.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
@@ -28,9 +29,9 @@ using std::thread;
 void install_signal_handler();
 
 
-inline bool thread_local tl_is_req_thread = false;
+SINTRA_DETAIL_DECL thread_local bool tl_is_req_thread = false;
 
-inline const char* Process_message_reader::reader_state_name(State state)
+SINTRA_DETAIL_DECL const char* Process_message_reader::reader_state_name(State state)
 {
     switch (state) {
         case READER_NORMAL:   return "normal";
@@ -40,7 +41,7 @@ inline const char* Process_message_reader::reader_state_name(State state)
     }
 }
 
-inline const char* Process_message_reader::delivery_stream_name(Delivery_stream stream)
+SINTRA_DETAIL_DECL const char* Process_message_reader::delivery_stream_name(Delivery_stream stream)
 {
     switch (stream) {
         case Delivery_stream::Request: return "request";
@@ -49,7 +50,7 @@ inline const char* Process_message_reader::delivery_stream_name(Delivery_stream 
     }
 }
 
-inline const char* Process_message_reader::communication_state_name(int communication_state)
+SINTRA_DETAIL_DECL const char* Process_message_reader::communication_state_name(int communication_state)
 {
     switch (communication_state) {
         case Managed_process::COMMUNICATION_STOPPED: return "stopped";
@@ -59,7 +60,7 @@ inline const char* Process_message_reader::communication_state_name(int communic
     }
 }
 
-inline void append_instance_id_value(std::ostringstream& out, instance_id_type value)
+SINTRA_DETAIL_DECL void append_instance_id_value(std::ostringstream& out, instance_id_type value)
 {
     if (value == invalid_instance_id) {
         out << "unknown";
@@ -69,7 +70,7 @@ inline void append_instance_id_value(std::ostringstream& out, instance_id_type v
     out << static_cast<unsigned long long>(value);
 }
 
-inline void append_sequence_value(std::ostringstream& out, sequence_counter_type value)
+SINTRA_DETAIL_DECL void append_sequence_value(std::ostringstream& out, sequence_counter_type value)
 {
     if (value == invalid_sequence) {
         out << "invalid";
@@ -79,7 +80,7 @@ inline void append_sequence_value(std::ostringstream& out, sequence_counter_type
     out << value;
 }
 
-inline void append_sequence_lag(
+SINTRA_DETAIL_DECL void append_sequence_lag(
     std::ostringstream&    out,
     sequence_counter_type  reading_sequence,
     sequence_counter_type  leading_sequence)
@@ -98,7 +99,7 @@ inline void append_sequence_lag(
     out << (leading_sequence - reading_sequence);
 }
 
-inline void append_current_communication_state(std::ostringstream& out)
+SINTRA_DETAIL_DECL void append_current_communication_state(std::ostringstream& out)
 {
     if (!s_mproc) {
         out << " communication_state=unreachable";
@@ -109,7 +110,7 @@ inline void append_current_communication_state(std::ostringstream& out)
         << Process_message_reader::communication_state_name(s_mproc->m_communication_state);
 }
 
-inline void append_message_ring_summary(
+SINTRA_DETAIL_DECL void append_message_ring_summary(
     std::ostringstream&                         out,
     const char*                                 label,
     const std::shared_ptr<Message_ring_R>&      ring,
@@ -154,7 +155,7 @@ inline void append_message_ring_summary(
         << "}";
 }
 
-inline const char* Process_message_reader::reader_condition_name() const
+SINTRA_DETAIL_DECL const char* Process_message_reader::reader_condition_name() const
 {
     if (m_reader_state.load() == READER_STOPPING) {
         return "stopping";
@@ -167,7 +168,7 @@ inline const char* Process_message_reader::reader_condition_name() const
     return "stopped";
 }
 
-inline std::string Process_message_reader::diagnostic_summary() const
+SINTRA_DETAIL_DECL std::string Process_message_reader::diagnostic_summary() const
 {
     std::ostringstream out;
 
@@ -210,7 +211,7 @@ inline std::string Process_message_reader::diagnostic_summary() const
     return out.str();
 }
 
-inline std::string Process_message_reader::delivery_target_summary(
+SINTRA_DETAIL_DECL std::string Process_message_reader::delivery_target_summary(
     Delivery_stream        stream,
     sequence_counter_type  target_sequence) const
 {
@@ -253,7 +254,7 @@ inline std::string Process_message_reader::delivery_target_summary(
     return out.str();
 }
 
-inline std::string Process_message_reader::missing_reader_summary(instance_id_type target_process_id)
+SINTRA_DETAIL_DECL std::string Process_message_reader::missing_reader_summary(instance_id_type target_process_id)
 {
     std::ostringstream out;
 
@@ -263,7 +264,7 @@ inline std::string Process_message_reader::missing_reader_summary(instance_id_ty
     return out.str();
 }
 
-inline bool validate_relay_sender(
+SINTRA_DETAIL_DECL bool validate_relay_sender(
     Message_prefix&                  message,
     instance_id_type                 ring_owner,
     const char*                      ring_name,
@@ -287,7 +288,7 @@ inline bool validate_relay_sender(
     return false;
 }
 
-inline bool validate_request_message(
+SINTRA_DETAIL_DECL bool validate_request_message(
     Message_prefix&                  message,
     instance_id_type                 ring_owner,
     const Process_message_reader&    reader)
@@ -307,7 +308,7 @@ inline bool validate_request_message(
     return true;
 }
 
-inline bool validate_reply_message(
+SINTRA_DETAIL_DECL bool validate_reply_message(
     Message_prefix&                  message,
     instance_id_type                 ring_owner,
     const Process_message_reader&    reader)
@@ -450,7 +451,7 @@ private:
 
 } // namespace detail
 
-inline void dispatch_event_handlers(
+SINTRA_DETAIL_DECL void dispatch_event_handlers(
     Message_prefix&                            message,
     std::initializer_list<instance_id_type>    scope_ids)
 {
@@ -531,7 +532,7 @@ inline void dispatch_event_handlers(
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects.
 // Keep the callable in a heap object to avoid TLS destructor crashes.
 
-inline
+SINTRA_DETAIL_DECL
 Process_message_reader::Process_message_reader(
     instance_id_type process_instance_id,
     Delivery_progress_ptr delivery_progress,
@@ -564,7 +565,7 @@ Process_message_reader::Process_message_reader(
 }
 
 
-inline
+SINTRA_DETAIL_DECL
 void Process_message_reader::wait_until_ready()
 {
     std::unique_lock<std::mutex> lk(m_ready_mutex);
@@ -578,7 +579,7 @@ void Process_message_reader::wait_until_ready()
 
 
 
-inline
+SINTRA_DETAIL_DECL
 void Process_message_reader::unblock_rpc_once()
 {
     detail::process_reader_rpc_unblock_for_test(
@@ -599,7 +600,7 @@ void Process_message_reader::unblock_rpc_once()
 }
 
 
-inline
+SINTRA_DETAIL_DECL
 void Process_message_reader::stop_nowait()
 {
     m_reader_state = READER_STOPPING;
@@ -671,7 +672,7 @@ void Process_message_reader::stop_nowait()
 
 
 
-inline
+SINTRA_DETAIL_DECL
 bool Process_message_reader::stop_and_wait(double waiting_period)
 {
     std::unique_lock<std::mutex> lk(m_stop_mutex);
@@ -719,7 +720,7 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
 }
 
 
-inline
+SINTRA_DETAIL_DECL
 Process_message_reader::~Process_message_reader()
 {
     if (!stop_and_wait(22.)) {
@@ -735,7 +736,7 @@ Process_message_reader::~Process_message_reader()
     m_in_rep_c.reset();
 }
 
-inline
+SINTRA_DETAIL_DECL
 void Process_message_reader::begin_reading_session(
     const std::shared_ptr<Message_ring_R>& ring,
     std::atomic<bool>&                     running_flag)
@@ -752,7 +753,7 @@ void Process_message_reader::begin_reading_session(
     m_ready_condition.notify_all();
 }
 
-inline
+SINTRA_DETAIL_DECL
 void Process_message_reader::end_reading_session(
     const std::shared_ptr<Message_ring_R>& ring,
     std::atomic<bool>&                     running_flag)
@@ -785,7 +786,7 @@ void Process_message_reader::end_reading_session(
 //   they may differ across different instances of the same type of receiver type.
 
 
-inline
+SINTRA_DETAIL_DECL
 void Process_message_reader::request_reader_function()
 {
     install_signal_handler();
@@ -1014,7 +1015,7 @@ void Process_message_reader::request_reader_function()
 
 
 
-inline
+SINTRA_DETAIL_DECL
 Process_message_reader::Delivery_target Process_message_reader::prepare_delivery_target(
     Delivery_stream        stream,
     sequence_counter_type  target_sequence) const
@@ -1059,7 +1060,7 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
 
 
 
-inline
+SINTRA_DETAIL_DECL
 void Process_message_reader::reply_reader_function()
 {
     install_signal_handler();

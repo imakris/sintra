@@ -6,7 +6,6 @@
 #include "globals.h"
 #include "logging.h"
 #include "process/managed_process.h"
-#include "messaging/process_message_reader_impl.h"
 
 #include <stdexcept>
 #include <string>
