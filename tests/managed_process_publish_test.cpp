@@ -57,14 +57,23 @@ struct Worker_info
 
 bool write_worker_info(const std::filesystem::path& dir, const Worker_info& info)
 {
-    std::ofstream out(dir / std::string(k_info_file), std::ios::binary | std::ios::trunc);
+    const auto path = dir / std::string(k_info_file);
+    const auto tmp_path = path.string() + ".tmp";
+    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
     if (!out) {
         return false;
     }
 
     out << static_cast<unsigned long long>(info.instance_id) << '\n';
     out << info.assigned_name << '\n';
-    return static_cast<bool>(out);
+    out.close();
+    if (!out) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, path, ec);
+    return !ec;
 }
 
 std::optional<Worker_info> read_worker_info(const std::filesystem::path& dir)
@@ -329,15 +338,24 @@ bool run_manual_publish_scenario(
         return false;
     }
 
+    const auto release_worker = [&]() {
+        std::ofstream done(
+            shared_dir / std::string(k_done_file),
+            std::ios::binary | std::ios::trunc);
+        done << "done\n";
+    };
+
     const auto info_path = shared_dir / std::string(k_info_file);
     if (!sintra::test::wait_for_file(info_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: worker info file not found\n");
+        release_worker();
         return false;
     }
 
     const auto info = read_worker_info(shared_dir);
     if (!info || info->assigned_name.empty()) {
         std::fprintf(stderr, "managed_process_publish_test: failed to read worker info\n");
+        release_worker();
         return false;
     }
 
@@ -359,9 +377,7 @@ bool run_manual_publish_scenario(
             static_cast<unsigned long long>(info->instance_id));
     }
 
-    std::ofstream done(shared_dir / std::string(k_done_file), std::ios::binary | std::ios::trunc);
-    done << "done\n";
-    done.close();
+    release_worker();
 
     const auto exit_path = shared_dir / std::string(k_exit_file);
     if (!sintra::test::wait_for_file(exit_path, std::chrono::seconds(5))) {
@@ -391,7 +407,8 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
             waiter.cv.notify_one();
         }
     };
-    sintra::activate_slot(handler, sintra::Typed_instance_id<sintra::Coordinator>(s_coord_id));
+    auto deactivate_handler =
+        sintra::activate_slot(handler, sintra::Typed_instance_id<sintra::Coordinator>(s_coord_id));
 
     const auto process_a = sintra::make_process_instance_id();
     const auto process_b = sintra::make_process_instance_id();
@@ -403,6 +420,7 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
 
     if (!ensure_reader_for_process(process_a) || !ensure_reader_for_process(process_b)) {
         std::fprintf(stderr, "managed_process_publish_test: delayed readers not ready\n");
+        deactivate_handler();
         return false;
     }
 
@@ -412,30 +430,40 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
         s_coord->m_processes_in_initialization.insert(process_b);
     }
 
+    const auto release_delayed_workers = [&]() {
+        std::ofstream done(
+            shared_dir / std::string(k_delayed_done_file),
+            std::ios::binary | std::ios::trunc);
+        done << "done\n";
+    };
+
     if (!spawn_delayed_worker(binary_path, shared_dir, "a", swarm_id, process_a, coord_id) ||
         !spawn_delayed_worker(binary_path, shared_dir, "b", swarm_id, process_b, coord_id))
     {
         std::fprintf(stderr, "managed_process_publish_test: delayed spawn failed\n");
-        return false;
-    }
-
-    const auto name_path = shared_dir / std::string(k_delayed_b_name_file);
-    if (!sintra::test::wait_for_file(name_path, std::chrono::seconds(5))) {
-        std::fprintf(stderr, "managed_process_publish_test: delayed name file missing\n");
-        return false;
-    }
-
-    std::ifstream name_in(name_path, std::ios::binary);
-    std::string expected_name;
-    std::getline(name_in >> std::ws, expected_name);
-    if (expected_name.empty()) {
-        std::fprintf(stderr, "managed_process_publish_test: delayed name file empty\n");
+        release_delayed_workers();
+        deactivate_handler();
         return false;
     }
 
     const auto marked_path = shared_dir / std::string(k_delayed_b_marked_file);
     if (!sintra::test::wait_for_file(marked_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed mark file missing\n");
+        release_delayed_workers();
+        deactivate_handler();
+        return false;
+    }
+
+    // The worker closes the name file before publishing this marker, so waiting
+    // for the marker prevents observing a created-but-not-yet-written file.
+    const auto name_path = shared_dir / std::string(k_delayed_b_name_file);
+    std::ifstream name_in(name_path, std::ios::binary);
+    std::string expected_name;
+    std::getline(name_in >> std::ws, expected_name);
+    if (expected_name.empty()) {
+        std::fprintf(stderr, "managed_process_publish_test: delayed name file empty\n");
+        release_delayed_workers();
+        deactivate_handler();
         return false;
     }
 
@@ -451,17 +479,15 @@ bool run_delayed_publication_scenario(const std::string& binary_path)
         std::fprintf(stderr, "managed_process_publish_test: delayed publication not observed\n");
     }
 
-    std::ofstream done(
-        shared_dir / std::string(k_delayed_done_file),
-        std::ios::binary | std::ios::trunc);
-    done << "done\n";
-    done.close();
+    release_delayed_workers();
 
     const auto exit_path = shared_dir / std::string(k_delayed_exit_file);
     if (!sintra::test::wait_for_file(exit_path, std::chrono::seconds(5))) {
         std::fprintf(stderr, "managed_process_publish_test: delayed worker did not exit\n");
         published = false;
     }
+
+    deactivate_handler();
 
     std::error_code ec;
     std::filesystem::remove_all(shared_dir, ec);
