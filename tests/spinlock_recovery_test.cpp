@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -30,6 +31,12 @@ namespace {
 constexpr std::string_view k_failure_prefix = "spinlock_recovery_test failure: ";
 constexpr auto k_child_poll_interval = std::chrono::milliseconds(10);
 constexpr auto k_child_cleanup_timeout = std::chrono::seconds(10);
+#ifdef _WIN32
+// Newer MinGW/UCRT aborts through Windows fail-fast. GetExitCodeProcess exposes
+// only its generic outer status; the legacy STATUS_STACK_BUFFER_OVERRUN name
+// does not mean this controlled abort path overran a buffer.
+constexpr std::uint32_t k_windows_fast_fail_exit_code = 0xC0000409u;
+#endif
 
 using sintra::test::Exact_child;
 using sintra::test::Exact_child_state;
@@ -77,7 +84,8 @@ uint32_t find_dead_pid(uint32_t self_pid)
 bool exited_as_expected_abort(const Exact_child& child) noexcept
 {
 #ifdef _WIN32
-    return child.exited_with_code(3);
+    return child.exited_with_code(3) ||
+        child.exited_with_code(k_windows_fast_fail_exit_code);
 #else
     return child.exited_from_signal(SIGABRT);
 #endif
