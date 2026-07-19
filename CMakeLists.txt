@@ -91,7 +91,7 @@ if(SINTRA_BUILD_COMPILED)
     if(MSVC)
         target_compile_options(sintra_compiled PRIVATE
             /bigobj
-            $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
+            $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Z7>
         )
     else()
         target_compile_options(sintra_compiled PRIVATE
@@ -118,7 +118,7 @@ endif()
 add_library(sintra_dev_flags INTERFACE)
 if(MSVC)
     target_compile_options(sintra_dev_flags INTERFACE
-        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
+        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Z7>
     )
     target_link_options(sintra_dev_flags INTERFACE
         $<$<CONFIG:Debug>:/DEBUG:FULL>

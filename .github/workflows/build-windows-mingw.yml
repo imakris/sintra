@@ -28,8 +28,8 @@ on:
       - '.github/workflows/**'
 
 jobs:
-  build-and-test:
-    name: MinGW Build & Test
+  build:
+    name: MinGW Build
     runs-on: windows-latest
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -37,22 +37,84 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
         with:
           version: v0.16.0
 
+      - name: Detect changed areas
+        id: changed
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        with:
+          filters: |
+            core:
+              - 'src/**'
+              - 'include/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - 'CMakePresets.json'
+              - 'third_party/**'
+            tests:
+              - 'tests/**'
+            examples:
+              - 'example/**'
+            workflows:
+              - '.github/workflows/**'
+
+      - name: Compute CMake flags
+        id: flags
+        shell: bash
+        run: |
+          CT="-DSINTRA_BUILD_TESTS=ON"
+          CE="-DSINTRA_BUILD_EXAMPLES=OFF"
+          CS="-DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON"
+          if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then
+            CE="-DSINTRA_BUILD_EXAMPLES=ON"
+          fi
+          echo "CMAKE_FLAGS=$CT $CE $CS" >> "$GITHUB_OUTPUT"
+
+      - name: Compute build parallelism
+        shell: pwsh
+        run: |
+          $total = [int]($env:NUMBER_OF_PROCESSORS)
+          if ($total -lt 1) { $total = 2 }
+          $jobs = $total - 2
+          if ($jobs -lt 2) { $jobs = 2 }
+          if ($jobs -gt $total) { $jobs = $total }
+          Add-Content -Path $env:GITHUB_ENV -Value "BUILD_JOBS=$jobs"
+          Write-Host "Using $jobs build jobs (detected $total cores)."
+
       - name: Configure CMake
-        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=g++.exe -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=g++.exe -DCMAKE_CXX_COMPILER_LAUNCHER=sccache ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
         run: |
-          cmake --build build --config Debug --parallel
-          cmake --build build --config Release --parallel
+          cmake --build build --config Debug --parallel ${{ env.BUILD_JOBS }}
+          cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
-      - name: Run tests
-        shell: pwsh
-        run: |
-          Set-Location tests
-          python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release --time-budget 7200
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-build-${{ github.event.pull_request.head.sha || github.sha }}
+          path: build/
+          retention-days: 1
+
+  stress-tests:
+    name: MinGW Tests
+    needs: build
+    if: ${{ needs.build.result == 'success' }}
+    uses: ./.github/workflows/stress-test-windows.yml
+    secrets:
+      repository-token: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      build_run_id: ${{ github.run_id }}
+      head_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+      branch: ${{ github.head_ref || github.ref_name }}
+      pr_number: ${{ github.event.pull_request.number || '' }}
+      base_sha: ${{ github.event.pull_request.base.sha || '' }}
+      force_tests: ${{ github.event_name == 'workflow_dispatch' }}
+      lane: windows-mingw
+      report_status: false

@@ -31,12 +31,19 @@ jobs:
   build:
     name: Linux Build
     runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
 
       - name: Detect changed areas
         id: changed
@@ -151,7 +158,7 @@ jobs:
           fi
 
       - name: Configure CMake
-        run: cmake -G "Ninja Multi-Config" -B build -S . ${{ steps.flags.outputs.CMAKE_FLAGS }}
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER_LAUNCHER=sccache ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
       - name: Build
         run: |

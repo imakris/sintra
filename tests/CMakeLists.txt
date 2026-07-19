@@ -12,7 +12,7 @@ if(MSVC)
         /bigobj
         $<$<CONFIG:Debug>:/UNDEBUG>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/O1>
-        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Zi>
+        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Z7>
         $<$<CONFIG:Release>:/DNDEBUG>
     )
     target_link_options(sintra_test_config INTERFACE

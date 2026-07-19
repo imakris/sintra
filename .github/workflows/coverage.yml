@@ -19,10 +19,16 @@ jobs:
 
     env:
       BUILD_DIR: build
+      SCCACHE_GHA_ENABLED: "true"
 
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
 
       - name: Install toolchain & coverage deps
         run: |
@@ -41,7 +47,8 @@ jobs:
               -DCMAKE_BUILD_TYPE=Debug \
               -DSINTRA_ENABLE_COVERAGE=ON \
               -DSINTRA_BUILD_TESTS=ON \
-              -DSINTRA_BUILD_EXAMPLES=OFF
+              -DSINTRA_BUILD_EXAMPLES=OFF \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           else
             cmake -S . -B "$BUILD_DIR" \
               -DCMAKE_BUILD_TYPE=Debug \
@@ -49,7 +56,8 @@ jobs:
               -DSINTRA_BUILD_TESTS=ON \
               -DSINTRA_BUILD_EXAMPLES=OFF \
               -DCMAKE_C_COMPILER=clang \
-              -DCMAKE_CXX_COMPILER=clang++
+              -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           fi
 
       - name: Compute build parallelism

@@ -28,6 +28,16 @@ on:
         required: false
         type: boolean
         default: false
+      lane:
+        description: "Windows compiler lane used to isolate stress-test concurrency"
+        required: false
+        type: string
+        default: windows
+      report_status:
+        description: "Update the primary Windows test status and badge"
+        required: false
+        type: boolean
+        default: true
     secrets:
       repository-token:
         description: "GitHub token forwarded from the caller workflow"
@@ -42,7 +52,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: stress-${{ inputs.head_sha }}-windows
+  group: stress-${{ inputs.head_sha }}-${{ inputs.lane }}
   cancel-in-progress: false
 
 jobs:
@@ -154,11 +164,11 @@ jobs:
 
       - name: Run stress tests with run_tests.py
         if: inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
-        shell: bash
+        shell: pwsh
         env:
           SINTRA_PRESERVE_SCRATCH: "1"
         run: |
-          cd tests
+          Set-Location tests
           python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release --time-budget 7200
 
       - name: List preserved scratch (failure only)
@@ -191,7 +201,7 @@ jobs:
           retention-days: 7
 
       - name: Mark status success
-        if: success()
+        if: inputs.report_status && success()
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
@@ -209,7 +219,7 @@ jobs:
             });
 
       - name: Mark status failure
-        if: failure()
+        if: inputs.report_status && failure()
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
@@ -227,7 +237,7 @@ jobs:
             });
 
       - name: Update tests badge
-        if: always() && inputs.branch == 'master' && inputs.pr_number == ''
+        if: inputs.report_status && always() && inputs.branch == 'master' && inputs.pr_number == ''
         uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
         with:
           auth: ${{ secrets.gist-secret }}
