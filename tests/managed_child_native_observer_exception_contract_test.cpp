@@ -199,7 +199,7 @@ int run_child(
         return 3;
     }
 #ifdef _WIN32
-    ExitProcess(k_high_bit_exit_status);
+    TerminateProcess(GetCurrentProcess(), k_high_bit_exit_status);
     return 0;
 #else
     return 0;

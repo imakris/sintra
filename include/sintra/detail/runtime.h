@@ -1451,55 +1451,72 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     }
 
     if (readiness_requested) {
-        auto shared_launch_attempt =
-            std::make_shared<detail::Managed_child_launch_attempt>(
-                std::move(launch_attempt));
-        auto async_setup =
-            [custody_owner, readiness_coordinator, custody_record, spawn_args,
-             shared_launch_attempt, custody_identity,
-             target = options.readiness_instance_name,
-             readiness_observer, handle_setup_exception]() mutable
-            {
-                bool created = false;
-                bool setup_threw = false;
-                try {
-                    auto result = custody_owner->spawn_swarm_process(
-                        spawn_args, *shared_launch_attempt);
-                    created = result.success && result.os_process_created;
-                    if (created) {
-                        detail::runtime_spawn_success_for_test(
-                            result.instance_id,
-                            result.os_pid,
-                            result.lifeline_enabled,
-                            result.lifeline_write_retained);
+        std::shared_ptr<std::atomic<bool>> readiness_worker_complete;
+        try {
+            readiness_worker_complete =
+                std::make_shared<std::atomic<bool>>(false);
+            auto shared_launch_attempt =
+                std::make_shared<detail::Managed_child_launch_attempt>(
+                    std::move(launch_attempt));
+            auto async_setup =
+                [custody_owner, readiness_coordinator, custody_record, spawn_args,
+                 shared_launch_attempt = std::move(shared_launch_attempt),
+                 custody_identity, target = options.readiness_instance_name,
+                 readiness_observer, handle_setup_exception]() mutable
+                {
+                    bool created = false;
+                    bool setup_threw = false;
+                    try {
+                        auto result = custody_owner->spawn_swarm_process(
+                            spawn_args, *shared_launch_attempt);
+                        created = result.success && result.os_process_created;
+                        if (created) {
+                            detail::runtime_spawn_success_for_test(
+                                result.instance_id,
+                                result.os_pid,
+                                result.lifeline_enabled,
+                                result.lifeline_write_retained);
+                        }
                     }
-                }
-                catch (...) {
-                    setup_threw = true;
-                    created = handle_setup_exception(
+                    catch (...) {
+                        setup_threw = true;
+                        created = handle_setup_exception(
+                            custody_owner,
+                            custody_record,
+                            spawn_args.piid,
+                            spawn_args.occurrence);
+                    }
+
+                    // Setup ownership is terminal once spawn returns. Readiness
+                    // observation must not keep detach waiting on setup.
+                    shared_launch_attempt.reset();
+                    if (!created && !setup_threw) {
+                        custody_owner->request_child_custody_release(custody_record);
+                    }
+                    readiness_observer(
                         custody_owner,
+                        readiness_coordinator,
                         custody_record,
+                        target,
+                        created,
+                        custody_identity,
                         spawn_args.piid,
                         spawn_args.occurrence);
-                }
-
-                if (!created && !setup_threw) {
-                    custody_owner->request_child_custody_release(custody_record);
-                }
-                readiness_observer(
-                    custody_owner,
-                    readiness_coordinator,
-                    custody_record,
-                    target,
-                    created,
-                    custody_identity,
-                    spawn_args.piid,
-                    spawn_args.occurrence);
-            };
-        try {
-            custody_owner->start_owned_lifecycle_worker(std::move(async_setup));
+                };
+            {
+                std::lock_guard<std::mutex> lock(custody_record->mutex);
+                custody_record->readiness_worker_complete =
+                    readiness_worker_complete;
+            }
+            custody_owner->start_owned_lifecycle_worker(
+                std::move(async_setup), nullptr,
+                invalid_instance_id, 0,
+                readiness_worker_complete);
         }
         catch (...) {
+            if (readiness_worker_complete) {
+                readiness_worker_complete->store(true, std::memory_order_release);
+            }
             custody_owner->note_child_custody_failure(
                 custody_record,
                 {Managed_child_failure_kind::setup_worker_start,
@@ -1647,6 +1664,9 @@ Managed_child_custody::observe_latest_created_exit(
                 return candidate.native.created();
             });
         if (selected == m_record->occurrences.rend()) {
+            return {};
+        }
+        if (selected->native.detaching() || selected->native.disowned()) {
             return {};
         }
         // Establish delivery custody before the callback becomes observable.

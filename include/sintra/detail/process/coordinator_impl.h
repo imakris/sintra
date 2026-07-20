@@ -1177,6 +1177,38 @@ inline void Coordinator::notify_managed_child_readiness_cancelled()
     m_managed_child_publication_changed.notify_all();
 }
 
+inline bool Coordinator::set_managed_child_member_role(
+    uint64_t                     custody_identity,
+    instance_id_type             process_iid,
+    uint32_t                     occurrence,
+    detail::Member_lifetime_role role,
+    std::chrono::steady_clock::time_point deadline,
+    bool                         absent_is_success)
+{
+    std::unique_lock publish_lock(m_publish_mutex);
+    if (absent_is_success &&
+        m_member_roles.find(process_iid) == m_member_roles.end())
+    {
+        return true;
+    }
+    if (!m_managed_child_publication_changed.wait_until(
+            publish_lock, deadline, [&] {
+                return m_member_roles.find(process_iid) != m_member_roles.end();
+            }))
+    {
+        return false;
+    }
+    const auto found = m_member_roles.find(process_iid);
+    if (found == m_member_roles.end() ||
+        !found->second.identity.matches(
+            custody_identity, process_iid, occurrence))
+    {
+        return false;
+    }
+    found->second.role = role;
+    return true;
+}
+
 
 
 // EXPORTED EXCLUSIVELY FOR RPC
@@ -2219,7 +2251,11 @@ void Coordinator::enable_recovery(instance_id_type piid)
     }
 
     std::lock_guard<std::mutex> custody_lock(custody->mutex);
-    if (!custody->release_state.open()) {
+    const auto* exact = custody->find_occurrence_locked(
+        occurrence.process_instance_id, occurrence.occurrence);
+    if (!custody->release_state.open() || !exact ||
+        exact->native.detaching() || exact->native.disowned())
+    {
         return;
     }
     custody->recovery_requested = true;
@@ -2237,6 +2273,8 @@ void Coordinator::recover_if_required(
         info.process_iid);
 #endif
 
+    std::unique_lock<std::mutex> admission_lock(
+        detail::s_teardown_admission_mutex);
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         return;
     }
@@ -2268,6 +2306,7 @@ void Coordinator::recover_if_required(
         }
     }
     if (!recovery_recipe_available) {
+        admission_lock.unlock();
         Log_stream(log_level::warning)
             << "Recovery skipped for process "
             << static_cast<unsigned long long>(info.process_iid)
@@ -2276,14 +2315,16 @@ void Coordinator::recover_if_required(
     }
     {
         std::lock_guard<std::mutex> custody_lock(custody->mutex);
+        const auto* exact = custody->find_occurrence_locked(
+            occurrence.process_instance_id,
+            occurrence.occurrence);
         if (!custody->release_state.open() || !custody->recovery_requested ||
-            !custody->find_occurrence_locked(
-                occurrence.process_instance_id,
-                occurrence.occurrence))
+            !exact || exact->native.detaching() || exact->native.disowned())
         {
             return;
         }
     }
+    admission_lock.unlock();
 
     Recovery_policy policy;
     Recovery_runner runner;
@@ -2335,11 +2376,12 @@ void Coordinator::recover_if_required(
         }
         {
             std::lock_guard<std::mutex> custody_lock(custody->mutex);
+            const auto* exact = custody->find_occurrence_locked(
+                occurrence.process_instance_id,
+                occurrence.occurrence);
             if (!custody->release_state.open() ||
-                !custody->recovery_requested ||
-                !custody->find_occurrence_locked(
-                    occurrence.process_instance_id,
-                    occurrence.occurrence))
+                !custody->recovery_requested || !exact ||
+                exact->native.detaching() || exact->native.disowned())
             {
                 return;
             }

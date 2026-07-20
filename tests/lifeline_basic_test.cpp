@@ -570,20 +570,20 @@ bool send_lifeline_protocol_byte(
 #ifdef _WIN32
     DWORD bytes_written = 0;
     const bool written = WriteFile(
-        reinterpret_cast<HANDLE>(entry->second),
+        reinterpret_cast<HANDLE>(entry->second.handle),
         &value,
         1,
         &bytes_written,
         nullptr) != 0 && bytes_written == 1;
-    CloseHandle(reinterpret_cast<HANDLE>(entry->second));
+    CloseHandle(reinterpret_cast<HANDLE>(entry->second.handle));
 #else
     ssize_t result = -1;
     do {
-        result = ::write(static_cast<int>(entry->second), &value, 1);
+        result = ::write(static_cast<int>(entry->second.handle), &value, 1);
     }
     while (result == -1 && errno == EINTR);
     const bool written = result == 1;
-    ::close(static_cast<int>(entry->second));
+    ::close(static_cast<int>(entry->second.handle));
 #endif
     sintra::s_mproc->m_lifeline_writes.erase(entry);
     return written;

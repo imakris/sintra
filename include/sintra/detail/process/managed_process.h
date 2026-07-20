@@ -182,7 +182,10 @@ enum class Managed_child_exit_status_kind
     // distinguish an ordinary return from TerminateProcess.
     exited,
     // Reported only when the platform supplies signal termination status.
-    signaled
+    signaled,
+    // Sintra deliberately relinquished native observation while the exact
+    // child was still alive. This is not evidence of native exit.
+    observation_ended_by_detach
 };
 
 struct Managed_child_exit
@@ -451,7 +454,7 @@ public:
         {
             return false;
         }
-        m_phase = already_exited ? Phase::EXITED : Phase::RUNNING;
+        m_phase = already_exited ? Phase::OS_EXITED : Phase::OWNER_BOUND;
         m_pid = pid;
         m_start_stamp_available = start_stamp_available;
         m_start_stamp = start_stamp;
@@ -471,19 +474,48 @@ public:
         if (m_phase == Phase::ABSENT) {
             return false;
         }
-        if (m_phase == Phase::EXITED) {
+        if (m_phase == Phase::OS_EXITED) {
             return m_wait_status_available == wait_status_available &&
                 (!wait_status_available || m_wait_status == wait_status);
         }
-        m_phase = Phase::EXITED;
+        if (m_phase == Phase::DISOWNED) {
+            return false;
+        }
+        m_phase = Phase::OS_EXITED;
         m_wait_status_available = wait_status_available;
         m_wait_status = wait_status;
         return true;
     }
 
     bool created() const noexcept { return m_phase != Phase::ABSENT; }
-    bool running() const noexcept { return m_phase == Phase::RUNNING; }
-    bool exited() const noexcept { return m_phase == Phase::EXITED; }
+    bool running() const noexcept { return m_phase == Phase::OWNER_BOUND; }
+    bool detaching() const noexcept { return m_phase == Phase::DETACHING; }
+    bool disowned() const noexcept { return m_phase == Phase::DISOWNED; }
+    bool exited() const noexcept { return m_phase == Phase::OS_EXITED; }
+    bool begin_detach() noexcept
+    {
+        if (m_phase != Phase::OWNER_BOUND) {
+            return false;
+        }
+        m_phase = Phase::DETACHING;
+        return true;
+    }
+    bool rollback_detach() noexcept
+    {
+        if (m_phase != Phase::DETACHING && m_phase != Phase::DISOWNED) {
+            return false;
+        }
+        m_phase = Phase::OWNER_BOUND;
+        return true;
+    }
+    bool commit_detach() noexcept
+    {
+        if (m_phase != Phase::DETACHING) {
+            return false;
+        }
+        m_phase = Phase::DISOWNED;
+        return true;
+    }
     int pid() const noexcept { return m_pid; }
     bool start_stamp_available() const noexcept
     {
@@ -497,15 +529,20 @@ public:
     std::uint32_t wait_status() const noexcept { return m_wait_status; }
 
 #ifdef _WIN32
-    bool register_exit_observer(uintptr_t expected_handle) noexcept
+    bool register_exit_observer(
+        uintptr_t expected_handle,
+        uintptr_t cancellation_handle,
+        std::shared_ptr<std::atomic<bool>> complete) noexcept
     {
         if (!running() || !m_process_handle_owned ||
             m_process_handle == 0 || m_process_handle != expected_handle ||
-            m_exit_observer_registered)
+            m_exit_observer_registered || cancellation_handle == 0 || !complete)
         {
             return false;
         }
         m_exit_observer_registered = true;
+        m_exit_observer_cancellation_handle = cancellation_handle;
+        m_exit_observer_complete = std::move(complete);
         return true;
     }
 
@@ -518,6 +555,23 @@ public:
         }
         m_exit_observer_registered = false;
         return true;
+    }
+
+    uintptr_t exit_observer_cancellation_handle() const noexcept
+    {
+        return m_exit_observer_cancellation_handle;
+    }
+
+    uintptr_t take_exit_observer_cancellation_handle() noexcept
+    {
+        const auto handle = m_exit_observer_cancellation_handle;
+        m_exit_observer_cancellation_handle = 0;
+        return handle;
+    }
+
+    std::shared_ptr<std::atomic<bool>> exit_observer_complete() const noexcept
+    {
+        return m_exit_observer_complete;
     }
 
     bool take_owned_process_handle(
@@ -555,8 +609,10 @@ private:
     enum class Phase
     {
         ABSENT,
-        RUNNING,
-        EXITED
+        OWNER_BOUND,
+        DETACHING,
+        DISOWNED,
+        OS_EXITED
     };
 
     Phase    m_phase = Phase::ABSENT;
@@ -569,6 +625,8 @@ private:
     uintptr_t m_process_handle = 0;
     bool      m_process_handle_owned = false;
     bool      m_exit_observer_registered = false;
+    uintptr_t m_exit_observer_cancellation_handle = 0;
+    std::shared_ptr<std::atomic<bool>> m_exit_observer_complete;
 #endif
 };
 
@@ -914,6 +972,7 @@ struct Managed_child_custody_record
     bool                                       recovery_requested = false;
     Readiness_phase                            readiness = Readiness_phase::not_requested;
     std::atomic<bool>                          readiness_cancelled{false};
+    std::shared_ptr<std::atomic<bool>>          readiness_worker_complete;
     Managed_child_release_state                release_state;
     Managed_child_failure                      last_failure;
     std::vector<Managed_child_occurrence_record> occurrences;
@@ -943,6 +1002,16 @@ struct Managed_child_custody_record
             });
         return exact == occurrences.end() ? nullptr : &*exact;
     }
+};
+
+enum class Managed_child_detach_result
+{
+    NOT_STARTED,
+    SETTLEMENT_PENDING,
+    DISOWNED,
+    DEFINITE_NON_DELIVERY,
+    NO_LIVE_OCCURRENCE,
+    CONFLICT
 };
 
 // Pins one admitted occurrence until setup becomes terminal.  The launch
@@ -1447,7 +1516,13 @@ struct Managed_process: Derived_transceiver<Managed_process>
 #endif
 
     using lifeline_handle_type = uintptr_t;
-    map<instance_id_type, lifeline_handle_type>
+    struct Lifeline_write_endpoint
+    {
+        lifeline_handle_type handle = static_cast<lifeline_handle_type>(-1);
+        uint64_t             custody_identity = 0;
+        uint32_t             occurrence = 0;
+    };
+    map<instance_id_type, Lifeline_write_endpoint>
                                         m_lifeline_writes;
     mutable std::mutex                  m_lifeline_mutex;
 
@@ -1499,6 +1574,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         detail::Release_mode release_mode = detail::Release_mode::passive);
+    detail::Managed_child_detach_result detach_child_custody_until(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        std::chrono::steady_clock::time_point deadline);
     void start_child_custody_release_worker(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         uint64_t release_attempt_generation);
@@ -1586,8 +1664,17 @@ struct Managed_process: Derived_transceiver<Managed_process>
         std::function<void()> worker,
         const char* failure_stage = nullptr,
         instance_id_type failure_process_instance_id = invalid_instance_id,
-        uint32_t failure_occurrence = 0);
+        uint32_t failure_occurrence = 0,
+        std::shared_ptr<std::atomic<bool>> complete = {});
     void join_owned_lifecycle_workers();
+    void join_completed_lifecycle_workers();
+#ifdef _WIN32
+    bool settle_disowned_windows_observer(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        instance_id_type process_instance_id,
+        uint32_t occurrence,
+        std::chrono::steady_clock::time_point deadline);
+#endif
     void retire_child_custody_if_complete(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody);
 
@@ -1603,6 +1690,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
     uint64_t                            m_next_child_custody_identity = 1;
     std::map<uint64_t, std::shared_ptr<detail::Managed_child_custody_record>>
                                         m_child_custodies;
+    std::map<uint64_t, std::shared_ptr<detail::Managed_child_custody_record>>
+                                        m_disowned_child_custodies;
     std::map<instance_id_type, detail::Managed_child_active_occurrence>
                                         m_child_custody_by_process;
     mutable std::mutex                  m_owned_lifecycle_workers_mutex;

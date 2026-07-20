@@ -367,6 +367,13 @@ private:
         uint32_t          occurrence,
         const std::atomic<bool>& cancelled);
     void notify_managed_child_readiness_cancelled();
+    bool set_managed_child_member_role(
+        uint64_t                     custody_identity,
+        instance_id_type             process_iid,
+        uint32_t                     occurrence,
+        detail::Member_lifetime_role role,
+        std::chrono::steady_clock::time_point deadline,
+        bool                         absent_is_success = false);
 
     // Publish a transceiver instance and assigned name in the registry. Enforces
     // name uniqueness and per-process limits, emits instance_published (or
