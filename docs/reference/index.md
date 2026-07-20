@@ -70,6 +70,7 @@
 | [`sintra::leave`](leave.md) | function | `<sintra/sintra.h>` | Unilateral departure while peers continue. |
 | [Recovery](recovery.md) | reference | `<sintra/sintra.h>` | Recovery policy, runner, and crash information APIs. |
 | [Lifecycle hooks](lifecycle_hooks.md) | reference | `<sintra/sintra.h>` | Process lifecycle event callbacks and reason values. |
+| [`sintra::set_member_lifecycle_handler`](lifecycle_hooks.md) | function | `<sintra/sintra.h>` | Observe detached-member lifeline release and coordinator departure. |
 
 ## Diagnostics
 

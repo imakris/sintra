@@ -58,6 +58,7 @@ namespace detail {
         instance_unpublished, // sent by Coordinator, always before the
                               // Transceiver sends instance_invalidated
         unpublish_transceiver_notify,
+        coordinator_departure_notice,
 
         // SPECIAL MESSAGE IDENTIFIERS
         exception,

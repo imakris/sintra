@@ -15,6 +15,7 @@
 #include <exception>
 #endif
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
@@ -96,6 +97,10 @@ inline constexpr const char* k_stage_publish_transceiver_locked =
     "publish_transceiver/publish_locked";
 inline constexpr const char* k_stage_managed_child_publication_identity_captured =
     "publish_transceiver/managed_child_identity_captured";
+inline constexpr const char* k_stage_collective_detached_notice_sent =
+    "begin_collective_shutdown/detached_notice_sent";
+inline constexpr const char* k_stage_collective_before_barrier_snapshot =
+    "process_group/before_collective_barrier_snapshot";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 // Coordinator lock-stage hook: tests running in the coordinator process may
@@ -216,6 +221,11 @@ sequence_counter_type Process_group::barrier(
     const string&  barrier_name,
     int32_t        barrier_mode_tag)
 {
+    std::unique_lock<std::timed_mutex> collective_entry_lock;
+    if (s_coord) {
+        collective_entry_lock = std::unique_lock<std::timed_mutex>(
+            s_coord->m_collective_shutdown_entry_mutex);
+    }
     std::unique_lock basic_lock(m_call_mutex);
     instance_id_type caller_piid = s_tl_current_message->sender_instance_id;
     if (m_process_ids.find(caller_piid) == m_process_ids.end()) {
@@ -236,6 +246,8 @@ sequence_counter_type Process_group::barrier(
     // This ensures a consistent view: no process can be added/removed or change draining state
     // between the membership snapshot and the draining filter.
     if (b.processes_pending.empty()) {
+        coordinator_lock_stage_for_test(
+            detail::test_hooks::k_stage_collective_before_barrier_snapshot);
         // new or reused barrier (may have failed previously)
         b.processes_pending = m_process_ids;
         b.processes_arrived.clear();
@@ -270,6 +282,9 @@ sequence_counter_type Process_group::barrier(
     // Now safe to release m_call_mutex - barrier state is consistent and other threads
     // need to be able to arrive at the barrier concurrently
     basic_lock.unlock();
+    if (collective_entry_lock.owns_lock()) {
+        collective_entry_lock.unlock();
+    }
 
     b.processes_arrived.insert(caller_piid);
     b.processes_pending.erase(caller_piid);
@@ -506,10 +521,12 @@ inline bool Coordinator::external_process_invitation_exists(instance_id_type pro
     return external_process_invitation_exists_unlocked(process_iid);
 }
 
-inline bool Coordinator::group_has_non_external_peer(
+inline bool Coordinator::group_has_collective_peer(
     const string&      group_name,
     instance_id_type   self_process_iid)
 {
+    std::lock_guard<std::timed_mutex> collective_entry_lock(
+        m_collective_shutdown_entry_mutex);
     std::vector<instance_id_type> members;
     {
         std::lock_guard groups_lock(m_groups_mutex);
@@ -525,9 +542,19 @@ inline bool Coordinator::group_has_non_external_peer(
 
     std::lock_guard publish_lock(m_publish_mutex);
     for (auto process_iid : members) {
-        if (process_iid                                      != self_process_iid &&
-            m_external_attached_processes.count(process_iid) == 0)
+        if (process_iid == self_process_iid) {
+            continue;
+        }
+        const auto role = m_member_roles.find(process_iid);
+        if (role != m_member_roles.end() &&
+            role->second.role == detail::Member_lifetime_role::DETACHED)
         {
+            if (!m_detached_collective_departure_started) {
+                return true;
+            }
+            continue;
+        }
+        if (m_external_attached_processes.count(process_iid) == 0) {
             return true;
         }
     }
@@ -606,6 +633,9 @@ inline bool Coordinator::reserve_external_process_invitation(
     instance_id_type                       process_iid,
     const string&                          token,
     std::chrono::steady_clock::time_point  expires_at,
+    detail::Member_lifetime_role           role,
+    uint32_t                               coordinator_pid,
+    uint64_t                               coordinator_start_stamp,
     uint32_t&                              occurrence_out)
 {
     coordinator_lock_stage_for_test(
@@ -615,6 +645,13 @@ inline bool Coordinator::reserve_external_process_invitation(
         return false;
     }
 
+    std::lock_guard<std::timed_mutex> collective_entry_lock(
+        m_collective_shutdown_entry_mutex);
+    if (role == detail::Member_lifetime_role::DETACHED &&
+        m_detached_collective_departure_started)
+    {
+        return false;
+    }
     std::lock_guard lock(m_external_process_invitations_mutex);
     if (external_process_invitation_exists_unlocked(process_iid)) {
         return false;
@@ -638,6 +675,9 @@ inline bool Coordinator::reserve_external_process_invitation(
     record.token      = token;
     record.expires_at = expires_at;
     record.occurrence = next_occurrence;
+    record.role       = role;
+    record.coordinator_pid = coordinator_pid;
+    record.coordinator_start_stamp = coordinator_start_stamp;
     record.state      = External_process_invitation_state::pending;
     m_external_process_invitations.emplace(process_iid, std::move(record));
     occurrence_out = next_occurrence;
@@ -870,62 +910,81 @@ inline bool Coordinator::add_external_process_to_standard_groups(instance_id_typ
     return true;
 }
 
-inline bool Coordinator::claim_external_process_invitation(
+inline detail::External_process_claim_result
+Coordinator::claim_external_process_invitation(
     instance_id_type   process_iid,
     const string&      token)
 {
     if (!detail::is_valid_process_instance_id(process_iid) || token.empty()) {
-        return false;
+        return {};
     }
 
     if (m_shutdown.load(std::memory_order_acquire)) {
-        return false;
+        return {};
     }
 
     if (!s_tl_current_message ||
         process_of(s_tl_current_message->sender_instance_id) != process_iid)
     {
-        return false;
+        return {};
     }
 
-    std::lock_guard<mutex> admission_lock(detail::s_teardown_admission_mutex);
+    std::lock_guard<std::timed_mutex> admission_lock(
+        detail::s_teardown_admission_mutex);
+    std::lock_guard<std::timed_mutex> collective_entry_lock(
+        m_collective_shutdown_entry_mutex);
+    if (m_detached_collective_departure_started) {
+        return {};
+    }
     std::lock_guard lock(m_external_process_invitations_mutex);
     auto it = m_external_process_invitations.find(process_iid);
     if (it == m_external_process_invitations.end()) {
-        return false;
+        return {};
     }
 
     auto&      record = it->second;
     const auto now    = std::chrono::steady_clock::now();
     if (record.state != External_process_invitation_state::pending) {
-        return false;
+        return {};
     }
     if (record.expires_at <= now) {
         record.state      = External_process_invitation_state::rejecting;
         record.expires_at = now + k_external_process_invitation_rejection_grace;
         m_external_process_invitations_cv.notify_all();
-        return false;
+        return {};
     }
     if (!detail::external_attach_tokens_equal(record.token, token)) {
         record.state      = External_process_invitation_state::rejecting;
         record.expires_at = now;
         m_external_process_invitations_cv.notify_all();
-        return false;
+        return {};
     }
 
     if (s_tl_current_message->managed_child_custody_identity != 0 ||
         s_tl_current_message->managed_child_occurrence != record.occurrence)
     {
-        return false;
+        return {};
     }
 
-    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
-        return false;
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
+        !s_mproc)
+    {
+        return {};
     }
 
-    if (!s_mproc) {
-        return false;
+    if (record.role == detail::Member_lifetime_role::DETACHED) {
+        const auto coordinator_pid = static_cast<uint32_t>(s_mproc->m_pid);
+        const auto observed = query_process_start_stamp(coordinator_pid);
+        if (record.coordinator_pid == 0 ||
+            record.coordinator_start_stamp == 0 ||
+            record.coordinator_pid != coordinator_pid ||
+            record.coordinator_start_stamp != s_mproc->m_process_start_stamp ||
+            !observed || *observed != record.coordinator_start_stamp)
+        {
+            return {};
+        }
     }
+
     {
         Dispatch_shared_lock readers_lock(s_mproc->m_readers_mutex);
         const auto reader = s_mproc->m_readers.find(process_iid);
@@ -933,7 +992,7 @@ inline bool Coordinator::claim_external_process_invitation(
             reader->second->get_occurrence() != record.occurrence ||
             reader->second->get_managed_child_custody_identity() != 0)
         {
-            return false;
+            return {};
         }
     }
     {
@@ -941,18 +1000,16 @@ inline bool Coordinator::claim_external_process_invitation(
         if (m_transceiver_registry.count(process_iid)  != 0 ||
             m_joined_process_branch.count(process_iid) != 0)
         {
-            return false;
+            return {};
         }
         for (const auto& entry : m_inflight_joins) {
             if (entry.second == process_iid) {
-                return false;
+                return {};
             }
         }
-        if (s_mproc) {
-            std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
-            if (s_mproc->m_cached_spawns.count(process_iid) != 0) {
-                return false;
-            }
+        std::lock_guard<std::mutex> cache_lock(s_mproc->m_cached_spawns_mutex);
+        if (s_mproc->m_cached_spawns.count(process_iid) != 0) {
+            return {};
         }
         const bool role_inserted = m_member_roles.emplace(
             process_iid,
@@ -960,7 +1017,7 @@ inline bool Coordinator::claim_external_process_invitation(
                 Process_reader_identity{0, process_iid, record.occurrence},
                 record.role}).second;
         if (!role_inserted) {
-            return false;
+            return {};
         }
         m_transceiver_registry[process_iid];
         m_external_attached_processes[process_iid] = record.occurrence;
@@ -982,7 +1039,7 @@ inline bool Coordinator::claim_external_process_invitation(
         m_member_roles.erase(process_iid);
         m_external_attached_processes.erase(process_iid);
         m_transceiver_registry.erase(process_iid);
-        return false;
+        return {};
     }
 
     set_collective_shutdown_state(process_iid, 0);
@@ -995,11 +1052,19 @@ inline bool Coordinator::claim_external_process_invitation(
         m_member_roles.erase(process_iid);
         m_external_attached_processes.erase(process_iid);
         m_transceiver_registry.erase(process_iid);
-        return false;
+        return {};
     }
+
+    detail::External_process_claim_result result{};
+    result.accepted = true;
+    result.role = static_cast<uint64_t>(record.role);
+    result.coordinator_pid = record.coordinator_pid;
+    result.coordinator_start_stamp = record.coordinator_start_stamp;
+    result.exact_watch_required =
+        record.role == detail::Member_lifetime_role::DETACHED;
     m_external_process_invitations.erase(it);
     m_external_process_invitations_cv.notify_all();
-    return true;
+    return result;
 }
 
 
@@ -1207,6 +1272,17 @@ inline bool Coordinator::set_managed_child_member_role(
     }
     found->second.role = role;
     return true;
+}
+
+inline void Coordinator::send_member_lifecycle_notice(
+    const Process_reader_identity&       identity,
+    detail::Member_lifecycle_notice_kind notice_kind)
+{
+    emit_remote<Coordinator::coordinator_departure_notice>(
+        identity.process_iid,
+        identity.custody_identity,
+        identity.occurrence,
+        static_cast<uint64_t>(notice_kind));
 }
 
 
@@ -1790,13 +1866,63 @@ inline sequence_counter_type Coordinator::begin_collective_shutdown(instance_id_
         return invalid_sequence;
     }
 
+    std::lock_guard<std::timed_mutex> collective_entry_lock(
+        m_collective_shutdown_entry_mutex);
     set_collective_shutdown_state(process_iid, 1);
 
-    auto pending_completions = collect_pending_barrier_completions(
+    std::vector<Pending_completion> pending_completions;
+    bool draining_changed = false;
+    if (!m_detached_collective_departure_started) {
+        m_detached_collective_departure_started = true;
+        std::vector<Member_role_record> detached_members;
+        {
+            std::lock_guard groups_lock(m_groups_mutex);
+            {
+                std::lock_guard publish_lock(m_publish_mutex);
+                for (const auto& [member_iid, member] : m_member_roles) {
+                    if (member.role != detail::Member_lifetime_role::DETACHED) {
+                        continue;
+                    }
+                    detached_members.push_back(member);
+                    draining_changed = set_draining_state(member_iid, 1) ||
+                        draining_changed;
+                }
+            }
+            for (const auto& member : detached_members) {
+                auto completions = collect_pending_barrier_completions_unlocked(
+                    member.identity.process_iid,
+                    false);
+                pending_completions.insert(
+                    pending_completions.end(),
+                    std::make_move_iterator(completions.begin()),
+                    std::make_move_iterator(completions.end()));
+            }
+        }
+
+        if (s_mproc) {
+            for (const auto& member : detached_members) {
+                send_member_lifecycle_notice(
+                    member.identity,
+                    detail::Member_lifecycle_notice_kind::
+                        COLLECTIVE_DEPARTURE);
+            }
+        }
+        coordinator_lock_stage_for_test(
+            detail::test_hooks::k_stage_collective_detached_notice_sent);
+    }
+
+    auto caller_completions = collect_pending_barrier_completions(
         process_iid,
         false,
         Barrier_scope::user_only);
+    pending_completions.insert(
+        pending_completions.end(),
+        std::make_move_iterator(caller_completions.begin()),
+        std::make_move_iterator(caller_completions.end()));
     emit_pending_barrier_completions(pending_completions);
+    if (draining_changed) {
+        note_draining_state_change();
+    }
 
     return s_mproc ? s_mproc->m_out_rep_c->get_leading_sequence() : invalid_sequence;
 }
@@ -2085,7 +2211,7 @@ instance_id_type Coordinator::join_swarm(
         return invalid_instance_id;
     }
 
-    std::unique_lock<mutex> admission_lock(detail::s_teardown_admission_mutex);
+    std::unique_lock<std::timed_mutex> admission_lock(detail::s_teardown_admission_mutex);
 
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         return invalid_instance_id;
@@ -2277,7 +2403,7 @@ void Coordinator::recover_if_required(
         info.process_iid);
 #endif
 
-    std::unique_lock<std::mutex> admission_lock(
+    std::unique_lock<std::timed_mutex> admission_lock(
         detail::s_teardown_admission_mutex);
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
         return;
@@ -2373,7 +2499,7 @@ void Coordinator::recover_if_required(
             spawned
         ]() mutable
     {
-        std::unique_lock<mutex> admission_lock(
+        std::unique_lock<std::timed_mutex> admission_lock(
             detail::s_teardown_admission_mutex);
         if (should_cancel() || !s_mproc) {
             return;

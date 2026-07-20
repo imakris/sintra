@@ -332,6 +332,12 @@ owning runtime is active. Keep the returned move-only subscription alive for
 delivery, and do not initiate Sintra teardown from its lifecycle-thread
 callback.
 
+`detach_until(deadline)` is the explicit survival handoff. A successful result
+of `Managed_child_detach_result::disowned` closes recovery, releases the
+lifeline, and permanently relinquishes native exit and termination authority
+without claiming that the child exited. Later release or termination calls on
+that custody report `disowned` and do not kill or wait for the child.
+
 The complete status, failure, exact-exit, callback, cancellation, quiescence,
 threading, and teardown contract is in
 [`sintra::spawn_swarm_process`](reference/spawn_swarm_process.md).
@@ -360,6 +366,7 @@ struct External_process_invitation_options
 {
     instance_id_type           process_instance_id = invalid_instance_id;
     std::chrono::milliseconds  timeout{std::chrono::seconds(30)};
+    bool                       detached = false;
 };
 
 struct External_process_invitation
@@ -390,6 +397,13 @@ Externally attached processes may leave, but they are never recovered by
 Sintra. See
 [`sintra::create_external_process_invitation`](reference/external_process_invitation.md)
 for the complete contract.
+
+The default invitation remains coordinator-bound. Set `detached = true` only
+when the host will service member lifecycle events and call `leave()` from its
+serialized control thread. Detached admission requires an exact live
+coordinator PID and start identity, never a PID-only fallback. Detached members
+are notified and excluded before collective shutdown takes its
+lifecycle-barrier snapshot.
 
 ### `sintra::process_index`
 
@@ -926,6 +940,7 @@ not recoverable. Use `s_recovery_occurrence` to distinguish the original run
 void set_recovery_policy(Recovery_policy policy);
 void set_recovery_runner(Recovery_runner runner);
 void set_lifecycle_handler(Lifecycle_handler handler);
+bool set_member_lifecycle_handler(Member_lifecycle_handler handler);
 ```
 
 These coordinator-only hooks filter or delay recovery and observe committed
@@ -933,6 +948,12 @@ process retirement. A runner receives a one-shot `Recovery_control`; a retained
 control becomes inert when shutdown starts or its exact custody closes. The
 normative contracts are in [`sintra::recovery`](reference/recovery.md) and
 [`sintra::set_lifecycle_handler`](reference/lifecycle_hooks.md).
+
+`set_member_lifecycle_handler` is separate and effective only in a member
+process. A detached member receives a sticky lifeline-release event and one
+coordinator-departure event on a Sintra-owned thread. The callback should do
+bounded work and post `leave()` to the host's control thread; lifecycle teardown
+is rejected when called directly from the callback.
 
 ### Windows Host Crash Notification
 
@@ -1211,6 +1232,7 @@ sources.
 | `sintra::announce_fatal_windows_exception` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::Entry_descriptor` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::Lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
+| `sintra::Member_lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::Lifetime_policy` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::Log_stream` | [Errors and Diagnostics](#errors-and-diagnostics) |
 | `sintra::Named_instance<T>` | [Targeting and IDs](#targeting-and-ids) |
@@ -1273,6 +1295,7 @@ sources.
 | `sintra::process_of` | [Targeting and IDs](#targeting-and-ids) |
 | `sintra::process_index` | [Initialization and Process Topology](#initialization-and-process-topology) |
 | `sintra::process_lifecycle_event` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
+| `sintra::member_lifecycle_event` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::Range<T>` | [Direct Ring Helpers](#direct-ring-helpers) |
 | `sintra::receive` | [Publish/Subscribe](#publishsubscribe) |
 | `sintra::remote` | [Publish/Subscribe](#publishsubscribe) |
@@ -1286,6 +1309,7 @@ sources.
 | `sintra::rpc_unavailable` | [RPC](#rpc), [Errors and Diagnostics](#errors-and-diagnostics) |
 | `sintra::sequence_counter_type` | [Targeting and IDs](#targeting-and-ids), [Barriers and Fences](#barriers-and-fences) |
 | `sintra::set_lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
+| `sintra::set_member_lifecycle_handler` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::set_log_callback` | [Errors and Diagnostics](#errors-and-diagnostics) |
 | `sintra::set_recovery_policy` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |
 | `sintra::set_recovery_runner` | [Recovery and Lifecycle Hooks](#recovery-and-lifecycle-hooks) |

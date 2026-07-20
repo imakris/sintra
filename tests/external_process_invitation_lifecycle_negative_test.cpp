@@ -781,12 +781,12 @@ int run_admitted_alive_helper(int argc, char* argv[])
     const auto stale_lifetime =
         std::make_shared<const sintra::detail::Managed_process_lifetime>();
     sintra::s_mproc->coordinator_departed(
-        sintra::detail::Coordinator_departure_cause::SIGNALED_CRASH,
+        sintra::member_lifecycle_event::departure_cause::SIGNALED_CRASH,
         stale_lifetime);
     const bool stale_departure_rejected =
         sintra::s_mproc->m_coordinator_departure_cause.load(
             std::memory_order_acquire) ==
-            sintra::detail::Coordinator_departure_cause::NONE &&
+            sintra::member_lifecycle_event::departure_cause::NONE &&
         !sintra::s_mproc->m_must_stop.load(std::memory_order_acquire);
     write_marker(dir, marker, has_lifeline_arg ? "unexpected_lifeline_arg" : "ready");
 
@@ -801,7 +801,7 @@ int run_admitted_alive_helper(int argc, char* argv[])
         sintra::s_mproc->m_coordinator_departure_cause.load(
             std::memory_order_acquire);
     sintra::s_mproc->coordinator_departed(
-        sintra::detail::Coordinator_departure_cause::SIGNALED_CRASH,
+        sintra::member_lifecycle_event::departure_cause::SIGNALED_CRASH,
         sintra::s_mproc->m_runtime_lifetime);
     const bool default_bound_once =
         stale_departure_rejected &&
@@ -811,7 +811,7 @@ int run_admitted_alive_helper(int argc, char* argv[])
         g_departure_pre_unblock_seen.load(std::memory_order_acquire) &&
         g_bound_stop_published_pre_unblock.load(std::memory_order_acquire) &&
         first_cause ==
-            sintra::detail::Coordinator_departure_cause::UNPUBLISHED &&
+            sintra::member_lifecycle_event::departure_cause::UNPUBLISHED &&
         sintra::s_mproc->m_coordinator_departure_cause.load(
             std::memory_order_acquire) == first_cause &&
         sintra::s_mproc->m_must_stop.load(std::memory_order_acquire) &&

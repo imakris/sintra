@@ -318,6 +318,8 @@ struct Managed_child_status
         Managed_child_readiness_state::not_requested;
     Managed_child_release_state release_state =
         Managed_child_release_state::open;
+    Managed_child_custody_state custody_state =
+        Managed_child_custody_state::not_started;
     std::size_t admitted_occurrences = 0;
     std::size_t created_occurrences = 0;
     std::size_t exited_occurrences = 0;
@@ -370,6 +372,8 @@ public:
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
         std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_detach_result detach_until(
+        std::chrono::steady_clock::time_point deadline) const;
 
 private:
     explicit Managed_child_custody(
@@ -389,6 +393,7 @@ struct External_process_invitation_options
 {
     instance_id_type           process_instance_id = invalid_instance_id;
     std::chrono::milliseconds  timeout{std::chrono::seconds(30)};
+    bool                       detached = false;
 };
 
 struct External_process_invitation
@@ -472,7 +477,7 @@ inline void cleanup_failed_init_noexcept()
     }
 
     {
-        std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+        std::lock_guard<std::timed_mutex> admission_lock(s_teardown_admission_mutex);
         s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
         s_teardown_admission_closed.store(false, std::memory_order_release);
     }
@@ -556,7 +561,7 @@ inline bool finalize_impl()
     }
 
     {
-        std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+        std::lock_guard<std::timed_mutex> admission_lock(s_teardown_admission_mutex);
         s_teardown_admission_closed.store(true, std::memory_order_release);
         if (s_shutdown_state.load(std::memory_order_acquire) ==
             shutdown_protocol_state::idle)
@@ -586,7 +591,7 @@ inline bool finalize_impl()
             else if (!s_mproc->m_must_stop.load(std::memory_order_acquire) &&
                 s_mproc->m_coordinator_departure_cause.load(
                     std::memory_order_acquire) ==
-                detail::Coordinator_departure_cause::NONE)
+                member_lifecycle_event::departure_cause::NONE)
             {
                 try {
                     auto handle = Coordinator::rpc_async_begin_process_draining(
@@ -665,7 +670,7 @@ inline bool finalize_impl()
         s_finalization_drain_started = false;
     }
     {
-        std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+        std::lock_guard<std::timed_mutex> admission_lock(s_teardown_admission_mutex);
         s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
         s_teardown_admission_closed.store(false, std::memory_order_release);
     }
@@ -709,7 +714,7 @@ inline void close_teardown_admission_and_claim_state(
     const char*                api_name)
 {
     validate_managed_child_exit_callback_teardown(api_name);
-    std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+    std::lock_guard<std::timed_mutex> admission_lock(s_teardown_admission_mutex);
     if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
         if (s_shutdown_state.load(std::memory_order_acquire) == desired_state) {
             // Retry the same incomplete terminal phase. Admission stays closed.
@@ -725,7 +730,7 @@ inline void close_teardown_admission_and_claim_state(
 inline bool close_teardown_admission_for_shutdown(const char* api_name)
 {
     validate_managed_child_exit_callback_teardown(api_name);
-    std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+    std::lock_guard<std::timed_mutex> admission_lock(s_teardown_admission_mutex);
     if (s_teardown_admission_closed.load(std::memory_order_acquire)) {
         const auto state = s_shutdown_state.load(std::memory_order_acquire);
         if (state == shutdown_protocol_state::collective_shutdown_entered ||
@@ -748,7 +753,7 @@ inline bool close_teardown_admission_for_shutdown(const char* api_name)
 
 inline void reset_lifecycle_teardown_to_idle()
 {
-    std::lock_guard<std::mutex> admission_lock(s_teardown_admission_mutex);
+    std::lock_guard<std::timed_mutex> admission_lock(s_teardown_admission_mutex);
     s_shutdown_state.store(shutdown_protocol_state::idle, std::memory_order_release);
     s_teardown_admission_closed.store(false, std::memory_order_release);
 }
@@ -813,7 +818,7 @@ inline void shutdown_coordinator_drain_wait(const std::string& group_name)
     };
     auto only_self_remains = [&]() {
         return
-            !s_coord->group_has_non_external_peer(group_name, s_mproc_id) &&
+            !s_coord->group_has_collective_peer(group_name, s_mproc_id) &&
             external_readers_drained();
     };
 
@@ -865,7 +870,7 @@ inline bool shutdown_group_is_trivial(const std::string& group_name)
         return s_coord_id == invalid_instance_id;
     }
 
-    return !s_coord->group_has_non_external_peer(group_name, s_mproc_id);
+    return !s_coord->group_has_collective_peer(group_name, s_mproc_id);
 }
 
 inline void begin_collective_shutdown_for_barriers()
@@ -1082,7 +1087,7 @@ inline External_process_invitation create_external_process_invitation(
     detail::runtime_stage_for_test(
         detail::test_hooks::k_stage_create_invitation_pre_admission_lock);
 
-    std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
+    std::lock_guard<std::timed_mutex> admission_lock(detail::s_teardown_admission_mutex);
     if (!s_mproc || !s_coord) {
         Log_stream(log_level::error)
             << "create_external_process_invitation: an active coordinator is required\n";
@@ -1125,8 +1130,32 @@ inline External_process_invitation create_external_process_invitation(
     }
 
     const auto expires_at = std::chrono::steady_clock::now() + options.timeout;
+    const auto role = options.detached
+        ? detail::Member_lifetime_role::DETACHED
+        : detail::Member_lifetime_role::COORDINATOR_BOUND;
+    const auto coordinator_pid = static_cast<uint32_t>(s_mproc->m_pid);
+    const auto coordinator_start_stamp = s_mproc->m_process_start_stamp;
+    if (options.detached) {
+        const auto observed = query_process_start_stamp(coordinator_pid);
+        if (coordinator_pid == 0 || coordinator_start_stamp == 0 ||
+            !observed || *observed != coordinator_start_stamp)
+        {
+            Log_stream(log_level::error)
+                << "create_external_process_invitation: exact coordinator "
+                   "identity is unavailable for detached membership\n";
+            return {};
+        }
+    }
     uint32_t   occurrence = 0;
-    if (!s_coord->reserve_external_process_invitation(process_iid, token, expires_at, occurrence)) {
+    if (!s_coord->reserve_external_process_invitation(
+            process_iid,
+            token,
+            expires_at,
+            role,
+            coordinator_pid,
+            coordinator_start_stamp,
+            occurrence))
+    {
         Log_stream(log_level::warning)
             << "create_external_process_invitation: process instance id "
             << static_cast<unsigned long long>(process_iid)
@@ -1318,7 +1347,7 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
 
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
     {
-        std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
+        std::lock_guard<std::timed_mutex> admission_lock(detail::s_teardown_admission_mutex);
         if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) || !s_mproc) {
             Log_stream(log_level::warning)
                 << "spawn_swarm_process: rejected because lifecycle teardown is in progress\n";
@@ -1471,8 +1500,18 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
                 [custody_owner, readiness_coordinator, custody_record, spawn_args,
                  shared_launch_attempt = std::move(shared_launch_attempt),
                  custody_identity, target = options.readiness_instance_name,
-                 readiness_observer, handle_setup_exception]() mutable
+                 readiness_observer, handle_setup_exception,
+                 readiness_worker_complete]() mutable
                 {
+                    Instantiator completion_notification(
+                        std::function<void()>([
+                                custody_record,
+                                readiness_worker_complete
+                            ]() {
+                            readiness_worker_complete->store(
+                                true, std::memory_order_release);
+                            custody_record->changed.notify_all();
+                        }));
                     bool created = false;
                     bool setup_threw = false;
                     try {
@@ -1584,6 +1623,7 @@ inline Managed_child_status Managed_child_custody::status() const
         return result;
     }
     std::lock_guard<std::mutex> lock(m_record->mutex);
+    result.custody_state = Managed_child_custody_state::owner_bound;
     switch (m_record->readiness) {
     case detail::Readiness_phase::not_requested:
         result.readiness_state = Managed_child_readiness_state::not_requested;
@@ -1609,6 +1649,15 @@ inline Managed_child_status Managed_child_custody::status() const
     for (const auto& occurrence : m_record->occurrences) {
         result.created_occurrences += occurrence.native.created() ? 1u : 0u;
         result.exited_occurrences += occurrence.native.exited() ? 1u : 0u;
+        if (occurrence.native.disowned()) {
+            result.custody_state = Managed_child_custody_state::disowned;
+        }
+        else
+        if (occurrence.native.detaching() &&
+            result.custody_state != Managed_child_custody_state::disowned)
+        {
+            result.custody_state = Managed_child_custody_state::detaching;
+        }
     }
     return result;
 }
@@ -1649,7 +1698,7 @@ Managed_child_custody::observe_latest_created_exit(
         return {};
     }
 
-    std::lock_guard<std::mutex> admission_lock(
+    std::lock_guard<std::timed_mutex> admission_lock(
         detail::s_teardown_admission_mutex);
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
         !s_mproc)
@@ -1722,7 +1771,13 @@ inline Managed_child_status Managed_child_custody::wait_until_released(
     }
     std::unique_lock<std::mutex> lock(m_record->mutex);
     m_record->changed.wait_until(lock, deadline, [&]() {
-        return m_record->release_state.released();
+        return m_record->release_state.released() ||
+            std::any_of(
+                m_record->occurrences.begin(),
+                m_record->occurrences.end(),
+                [](const detail::Managed_child_occurrence_record& occurrence) {
+                    return occurrence.native.disowned();
+                });
     });
     lock.unlock();
     return status();
@@ -1747,6 +1802,15 @@ inline Managed_child_status Managed_child_custody::terminate_until(
     return wait_until_released(deadline);
 }
 
+inline Managed_child_detach_result Managed_child_custody::detach_until(
+    std::chrono::steady_clock::time_point deadline) const
+{
+    if (!m_record || !s_mproc) {
+        return Managed_child_detach_result::not_started;
+    }
+    return s_mproc->detach_child_custody_until(m_record, deadline);
+}
+
 inline instance_id_type join_swarm(
     int            branch_index,
     std::string    binary_name = std::string())
@@ -1757,7 +1821,7 @@ inline instance_id_type join_swarm(
 
     instance_id_type coord_id = invalid_instance_id;
     {
-        std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
+        std::lock_guard<std::timed_mutex> admission_lock(detail::s_teardown_admission_mutex);
         if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
             !s_mproc ||
             s_coord_id == invalid_instance_id)
@@ -1876,6 +1940,12 @@ inline void set_lifecycle_handler(Lifecycle_handler handler)
         return;
     }
     s_coord->set_lifecycle_handler(std::move(handler));
+}
+
+inline bool set_member_lifecycle_handler(Member_lifecycle_handler handler)
+{
+    return s_mproc && !s_coord &&
+        s_mproc->set_member_lifecycle_handler(std::move(handler));
 }
 
 } // namespace sintra

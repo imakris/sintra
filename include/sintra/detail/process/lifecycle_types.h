@@ -16,29 +16,12 @@ enum class Member_lifetime_role
     DETACHED
 };
 
-enum class Coordinator_departure_cause
+enum class Member_lifecycle_notice_kind : uint64_t
 {
-    NONE,
-    UNPUBLISHED,
-    SIGNALED_CRASH,
-    EXACT_OS_WATCH
+    MANAGED_DETACH_PRECOMMIT = 1,
+    MANAGED_DETACH_ABORT = 2,
+    COLLECTIVE_DEPARTURE = 3
 };
-
-enum class Member_lifecycle_event_kind
-{
-    LIFELINE_RELEASED,
-    COORDINATOR_DEPARTED
-};
-
-struct Member_lifecycle_event
-{
-    Member_lifecycle_event_kind kind =
-        Member_lifecycle_event_kind::LIFELINE_RELEASED;
-    Coordinator_departure_cause cause = Coordinator_departure_cause::NONE;
-};
-
-using Member_lifecycle_handler =
-    std::function<void(const Member_lifecycle_event&)>;
 
 inline constexpr unsigned char k_lifeline_release_byte = 0x01;
 
@@ -50,7 +33,58 @@ enum class Lifeline_observation
     BREACHED
 };
 
+struct External_process_claim_result
+{
+    uint64_t accepted;
+    uint64_t role;
+    uint64_t coordinator_pid;
+    uint64_t coordinator_start_stamp;
+    uint64_t exact_watch_required;
+};
+
 } // namespace detail
+
+struct member_lifecycle_event
+{
+    enum class kind
+    {
+        LIFELINE_RELEASED,
+        COORDINATOR_DEPARTED
+    };
+
+    enum class departure_cause
+    {
+        NONE,
+        UNPUBLISHED,
+        SIGNALED_CRASH,
+        EXACT_OS_WATCH,
+        COLLECTIVE_SHUTDOWN
+    };
+
+    kind            why = kind::LIFELINE_RELEASED;
+    departure_cause cause = departure_cause::NONE;
+};
+
+using Member_lifecycle_handler =
+    std::function<void(const member_lifecycle_event&)>;
+
+enum class Managed_child_custody_state
+{
+    not_started,
+    owner_bound,
+    detaching,
+    disowned
+};
+
+enum class Managed_child_detach_result
+{
+    not_started,
+    settlement_pending,
+    disowned,
+    definite_non_delivery,
+    no_live_occurrence,
+    conflict
+};
 
 // Lifecycle/recovery metadata and callbacks (effective only in the coordinator).
 // See docs/process_lifecycle_notes.md for timing and threading.

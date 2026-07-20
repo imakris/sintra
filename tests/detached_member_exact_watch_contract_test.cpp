@@ -27,6 +27,7 @@ using namespace std::chrono_literals;
 using sintra::test::Exact_child;
 using sintra::test::Exact_child_state;
 using sintra::test::managed_child::child_identity_t;
+using sintra::test::managed_child::Scoped_test_hook;
 using sintra::test::managed_child::exact_process_is_live;
 using sintra::test::managed_child::read_child_identity;
 using sintra::test::managed_child::terminate_process_by_pid;
@@ -38,6 +39,23 @@ constexpr auto k_timeout = 20s;
 constexpr auto k_poll = 10ms;
 constexpr std::string_view k_coordinator_flag = "--exact-watch-coordinator";
 constexpr std::string_view k_member_flag = "--exact-watch-member";
+
+std::atomic<sintra::instance_id_type> s_detach_target{
+    sintra::invalid_instance_id};
+
+void exit_immediately_after_detach_commit(
+    const char* stage,
+    sintra::instance_id_type process_iid,
+    std::uint32_t occurrence)
+{
+    if (stage && occurrence == 0 &&
+        process_iid == s_detach_target.load(std::memory_order_acquire) &&
+        std::string_view(stage) ==
+            sintra::detail::test_hooks::k_managed_child_detach_after_commit)
+    {
+        std::_Exit(73);
+    }
+}
 
 fs::path marker(const fs::path& directory, const char* name)
 {
@@ -57,17 +75,6 @@ bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout)
     return true;
 }
 
-std::shared_ptr<sintra::detail::Managed_child_custody_record>
-custody_record_for(sintra::instance_id_type process_iid)
-{
-    std::lock_guard<std::mutex> lock(sintra::s_mproc->m_child_custody_mutex);
-    const auto found =
-        sintra::s_mproc->m_child_custody_by_process.find(process_iid);
-    return found == sintra::s_mproc->m_child_custody_by_process.end()
-        ? nullptr
-        : found->second.custody.lock();
-}
-
 int run_member(int argc, char* argv[], const fs::path& directory)
 {
     try {
@@ -81,12 +88,12 @@ int run_member(int argc, char* argv[], const fs::path& directory)
     std::atomic<unsigned> departure_events{0};
     std::atomic<bool> callback_thread_valid{true};
     const auto control_thread = std::this_thread::get_id();
-    if (!sintra::s_mproc->set_member_lifecycle_handler(
-            [&](const sintra::detail::Member_lifecycle_event& event) {
+    if (!sintra::set_member_lifecycle_handler(
+            [&](const sintra::member_lifecycle_event& event) {
                 if (std::this_thread::get_id() == control_thread) {
                     callback_thread_valid.store(false, std::memory_order_release);
                 }
-                if (event.kind == sintra::detail::Member_lifecycle_event_kind::
+                if (event.why == sintra::member_lifecycle_event::kind::
                         LIFELINE_RELEASED)
                 {
                     lifeline_events.fetch_add(1, std::memory_order_release);
@@ -124,7 +131,7 @@ int run_member(int argc, char* argv[], const fs::path& directory)
         !callback_thread_valid.load(std::memory_order_acquire) ||
         sintra::s_mproc->m_coordinator_departure_cause.load(
             std::memory_order_acquire) !=
-            sintra::detail::Coordinator_departure_cause::EXACT_OS_WATCH)
+            sintra::member_lifecycle_event::departure_cause::EXACT_OS_WATCH)
     {
         return 7;
     }
@@ -153,6 +160,7 @@ int run_coordinator(
     }
 
     const auto member_iid = sintra::make_process_instance_id();
+    s_detach_target.store(member_iid, std::memory_order_release);
     sintra::Spawn_options options;
     options.binary_path = binary_path;
     options.args = {std::string(k_member_flag)};
@@ -166,20 +174,20 @@ int run_coordinator(
     }
     const bool member_ready = sintra::test::wait_for_file(
         marker(directory, "member.ready"), k_timeout, k_poll);
-    const auto record = custody_record_for(member_iid);
-    const auto detached = record
-        ? sintra::s_mproc->detach_child_custody_until(
-            record, std::chrono::steady_clock::now() + k_timeout)
-        : sintra::detail::Managed_child_detach_result::NOT_STARTED;
+    Scoped_test_hook commit_hook(
+        sintra::detail::test_hooks::s_managed_child_cleanup,
+        &exit_immediately_after_detach_commit);
+    const auto detached = custody.detach_until(
+        std::chrono::steady_clock::now() + k_timeout);
     if (!member_ready ||
-        detached != sintra::detail::Managed_child_detach_result::DISOWNED ||
+        detached != sintra::Managed_child_detach_result::disowned ||
         !sintra::test::wait_for_file(
             marker(directory, "member.released"), k_timeout, k_poll))
     {
         return 4;
     }
 
-    std::_Exit(73);
+    return 5;
 }
 
 int run_supervisor(const std::string& binary_path, const fs::path& directory)

@@ -251,6 +251,8 @@ private:
         uint32_t                               occurrence = 0;
         detail::Member_lifetime_role           role =
             detail::Member_lifetime_role::COORDINATOR_BOUND;
+        uint32_t                               coordinator_pid = 0;
+        uint64_t                               coordinator_start_stamp = 0;
         External_process_invitation_state      state = External_process_invitation_state::pending;
     };
 
@@ -374,6 +376,9 @@ private:
         detail::Member_lifetime_role role,
         std::chrono::steady_clock::time_point deadline,
         bool                         absent_is_success = false);
+    void send_member_lifecycle_notice(
+        const Process_reader_identity&       identity,
+        detail::Member_lifecycle_notice_kind notice_kind);
 
     // Publish a transceiver instance and assigned name in the registry. Enforces
     // name uniqueness and per-process limits, emits instance_published (or
@@ -413,9 +418,9 @@ private:
     instance_id_type join_swarm(const string& binary_name, int32_t branch_index);
 
     // Claim a coordinator-created external-process invitation during init().
-    // Returns false when the invitation is absent, canceled, expired, or the
-    // caller does not present the recorded token.
-    bool claim_external_process_invitation(
+    // Returns an unaccepted result when the invitation is absent, canceled,
+    // expired, or the caller does not present the recorded token.
+    detail::External_process_claim_result claim_external_process_invitation(
         instance_id_type   process_iid,
         const string&      token);
 
@@ -521,6 +526,9 @@ public:
         instance_id_type                       process_iid,
         const string&                          token,
         std::chrono::steady_clock::time_point  expires_at,
+        detail::Member_lifetime_role           role,
+        uint32_t                               coordinator_pid,
+        uint64_t                               coordinator_start_stamp,
         uint32_t&                              occurrence_out);
 
     bool cancel_external_process_invitation(
@@ -533,7 +541,7 @@ public:
     bool external_process_invitation_exists(
         instance_id_type       process_iid);
 
-    bool group_has_non_external_peer(
+    bool group_has_collective_peer(
         const string&          group_name,
         instance_id_type       self_process_iid);
 
@@ -553,13 +561,14 @@ public:
     // Coordinator lock ordering (outermost first). A thread may skip levels,
     // but must never acquire an earlier-listed mutex while holding a
     // later-listed one:
-    //   1. m_external_process_invitations_mutex
+    //   1. m_collective_shutdown_entry_mutex
+    //   2. m_external_process_invitations_mutex
     //      (held across the "is this process known" checks during invitation
     //      reservation)
-    //   2. m_groups_mutex
-    //   3. m_publication_notifications_mutex
-    //   4. m_publish_mutex
-    //   5. m_init_tracking_mutex
+    //   3. m_groups_mutex
+    //   4. m_publication_notifications_mutex
+    //   5. m_publish_mutex
+    //   6. m_init_tracking_mutex
     // Process_group locks nest below m_groups_mutex:
     //   m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m
     // The remaining coordinator mutexes are leaves; no other coordinator
@@ -567,6 +576,8 @@ public:
     //   m_type_resolution_mutex, m_lifecycle_mutex,
     //   m_recovery_threads_mutex, m_draining_state_mutex
     mutex                                          m_type_resolution_mutex;
+    std::timed_mutex                               m_collective_shutdown_entry_mutex;
+    bool                                           m_detached_collective_departure_started = false;
     detail::Coordinator_publication_notifications_mutex
                                                    m_publication_notifications_mutex;
     detail::Coordinator_publish_mutex             m_publish_mutex;
@@ -742,8 +753,15 @@ public:
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
     SINTRA_MESSAGE_RESERVED(instance_unpublished,
         type_id_type type_id, instance_id_type instance_id, message_string assigned_name)
+    SINTRA_MESSAGE_RESERVED(
+        coordinator_departure_notice,
+        instance_id_type process_instance_id,
+        uint64_t         custody_identity,
+        uint32_t         occurrence,
+        uint64_t         notice_kind);
 
     friend struct Managed_process;
+    friend struct Process_group;
     friend struct detail::Managed_child_readiness_access;
     friend struct Transceiver;
     friend bool finalize();

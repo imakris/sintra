@@ -21,6 +21,7 @@ struct External_process_invitation_options
 {
     sintra::instance_id_type   process_instance_id = sintra::invalid_instance_id;
     std::chrono::milliseconds  timeout{std::chrono::seconds(30)};
+    bool                       detached = false;
 };
 
 struct External_process_invitation
@@ -66,6 +67,11 @@ Contract:
   custody, or fenced by an unquiesced reader generation.
 - `timeout` must be positive. Pending invitations expire automatically and are
   cleaned up; shutdown also cancels pending invitations.
+- `detached` defaults to `false`, preserving the ordinary coordinator-bound
+  lifetime. Setting it to `true` is an explicit per-generation policy: the
+  accepted process survives coordinator departure and collective shutdown,
+  receives member lifecycle events, and leaves cooperatively from its host's
+  control thread.
 - Within one active coordinator runtime, each accepted reservation receives a
   monotonically increasing, non-zero `occurrence` for that process instance
   id. Together with the process id and owning swarm/runtime, it identifies one
@@ -93,6 +99,18 @@ Contract:
   a secret nor an authenticator.
 - After admission, the process is a normal swarm participant and is added to
   the standard `_sintra_all_processes` and `_sintra_external_processes` groups.
+- A detached invitation records the coordinator PID and exact process-start
+  identity in the authenticated coordinator-side reservation. The claim
+  returns that accepted role and identity; raw command-line arguments cannot
+  select detached membership. Creation or claim fails closed when the exact
+  identity is missing, zero, mismatched, or no longer live. Sintra never falls
+  back to PID-only observation.
+- On the first collective-shutdown entry, exact detached generations are
+  marked draining and notified before the lifecycle-barrier snapshot. They do
+  not call `shutdown()` or contribute to that collective's barrier cardinality.
+  The host should service the member lifecycle callback and call `leave()` on
+  its control thread. Bound invitations retain the existing symmetric
+  shutdown contract.
 - The external process may call `sintra::leave()` to depart while the swarm
   keeps running.
 - External invitations do not create a lifeline pipe/handle and do not provide
@@ -151,6 +169,9 @@ Failures:
 - In the external process, `sintra::init` throws `std::runtime_error` when the
   invitation claim is rejected or cannot be completed within the bounded claim
   wait.
+- Detached creation or initialization also fails when an exact coordinator
+  watch cannot be established. This rejection does not silently downgrade the
+  process to coordinator-bound membership.
 - If the background reader-retirement worker cannot start, Sintra logs a
   warning and retries after the current handler. If that retry also cannot
   start, it logs an error and deliberately retains the old reader as an
@@ -161,6 +182,7 @@ Failures:
 Example source:
 
 - [tests/external_process_invitation_test.cpp](../../tests/external_process_invitation_test.cpp)
+- [tests/detached_external_collective_shutdown_contract_test.cpp](../../tests/detached_external_collective_shutdown_contract_test.cpp)
 
 See also:
 
@@ -168,3 +190,4 @@ See also:
 - [`sintra::leave`](leave.md)
 - [`sintra::spawn_swarm_process`](spawn_swarm_process.md)
 - [`sintra::join_swarm`](join_swarm.md)
+- [Lifecycle hooks](lifecycle_hooks.md)

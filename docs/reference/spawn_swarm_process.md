@@ -71,12 +71,32 @@ enum class Managed_child_release_state
     complete
 };
 
+enum class Managed_child_custody_state
+{
+    not_started,
+    owner_bound,
+    detaching,
+    disowned
+};
+
+enum class Managed_child_detach_result
+{
+    not_started,
+    settlement_pending,
+    disowned,
+    definite_non_delivery,
+    no_live_occurrence,
+    conflict
+};
+
 struct Managed_child_status
 {
     Managed_child_readiness_state readiness_state =
         Managed_child_readiness_state::not_requested;
     Managed_child_release_state release_state =
         Managed_child_release_state::open;
+    Managed_child_custody_state custody_state =
+        Managed_child_custody_state::not_started;
     std::size_t admitted_occurrences = 0;
     std::size_t created_occurrences = 0;
     std::size_t exited_occurrences = 0;
@@ -94,7 +114,8 @@ enum class Managed_child_exit_status_kind
 {
     unavailable,
     exited,
-    signaled
+    signaled,
+    observation_ended_by_detach
 };
 
 struct Managed_child_exit
@@ -137,6 +158,8 @@ public:
     Managed_child_status release_until(
         std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status terminate_until(
+        std::chrono::steady_clock::time_point deadline) const;
+    Managed_child_detach_result detach_until(
         std::chrono::steady_clock::time_point deadline) const;
 };
 ```
@@ -260,6 +283,10 @@ Threading and lifecycle:
 - `release_state` is `open` before release is requested, `requested` while
   retirement remains incomplete, and `complete` only after every admitted
   occurrence has reached the complete-release contract.
+- `custody_state` is `owner_bound` while Sintra retains native authority,
+  `detaching` while a committed detach is settling, and `disowned` after that
+  authority has been irreversibly relinquished. `disowned` does not mean that
+  the OS process exited and does not make `release_state` complete.
 - `status()` is an immediate snapshot. `wait_for_readiness_until()`, `release_until()`,
   and `terminate_until()` return the same status shape after waiting only until
   their absolute steady-clock deadlines. An incomplete snapshot reports only
@@ -282,6 +309,23 @@ Threading and lifecycle:
 - Repeated release and termination calls operate on the same opaque record; they do not
   reconstruct authority from a process id or name. A cleanup escalation cannot
   be downgraded by a later graceful release request.
+- `Managed_child_custody::detach_until()` is a separate, irreversible
+  operation for the latest exact live occurrence. It closes recovery, commits
+  one lifeline-release byte, relinquishes native termination and exit-observer
+  authority, and returns only by its absolute deadline. `disowned` confirms
+  commit and settlement; `settlement_pending` means the monotone transition is
+  still settling. `definite_non_delivery` means the byte was not written and
+  owner authority was restored. `no_live_occurrence` and `conflict` report an
+  already-exited occurrence or an admitted release/termination operation.
+  `not_started` covers an invalid or stale handle, teardown or
+  collective-shutdown exclusion, deadline admission failure, and unavailable
+  or mismatched exact coordinator identity.
+- After detach commits, `release_until()` and `terminate_until()` report
+  `custody_state == disowned` without waiting for or terminating the child.
+  Authority cannot be reacquired through an old custody handle.
+- Successful detach completes existing exact-exit subscriptions once with
+  `status_kind == observation_ended_by_detach`. This is explicit loss of
+  observation authority, not an OS-exit event.
 - Complete release joins authoritative exact-occurrence publication and
   communication retirement with confirmed OS exit for every admitted
   occurrence. Dropping the handle does not drop Sintra's retained obligation.
@@ -321,6 +365,8 @@ Example source:
 - [tests/lifeline_basic_test.cpp](../../tests/lifeline_basic_test.cpp)
 - [tests/managed_child_public_cleanup_contract_test.cpp](../../tests/managed_child_public_cleanup_contract_test.cpp)
 - [tests/managed_child_exact_exit_observation_contract_test.cpp](../../tests/managed_child_exact_exit_observation_contract_test.cpp)
+- [tests/managed_child_detach_transaction_contract_test.cpp](../../tests/managed_child_detach_transaction_contract_test.cpp)
+- [tests/detached_member_exact_watch_contract_test.cpp](../../tests/detached_member_exact_watch_contract_test.cpp)
 
 See also:
 

@@ -64,7 +64,7 @@ public:
 
     // Internal: runtime code accesses this through detail::s_shutdown_state.
     std::atomic<detail::shutdown_protocol_state>& shutdown_state_ref() noexcept { return m_shutdown_state; }
-    std::mutex& teardown_admission_mutex_ref() noexcept { return m_teardown_admission_mutex; }
+    std::timed_mutex& teardown_admission_mutex_ref() noexcept { return m_teardown_admission_mutex; }
     std::atomic<bool>& teardown_admission_closed_ref() noexcept { return m_teardown_admission_closed; }
 
     Managed_process* managed_process()    const noexcept { return m_managed_process;    }
@@ -79,7 +79,7 @@ private:
     instance_id_type   m_coordinator_id       = 0;
     std::atomic<detail::shutdown_protocol_state>
                        m_shutdown_state{detail::shutdown_protocol_state::idle};
-    std::mutex         m_teardown_admission_mutex;
+    std::timed_mutex   m_teardown_admission_mutex;
     std::atomic<bool>  m_teardown_admission_closed{false};
 };
 

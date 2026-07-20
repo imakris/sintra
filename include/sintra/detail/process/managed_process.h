@@ -1006,16 +1006,6 @@ struct Managed_child_custody_record
     }
 };
 
-enum class Managed_child_detach_result
-{
-    NOT_STARTED,
-    SETTLEMENT_PENDING,
-    DISOWNED,
-    DEFINITE_NON_DELIVERY,
-    NO_LIVE_OCCURRENCE,
-    CONFLICT
-};
-
 // Pins one admitted occurrence until setup becomes terminal.  The launch
 // attempt below retains this settlement until its locally owned setup
 // resources have either transferred or rolled back.
@@ -1353,9 +1343,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
                                         m_member_lifetime_role{
                                             detail::Member_lifetime_role::
                                                 COORDINATOR_BOUND};
-    std::atomic<detail::Coordinator_departure_cause>
+    std::atomic<member_lifecycle_event::departure_cause>
                                         m_coordinator_departure_cause{
-                                            detail::Coordinator_departure_cause::NONE};
+                                            member_lifecycle_event::departure_cause::NONE};
     condition_variable                  m_termination_condition;
 
     uint64_t                            m_swarm_id;
@@ -1416,7 +1406,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
         function<void()>   task);
 
     void coordinator_departed(
-        detail::Coordinator_departure_cause cause,
+        member_lifecycle_event::departure_cause cause,
         const std::shared_ptr<const detail::Managed_process_lifetime>&
             runtime_lifetime);
 
@@ -1429,8 +1419,17 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void stop_exact_coordinator_watch() noexcept;
 
     bool set_member_lifecycle_handler(
-        detail::Member_lifecycle_handler handler);
+        Member_lifecycle_handler handler);
     void note_lifeline_released(
+        const std::shared_ptr<const detail::Managed_process_lifetime>&
+            runtime_lifetime);
+    void note_collective_shutdown_departure(
+        const std::shared_ptr<const detail::Managed_process_lifetime>&
+            runtime_lifetime);
+    void note_managed_detach_precommit(
+        const std::shared_ptr<const detail::Managed_process_lifetime>&
+            runtime_lifetime);
+    void note_managed_detach_abort(
         const std::shared_ptr<const detail::Managed_process_lifetime>&
             runtime_lifetime);
     void admit_member_host_departure() noexcept;
@@ -1453,7 +1452,6 @@ struct Managed_process: Derived_transceiver<Managed_process>
     // instance_unpublished event, which will follow shortly after.
     SINTRA_MESSAGE_RESERVED(terminated_abnormally, int status);
     SINTRA_MESSAGE_RESERVED(unpublish_transceiver_notify, instance_id_type transceiver_instance_id);
-
     unordered_map<Tn_type, list<function<void()>>>
                                         m_queued_availability_calls;
 
@@ -1580,9 +1578,15 @@ struct Managed_process: Derived_transceiver<Managed_process>
     std::mutex                          m_member_lifecycle_mutex;
     std::condition_variable             m_member_lifecycle_changed;
     std::thread                         m_member_lifecycle_thread;
-    detail::Member_lifecycle_handler    m_member_lifecycle_handler;
+    Member_lifecycle_handler            m_member_lifecycle_handler;
     bool                                m_member_lifecycle_stopping = false;
     bool                                m_member_host_departure_admitted = false;
+    bool                                m_detached_activation_ready = false;
+    bool                                m_managed_detach_precommit_pending = false;
+    member_lifecycle_event::departure_cause
+                                        m_precommit_departure_cause =
+                                            member_lifecycle_event::departure_cause::NONE;
+    bool                                m_collective_departure_notice_pending = false;
     bool                                m_lifeline_release_pending = false;
     bool                                m_lifeline_release_delivered = false;
     bool                                m_coordinator_departure_pending = false;
@@ -1623,7 +1627,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
     void request_child_custody_release(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         detail::Release_mode release_mode = detail::Release_mode::passive);
-    detail::Managed_child_detach_result detach_child_custody_until(
+    Managed_child_detach_result detach_child_custody_until(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         std::chrono::steady_clock::time_point deadline);
     void start_child_custody_release_worker(

@@ -11,6 +11,12 @@
   custody, preventing opt-in or delayed runners from crossing process-id reuse.
 - Hardened managed and external publication retirement with exact reader
   generation checks and ordered publication notifications.
+- Added exact managed-child detach with explicit disowned custody status,
+  detached external invitations, native event-driven coordinator observation,
+  and member-side lifecycle callbacks that survive coordinator departure.
+- Detached generations are notified and excluded before collective-shutdown
+  lifecycle barriers, while existing managed children and external invitations
+  remain coordinator-bound by default.
 
 ### Compatibility
 
@@ -20,8 +26,9 @@
 - Exact managed-child exit identities now include an opaque runtime-scoped
   custody identity so separate custodies remain distinct without redefining
   recovery occurrence semantics.
-- Bumped the ring ABI to version 8 for the internal joined-process startup
-  protocol. All processes in a swarm must use binaries built against the same
+- Bumped the ring ABI to version 9 for the joined-process startup protocol,
+  detached external-invitation claim metadata, and collective departure
+  notice. All processes in a swarm must use binaries built against the same
   Sintra ring ABI.
 
 ## v1.2.0 (2026-04-28)

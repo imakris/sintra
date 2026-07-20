@@ -1853,8 +1853,7 @@ inline bool Managed_process::activate_exact_coordinator_watch(
                         std::unique_lock<std::mutex> lock(
                             m_member_lifecycle_mutex);
                         m_member_lifecycle_changed.wait(lock, [this]() {
-                            return m_lifeline_release_pending ||
-                                m_lifeline_release_delivered ||
+                            return m_detached_activation_ready ||
                                 m_member_lifecycle_stopping ||
                                 m_coordinator_watch_cancelled.load(
                                     std::memory_order_acquire);
@@ -1867,7 +1866,7 @@ inline bool Managed_process::activate_exact_coordinator_watch(
                         }
                         lock.unlock();
                         coordinator_departed(
-                            detail::Coordinator_departure_cause::EXACT_OS_WATCH,
+                            member_lifecycle_event::departure_cause::EXACT_OS_WATCH,
                             runtime_lifetime);
                     }
                 }));
@@ -4016,7 +4015,7 @@ void Managed_process::init(int argc, const char* const* argv)
         // if the unpublished transceiver is the coordinator process, we have to stop.
         if (process_of(s_coord_id) == msg.instance_id) {
             coordinator_departed(
-                detail::Coordinator_departure_cause::UNPUBLISHED,
+                member_lifecycle_event::departure_cause::UNPUBLISHED,
                 runtime_lifetime);
         }
     };
@@ -4071,11 +4070,45 @@ void Managed_process::init(int argc, const char* const* argv)
         {
             if (process_of(s_coord_id) == msg.sender_instance_id) {
                 coordinator_departed(
-                    detail::Coordinator_departure_cause::SIGNALED_CRASH,
+                    member_lifecycle_event::departure_cause::SIGNALED_CRASH,
                     runtime_lifetime);
             }
         };
         activate<Managed_process>(cr_handler, any_remote);
+
+        auto member_lifecycle_notice_handler = [
+                this,
+                runtime_lifetime,
+                ring_occurrence
+            ](const Coordinator::coordinator_departure_notice& msg)
+        {
+            if (msg.process_instance_id != m_instance_id ||
+                msg.occurrence != ring_occurrence)
+            {
+                return;
+            }
+            const auto notice_kind = static_cast<
+                detail::Member_lifecycle_notice_kind>(msg.notice_kind);
+            switch (notice_kind) {
+            case detail::Member_lifecycle_notice_kind::
+                    MANAGED_DETACH_PRECOMMIT:
+                if (msg.custody_identity != 0) {
+                    note_managed_detach_precommit(runtime_lifetime);
+                }
+                break;
+            case detail::Member_lifecycle_notice_kind::MANAGED_DETACH_ABORT:
+                if (msg.custody_identity != 0) {
+                    note_managed_detach_abort(runtime_lifetime);
+                }
+                break;
+            case detail::Member_lifecycle_notice_kind::COLLECTIVE_DEPARTURE:
+                note_collective_shutdown_departure(runtime_lifetime);
+                break;
+            }
+        };
+        activate<Coordinator>(
+            member_lifecycle_notice_handler,
+            Typed_instance_id<Coordinator>(s_coord_id));
     }
 
     m_start_stop_mutex.lock();
@@ -4108,16 +4141,67 @@ void Managed_process::init(int argc, const char* const* argv)
         const auto deadline = std::chrono::steady_clock::now() +
             detail::k_external_attach_claim_timeout;
 
-        bool claim_accepted = false;
+        detail::External_process_claim_result claim{};
         try {
-            claim_accepted = handle.get_until(deadline);
+            claim = handle.get_until(deadline);
         }
         catch (const rpc_timeout&) {
             unblock_rpc(process_of(s_coord_id));
         }
 
-        if (!claim_accepted) {
+        if (!claim.accepted) {
             throw std::runtime_error("Sintra external process invitation was rejected.");
+        }
+        if (claim.role != static_cast<uint64_t>(
+                detail::Member_lifetime_role::COORDINATOR_BOUND) &&
+            claim.role != static_cast<uint64_t>(
+                detail::Member_lifetime_role::DETACHED))
+        {
+            throw std::runtime_error(
+                "Sintra external process invitation returned an invalid lifetime role.");
+        }
+        if (claim.role == static_cast<uint64_t>(
+                detail::Member_lifetime_role::DETACHED))
+        {
+            if (!claim.exact_watch_required || claim.coordinator_pid == 0 ||
+                claim.coordinator_start_stamp == 0)
+            {
+                throw std::runtime_error(
+                    "Sintra detached external invitation lacked exact coordinator identity.");
+            }
+            stop_exact_coordinator_watch();
+            if (!prepare_exact_coordinator_watch(
+                    claim.coordinator_pid,
+                    claim.coordinator_start_stamp))
+            {
+                throw std::runtime_error(
+                    "Sintra detached external invitation could not establish an exact coordinator watch.");
+            }
+            bool collective_departure_pending = false;
+            {
+                std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+                m_member_lifetime_role.store(
+                    detail::Member_lifetime_role::DETACHED,
+                    std::memory_order_release);
+                m_detached_activation_ready = true;
+                collective_departure_pending =
+                    m_collective_departure_notice_pending;
+                m_collective_departure_notice_pending = false;
+            }
+            if (!activate_exact_coordinator_watch(runtime_lifetime)) {
+                m_member_lifetime_role.store(
+                    detail::Member_lifetime_role::COORDINATOR_BOUND,
+                    std::memory_order_release);
+                stop_exact_coordinator_watch();
+                throw std::runtime_error(
+                    "Sintra detached external invitation could not activate its exact coordinator watch.");
+            }
+            m_member_lifecycle_changed.notify_all();
+            if (collective_departure_pending) {
+                coordinator_departed(
+                    member_lifecycle_event::departure_cause::COLLECTIVE_SHUTDOWN,
+                    runtime_lifetime);
+            }
         }
     }
 
@@ -4894,36 +4978,33 @@ inline void Managed_process::request_child_custody_release(
         custody, release_attempt_generation);
 }
 
-inline detail::Managed_child_detach_result
+inline Managed_child_detach_result
 Managed_process::detach_child_custody_until(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
     std::chrono::steady_clock::time_point deadline)
 {
-    using Detach_result = detail::Managed_child_detach_result;
+    using Detach_result = Managed_child_detach_result;
     if (!custody || !s_coord) {
-        return Detach_result::NOT_STARTED;
+        return Detach_result::not_started;
     }
     if (m_process_start_stamp == 0) {
-        return Detach_result::NOT_STARTED;
+        return Detach_result::not_started;
     }
     const auto exact_coordinator = query_process_start_stamp(
         static_cast<uint32_t>(m_pid));
     if (!exact_coordinator || *exact_coordinator != m_process_start_stamp) {
-        return Detach_result::NOT_STARTED;
+        return Detach_result::not_started;
     }
 
-    std::unique_lock<std::mutex> admission_lock(
+    std::unique_lock<std::timed_mutex> admission_lock(
         detail::s_teardown_admission_mutex, std::defer_lock);
-    while (!admission_lock.try_lock()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return Detach_result::NOT_STARTED;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (!admission_lock.try_lock_until(deadline)) {
+        return Detach_result::not_started;
     }
     if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
         s_mproc != this || custody->runtime_lifetime.lock() != m_runtime_lifetime)
     {
-        return Detach_result::NOT_STARTED;
+        return Detach_result::not_started;
     }
 
     instance_id_type process_iid = invalid_instance_id;
@@ -4974,15 +5055,15 @@ Managed_process::detach_child_custody_until(
                 });
         };
         if (!custody->changed.wait_until(lock, deadline, settled)) {
-            return Detach_result::SETTLEMENT_PENDING;
+            return Detach_result::settlement_pending;
         }
         if (!custody->release_state.open()) {
-            return Detach_result::CONFLICT;
+            return Detach_result::conflict;
         }
 
         const auto active = latest_owned();
         if (active == custody->occurrences.rend()) {
-            return Detach_result::NO_LIVE_OCCURRENCE;
+            return Detach_result::no_live_occurrence;
         }
         process_iid = active->process_instance_id;
         occurrence_number = active->occurrence;
@@ -4996,21 +5077,16 @@ Managed_process::detach_child_custody_until(
             s_coord->notify_managed_child_readiness_cancelled();
         }
         std::unique_lock<std::mutex> lock(custody->mutex);
+        const auto worker_complete = custody->readiness_worker_complete;
         const bool settled = custody->changed.wait_until(
             lock, deadline, [&] {
-                return custody->readiness != detail::Readiness_phase::pending;
+                return custody->readiness != detail::Readiness_phase::pending &&
+                    (!worker_complete ||
+                     worker_complete->load(std::memory_order_acquire));
             });
-        const auto worker_complete = custody->readiness_worker_complete;
         lock.unlock();
-        while (worker_complete &&
-            !worker_complete->load(std::memory_order_acquire) &&
-            std::chrono::steady_clock::now() < deadline)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
         join_completed_lifecycle_workers();
-        return settled && (!worker_complete ||
-            worker_complete->load(std::memory_order_acquire));
+        return settled;
     };
 
     if (already_disowned) {
@@ -5019,15 +5095,24 @@ Managed_process::detach_child_custody_until(
         const bool native_settled = settle_disowned_windows_observer(
             custody, process_iid, occurrence_number, deadline);
         if (!readiness_settled || !native_settled) {
-            return Detach_result::SETTLEMENT_PENDING;
+            return Detach_result::settlement_pending;
         }
 #else
         if (!readiness_settled) {
-            return Detach_result::SETTLEMENT_PENDING;
+            return Detach_result::settlement_pending;
         }
 #endif
         retire_child_custody_if_complete(custody);
-        return Detach_result::DISOWNED;
+        return Detach_result::disowned;
+    }
+
+    std::unique_lock<std::timed_mutex> collective_entry_lock(
+        s_coord->m_collective_shutdown_entry_mutex,
+        std::defer_lock);
+    if (!collective_entry_lock.try_lock_until(deadline) ||
+        s_coord->m_detached_collective_departure_started)
+    {
+        return Detach_result::not_started;
     }
 
 #ifndef _WIN32
@@ -5046,10 +5131,10 @@ Managed_process::detach_child_custody_until(
             process_iid, occurrence_number);
         if (!exact || !custody->release_state.open())
         {
-            return Detach_result::CONFLICT;
+            return Detach_result::conflict;
         }
         if (!exact->exact_coordinator_watch_ready) {
-            return Detach_result::CONFLICT;
+            return Detach_result::conflict;
         }
         recovery_requested = custody->recovery_requested;
         const auto cached = m_cached_spawns.find(process_iid);
@@ -5062,7 +5147,7 @@ Managed_process::detach_child_custody_until(
             if (!recovery_recipe.empty()) {
                 m_cached_spawns.insert(std::move(recovery_recipe));
             }
-            return Detach_result::CONFLICT;
+            return Detach_result::conflict;
         }
         custody->recovery_requested = false;
     }
@@ -5094,6 +5179,28 @@ Managed_process::detach_child_custody_until(
         custody->changed.notify_all();
     };
 
+    const Coordinator::Process_reader_identity member_identity{
+        custody->identity, process_iid, occurrence_number};
+    auto abort_precommit_notice = [&]() noexcept {
+        try {
+            s_coord->send_member_lifecycle_notice(
+                member_identity,
+                detail::Member_lifecycle_notice_kind::MANAGED_DETACH_ABORT);
+        }
+        catch (...) {
+        }
+    };
+    try {
+        s_coord->send_member_lifecycle_notice(
+            member_identity,
+            detail::Member_lifecycle_notice_kind::MANAGED_DETACH_PRECOMMIT);
+    }
+    catch (...) {
+        abort_precommit_notice();
+        rollback_staging(false);
+        return Detach_result::conflict;
+    }
+
     if (!s_coord->set_managed_child_member_role(
             custody->identity,
             process_iid,
@@ -5102,7 +5209,8 @@ Managed_process::detach_child_custody_until(
             deadline))
     {
         rollback_staging(false);
-        return Detach_result::CONFLICT;
+        abort_precommit_notice();
+        return Detach_result::conflict;
     }
 
     bool provenance_staged = false;
@@ -5117,7 +5225,8 @@ Managed_process::detach_child_custody_until(
     }
     if (!provenance_staged) {
         rollback_staging(true);
-        return Detach_result::CONFLICT;
+        abort_precommit_notice();
+        return Detach_result::conflict;
     }
 
     auto rollback_provenance = [&]() {
@@ -5286,10 +5395,13 @@ Managed_process::detach_child_custody_until(
     if (!committed) {
         rollback_provenance();
         rollback_staging(true);
+        abort_precommit_notice();
         return write_attempted
-            ? Detach_result::DEFINITE_NON_DELIVERY
-            : Detach_result::CONFLICT;
+            ? Detach_result::definite_non_delivery
+            : Detach_result::conflict;
     }
+
+    collective_entry_lock.unlock();
 
     dispatch_child_exit_publication(std::move(detach_publication));
     detail::managed_child_cleanup_for_test(
@@ -5300,19 +5412,19 @@ Managed_process::detach_child_custody_until(
 #ifndef _WIN32
     detail::reap_detached_children();
     if (!readiness_settled) {
-        return Detach_result::SETTLEMENT_PENDING;
+        return Detach_result::settlement_pending;
     }
 #else
     const bool native_settled = settle_disowned_windows_observer(
         custody, process_iid, occurrence_number, deadline);
     if (!readiness_settled || !native_settled)
     {
-        return Detach_result::SETTLEMENT_PENDING;
+        return Detach_result::settlement_pending;
     }
 #endif
     retire_child_custody_if_complete(custody);
     m_child_custody_changed.notify_all();
-    return Detach_result::DISOWNED;
+    return Detach_result::disowned;
 }
 
 inline void Managed_process::start_child_custody_release_worker(
@@ -7781,7 +7893,7 @@ inline bool Managed_process::ensure_member_lifecycle_dispatcher() noexcept
 }
 
 inline bool Managed_process::set_member_lifecycle_handler(
-    detail::Member_lifecycle_handler handler)
+    Member_lifecycle_handler handler)
 {
     if (handler && !ensure_member_lifecycle_dispatcher()) {
         return false;
@@ -7811,14 +7923,93 @@ inline void Managed_process::note_lifeline_released(
     if (runtime_lifetime != m_runtime_lifetime) {
         return;
     }
+    bool collective_departure_pending = false;
+    auto precommit_departure_cause =
+        member_lifecycle_event::departure_cause::NONE;
     {
         std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
         if (m_member_lifecycle_stopping || m_lifeline_release_delivered) {
             return;
         }
+        m_detached_activation_ready = true;
+        m_managed_detach_precommit_pending = false;
+        precommit_departure_cause = m_precommit_departure_cause;
+        m_precommit_departure_cause =
+            member_lifecycle_event::departure_cause::NONE;
         m_lifeline_release_pending = true;
+        collective_departure_pending = m_collective_departure_notice_pending;
+        m_collective_departure_notice_pending = false;
     }
     m_member_lifecycle_changed.notify_all();
+    if (precommit_departure_cause !=
+        member_lifecycle_event::departure_cause::NONE)
+    {
+        coordinator_departed(precommit_departure_cause, runtime_lifetime);
+    }
+    if (collective_departure_pending) {
+        coordinator_departed(
+            member_lifecycle_event::departure_cause::COLLECTIVE_SHUTDOWN,
+            runtime_lifetime);
+    }
+}
+
+inline void Managed_process::note_managed_detach_precommit(
+    const std::shared_ptr<const detail::Managed_process_lifetime>&
+        runtime_lifetime)
+{
+    if (runtime_lifetime != m_runtime_lifetime) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+    if (m_member_lifecycle_stopping || m_detached_activation_ready) {
+        return;
+    }
+    m_managed_detach_precommit_pending = true;
+}
+
+inline void Managed_process::note_managed_detach_abort(
+    const std::shared_ptr<const detail::Managed_process_lifetime>&
+        runtime_lifetime)
+{
+    if (runtime_lifetime != m_runtime_lifetime) {
+        return;
+    }
+    auto pending_cause = member_lifecycle_event::departure_cause::NONE;
+    {
+        std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+        if (m_member_lifecycle_stopping || m_detached_activation_ready) {
+            return;
+        }
+        m_managed_detach_precommit_pending = false;
+        pending_cause = m_precommit_departure_cause;
+        m_precommit_departure_cause =
+            member_lifecycle_event::departure_cause::NONE;
+    }
+    if (pending_cause != member_lifecycle_event::departure_cause::NONE) {
+        coordinator_departed(pending_cause, runtime_lifetime);
+    }
+}
+
+inline void Managed_process::note_collective_shutdown_departure(
+    const std::shared_ptr<const detail::Managed_process_lifetime>&
+        runtime_lifetime)
+{
+    if (runtime_lifetime != m_runtime_lifetime) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+        if (m_member_lifecycle_stopping) {
+            return;
+        }
+        if (!m_detached_activation_ready) {
+            m_collective_departure_notice_pending = true;
+            return;
+        }
+    }
+    coordinator_departed(
+        member_lifecycle_event::departure_cause::COLLECTIVE_SHUTDOWN,
+        runtime_lifetime);
 }
 
 inline void Managed_process::queue_member_coordinator_departure(
@@ -7851,8 +8042,8 @@ inline void Managed_process::admit_member_host_departure() noexcept
 inline void Managed_process::run_member_lifecycle_dispatcher() noexcept
 {
     while (true) {
-        detail::Member_lifecycle_handler handler;
-        detail::Member_lifecycle_event event;
+        Member_lifecycle_handler handler;
+        member_lifecycle_event event;
         {
             std::unique_lock<std::mutex> lock(m_member_lifecycle_mutex);
             m_member_lifecycle_changed.wait(lock, [this]() {
@@ -7868,14 +8059,12 @@ inline void Managed_process::run_member_lifecycle_dispatcher() noexcept
             if (m_lifeline_release_pending) {
                 m_lifeline_release_pending = false;
                 m_lifeline_release_delivered = true;
-                event.kind =
-                    detail::Member_lifecycle_event_kind::LIFELINE_RELEASED;
+                event.why = member_lifecycle_event::kind::LIFELINE_RELEASED;
             }
             else {
                 m_coordinator_departure_pending = false;
                 m_coordinator_departure_delivered = true;
-                event.kind = detail::Member_lifecycle_event_kind::
-                    COORDINATOR_DEPARTED;
+                event.why = member_lifecycle_event::kind::COORDINATOR_DEPARTED;
                 event.cause = m_coordinator_departure_cause.load(
                     std::memory_order_acquire);
             }
@@ -7910,6 +8099,10 @@ inline void Managed_process::stop_member_lifecycle_dispatcher() noexcept
         m_member_lifecycle_stopping = true;
         m_member_lifecycle_handler = {};
         m_lifeline_release_pending = false;
+        m_managed_detach_precommit_pending = false;
+        m_precommit_departure_cause =
+            member_lifecycle_event::departure_cause::NONE;
+        m_collective_departure_notice_pending = false;
         m_coordinator_departure_pending = false;
     }
     m_member_lifecycle_changed.notify_all();
@@ -7971,7 +8164,7 @@ inline bool Managed_process::settle_disowned_windows_observer(
 #endif
 
 inline void Managed_process::coordinator_departed(
-    detail::Coordinator_departure_cause cause,
+    member_lifecycle_event::departure_cause cause,
     const std::shared_ptr<const detail::Managed_process_lifetime>&
         runtime_lifetime)
 {
@@ -7979,7 +8172,21 @@ inline void Managed_process::coordinator_departed(
         return;
     }
 
-    auto expected = detail::Coordinator_departure_cause::NONE;
+    {
+        std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+        if (m_managed_detach_precommit_pending &&
+            !m_detached_activation_ready)
+        {
+            if (m_precommit_departure_cause ==
+                member_lifecycle_event::departure_cause::NONE)
+            {
+                m_precommit_departure_cause = cause;
+            }
+            return;
+        }
+    }
+
+    auto expected = member_lifecycle_event::departure_cause::NONE;
     if (!m_coordinator_departure_cause.compare_exchange_strong(
             expected,
             cause,
