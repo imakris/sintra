@@ -92,24 +92,32 @@ void lock_stage_callback(const char* stage)
 void seed_fake_process(sintra::instance_id_type fake_piid)
 {
     std::lock_guard publish_lock(s_coord->m_publish_mutex);
-    s_coord->m_transceiver_registry[fake_piid][fake_piid] =
-        sintra::Tn_type{0, "coordinator_lock_order_fake"};
+    auto& publication = s_coord->m_transceiver_registry[fake_piid][fake_piid];
+    publication = sintra::Tn_type{0, "coordinator_lock_order_fake"};
+    s_coord->m_member_roles[fake_piid] = {
+        publication.reader_identity,
+        sintra::detail::Member_lifetime_role::COORDINATOR_BOUND};
     s_mproc->m_instance_id_of_assigned_name.set_value(
         "coordinator_lock_order_fake", fake_piid);
 }
 
-void run_concurrent_unpublish_and_make_group(
+bool run_concurrent_unpublish_and_make_group(
     sintra::instance_id_type   fake_piid,
     const std::string&         group_name,
     std::chrono::seconds       budget)
 {
     std::atomic<bool> unpublish_done{false};
+    std::atomic<bool> unpublish_succeeded{false};
     std::atomic<bool> make_group_done{false};
 
     // Both RPC wrappers take the local shortcut and run the coordinator
     // member functions directly on these threads.
     std::thread unpublisher([&]() {
-        sintra::Coordinator::rpc_unpublish_transceiver(s_coord_id, fake_piid);
+        unpublish_succeeded.store(
+            sintra::Coordinator::rpc_unpublish_transceiver(
+                s_coord_id,
+                fake_piid),
+            std::memory_order_release);
         unpublish_done.store(true, std::memory_order_release);
     });
     std::thread group_maker([&]() {
@@ -144,6 +152,7 @@ void run_concurrent_unpublish_and_make_group(
 
     unpublisher.join();
     group_maker.join();
+    return unpublish_succeeded.load(std::memory_order_acquire);
 }
 
 } // namespace
@@ -160,19 +169,44 @@ int main(int argc, char* argv[])
     // Pass 1: deterministic rendezvous inside the two critical sections.
     seed_fake_process(fake_piid);
     g_rendezvous_armed.store(true, std::memory_order_release);
-    run_concurrent_unpublish_and_make_group(
-        fake_piid,
-        "coordinator_lock_order_group_rendezvous",
-        std::chrono::seconds(20));
+    const bool deterministic_unpublish_succeeded =
+        run_concurrent_unpublish_and_make_group(
+            fake_piid,
+            "coordinator_lock_order_group_rendezvous",
+            std::chrono::seconds(20));
     g_rendezvous_armed.store(false, std::memory_order_release);
+    if (!deterministic_unpublish_succeeded ||
+        !g_unpublish_stage_reached.load(std::memory_order_acquire) ||
+        !g_make_group_stage_reached.load(std::memory_order_acquire))
+    {
+        std::fprintf(stderr,
+            "coordinator_lock_order_test: deterministic pass was disarmed "
+            "(unpublish_succeeded=%d, unpublish_stage=%d, make_group_stage=%d)\n",
+            deterministic_unpublish_succeeded ? 1 : 0,
+            g_unpublish_stage_reached.load(std::memory_order_acquire) ? 1 : 0,
+            g_make_group_stage_reached.load(std::memory_order_acquire) ? 1 : 0);
+        sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+            nullptr, std::memory_order_release);
+        sintra::detail::finalize();
+        return 1;
+    }
 
     // Pass 2: free-running stress without the rendezvous.
     for (int i = 0; i < k_stress_iterations; ++i) {
         seed_fake_process(fake_piid);
-        run_concurrent_unpublish_and_make_group(
-            fake_piid,
-            "coordinator_lock_order_group_" + std::to_string(i),
-            std::chrono::seconds(20));
+        if (!run_concurrent_unpublish_and_make_group(
+                fake_piid,
+                "coordinator_lock_order_group_" + std::to_string(i),
+                std::chrono::seconds(20)))
+        {
+            std::fprintf(stderr,
+                "coordinator_lock_order_test: unpublish failed in stress iteration %d\n",
+                i);
+            sintra::detail::test_hooks::s_coordinator_lock_stage.store(
+                nullptr, std::memory_order_release);
+            sintra::detail::finalize();
+            return 1;
+        }
     }
 
     sintra::detail::test_hooks::s_coordinator_lock_stage.store(

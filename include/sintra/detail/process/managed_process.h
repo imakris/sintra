@@ -271,8 +271,23 @@ using Managed_child_post_spawn_callback = void (*)(
     uint32_t);
 inline std::atomic<Managed_child_post_spawn_callback>
     s_managed_child_post_spawn{nullptr};
+
+using Coordinator_departure_pre_rpc_unblock_callback = void (*)();
+inline std::atomic<Coordinator_departure_pre_rpc_unblock_callback>
+    s_coordinator_departure_pre_rpc_unblock{nullptr};
 #endif
 } // namespace test_hooks
+
+inline void coordinator_departure_pre_rpc_unblock_for_test()
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_coordinator_departure_pre_rpc_unblock.load(
+            std::memory_order_acquire))
+    {
+        callback();
+    }
+#endif
+}
 
 inline void managed_child_post_spawn_for_test(
     Managed_child_post_spawn_stage stage,

@@ -79,6 +79,26 @@ std::atomic<unsigned>   g_reader_retirement_stop_calls{0};
 std::atomic<unsigned>   g_reader_retirement_start_failures{0};
 std::atomic<Reader_retirement_gate*>
                         g_reader_retirement_gate{nullptr};
+std::atomic<bool>       g_departure_pre_unblock_seen{false};
+std::atomic<bool>       g_bound_stop_published_pre_unblock{false};
+
+void coordinator_departure_pre_rpc_unblock_callback()
+{
+    if (!sintra::s_mproc) {
+        return;
+    }
+
+    const auto role = sintra::s_mproc->m_member_lifetime_role.load(
+        std::memory_order_acquire);
+    if (role != sintra::detail::Member_lifetime_role::COORDINATOR_BOUND) {
+        return;
+    }
+
+    g_departure_pre_unblock_seen.store(true, std::memory_order_release);
+    g_bound_stop_published_pre_unblock.store(
+        sintra::s_mproc->m_must_stop.load(std::memory_order_acquire),
+        std::memory_order_release);
+}
 
 #ifdef _WIN32
 HANDLE g_abort_ack_handle = INVALID_HANDLE_VALUE;
@@ -755,6 +775,9 @@ int run_admitted_alive_helper(int argc, char* argv[])
     const bool has_lifeline_arg = has_argv_flag_or_value(argc, argv, "--lifeline_handle");
 
     sintra::init(argc, argv);
+    sintra::detail::test_hooks::s_coordinator_departure_pre_rpc_unblock.store(
+        &coordinator_departure_pre_rpc_unblock_callback,
+        std::memory_order_release);
     const auto stale_lifetime =
         std::make_shared<const sintra::detail::Managed_process_lifetime>();
     sintra::s_mproc->coordinator_departed(
@@ -785,6 +808,8 @@ int run_admitted_alive_helper(int argc, char* argv[])
         sintra::s_mproc->m_member_lifetime_role.load(
             std::memory_order_acquire) ==
             sintra::detail::Member_lifetime_role::COORDINATOR_BOUND &&
+        g_departure_pre_unblock_seen.load(std::memory_order_acquire) &&
+        g_bound_stop_published_pre_unblock.load(std::memory_order_acquire) &&
         first_cause ==
             sintra::detail::Coordinator_departure_cause::UNPUBLISHED &&
         sintra::s_mproc->m_coordinator_departure_cause.load(
@@ -796,6 +821,9 @@ int run_admitted_alive_helper(int argc, char* argv[])
         dir,
         marker + "_done",
         default_bound_once ? "bound_stopped_once" : "departure_contract_failed");
+    sintra::detail::test_hooks::s_coordinator_departure_pre_rpc_unblock.store(
+        nullptr,
+        std::memory_order_release);
     sintra::leave();
     return 0;
 }

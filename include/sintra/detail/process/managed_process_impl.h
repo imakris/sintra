@@ -6446,14 +6446,17 @@ inline void Managed_process::coordinator_departed(
         return;
     }
 
+    const auto role = m_member_lifetime_role.load(std::memory_order_acquire);
+    if (role == detail::Member_lifetime_role::COORDINATOR_BOUND) {
+        m_must_stop.store(true, std::memory_order_release);
+    }
+
+    detail::coordinator_departure_pre_rpc_unblock_for_test();
     unblock_rpc(process_of(s_coord_id));
-    if (m_member_lifetime_role.load(std::memory_order_acquire) !=
-        detail::Member_lifetime_role::COORDINATOR_BOUND)
-    {
+    if (role != detail::Member_lifetime_role::COORDINATOR_BOUND) {
         return;
     }
 
-    m_must_stop.store(true, std::memory_order_release);
     const std::weak_ptr<const detail::Managed_process_lifetime> weak_lifetime =
         runtime_lifetime;
     run_after_current_handler([weak_lifetime]() {
