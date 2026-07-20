@@ -45,14 +45,16 @@ constexpr const char* k_role_respawn_child  = "respawn_child";
 constexpr const char* k_role_manual_disable = "manual_disable";
 constexpr const char* k_role_short_option   = "short_option";
 
-constexpr const char* k_case_normal          = "normal";
-constexpr const char* k_case_disabled        = "disabled";
-constexpr const char* k_case_crash           = "crash";
-constexpr const char* k_case_hung            = "hung";
-constexpr const char* k_case_leak            = "leak";
-constexpr const char* k_case_respawn         = "respawn";
-constexpr const char* k_case_wait_timeout    = "wait_timeout";
-constexpr const char* k_case_wedged_handler  = "wedged_handler";
+constexpr const char* k_case_normal           = "normal";
+constexpr const char* k_case_disabled         = "disabled";
+constexpr const char* k_case_crash            = "crash";
+constexpr const char* k_case_hung             = "hung";
+constexpr const char* k_case_leak             = "leak";
+constexpr const char* k_case_respawn          = "respawn";
+constexpr const char* k_case_wait_timeout     = "wait_timeout";
+constexpr const char* k_case_wedged_handler   = "wedged_handler";
+constexpr const char* k_case_protocol_release = "protocol_release";
+constexpr const char* k_case_protocol_invalid = "protocol_invalid";
 constexpr const char* k_wedged_service_name  = "lifeline_wedged_service";
 constexpr const char* k_wait_timeout_service_name =
     "lifeline_wait_timeout_never_published";
@@ -555,6 +557,38 @@ int child_pid_value()
     return static_cast<int>(sintra::test::get_pid());
 }
 
+bool send_lifeline_protocol_byte(
+    sintra::instance_id_type process_iid,
+    unsigned char            value)
+{
+    std::lock_guard<std::mutex> lock(sintra::s_mproc->m_lifeline_mutex);
+    auto entry = sintra::s_mproc->m_lifeline_writes.find(process_iid);
+    if (entry == sintra::s_mproc->m_lifeline_writes.end()) {
+        return false;
+    }
+
+#ifdef _WIN32
+    DWORD bytes_written = 0;
+    const bool written = WriteFile(
+        reinterpret_cast<HANDLE>(entry->second),
+        &value,
+        1,
+        &bytes_written,
+        nullptr) != 0 && bytes_written == 1;
+    CloseHandle(reinterpret_cast<HANDLE>(entry->second));
+#else
+    ssize_t result = -1;
+    do {
+        result = ::write(static_cast<int>(entry->second), &value, 1);
+    }
+    while (result == -1 && errno == EINTR);
+    const bool written = result == 1;
+    ::close(static_cast<int>(entry->second));
+#endif
+    sintra::s_mproc->m_lifeline_writes.erase(entry);
+    return written;
+}
+
 int run_child(
     const std::filesystem::path&   dir,
     const std::string&             test_case,
@@ -624,6 +658,35 @@ int run_child(
         std::_Exit(0);
     }
 
+    if (test_case == k_case_protocol_release) {
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(3);
+        while (sintra::s_mproc->m_runtime_lifetime->m_lifeline_observation.load(
+                   std::memory_order_acquire) !=
+                   sintra::detail::Lifeline_observation::DETACHED &&
+            std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (sintra::s_mproc->m_runtime_lifetime->m_lifeline_observation.load(
+                std::memory_order_acquire) !=
+                sintra::detail::Lifeline_observation::DETACHED)
+        {
+            std::fprintf(stderr, "[child] release byte was not observed\n");
+            std::_Exit(2);
+        }
+        if (!sintra::leave()) {
+            std::fprintf(stderr, "[child] leave after release failed\n");
+            std::_Exit(3);
+        }
+        if (!write_text_file(child_done_path(dir, test_case), "detached")) {
+            std::fprintf(stderr, "[child] failed to write release marker\n");
+            std::_Exit(4);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        std::_Exit(0);
+    }
+
     std::this_thread::sleep_for(std::chrono::seconds(10));
     std::_Exit(0);
 }
@@ -643,6 +706,11 @@ int run_owner(
         k_case_arg, test_case,
         k_dir_arg, dir.string()
     };
+    if (test_case == k_case_protocol_release ||
+        test_case == k_case_protocol_invalid)
+    {
+        spawn_options.process_instance_id = sintra::make_process_instance_id(9);
+    }
 
     if (test_case == k_case_disabled) {
         spawn_options.lifetime.enable_lifeline = false;
@@ -705,6 +773,29 @@ int run_owner(
     if (!sintra::test::wait_for_file(child_ready_path(dir, test_case), std::chrono::milliseconds(3000))) {
         std::fprintf(stderr, "[owner] child did not signal ready\n");
         std::_Exit(3);
+    }
+
+    if (test_case == k_case_protocol_release ||
+        test_case == k_case_protocol_invalid)
+    {
+        const unsigned char protocol_byte = test_case == k_case_protocol_release
+            ? sintra::detail::k_lifeline_release_byte
+            : static_cast<unsigned char>(sintra::detail::k_lifeline_release_byte + 1);
+        if (!send_lifeline_protocol_byte(
+                spawn_options.process_instance_id, protocol_byte))
+        {
+            std::fprintf(stderr, "[owner] failed to write lifeline protocol byte\n");
+            std::_Exit(9);
+        }
+        if (test_case == k_case_protocol_release &&
+            !sintra::test::wait_for_file(
+                child_done_path(dir, test_case),
+                std::chrono::milliseconds(3000)))
+        {
+            std::fprintf(stderr, "[owner] child did not leave after release\n");
+            std::_Exit(10);
+        }
+        std::_Exit(0);
     }
 
     if (test_case == k_case_wedged_handler) {
@@ -1506,6 +1597,18 @@ int main(int argc, char* argv[])
     // Test 12: Short option handling
     // Verifies that short options like -f don't accidentally trigger lifeline parsing.
     ok &= run_short_option_case(binary_path);
+
+    // Test 13: The release byte disarms the exact epoch and leave joins its watcher.
+    const auto protocol_release_dir =
+        sintra::test::unique_scratch_directory("lifeline_protocol_release");
+    ok &= run_owner_case(
+        binary_path, protocol_release_dir, k_case_protocol_release, 0, false);
+
+    // Test 14: A non-release byte preserves breach and fail-fast semantics.
+    const auto protocol_invalid_dir =
+        sintra::test::unique_scratch_directory("lifeline_protocol_invalid");
+    ok &= run_owner_case(
+        binary_path, protocol_invalid_dir, k_case_protocol_invalid, 99, false);
 
     return ok ? 0 : 1;
 }

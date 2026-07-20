@@ -861,10 +861,48 @@ private:
     std::variant<Open, Releasing, Released> m_state{Open{}};
 };
 
-// One retained logical custody record.  Subsystems remain authoritative for
-// their own facts; this record only joins their exact-occurrence reports.
+// Fences asynchronous work to one runtime epoch. Closing admission prevents a
+// queued callback from becoming active while destruction waits out callbacks
+// that already own the epoch.
 struct Managed_process_lifetime
-{};
+{
+    bool enter_owner_callback() const
+    {
+        std::lock_guard<std::mutex> lock(m_callback_mutex);
+        if (!m_callback_admission_open) {
+            return false;
+        }
+        ++m_active_callbacks;
+        return true;
+    }
+
+    void leave_owner_callback() const
+    {
+        std::lock_guard<std::mutex> lock(m_callback_mutex);
+        assert(m_active_callbacks != 0);
+        --m_active_callbacks;
+        if (m_active_callbacks == 0) {
+            m_callbacks_quiesced.notify_all();
+        }
+    }
+
+    void close_owner_callback_admission_and_wait() const
+    {
+        std::unique_lock<std::mutex> lock(m_callback_mutex);
+        m_callback_admission_open = false;
+        m_callbacks_quiesced.wait(lock, [this]() { return m_active_callbacks == 0; });
+    }
+
+    mutable std::atomic<Lifeline_observation>
+                                                m_lifeline_observation{
+                                                    Lifeline_observation::INACTIVE};
+
+private:
+    mutable std::mutex                          m_callback_mutex;
+    mutable std::condition_variable             m_callbacks_quiesced;
+    mutable bool                                m_callback_admission_open = true;
+    mutable std::size_t                         m_active_callbacks = 0;
+};
 
 struct Managed_child_custody_record
 {
@@ -1310,6 +1348,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
         const std::shared_ptr<const detail::Managed_process_lifetime>&
             runtime_lifetime);
 
+    void start_lifeline_watcher(
+        const Lifetime_policy& policy,
+        bool                   lifeline_required);
+    void stop_lifeline_watcher() noexcept;
+
     void wait_for_delivery_fence();
     void notify_delivery_progress();
 
@@ -1408,8 +1451,23 @@ struct Managed_process: Derived_transceiver<Managed_process>
                                         m_lifeline_writes;
     mutable std::mutex                  m_lifeline_mutex;
 
-    bool release_lifeline(instance_id_type process_instance_id);
-    void release_all_lifelines();
+    bool breach_lifeline(instance_id_type process_instance_id);
+    void breach_all_lifelines();
+
+    std::thread                         m_lifeline_watcher;
+    std::atomic<bool>                   m_lifeline_watcher_cancelled{false};
+    std::atomic<lifeline_handle_type>   m_lifeline_watch_endpoint{
+                                            static_cast<lifeline_handle_type>(-1)};
+#ifdef _WIN32
+    std::mutex                          m_lifeline_watcher_start_mutex;
+    std::condition_variable             m_lifeline_watcher_started;
+    bool                                m_lifeline_watcher_start_reported = false;
+    lifeline_handle_type                m_lifeline_watcher_thread_handle = 0;
+    unsigned long                       m_lifeline_watcher_start_error = 0;
+#else
+    int                                 m_lifeline_cancel_read = -1;
+    int                                 m_lifeline_cancel_write = -1;
+#endif
 
     Spawn_result spawn_swarm_process(
         const Spawn_swarm_process_args& ssp_args,

@@ -1635,7 +1635,7 @@ inline bool Coordinator::unpublish_transceiver_exact(
                 s_mproc->note_child_initialization_complete(custody_occurrence);
                 s_mproc->note_child_publication_retired(custody_occurrence);
             }
-            s_mproc->release_lifeline(process_iid);
+            s_mproc->breach_lifeline(process_iid);
         }
         if (retiring_reader) {
             if (process_publication_identity.is_external_process() && s_mproc) {

@@ -153,7 +153,7 @@ struct Cleanup_gate
     sintra::instance_id_type expected_iid = sintra::invalid_instance_id;
     uint32_t expected_occurrence = 0;
     unsigned before_count = 0;
-    unsigned lifeline_released_count = 0;
+    unsigned lifeline_breached_count = 0;
     unsigned retirement_confirmed_count = 0;
     unsigned passive_wait_count = 0;
     bool observer_waiting = false;
@@ -195,9 +195,9 @@ void observe_cleanup(
         gate->changed.wait(lock, [&]() { return gate->release; });
     }
     else if (std::string_view(stage) ==
-        sintra::detail::test_hooks::k_managed_child_cleanup_lifeline_released)
+        sintra::detail::test_hooks::k_managed_child_cleanup_lifeline_breached)
     {
-        ++gate->lifeline_released_count;
+        ++gate->lifeline_breached_count;
         gate->changed.notify_all();
     }
     else if (std::string_view(stage) ==
@@ -784,7 +784,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
         failed_bounded_incomplete = failed_bounded_incomplete &&
-            gate.before_count == 1 && gate.lifeline_released_count == 0 &&
+            gate.before_count == 1 && gate.lifeline_breached_count == 0 &&
             gate.retirement_confirmed_count == 0;
     }
 
@@ -832,7 +832,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 #endif
     const bool authoritative_cleanup_once = [&]() {
         std::lock_guard<std::mutex> lock(gate.mutex);
-        return gate.before_count == 1 && gate.lifeline_released_count == 1 &&
+        return gate.before_count == 1 && gate.lifeline_breached_count == 1 &&
             gate.retirement_confirmed_count == 1 &&
             gate.passive_wait_count == 1;
     }();
@@ -893,7 +893,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         std::printf(
             "PUBLIC_CLEANUP_GREEN_VALID nonce=%s custody_ready=1 bounded_incomplete=1 "
             "passive_wait_observed=1 injected_failure_retained=1 "
-            "retained_finalize=1 monotone_retry=1 lifeline_released=1 "
+            "retained_finalize=1 monotone_retry=1 lifeline_breached=1 "
             "publication_retired=1 communication_retired=1 exact_exit=1 "
             "expected_status=99 survivor_absent=1 final_retry=1 "
             "callback_reentry=1 windows_fallback_wake=%s\n",
@@ -953,7 +953,7 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     {
         std::lock_guard<std::mutex> lock(gate.mutex);
         before_count = gate.before_count;
-        lifeline_count = gate.lifeline_released_count;
+        lifeline_count = gate.lifeline_breached_count;
         retirement_count = gate.retirement_confirmed_count;
         passive_count = gate.passive_wait_count;
     }

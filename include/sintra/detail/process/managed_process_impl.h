@@ -39,6 +39,7 @@
 #include <signal.h>
 #include <cerrno>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <sched.h>
 #include <time.h>
@@ -360,8 +361,8 @@ inline constexpr const char* k_managed_child_prepublication_reader_terminal =
     "managed_child_prepublication_reader_terminal";
 inline constexpr const char* k_managed_child_cleanup_before_actions =
     "managed_child_cleanup_before_actions";
-inline constexpr const char* k_managed_child_cleanup_lifeline_released =
-    "managed_child_cleanup_lifeline_released";
+inline constexpr const char* k_managed_child_cleanup_lifeline_breached =
+    "managed_child_cleanup_lifeline_breached";
 inline constexpr const char* k_managed_child_cleanup_retirement_confirmed =
     "managed_child_cleanup_retirement_confirmed";
 inline constexpr const char* k_managed_child_cleanup_before_native_convergence =
@@ -1035,12 +1036,6 @@ namespace {
         return nullptr;
     }
 
-    inline std::atomic<bool>& lifeline_shutdown_flag()
-    {
-        static std::atomic<bool> flag{false};
-        return flag;
-    }
-
     // Argument names for lifeline configuration (internal, fixed)
     constexpr const char* k_lifeline_handle_arg    = "--lifeline_handle";
     constexpr const char* k_lifeline_exit_code_arg = "--lifeline_exit_code";
@@ -1081,9 +1076,19 @@ namespace {
         }).detach();
     }
 
-    inline void signal_lifeline_shutdown(int timeout_ms, int exit_code)
+    inline void signal_lifeline_breach(
+        Managed_process* exact_owner,
+        const std::shared_ptr<const detail::Managed_process_lifetime>& lifetime,
+        int timeout_ms,
+        int exit_code)
     {
-        if (lifeline_shutdown_flag().exchange(true)) {
+        auto expected = detail::Lifeline_observation::ARMED;
+        if (!lifetime->m_lifeline_observation.compare_exchange_strong(
+                expected,
+                detail::Lifeline_observation::BREACHED,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
             return;
         }
 
@@ -1096,111 +1101,143 @@ namespace {
         // behind lifecycle locks.
         schedule_lifeline_hard_exit(timeout_ms, exit_code);
 
-        if (s_mproc) {
-            s_mproc->m_must_stop.store(true, std::memory_order_release);
-            s_mproc->stop();
-            s_mproc->unblock_rpc();
+        if (!lifetime->enter_owner_callback()) {
+            return;
         }
+        try {
+            exact_owner->m_must_stop.store(true, std::memory_order_release);
+            exact_owner->stop();
+            exact_owner->unblock_rpc();
+        }
+        catch (...) {
+            lifetime->leave_owner_callback();
+            throw;
+        }
+        lifetime->leave_owner_callback();
     }
 
 #ifdef _WIN32
-    inline void lifeline_watch_loop(HANDLE handle, int timeout_ms, int exit_code)
+    inline void lifeline_watch_loop(
+        Managed_process* exact_owner,
+        const std::shared_ptr<const detail::Managed_process_lifetime>& lifetime,
+        HANDLE handle,
+        int timeout_ms,
+        int exit_code)
     {
         if (!handle || handle == INVALID_HANDLE_VALUE) {
-            signal_lifeline_shutdown(timeout_ms, exit_code);
+            signal_lifeline_breach(
+                exact_owner, lifetime, timeout_ms, exit_code);
             return;
         }
 
         char  buffer     = 0;
         DWORD bytes_read = 0;
-        while (true) {
-            const BOOL ok = ReadFile(handle, &buffer, 1, &bytes_read, nullptr);
-            if (!ok)             { break; }
-            if (bytes_read == 0) { break; }
+        BOOL  ok          = FALSE;
+        DWORD read_error  = ERROR_OPERATION_ABORTED;
+        if (!exact_owner->m_lifeline_watcher_cancelled.load(
+                std::memory_order_acquire))
+        {
+            ok = ReadFile(handle, &buffer, 1, &bytes_read, nullptr);
+            if (!ok) {
+                read_error = GetLastError();
+            }
+        }
+        const auto endpoint = reinterpret_cast<uintptr_t>(handle);
+        auto expected_endpoint = endpoint;
+        if (exact_owner->m_lifeline_watch_endpoint.compare_exchange_strong(
+                expected_endpoint,
+                static_cast<Managed_process::lifeline_handle_type>(-1),
+                std::memory_order_acq_rel))
+        {
+            CloseHandle(handle);
         }
 
-        CloseHandle(handle);
-        signal_lifeline_shutdown(timeout_ms, exit_code);
+        if (ok && bytes_read == 1 &&
+            static_cast<unsigned char>(buffer) == detail::k_lifeline_release_byte)
+        {
+            auto expected = detail::Lifeline_observation::ARMED;
+            lifetime->m_lifeline_observation.compare_exchange_strong(
+                expected,
+                detail::Lifeline_observation::DETACHED,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire);
+            return;
+        }
+        if (!ok && read_error == ERROR_OPERATION_ABORTED &&
+            exact_owner->m_lifeline_watcher_cancelled.load(
+                std::memory_order_acquire))
+        {
+            return;
+        }
+        signal_lifeline_breach(exact_owner, lifetime, timeout_ms, exit_code);
     }
 #else
-    inline void lifeline_watch_loop(int fd, int timeout_ms, int exit_code)
+    inline void lifeline_watch_loop(
+        Managed_process* exact_owner,
+        const std::shared_ptr<const detail::Managed_process_lifetime>& lifetime,
+        int fd,
+        int cancel_fd,
+        int timeout_ms,
+        int exit_code)
     {
-        if (fd < 0) {
-            signal_lifeline_shutdown(timeout_ms, exit_code);
+        if (fd < 0 || cancel_fd < 0) {
+            signal_lifeline_breach(
+                exact_owner, lifetime, timeout_ms, exit_code);
             return;
         }
 
-        char buffer = 0;
+        bool breached = false;
         while (true) {
-            const ssize_t bytes_read = ::read(fd, &buffer, 1);
-            if (bytes_read > 0)  { continue; }
-            if (bytes_read == 0) { break;    }
-            if (errno == EINTR)  { continue; }
+            pollfd watched[2] = {
+                {fd,        POLLIN, 0},
+                {cancel_fd, POLLIN, 0},
+            };
+            const int poll_result = ::poll(watched, 2, -1);
+            if (poll_result == -1 && errno == EINTR) {
+                continue;
+            }
+            if (poll_result == -1) {
+                breached = true;
+                break;
+            }
+            if ((watched[0].revents & POLLIN) != 0) {
+                char buffer = 0;
+                const ssize_t bytes_read = ::read(fd, &buffer, 1);
+                if (bytes_read == -1 && errno == EINTR) {
+                    continue;
+                }
+                if (bytes_read == 1 &&
+                    static_cast<unsigned char>(buffer) ==
+                        detail::k_lifeline_release_byte)
+                {
+                    auto expected = detail::Lifeline_observation::ARMED;
+                    lifetime->m_lifeline_observation.compare_exchange_strong(
+                        expected,
+                        detail::Lifeline_observation::DETACHED,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire);
+                    break;
+                }
+                breached = true;
+                break;
+            }
+            if ((watched[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+                break;
+            }
+            breached = true;
             break;
         }
 
         ::close(fd);
-        signal_lifeline_shutdown(timeout_ms, exit_code);
+        exact_owner->m_lifeline_watch_endpoint.store(
+            static_cast<Managed_process::lifeline_handle_type>(-1),
+            std::memory_order_release);
+        if (breached) {
+            signal_lifeline_breach(
+                exact_owner, lifetime, timeout_ms, exit_code);
+        }
     }
 #endif
-
-    inline void start_lifeline_watcher(const Lifetime_policy& policy, bool lifeline_required)
-    {
-        if (!policy.enable_lifeline) {
-            return;
-        }
-
-        // Check if lifeline was disabled via argument
-        if (s_lifeline_disabled) {
-#ifndef NDEBUG
-            log_lifeline_message(
-                detail::log_level::warning,
-                std::string("[sintra] Lifeline disabled via ") + k_lifeline_disable_arg + "\n");
-#endif
-            return;
-        }
-
-        // Check if handle/fd was provided via argument
-        if (s_lifeline_handle_value.empty()) {
-            if (lifeline_required) {
-                log_lifeline_message(
-                    detail::log_level::error,
-                    "[sintra] Lifeline missing - terminating\n");
-                lifeline_hard_exit(policy.hard_exit_code);
-            }
-            return;
-        }
-
-        // Parse the handle value
-        errno = 0;
-        char*                    end    = nullptr;
-        const unsigned long long parsed = std::strtoull(s_lifeline_handle_value.c_str(), &end, 10);
-        if (!end || end == s_lifeline_handle_value.c_str() || errno != 0) {
-            if (lifeline_required) {
-                log_lifeline_message(
-                    detail::log_level::error,
-                    "[sintra] Lifeline parse failure - terminating\n");
-                lifeline_hard_exit(policy.hard_exit_code);
-            }
-            return;
-        }
-
-        // Use parsed argument values
-        const int exit_code  = s_lifeline_exit_code;
-        int       timeout_ms = s_lifeline_timeout_ms;
-        if (timeout_ms < 0) {
-            timeout_ms = 0;
-        }
-#ifdef _WIN32
-        const auto handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(parsed));
-        std::thread(detail::Exception_boundary{"lifeline_watch"}.wrap(
-            [=]{ lifeline_watch_loop(handle, timeout_ms, exit_code); })).detach();
-#else
-        const int fd = static_cast<int>(parsed);
-        std::thread(detail::Exception_boundary{"lifeline_watch"}.wrap(
-            [=]{ lifeline_watch_loop(fd, timeout_ms, exit_code); })).detach();
-#endif
-    }
 
     inline bool lifeline_handle_valid(Managed_process::lifeline_handle_type handle)
     {
@@ -1279,6 +1316,225 @@ namespace {
         read_fd = pipefd[0];
         write_fd = pipefd[1];
         return true;
+    }
+#endif
+}
+
+inline void Managed_process::start_lifeline_watcher(
+    const Lifetime_policy& policy,
+    bool                   lifeline_required)
+{
+    if (!policy.enable_lifeline) {
+        return;
+    }
+
+    if (s_lifeline_disabled) {
+#ifndef NDEBUG
+        log_lifeline_message(
+            detail::log_level::warning,
+            std::string("[sintra] Lifeline disabled via ") +
+                k_lifeline_disable_arg + "\n");
+#endif
+        return;
+    }
+
+    if (s_lifeline_handle_value.empty()) {
+        if (lifeline_required) {
+            log_lifeline_message(
+                detail::log_level::error,
+                "[sintra] Lifeline missing - terminating\n");
+            lifeline_hard_exit(policy.hard_exit_code);
+        }
+        return;
+    }
+
+    errno = 0;
+    char*                    end    = nullptr;
+    const unsigned long long parsed = std::strtoull(
+        s_lifeline_handle_value.c_str(), &end, 10);
+    if (!end || end == s_lifeline_handle_value.c_str() || errno != 0) {
+        if (lifeline_required) {
+            log_lifeline_message(
+                detail::log_level::error,
+                "[sintra] Lifeline parse failure - terminating\n");
+            lifeline_hard_exit(policy.hard_exit_code);
+        }
+        return;
+    }
+
+    const int exit_code = s_lifeline_exit_code;
+    const int timeout_ms = std::max(0, s_lifeline_timeout_ms);
+    const auto lifetime = m_runtime_lifetime;
+    m_lifeline_watcher_cancelled.store(false, std::memory_order_release);
+    lifetime->m_lifeline_observation.store(
+        detail::Lifeline_observation::ARMED,
+        std::memory_order_release);
+
+#ifdef _WIN32
+    const auto handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(parsed));
+    m_lifeline_watch_endpoint.store(
+        reinterpret_cast<uintptr_t>(handle),
+        std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(m_lifeline_watcher_start_mutex);
+        m_lifeline_watcher_start_reported = false;
+        m_lifeline_watcher_thread_handle  = 0;
+        m_lifeline_watcher_start_error    = ERROR_SUCCESS;
+    }
+    try {
+        m_lifeline_watcher = std::thread(
+            detail::Exception_boundary{"lifeline_watch"}.wrap(
+                [this, lifetime, handle, timeout_ms, exit_code]() {
+                    HANDLE thread_handle = nullptr;
+                    const bool duplicated = DuplicateHandle(
+                        GetCurrentProcess(),
+                        GetCurrentThread(),
+                        GetCurrentProcess(),
+                        &thread_handle,
+                        0,
+                        FALSE,
+                        DUPLICATE_SAME_ACCESS) != 0;
+                    const DWORD duplicate_error = duplicated
+                        ? ERROR_SUCCESS
+                        : GetLastError();
+                    {
+                        std::lock_guard<std::mutex> lock(
+                            m_lifeline_watcher_start_mutex);
+                        m_lifeline_watcher_thread_handle =
+                            reinterpret_cast<lifeline_handle_type>(thread_handle);
+                        m_lifeline_watcher_start_error = duplicate_error;
+                        m_lifeline_watcher_start_reported = true;
+                    }
+                    m_lifeline_watcher_started.notify_all();
+                    if (!duplicated) {
+                        return;
+                    }
+                    lifeline_watch_loop(
+                        this, lifetime, handle, timeout_ms, exit_code);
+                }));
+    }
+    catch (...) {
+        m_lifeline_watch_endpoint.store(
+            static_cast<lifeline_handle_type>(-1),
+            std::memory_order_release);
+        CloseHandle(handle);
+        lifetime->m_lifeline_observation.store(
+            detail::Lifeline_observation::INACTIVE,
+            std::memory_order_release);
+        throw;
+    }
+    {
+        std::unique_lock<std::mutex> lock(m_lifeline_watcher_start_mutex);
+        m_lifeline_watcher_started.wait(lock, [this]() {
+            return m_lifeline_watcher_start_reported;
+        });
+    }
+    if (m_lifeline_watcher_thread_handle == 0) {
+        const auto error = m_lifeline_watcher_start_error;
+        m_lifeline_watcher.join();
+        m_lifeline_watch_endpoint.store(
+            static_cast<lifeline_handle_type>(-1),
+            std::memory_order_release);
+        CloseHandle(handle);
+        lifetime->m_lifeline_observation.store(
+            detail::Lifeline_observation::INACTIVE,
+            std::memory_order_release);
+        throw std::system_error(
+            static_cast<int>(error),
+            std::system_category(),
+            "Failed to duplicate lifeline watcher thread handle");
+    }
+#else
+    const int fd = static_cast<int>(parsed);
+    int cancel_pipe[2] = {-1, -1};
+    if (detail::call_pipe2(cancel_pipe, O_CLOEXEC) != 0) {
+        const int error = errno;
+        ::close(fd);
+        lifetime->m_lifeline_observation.store(
+            detail::Lifeline_observation::INACTIVE,
+            std::memory_order_release);
+        throw std::system_error(
+            error, std::generic_category(), "Failed to create lifeline cancellation pipe");
+    }
+    m_lifeline_cancel_read  = cancel_pipe[0];
+    m_lifeline_cancel_write = cancel_pipe[1];
+    m_lifeline_watch_endpoint.store(
+        static_cast<lifeline_handle_type>(fd),
+        std::memory_order_release);
+    try {
+        m_lifeline_watcher = std::thread(
+            detail::Exception_boundary{"lifeline_watch"}.wrap(
+                [this, lifetime, fd, timeout_ms, exit_code]() {
+                    lifeline_watch_loop(
+                        this,
+                        lifetime,
+                        fd,
+                        m_lifeline_cancel_read,
+                        timeout_ms,
+                        exit_code);
+                }));
+    }
+    catch (...) {
+        ::close(fd);
+        ::close(m_lifeline_cancel_read);
+        ::close(m_lifeline_cancel_write);
+        m_lifeline_cancel_read  = -1;
+        m_lifeline_cancel_write = -1;
+        m_lifeline_watch_endpoint.store(
+            static_cast<lifeline_handle_type>(-1),
+            std::memory_order_release);
+        lifetime->m_lifeline_observation.store(
+            detail::Lifeline_observation::INACTIVE,
+            std::memory_order_release);
+        throw;
+    }
+#endif
+}
+
+inline void Managed_process::stop_lifeline_watcher() noexcept
+{
+    if (!m_lifeline_watcher.joinable()) {
+        return;
+    }
+
+    m_lifeline_watcher_cancelled.store(true, std::memory_order_release);
+#ifdef _WIN32
+    const HANDLE thread_handle = reinterpret_cast<HANDLE>(
+        m_lifeline_watcher_thread_handle);
+    while (WaitForSingleObject(thread_handle, 0) == WAIT_TIMEOUT) {
+        CancelSynchronousIo(thread_handle);
+        if (WaitForSingleObject(thread_handle, 10) == WAIT_OBJECT_0) {
+            break;
+        }
+    }
+#else
+    const char cancel = 1;
+    ssize_t written = -1;
+    do {
+        written = ::write(m_lifeline_cancel_write, &cancel, 1);
+    }
+    while (written == -1 && errno == EINTR);
+    (void)written;
+#endif
+    m_lifeline_watcher.join();
+
+#ifdef _WIN32
+    CloseHandle(thread_handle);
+    m_lifeline_watcher_thread_handle = 0;
+    const auto endpoint = m_lifeline_watch_endpoint.exchange(
+        static_cast<lifeline_handle_type>(-1),
+        std::memory_order_acq_rel);
+    if (lifeline_handle_valid(endpoint)) {
+        CloseHandle(reinterpret_cast<HANDLE>(endpoint));
+    }
+#else
+    if (m_lifeline_cancel_read >= 0) {
+        ::close(m_lifeline_cancel_read);
+        m_lifeline_cancel_read = -1;
+    }
+    if (m_lifeline_cancel_write >= 0) {
+        ::close(m_lifeline_cancel_write);
+        m_lifeline_cancel_write = -1;
     }
 #endif
 }
@@ -2584,6 +2840,9 @@ Managed_process::Managed_process():
 inline
 Managed_process::~Managed_process()
 {
+    m_runtime_lifetime->close_owner_callback_admission_and_wait();
+    stop_lifeline_watcher();
+
 #ifndef _WIN32
     // SIGCHLD publication runs under the shared dispatch lock. Wait for any
     // active producer to enqueue its owned callbacks before draining.
@@ -2625,7 +2884,7 @@ Managed_process::~Managed_process()
         wait_until_all_external_readers_are_done(called_from_request_reader ? 1 : 0);
     }
 
-    release_all_lifelines();
+    breach_all_lifelines();
 
     assert(m_communication_state <= COMMUNICATION_PAUSED); // i.e. paused or stopped
 
@@ -4795,9 +5054,9 @@ inline bool Managed_process::execute_current_slot_child_retirement(
             s_coord->note_draining_state_change();
         }
         if (release_mode == detail::Release_mode::cleanup) {
-            release_lifeline(process_iid);
+            breach_lifeline(process_iid);
             detail::managed_child_cleanup_for_test(
-                detail::test_hooks::k_managed_child_cleanup_lifeline_released,
+                detail::test_hooks::k_managed_child_cleanup_lifeline_breached,
                 process_iid,
                 occurrence);
         }
@@ -5955,7 +6214,7 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 }
 
 inline
-bool Managed_process::release_lifeline(instance_id_type process_instance_id)
+bool Managed_process::breach_lifeline(instance_id_type process_instance_id)
 {
     std::lock_guard<mutex> lock(m_lifeline_mutex);
     auto it = m_lifeline_writes.find(process_instance_id);
@@ -5968,7 +6227,7 @@ bool Managed_process::release_lifeline(instance_id_type process_instance_id)
 }
 
 inline
-void Managed_process::release_all_lifelines()
+void Managed_process::breach_all_lifelines()
 {
     std::lock_guard<mutex> lock(m_lifeline_mutex);
     for (auto& entry : m_lifeline_writes) {
@@ -6457,13 +6716,22 @@ inline void Managed_process::coordinator_departed(
         return;
     }
 
+    Managed_process* const exact_owner = this;
     const std::weak_ptr<const detail::Managed_process_lifetime> weak_lifetime =
         runtime_lifetime;
-    run_after_current_handler([weak_lifetime]() {
+    run_after_current_handler([exact_owner, weak_lifetime]() {
         const auto lifetime = weak_lifetime.lock();
-        if (lifetime && s_mproc && s_mproc->m_runtime_lifetime == lifetime) {
-            s_mproc->stop();
+        if (!lifetime || !lifetime->enter_owner_callback()) {
+            return;
         }
+        try {
+            exact_owner->stop();
+        }
+        catch (...) {
+            lifetime->leave_owner_callback();
+            throw;
+        }
+        lifetime->leave_owner_callback();
     });
 }
 

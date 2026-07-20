@@ -23,6 +23,16 @@ enum class Coordinator_departure_cause
     SIGNALED_CRASH
 };
 
+inline constexpr unsigned char k_lifeline_release_byte = 0x01;
+
+enum class Lifeline_observation
+{
+    INACTIVE,
+    ARMED,
+    DETACHED,
+    BREACHED
+};
+
 } // namespace detail
 
 // Lifecycle/recovery metadata and callbacks (effective only in the coordinator).
