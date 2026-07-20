@@ -249,6 +249,8 @@ private:
         std::string                            token;
         std::chrono::steady_clock::time_point  expires_at;
         uint32_t                               occurrence = 0;
+        detail::Member_lifetime_role           role =
+            detail::Member_lifetime_role::COORDINATOR_BOUND;
         External_process_invitation_state      state = External_process_invitation_state::pending;
     };
 
@@ -304,6 +306,13 @@ private:
         }
 
         bool operator==(const Process_reader_identity&) const = default;
+    };
+
+    struct Member_role_record
+    {
+        Process_reader_identity        identity;
+        detail::Member_lifetime_role   role =
+            detail::Member_lifetime_role::COORDINATOR_BOUND;
     };
 
     struct Transceiver_publication
@@ -584,6 +593,10 @@ public:
 
     // access only after acquiring m_publish_mutex
     unordered_map<instance_id_type, uint32_t>      m_external_attached_processes;
+    // Membership role is independent from publication, launch provenance,
+    // and custody state, but retains the same exact admitted generation.
+    unordered_map<instance_id_type, Member_role_record>
+                                                   m_member_roles;
     mutable std::mutex                             m_lifecycle_mutex;
     Recovery_policy                                m_recovery_policy;
     Recovery_runner                                m_recovery_runner;

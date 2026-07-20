@@ -8,6 +8,23 @@
 
 namespace sintra {
 
+namespace detail {
+
+enum class Member_lifetime_role
+{
+    COORDINATOR_BOUND,
+    DETACHED
+};
+
+enum class Coordinator_departure_cause
+{
+    NONE,
+    UNPUBLISHED,
+    SIGNALED_CRASH
+};
+
+} // namespace detail
+
 // Lifecycle/recovery metadata and callbacks (effective only in the coordinator).
 // See docs/process_lifecycle_notes.md for timing and threading.
 struct Crash_info

@@ -954,6 +954,14 @@ inline bool Coordinator::claim_external_process_invitation(
                 return false;
             }
         }
+        const bool role_inserted = m_member_roles.emplace(
+            process_iid,
+            Member_role_record{
+                Process_reader_identity{0, process_iid, record.occurrence},
+                record.role}).second;
+        if (!role_inserted) {
+            return false;
+        }
         m_transceiver_registry[process_iid];
         m_external_attached_processes[process_iid] = record.occurrence;
     }
@@ -971,6 +979,7 @@ inline bool Coordinator::claim_external_process_invitation(
 
     if (in_initialization) {
         std::lock_guard publish_lock(m_publish_mutex);
+        m_member_roles.erase(process_iid);
         m_external_attached_processes.erase(process_iid);
         m_transceiver_registry.erase(process_iid);
         return false;
@@ -983,6 +992,7 @@ inline bool Coordinator::claim_external_process_invitation(
 
     if (!add_external_process_to_standard_groups(process_iid)) {
         std::lock_guard publish_lock(m_publish_mutex);
+        m_member_roles.erase(process_iid);
         m_external_attached_processes.erase(process_iid);
         m_transceiver_registry.erase(process_iid);
         return false;
@@ -1236,6 +1246,22 @@ inline instance_id_type Coordinator::publish_transceiver_with_reader_identity(
         m_managed_child_publication_changed.notify_all();
     };
 
+    auto record_member_role = [&]() {
+        if (iid != process_iid || process_iid == s_mproc_id) {
+            return true;
+        }
+        const auto existing = m_member_roles.find(process_iid);
+        if (existing != m_member_roles.end()) {
+            return existing->second.identity == reader_identity;
+        }
+        m_member_roles.emplace(
+            process_iid,
+            Member_role_record{
+                reader_identity,
+                detail::Member_lifetime_role::COORDINATOR_BOUND});
+        return true;
+    };
+
     auto true_sequence = [&](bool allow_notification_delay) {
         bool queued_notification = false;
         if (allow_notification_delay) {
@@ -1293,6 +1319,9 @@ inline instance_id_type Coordinator::publish_transceiver_with_reader_identity(
         if (resolve_instance(assigned_name) != invalid_instance_id) {
             return invalid_instance_id;
         }
+        if (!record_member_role()) {
+            return invalid_instance_id;
+        }
 
         s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
         pr.emplace(iid, entry);
@@ -1308,6 +1337,9 @@ inline instance_id_type Coordinator::publish_transceiver_with_reader_identity(
 
         // the assigned_name should not be taken
         if (resolve_instance(assigned_name) != invalid_instance_id) {
+            return invalid_instance_id;
+        }
+        if (!record_member_role()) {
             return invalid_instance_id;
         }
 
@@ -1370,6 +1402,7 @@ inline bool Coordinator::unpublish_transceiver_exact(
     // coordinator lock. The publication is revalidated under m_publish_mutex
     // immediately before it is extracted below.
     Process_reader_identity process_publication_identity;
+    Member_role_record      process_member_role;
     detail::Managed_child_occurrence_token custody_occurrence;
     std::shared_ptr<detail::Managed_child_custody_record> custody_lifetime;
     if (iid == process_iid) {
@@ -1389,6 +1422,15 @@ inline bool Coordinator::unpublish_transceiver_exact(
                 process_publication_identity != *expected_identity)
             {
                 return false;
+            }
+            if (process_iid != s_mproc_id) {
+                const auto role = m_member_roles.find(process_iid);
+                if (role == m_member_roles.end() ||
+                    role->second.identity != process_publication_identity)
+                {
+                    return false;
+                }
+                process_member_role = role->second;
             }
         }
 
@@ -1440,6 +1482,16 @@ inline bool Coordinator::unpublish_transceiver_exact(
         stored_identity != process_publication_identity)
     {
         return false;
+    }
+    if (iid == process_iid && process_iid != s_mproc_id) {
+        const auto role = m_member_roles.find(process_iid);
+        if (role == m_member_roles.end() ||
+            role->second.identity != stored_identity ||
+            role->second.identity != process_member_role.identity ||
+            role->second.role != process_member_role.role)
+        {
+            return false;
+        }
     }
     if (iid == process_iid && stored_identity.is_external_process()) {
         const auto attached = m_external_attached_processes.find(process_iid);
@@ -1528,6 +1580,7 @@ inline bool Coordinator::unpublish_transceiver_exact(
         // remove the unpublished process's remaining registry entries
         m_transceiver_registry.erase(pr_it);
         m_external_attached_processes.erase(process_iid);
+        m_member_roles.erase(process_iid);
 
         // CRITICAL: Mark as draining BEFORE removing from groups to prevent barriers
         // from including this process. This handles both graceful shutdown (where

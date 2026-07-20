@@ -10,6 +10,7 @@
 #include "../messaging/message.h"
 #include "../process/process_id.h"
 #include "../messaging/process_message_reader.h"
+#include "lifecycle_types.h"
 #include "../resolve_type.h"
 #include "../ipc/spinlocked_containers.h"
 #include "../transceiver.h"
@@ -1223,6 +1224,13 @@ struct Managed_process: Derived_transceiver<Managed_process>
     uint64_t                            m_process_start_stamp = 0;
 
     atomic<bool>                        m_must_stop;
+    std::atomic<detail::Member_lifetime_role>
+                                        m_member_lifetime_role{
+                                            detail::Member_lifetime_role::
+                                                COORDINATOR_BOUND};
+    std::atomic<detail::Coordinator_departure_cause>
+                                        m_coordinator_departure_cause{
+                                            detail::Coordinator_departure_cause::NONE};
     condition_variable                  m_termination_condition;
 
     uint64_t                            m_swarm_id;
@@ -1281,6 +1289,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     void run_after_current_handler(
         function<void()>   task);
+
+    void coordinator_departed(
+        detail::Coordinator_departure_cause cause,
+        const std::shared_ptr<const detail::Managed_process_lifetime>&
+            runtime_lifetime);
 
     void wait_for_delivery_fence();
     void notify_delivery_progress();

@@ -627,15 +627,24 @@ bool external_process_state_absent(sintra::instance_id_type process_iid)
     std::lock_guard lock(sintra::s_coord->m_publish_mutex);
     return
         sintra::s_coord->m_transceiver_registry.count(process_iid) == 0 &&
-        sintra::s_coord->m_external_attached_processes.count(process_iid) == 0;
+        sintra::s_coord->m_external_attached_processes.count(process_iid) == 0 &&
+        sintra::s_coord->m_member_roles.count(process_iid) == 0;
 }
 
 bool external_process_state_present(sintra::instance_id_type process_iid)
 {
     std::lock_guard lock(sintra::s_coord->m_publish_mutex);
+    const auto attached =
+        sintra::s_coord->m_external_attached_processes.find(process_iid);
+    const auto member = sintra::s_coord->m_member_roles.find(process_iid);
     return
         sintra::s_coord->m_transceiver_registry.count(process_iid) == 1 &&
-        sintra::s_coord->m_external_attached_processes.count(process_iid) == 1;
+        attached != sintra::s_coord->m_external_attached_processes.end() &&
+        member != sintra::s_coord->m_member_roles.end() &&
+        member->second.identity.process_iid == process_iid &&
+        member->second.identity.occurrence == attached->second &&
+        member->second.role ==
+            sintra::detail::Member_lifetime_role::COORDINATOR_BOUND;
 }
 
 bool remove_exact_external_reader_for_reuse(
@@ -746,6 +755,16 @@ int run_admitted_alive_helper(int argc, char* argv[])
     const bool has_lifeline_arg = has_argv_flag_or_value(argc, argv, "--lifeline_handle");
 
     sintra::init(argc, argv);
+    const auto stale_lifetime =
+        std::make_shared<const sintra::detail::Managed_process_lifetime>();
+    sintra::s_mproc->coordinator_departed(
+        sintra::detail::Coordinator_departure_cause::SIGNALED_CRASH,
+        stale_lifetime);
+    const bool stale_departure_rejected =
+        sintra::s_mproc->m_coordinator_departure_cause.load(
+            std::memory_order_acquire) ==
+            sintra::detail::Coordinator_departure_cause::NONE &&
+        !sintra::s_mproc->m_must_stop.load(std::memory_order_acquire);
     write_marker(dir, marker, has_lifeline_arg ? "unexpected_lifeline_arg" : "ready");
 
     if (!wait_for_control_file(dir, marker, ".release", 10s)) {
@@ -754,7 +773,29 @@ int run_admitted_alive_helper(int argc, char* argv[])
         return 1;
     }
 
-    write_marker(dir, marker + "_done", "released");
+    sintra::s_mproc->wait_for_stop();
+    const auto first_cause =
+        sintra::s_mproc->m_coordinator_departure_cause.load(
+            std::memory_order_acquire);
+    sintra::s_mproc->coordinator_departed(
+        sintra::detail::Coordinator_departure_cause::SIGNALED_CRASH,
+        sintra::s_mproc->m_runtime_lifetime);
+    const bool default_bound_once =
+        stale_departure_rejected &&
+        sintra::s_mproc->m_member_lifetime_role.load(
+            std::memory_order_acquire) ==
+            sintra::detail::Member_lifetime_role::COORDINATOR_BOUND &&
+        first_cause ==
+            sintra::detail::Coordinator_departure_cause::UNPUBLISHED &&
+        sintra::s_mproc->m_coordinator_departure_cause.load(
+            std::memory_order_acquire) == first_cause &&
+        sintra::s_mproc->m_must_stop.load(std::memory_order_acquire) &&
+        sintra::s_mproc->m_communication_state ==
+            sintra::Managed_process::COMMUNICATION_STOPPED;
+    write_marker(
+        dir,
+        marker + "_done",
+        default_bound_once ? "bound_stopped_once" : "departure_contract_failed");
     sintra::leave();
     return 0;
 }
@@ -1086,7 +1127,7 @@ bool run_shutdown_with_admitted_alive_case(
         "admitted live external helper should not block coordinator shutdown");
 
     write_control_file(dir, "alive", ".release");
-    ok &= wait_for_marker(dir, "alive_done", "released", 5s);
+    ok &= wait_for_marker(dir, "alive_done", "bound_stopped_once", 5s);
     ok &= wait_for_expected_exit(
         helper,
         Expected_child_exit::clean,

@@ -3219,7 +3219,12 @@ void Managed_process::init(int argc, const char* const* argv)
         }
     };
 
-    auto unpublished_handler = [this](const Coordinator::instance_unpublished& msg)
+    const auto runtime_lifetime = m_runtime_lifetime;
+
+    auto unpublished_handler = [
+            this,
+            runtime_lifetime
+        ](const Coordinator::instance_unpublished& msg)
     {
         auto iid         = msg.instance_id;
         auto process_iid = process_of(iid);
@@ -3238,17 +3243,16 @@ void Managed_process::init(int argc, const char* const* argv)
                 }
             }
 
-            s_mproc->unblock_rpc(iid);
+            if (iid != process_of(s_coord_id)) {
+                unblock_rpc(iid);
+            }
         }
 
         // if the unpublished transceiver is the coordinator process, we have to stop.
         if (process_of(s_coord_id) == msg.instance_id) {
-            s_mproc->m_must_stop.store(true, std::memory_order_release);
-            // Coordinator process has unpublished - pause communication outside the handler
-            // to avoid reentrancy into barrier machinery.
-            s_mproc->run_after_current_handler([]{
-                s_mproc->stop(); // idempotent
-            });
+            coordinator_departed(
+                detail::Coordinator_departure_cause::UNPUBLISHED,
+                runtime_lifetime);
         }
     };
 
@@ -3295,17 +3299,15 @@ void Managed_process::init(int argc, const char* const* argv)
         activate<Managed_process>(cr_handler, any_remote);
     }
     else {
-        auto cr_handler = [](const Managed_process::terminated_abnormally& msg)
+        auto cr_handler = [
+                this,
+                runtime_lifetime
+            ](const Managed_process::terminated_abnormally& msg)
         {
-            // Remote coordinator crashed: fail outstanding RPCs and pause communication
             if (process_of(s_coord_id) == msg.sender_instance_id) {
-                s_mproc->m_must_stop.store(true, std::memory_order_release);
-                // 1) Wake any RPCs waiting on the coordinator so they fail fast.
-                s_mproc->unblock_rpc(process_of(s_coord_id));
-                // 2) Pause communication *after* this handler completes to avoid reentrancy.
-                s_mproc->run_after_current_handler([]{
-                    s_mproc->stop(); // idempotent
-                });
+                coordinator_departed(
+                    detail::Coordinator_departure_cause::SIGNALED_CRASH,
+                    runtime_lifetime);
             }
         };
         activate<Managed_process>(cr_handler, any_remote);
@@ -6423,6 +6425,43 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
         }
         task();
     };
+}
+
+inline void Managed_process::coordinator_departed(
+    detail::Coordinator_departure_cause cause,
+    const std::shared_ptr<const detail::Managed_process_lifetime>&
+        runtime_lifetime)
+{
+    if (runtime_lifetime != m_runtime_lifetime) {
+        return;
+    }
+
+    auto expected = detail::Coordinator_departure_cause::NONE;
+    if (!m_coordinator_departure_cause.compare_exchange_strong(
+            expected,
+            cause,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+        return;
+    }
+
+    unblock_rpc(process_of(s_coord_id));
+    if (m_member_lifetime_role.load(std::memory_order_acquire) !=
+        detail::Member_lifetime_role::COORDINATOR_BOUND)
+    {
+        return;
+    }
+
+    m_must_stop.store(true, std::memory_order_release);
+    const std::weak_ptr<const detail::Managed_process_lifetime> weak_lifetime =
+        runtime_lifetime;
+    run_after_current_handler([weak_lifetime]() {
+        const auto lifetime = weak_lifetime.lock();
+        if (lifetime && s_mproc && s_mproc->m_runtime_lifetime == lifetime) {
+            s_mproc->stop();
+        }
+    });
 }
 
 inline
