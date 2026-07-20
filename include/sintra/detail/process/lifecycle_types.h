@@ -20,8 +20,25 @@ enum class Coordinator_departure_cause
 {
     NONE,
     UNPUBLISHED,
-    SIGNALED_CRASH
+    SIGNALED_CRASH,
+    EXACT_OS_WATCH
 };
+
+enum class Member_lifecycle_event_kind
+{
+    LIFELINE_RELEASED,
+    COORDINATOR_DEPARTED
+};
+
+struct Member_lifecycle_event
+{
+    Member_lifecycle_event_kind kind =
+        Member_lifecycle_event_kind::LIFELINE_RELEASED;
+    Coordinator_departure_cause cause = Coordinator_departure_cause::NONE;
+};
+
+using Member_lifecycle_handler =
+    std::function<void(const Member_lifecycle_event&)>;
 
 inline constexpr unsigned char k_lifeline_release_byte = 0x01;
 

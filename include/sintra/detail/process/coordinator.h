@@ -437,6 +437,10 @@ private:
     // Release join_swarm in-flight tracking and flush delayed publications once
     // all processes finish initialization.
     void mark_initialization_complete(instance_id_type process_iid);
+    bool register_exact_coordinator_watch(
+        instance_id_type process_iid,
+        uint32_t         occurrence,
+        uint64_t         process_start_stamp);
 
     // Signal shutdown to cancel delayed recovery and future spawns. Recovery
     // threads check this flag before running or respawning.
@@ -725,6 +729,7 @@ public:
     SINTRA_RPC_EXPLICIT(print)
     SINTRA_RPC_EXPLICIT(enable_recovery)
     SINTRA_RPC_EXPLICIT(mark_initialization_complete)
+    SINTRA_RPC_STRICT_EXPLICIT(register_exact_coordinator_watch)
     SINTRA_RPC_STRICT_EXPLICIT(join_swarm)
     SINTRA_RPC_STRICT_EXPLICIT(claim_external_process_invitation)
 

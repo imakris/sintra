@@ -40,6 +40,11 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/event.h>
+#endif
 #include <sys/wait.h>
 #include <sched.h>
 #include <time.h>
@@ -51,6 +56,10 @@ namespace sintra {
 using std::unique_lock;
 
 extern thread_local bool tl_is_req_thread;
+
+namespace detail {
+inline thread_local bool tl_in_member_lifecycle_callback = false;
+}
 
 #ifndef _WIN32
 namespace detail {
@@ -357,6 +366,8 @@ inline constexpr const char* k_managed_child_fail_pre_create_setup =
     "managed_child_pre_create_setup";
 inline constexpr const char* k_managed_child_fail_post_native_setup =
     "managed_child_post_native_setup";
+inline constexpr const char* k_managed_child_before_native_handoff =
+    "managed_child_before_native_handoff";
 inline constexpr const char* k_managed_child_fail_native_observer_start =
     "managed_child_native_observer_start";
 inline constexpr const char* k_managed_child_native_observer_before_wait =
@@ -1212,12 +1223,21 @@ namespace {
             exact_owner->m_member_lifetime_role.store(
                 detail::Member_lifetime_role::DETACHED,
                 std::memory_order_release);
+            if (!exact_owner->activate_exact_coordinator_watch(lifetime)) {
+                exact_owner->m_member_lifetime_role.store(
+                    detail::Member_lifetime_role::COORDINATOR_BOUND,
+                    std::memory_order_release);
+                signal_lifeline_breach(
+                    exact_owner, lifetime, timeout_ms, exit_code);
+                return;
+            }
             auto expected = detail::Lifeline_observation::ARMED;
             lifetime->m_lifeline_observation.compare_exchange_strong(
                 expected,
                 detail::Lifeline_observation::DETACHED,
                 std::memory_order_acq_rel,
                 std::memory_order_acquire);
+            exact_owner->note_lifeline_released(lifetime);
             return;
         }
         if (!ok && read_error == ERROR_OPERATION_ABORTED &&
@@ -1270,12 +1290,22 @@ namespace {
                     exact_owner->m_member_lifetime_role.store(
                         detail::Member_lifetime_role::DETACHED,
                         std::memory_order_release);
+                    if (!exact_owner->activate_exact_coordinator_watch(
+                            lifetime))
+                    {
+                        exact_owner->m_member_lifetime_role.store(
+                            detail::Member_lifetime_role::COORDINATOR_BOUND,
+                            std::memory_order_release);
+                        breached = true;
+                        break;
+                    }
                     auto expected = detail::Lifeline_observation::ARMED;
                     lifetime->m_lifeline_observation.compare_exchange_strong(
                         expected,
                         detail::Lifeline_observation::DETACHED,
                         std::memory_order_acq_rel,
                         std::memory_order_acquire);
+                    exact_owner->note_lifeline_released(lifetime);
                     break;
                 }
                 breached = true;
@@ -1617,6 +1647,292 @@ inline void Managed_process::stop_lifeline_watcher() noexcept
         m_lifeline_cancel_write = -1;
     }
 #endif
+}
+
+inline bool Managed_process::prepare_exact_coordinator_watch(
+    uint32_t coordinator_pid,
+    uint64_t coordinator_start_stamp) noexcept
+{
+    std::lock_guard<std::mutex> watch_lock(m_coordinator_watch_mutex);
+    if (coordinator_pid == 0 || coordinator_start_stamp == 0 ||
+        m_coordinator_watch_prepared || m_coordinator_watcher.joinable())
+    {
+        return false;
+    }
+
+    const auto observed = query_process_start_stamp(coordinator_pid);
+    if (!observed) {
+        if (!is_process_alive(coordinator_pid)) {
+            m_coordinator_watch_already_gone = true;
+            m_coordinator_watch_prepared = true;
+            return true;
+        }
+        return false;
+    }
+    if (*observed != coordinator_start_stamp) {
+        return false;
+    }
+
+#ifdef _WIN32
+    HANDLE process = OpenProcess(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        coordinator_pid);
+    if (!process) {
+        return false;
+    }
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    ULARGE_INTEGER opened_stamp{};
+    if (!GetProcessTimes(process, &creation, &exit, &kernel, &user)) {
+        CloseHandle(process);
+        return false;
+    }
+    opened_stamp.LowPart  = creation.dwLowDateTime;
+    opened_stamp.HighPart = creation.dwHighDateTime;
+    if (opened_stamp.QuadPart != coordinator_start_stamp) {
+        CloseHandle(process);
+        return false;
+    }
+    HANDLE cancel = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!cancel) {
+        CloseHandle(process);
+        return false;
+    }
+    m_coordinator_watch_process = reinterpret_cast<uintptr_t>(process);
+    m_coordinator_watch_cancel  = reinterpret_cast<uintptr_t>(cancel);
+#else
+    int cancel_pipe[2] = {-1, -1};
+    if (detail::call_pipe2(cancel_pipe, O_CLOEXEC) != 0) {
+        return false;
+    }
+    int native_watch = -1;
+#if defined(__linux__) && defined(SYS_pidfd_open)
+    native_watch = static_cast<int>(::syscall(
+        SYS_pidfd_open, static_cast<pid_t>(coordinator_pid), 0));
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    native_watch = ::kqueue();
+    if (native_watch >= 0) {
+        struct kevent change;
+        EV_SET(
+            &change,
+            coordinator_pid,
+            EVFILT_PROC,
+            EV_ADD | EV_ENABLE,
+            NOTE_EXIT,
+            0,
+            nullptr);
+        if (::kevent(native_watch, &change, 1, nullptr, 0, nullptr) != 0) {
+            ::close(native_watch);
+            native_watch = -1;
+        }
+    }
+#endif
+    const auto confirmed = query_process_start_stamp(coordinator_pid);
+    const bool gone_after_open = !confirmed && !is_process_alive(coordinator_pid);
+    if (native_watch < 0 || (!confirmed && !gone_after_open) ||
+        (confirmed && *confirmed != coordinator_start_stamp))
+    {
+        if (native_watch >= 0) {
+            ::close(native_watch);
+        }
+        ::close(cancel_pipe[0]);
+        ::close(cancel_pipe[1]);
+        return false;
+    }
+    m_coordinator_watch_native       = native_watch;
+    m_coordinator_watch_cancel_read  = cancel_pipe[0];
+    m_coordinator_watch_cancel_write = cancel_pipe[1];
+    m_coordinator_watch_already_gone = gone_after_open;
+#endif
+
+    m_coordinator_watch_prepared = true;
+    return true;
+}
+
+inline bool Managed_process::activate_exact_coordinator_watch(
+    const std::shared_ptr<const detail::Managed_process_lifetime>&
+        runtime_lifetime) noexcept
+{
+    std::lock_guard<std::mutex> watch_lock(m_coordinator_watch_mutex);
+    if (runtime_lifetime != m_runtime_lifetime ||
+        !m_coordinator_watch_prepared)
+    {
+        return false;
+    }
+    if (m_coordinator_watcher.joinable()) {
+        return true;
+    }
+
+    const bool already_gone = m_coordinator_watch_already_gone;
+#ifdef _WIN32
+    const auto process_handle = m_coordinator_watch_process;
+    const auto cancel_handle = m_coordinator_watch_cancel;
+#else
+    const int native_watch = m_coordinator_watch_native;
+    const int cancel_read = m_coordinator_watch_cancel_read;
+#endif
+    m_coordinator_watch_cancelled.store(false, std::memory_order_release);
+    try {
+        m_coordinator_watcher = std::thread(
+            detail::Exception_boundary{"coordinator_watch"}.wrap(
+                [this, runtime_lifetime, already_gone
+#ifdef _WIN32
+                 , process_handle, cancel_handle
+#else
+                 , native_watch, cancel_read
+#endif
+                ]() {
+                    bool departed = already_gone;
+                    bool observation_failed = false;
+                    if (!already_gone) {
+#ifdef _WIN32
+                        HANDLE watched[2] = {
+                            reinterpret_cast<HANDLE>(process_handle),
+                            reinterpret_cast<HANDLE>(cancel_handle),
+                        };
+                        const DWORD result = WaitForMultipleObjects(
+                            2, watched, FALSE, INFINITE);
+                        departed = result == WAIT_OBJECT_0;
+                        observation_failed =
+                            result != WAIT_OBJECT_0 &&
+                            result != WAIT_OBJECT_0 + 1;
+#elif defined(__linux__) && defined(SYS_pidfd_open)
+                        pollfd watched[2] = {
+                            {native_watch, POLLIN, 0},
+                            {cancel_read,  POLLIN, 0},
+                        };
+                        int result = -1;
+                        do {
+                            result = ::poll(watched, 2, -1);
+                        }
+                        while (result == -1 && errno == EINTR);
+                        departed = result > 0 &&
+                            (watched[0].revents &
+                                (POLLIN | POLLHUP | POLLERR)) != 0;
+                        const bool cancelled = result > 0 &&
+                            (watched[1].revents &
+                                (POLLIN | POLLHUP | POLLERR)) != 0;
+                        observation_failed =
+                            result <= 0 || (!departed && !cancelled);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+                        struct kevent change;
+                        EV_SET(
+                            &change,
+                            cancel_read,
+                            EVFILT_READ,
+                            EV_ADD | EV_ENABLE,
+                            0,
+                            0,
+                            nullptr);
+                        struct kevent event;
+                        int result = -1;
+                        do {
+                            result = ::kevent(
+                                native_watch,
+                                &change,
+                                1,
+                                &event,
+                                1,
+                                nullptr);
+                        }
+                        while (result == -1 && errno == EINTR);
+                        departed = result == 1 &&
+                            event.filter == EVFILT_PROC &&
+                            (event.fflags & NOTE_EXIT) != 0;
+                        const bool cancelled = result == 1 &&
+                            event.filter == EVFILT_READ &&
+                            event.ident == static_cast<uintptr_t>(cancel_read);
+                        observation_failed =
+                            result != 1 || (!departed && !cancelled);
+#endif
+                    }
+                    if ((departed || observation_failed) &&
+                        !m_coordinator_watch_cancelled.load(
+                            std::memory_order_acquire))
+                    {
+                        std::unique_lock<std::mutex> lock(
+                            m_member_lifecycle_mutex);
+                        m_member_lifecycle_changed.wait(lock, [this]() {
+                            return m_lifeline_release_pending ||
+                                m_lifeline_release_delivered ||
+                                m_member_lifecycle_stopping ||
+                                m_coordinator_watch_cancelled.load(
+                                    std::memory_order_acquire);
+                        });
+                        if (m_member_lifecycle_stopping ||
+                            m_coordinator_watch_cancelled.load(
+                                std::memory_order_acquire))
+                        {
+                            return;
+                        }
+                        lock.unlock();
+                        coordinator_departed(
+                            detail::Coordinator_departure_cause::EXACT_OS_WATCH,
+                            runtime_lifetime);
+                    }
+                }));
+    }
+    catch (...) {
+        return false;
+    }
+    return true;
+}
+
+inline void Managed_process::stop_exact_coordinator_watch() noexcept
+{
+    std::lock_guard<std::mutex> watch_lock(m_coordinator_watch_mutex);
+    {
+        std::lock_guard<std::mutex> lifecycle_lock(m_member_lifecycle_mutex);
+        m_coordinator_watch_cancelled.store(true, std::memory_order_release);
+    }
+    m_member_lifecycle_changed.notify_all();
+    if (m_coordinator_watcher.joinable()) {
+        if (!m_coordinator_watch_already_gone) {
+#ifdef _WIN32
+            if (!SetEvent(reinterpret_cast<HANDLE>(m_coordinator_watch_cancel))) {
+                std::terminate();
+            }
+#else
+            const char cancel = 1;
+            ssize_t written = -1;
+            do {
+                written = ::write(
+                    m_coordinator_watch_cancel_write, &cancel, 1);
+            }
+            while (written == -1 && errno == EINTR);
+            if (written != 1 && !(written == -1 && errno == EPIPE)) {
+                std::terminate();
+            }
+#endif
+        }
+        m_coordinator_watcher.join();
+    }
+
+#ifdef _WIN32
+    if (m_coordinator_watch_process != 0) {
+        CloseHandle(reinterpret_cast<HANDLE>(m_coordinator_watch_process));
+        m_coordinator_watch_process = 0;
+    }
+    if (m_coordinator_watch_cancel != 0) {
+        CloseHandle(reinterpret_cast<HANDLE>(m_coordinator_watch_cancel));
+        m_coordinator_watch_cancel = 0;
+    }
+#else
+    if (m_coordinator_watch_native >= 0) {
+        ::close(m_coordinator_watch_native);
+        m_coordinator_watch_native = -1;
+    }
+    if (m_coordinator_watch_cancel_read >= 0) {
+        ::close(m_coordinator_watch_cancel_read);
+        m_coordinator_watch_cancel_read = -1;
+    }
+    if (m_coordinator_watch_cancel_write >= 0) {
+        ::close(m_coordinator_watch_cancel_write);
+        m_coordinator_watch_cancel_write = -1;
+    }
+#endif
+    m_coordinator_watch_prepared = false;
+    m_coordinator_watch_already_gone = false;
 }
 
 #if defined(_WIN32) && defined(SINTRA_ENABLE_TEST_HOOKS)
@@ -1976,6 +2292,8 @@ detail::Managed_child_launch_attempt::cancel_posix_native_handoff()
             throw std::runtime_error(
                 "Managed-child native authority was not absent");
         }
+        occurrence->exact_coordinator_watch_ready = false;
+        occurrence->pending_exact_coordinator_watch_start_stamp = 0;
 
         const auto slot = std::find_if(
             m_owner->m_spawned_child_pids.begin(),
@@ -2096,6 +2414,8 @@ detail::Managed_child_launch_attempt::commit_posix_native_handoff(
                 throw std::runtime_error(
                     "Managed-child native authority commit failed");
             }
+            occurrence->exact_coordinator_watch_ready = false;
+            occurrence->pending_exact_coordinator_watch_start_stamp = 0;
             if (slot != m_owner->m_spawned_child_pids.end()) {
                 m_owner->m_spawned_child_pids.erase(slot);
             }
@@ -2122,6 +2442,14 @@ detail::Managed_child_launch_attempt::commit_posix_native_handoff(
             {
                 throw std::runtime_error(
                     "Managed-child native authority commit failed");
+            }
+            const auto pending_watch_stamp =
+                occurrence->pending_exact_coordinator_watch_start_stamp;
+            if (pending_watch_stamp != 0) {
+                occurrence->exact_coordinator_watch_ready =
+                    start_stamp_available &&
+                    start_stamp == pending_watch_stamp;
+                occurrence->pending_exact_coordinator_watch_start_stamp = 0;
             }
             m_posix_reap = Posix_reap_ownership::transferred;
         }
@@ -2186,6 +2514,13 @@ detail::Managed_child_launch_attempt::commit_windows_native_authority(
             throw std::runtime_error(
                 "Managed-child Windows native authority commit failed");
         }
+        const auto pending_watch_stamp =
+            exact->pending_exact_coordinator_watch_start_stamp;
+        if (pending_watch_stamp != 0) {
+            exact->exact_coordinator_watch_ready =
+                start_stamp_available && start_stamp == pending_watch_stamp;
+            exact->pending_exact_coordinator_watch_start_stamp = 0;
+        }
 
         // The exact native record now owns the original process handle.  Until
         // an observer is registered, it is also the authoritative fallback.
@@ -2210,6 +2545,8 @@ detail::Managed_child_launch_attempt::confirm_windows_native_absent()
         throw std::runtime_error(
             "Managed-child Windows native authority was not absent");
     }
+    exact->exact_coordinator_watch_ready = false;
+    exact->pending_exact_coordinator_watch_start_stamp = 0;
 }
 
 inline void
@@ -2586,6 +2923,13 @@ detail::Managed_child_launch_attempt::rollback_posix_reap_reservation() noexcept
     try {
         std::lock_guard<std::mutex> roster_lock(
             m_owner->m_spawned_child_pids_mutex);
+        std::lock_guard<std::mutex> custody_lock(m_custody->mutex);
+        if (auto* exact = m_custody->find_occurrence_locked(
+                m_process_instance_id, m_occurrence))
+        {
+            exact->exact_coordinator_watch_ready = false;
+            exact->pending_exact_coordinator_watch_start_stamp = 0;
+        }
         m_owner->m_spawned_child_pids.erase(
             std::remove_if(
                 m_owner->m_spawned_child_pids.begin(),
@@ -2609,6 +2953,19 @@ detail::Managed_child_launch_attempt::rollback_windows_native_authority() noexce
         raw_handle = m_windows_process_handle;
         m_windows_process_handle = 0;
         m_windows_native = Windows_native_ownership::absent;
+        try {
+            if (m_custody) {
+                std::lock_guard<std::mutex> lock(m_custody->mutex);
+                if (auto* exact = m_custody->find_occurrence_locked(
+                        m_process_instance_id, m_occurrence))
+                {
+                    exact->exact_coordinator_watch_ready = false;
+                    exact->pending_exact_coordinator_watch_start_stamp = 0;
+                }
+            }
+        }
+        catch (...) {
+        }
     }
     else if (m_windows_native ==
                  Windows_native_ownership::native_observer_pending)
@@ -2981,6 +3338,8 @@ Managed_process::~Managed_process()
 {
     m_runtime_lifetime->close_owner_callback_admission_and_wait();
     stop_lifeline_watcher();
+    stop_exact_coordinator_watch();
+    stop_member_lifecycle_dispatcher();
 
 #ifndef _WIN32
     // SIGCHLD publication runs under the shared dispatch lock. Wait for any
@@ -3556,6 +3915,14 @@ void Managed_process::init(int argc, const char* const* argv)
                 ", while this process was built with " + detail::abi_description() +
                 ". Mixing toolchains (for example MSVC and MinGW) is not supported.");
         }
+
+        const auto run_marker = read_run_marker(
+            run_marker_path(std::filesystem::path(m_directory)));
+        if (run_marker) {
+            prepare_exact_coordinator_watch(
+                run_marker->pid,
+                run_marker->start_stamp);
+        }
     }
 
     const auto ring_occurrence = external_attach_token_arg.empty()
@@ -3715,6 +4082,23 @@ void Managed_process::init(int argc, const char* const* argv)
 
     m_communication_state = COMMUNICATION_RUNNING;
     m_start_stop_mutex.unlock();
+
+    if (!coordinator_is_local && m_coordinator_watch_prepared) {
+        bool watch_registered = false;
+        try {
+            watch_registered =
+                Coordinator::rpc_register_exact_coordinator_watch(
+                    s_coord_id,
+                    m_instance_id,
+                    s_recovery_occurrence,
+                    m_process_start_stamp);
+        }
+        catch (...) {
+        }
+        if (!watch_registered) {
+            stop_exact_coordinator_watch();
+        }
+    }
 
     if (!external_attach_token_arg.empty()) {
         auto handle = Coordinator::rpc_async_claim_external_process_invitation(
@@ -4519,6 +4903,14 @@ Managed_process::detach_child_custody_until(
     if (!custody || !s_coord) {
         return Detach_result::NOT_STARTED;
     }
+    if (m_process_start_stamp == 0) {
+        return Detach_result::NOT_STARTED;
+    }
+    const auto exact_coordinator = query_process_start_stamp(
+        static_cast<uint32_t>(m_pid));
+    if (!exact_coordinator || *exact_coordinator != m_process_start_stamp) {
+        return Detach_result::NOT_STARTED;
+    }
 
     std::unique_lock<std::mutex> admission_lock(
         detail::s_teardown_admission_mutex, std::defer_lock);
@@ -4654,6 +5046,9 @@ Managed_process::detach_child_custody_until(
             process_iid, occurrence_number);
         if (!exact || !custody->release_state.open())
         {
+            return Detach_result::CONFLICT;
+        }
+        if (!exact->exact_coordinator_watch_ready) {
             return Detach_result::CONFLICT;
         }
         recovery_requested = custody->recovery_requested;
@@ -5362,6 +5757,56 @@ inline void Managed_process::note_child_initialization_complete(
         occurrence->initialization_reservation_active = false;
     }
     custody->changed.notify_all();
+}
+
+inline bool Managed_process::note_child_exact_coordinator_watch_ready(
+    uint64_t          custody_identity,
+    instance_id_type process_instance_id,
+    uint32_t         occurrence_number,
+    uint64_t         process_start_stamp)
+{
+    const auto token = child_custody_occurrence_token_exact(
+        custody_identity,
+        process_instance_id,
+        occurrence_number);
+    auto custody = token.custody.lock();
+    if (!custody || process_start_stamp == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    auto* exact = custody->find_occurrence_locked(
+        process_instance_id, occurrence_number);
+    if (!exact) {
+        return false;
+    }
+    if (exact->native.running()) {
+        if (!exact->native.start_stamp_available() ||
+            exact->native.start_stamp() != process_start_stamp)
+        {
+            return false;
+        }
+        exact->exact_coordinator_watch_ready = true;
+        exact->pending_exact_coordinator_watch_start_stamp = 0;
+    }
+    else {
+        // A fast child may complete its own initialization before the owner
+        // commits native custody. Preserve only the authenticated exact claim;
+        // native handoff validates the start stamp before detach can proceed.
+        if (exact->setup !=
+                detail::Managed_child_occurrence_record::setup_state::pending ||
+            !exact->native.confirm_absent() ||
+            (exact->pending_exact_coordinator_watch_start_stamp != 0 &&
+             exact->pending_exact_coordinator_watch_start_stamp !=
+                 process_start_stamp))
+        {
+            return false;
+        }
+        exact->pending_exact_coordinator_watch_start_stamp =
+            process_start_stamp;
+    }
+    custody->changed.notify_all();
+    return true;
 }
 
 inline void Managed_process::mark_child_coordinator_initialization_complete(
@@ -6482,6 +6927,12 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             result.failure.message =
                 "OS process creation returned without a bindable native identity";
         }
+        if (result.os_process_created) {
+            detail::managed_child_failure_for_test(
+                detail::test_hooks::k_managed_child_before_native_handoff,
+                s.piid,
+                s.occurrence);
+        }
 
 #ifdef _WIN32
         if (result.os_process_created) {
@@ -6910,6 +7361,12 @@ void Managed_process::pause()
 inline
 void Managed_process::stop()
 {
+    m_must_stop.store(true, std::memory_order_release);
+    quiesce_communication();
+}
+
+inline void Managed_process::quiesce_communication()
+{
     std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
 
     // stop() might be called explicitly from one of the handlers, or from the
@@ -6918,8 +7375,6 @@ void Managed_process::stop()
     if (m_communication_state == COMMUNICATION_STOPPED) {
         return;
     }
-
-    m_must_stop.store(true, std::memory_order_release);
 
     {
         Dispatch_shared_lock readers_lock(m_readers_mutex);
@@ -7306,6 +7761,163 @@ inline void Managed_process::join_completed_lifecycle_workers()
     }
 }
 
+inline bool Managed_process::ensure_member_lifecycle_dispatcher() noexcept
+{
+    std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+    if (m_member_lifecycle_thread.joinable()) {
+        return !m_member_lifecycle_stopping;
+    }
+    if (m_member_lifecycle_stopping) {
+        return false;
+    }
+    try {
+        m_member_lifecycle_thread = std::thread(
+            [this]() { run_member_lifecycle_dispatcher(); });
+    }
+    catch (...) {
+        return false;
+    }
+    return true;
+}
+
+inline bool Managed_process::set_member_lifecycle_handler(
+    detail::Member_lifecycle_handler handler)
+{
+    if (handler && !ensure_member_lifecycle_dispatcher()) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+        if (m_member_lifecycle_stopping) {
+            return false;
+        }
+        m_member_lifecycle_handler = std::move(handler);
+        if (m_runtime_lifetime->m_lifeline_observation.load(
+                std::memory_order_acquire) ==
+                detail::Lifeline_observation::DETACHED &&
+            !m_lifeline_release_delivered)
+        {
+            m_lifeline_release_pending = true;
+        }
+    }
+    m_member_lifecycle_changed.notify_all();
+    return true;
+}
+
+inline void Managed_process::note_lifeline_released(
+    const std::shared_ptr<const detail::Managed_process_lifetime>&
+        runtime_lifetime)
+{
+    if (runtime_lifetime != m_runtime_lifetime) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+        if (m_member_lifecycle_stopping || m_lifeline_release_delivered) {
+            return;
+        }
+        m_lifeline_release_pending = true;
+    }
+    m_member_lifecycle_changed.notify_all();
+}
+
+inline void Managed_process::queue_member_coordinator_departure(
+    const std::shared_ptr<const detail::Managed_process_lifetime>&
+        runtime_lifetime)
+{
+    if (runtime_lifetime != m_runtime_lifetime) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+        if (m_member_lifecycle_stopping || m_member_host_departure_admitted ||
+            m_coordinator_departure_pending ||
+            m_coordinator_departure_delivered)
+        {
+            return;
+        }
+        m_coordinator_departure_pending = true;
+    }
+    m_member_lifecycle_changed.notify_all();
+}
+
+inline void Managed_process::admit_member_host_departure() noexcept
+{
+    std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+    m_member_host_departure_admitted = true;
+    m_coordinator_departure_pending = false;
+}
+
+inline void Managed_process::run_member_lifecycle_dispatcher() noexcept
+{
+    while (true) {
+        detail::Member_lifecycle_handler handler;
+        detail::Member_lifecycle_event event;
+        {
+            std::unique_lock<std::mutex> lock(m_member_lifecycle_mutex);
+            m_member_lifecycle_changed.wait(lock, [this]() {
+                return m_member_lifecycle_stopping ||
+                    (m_member_lifecycle_handler &&
+                     (m_lifeline_release_pending ||
+                      m_coordinator_departure_pending));
+            });
+            if (m_member_lifecycle_stopping) {
+                return;
+            }
+            handler = m_member_lifecycle_handler;
+            if (m_lifeline_release_pending) {
+                m_lifeline_release_pending = false;
+                m_lifeline_release_delivered = true;
+                event.kind =
+                    detail::Member_lifecycle_event_kind::LIFELINE_RELEASED;
+            }
+            else {
+                m_coordinator_departure_pending = false;
+                m_coordinator_departure_delivered = true;
+                event.kind = detail::Member_lifecycle_event_kind::
+                    COORDINATOR_DEPARTED;
+                event.cause = m_coordinator_departure_cause.load(
+                    std::memory_order_acquire);
+            }
+        }
+
+        const auto lifetime = m_runtime_lifetime;
+        if (!lifetime->enter_owner_callback()) {
+            continue;
+        }
+        const bool previous = detail::tl_in_member_lifecycle_callback;
+        detail::tl_in_member_lifecycle_callback = true;
+        try {
+            handler(event);
+        }
+        catch (const std::exception& error) {
+            Log_stream(log_level::error)
+                << "Member lifecycle callback threw: " << error.what() << '\n';
+        }
+        catch (...) {
+            Log_stream(log_level::error)
+                << "Member lifecycle callback threw an unknown exception\n";
+        }
+        detail::tl_in_member_lifecycle_callback = previous;
+        lifetime->leave_owner_callback();
+    }
+}
+
+inline void Managed_process::stop_member_lifecycle_dispatcher() noexcept
+{
+    {
+        std::lock_guard<std::mutex> lock(m_member_lifecycle_mutex);
+        m_member_lifecycle_stopping = true;
+        m_member_lifecycle_handler = {};
+        m_lifeline_release_pending = false;
+        m_coordinator_departure_pending = false;
+    }
+    m_member_lifecycle_changed.notify_all();
+    if (m_member_lifecycle_thread.joinable()) {
+        m_member_lifecycle_thread.join();
+    }
+}
+
 #ifdef _WIN32
 inline bool Managed_process::settle_disowned_windows_observer(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
@@ -7385,6 +7997,25 @@ inline void Managed_process::coordinator_departed(
     detail::coordinator_departure_pre_rpc_unblock_for_test();
     unblock_rpc(process_of(s_coord_id));
     if (role != detail::Member_lifetime_role::COORDINATOR_BOUND) {
+        Managed_process* const exact_owner = this;
+        const std::weak_ptr<const detail::Managed_process_lifetime>
+            weak_lifetime = runtime_lifetime;
+        run_after_current_handler([exact_owner, weak_lifetime]() {
+            const auto lifetime = weak_lifetime.lock();
+            if (!lifetime || !lifetime->enter_owner_callback()) {
+                return;
+            }
+            try {
+                exact_owner->quiesce_communication();
+                exact_owner->queue_member_coordinator_departure(
+                    lifetime);
+            }
+            catch (...) {
+                lifetime->leave_owner_callback();
+                throw;
+            }
+            lifetime->leave_owner_callback();
+        });
         return;
     }
 

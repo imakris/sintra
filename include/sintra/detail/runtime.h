@@ -583,7 +583,11 @@ inline bool finalize_impl()
                 s_coord->begin_shutdown();
                 flush_seq = s_coord->begin_process_draining(s_mproc_id);
             }
-            else if (!s_mproc->m_must_stop.load(std::memory_order_acquire)) {
+            else if (!s_mproc->m_must_stop.load(std::memory_order_acquire) &&
+                s_mproc->m_coordinator_departure_cause.load(
+                    std::memory_order_acquire) ==
+                detail::Coordinator_departure_cause::NONE)
+            {
                 try {
                     auto handle = Coordinator::rpc_async_begin_process_draining(
                         s_coord_id,
@@ -751,9 +755,11 @@ inline void reset_lifecycle_teardown_to_idle()
 
 inline void validate_leave_context()
 {
-    if (tl_in_handler_dispatch || tl_in_post_handler()) {
+    if (tl_in_handler_dispatch || tl_in_post_handler() ||
+        detail::tl_in_member_lifecycle_callback)
+    {
         throw std::logic_error(
-            "sintra::leave() must not be called from a message handler or post-handler callback.");
+            "sintra::leave() must not be called from a Sintra callback.");
     }
 }
 
@@ -1031,6 +1037,9 @@ inline bool shutdown(const shutdown_options& options)
 inline bool leave()
 {
     detail::validate_leave_context();
+    if (s_mproc) {
+        s_mproc->admit_member_host_departure();
+    }
     detail::close_teardown_admission_and_claim_state(
         detail::shutdown_protocol_state::local_departure_entered,
         "sintra::leave()");

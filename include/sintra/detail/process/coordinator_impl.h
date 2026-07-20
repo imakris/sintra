@@ -1386,7 +1386,11 @@ inline instance_id_type Coordinator::publish_transceiver_with_reader_identity(
         set_collective_shutdown_state(process_iid, 0);
         set_draining_state(process_iid, 0);
 
-        return true_sequence(true);
+        // A managed child already has a prepared reader and authenticated
+        // custody identity. Its publication notification must not depend on
+        // whether the child or the owner's native handoff wins this race.
+        // Unowned/joined processes retain the initialization delay.
+        return true_sequence(!reader_identity.is_managed_child());
     }
     else {
         return invalid_instance_id;
@@ -2650,6 +2654,25 @@ void Coordinator::mark_initialization_complete(instance_id_type process_iid)
     if (s_mproc) {
         s_mproc->note_child_initialization_complete(custody_occurrence);
     }
+}
+
+inline bool Coordinator::register_exact_coordinator_watch(
+    instance_id_type process_iid,
+    uint32_t         occurrence,
+    uint64_t         process_start_stamp)
+{
+    if (!s_mproc || !s_tl_current_message || process_start_stamp == 0 ||
+        process_of(s_tl_current_message->sender_instance_id) != process_iid ||
+        s_tl_current_message->managed_child_custody_identity == 0 ||
+        s_tl_current_message->managed_child_occurrence != occurrence)
+    {
+        return false;
+    }
+    return s_mproc->note_child_exact_coordinator_watch_ready(
+        s_tl_current_message->managed_child_custody_identity,
+        process_iid,
+        occurrence,
+        process_start_stamp);
 }
 
 

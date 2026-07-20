@@ -57,6 +57,7 @@ std::atomic<sintra::instance_id_type> s_hook_iid{
     sintra::invalid_instance_id};
 std::atomic<unsigned> s_before_commit{0};
 std::atomic<unsigned> s_after_commit{0};
+fs::path s_pending_watch_ready_marker;
 
 fs::path marker(const fs::path& directory, std::string_view name)
 {
@@ -72,6 +73,27 @@ bool inject_detach_write_failure(
         std::string_view(stage) ==
             sintra::detail::test_hooks::k_managed_child_fail_detach_write &&
         process_iid == s_failure_iid.load(std::memory_order_acquire);
+}
+
+bool hold_native_handoff_until_watch_ready(
+    const char* stage,
+    sintra::instance_id_type process_iid,
+    std::uint32_t occurrence) noexcept
+{
+    if (!stage || occurrence != 0 ||
+        process_iid != s_hook_iid.load(std::memory_order_acquire) ||
+        std::string_view(stage) !=
+            sintra::detail::test_hooks::k_managed_child_before_native_handoff)
+    {
+        return false;
+    }
+    try {
+        return !sintra::test::wait_for_file(
+            s_pending_watch_ready_marker, k_step_timeout, k_poll_interval);
+    }
+    catch (...) {
+        return true;
+    }
 }
 
 void count_detach_stage(
@@ -149,6 +171,35 @@ int run_child(
         return 2;
     }
 
+    std::atomic<unsigned> lifeline_events{0};
+    std::atomic<unsigned> departure_events{0};
+    std::atomic<bool> callback_thread_valid{true};
+    std::atomic<bool> callback_leave_rejected{false};
+    const auto control_thread = std::this_thread::get_id();
+    if (!sintra::s_mproc->set_member_lifecycle_handler(
+            [&](const sintra::detail::Member_lifecycle_event& event) {
+                if (std::this_thread::get_id() == control_thread) {
+                    callback_thread_valid.store(false, std::memory_order_release);
+                }
+                if (event.kind == sintra::detail::Member_lifecycle_event_kind::
+                        LIFELINE_RELEASED)
+                {
+                    lifeline_events.fetch_add(1, std::memory_order_release);
+                    return;
+                }
+                departure_events.fetch_add(1, std::memory_order_release);
+                try {
+                    (void)sintra::leave();
+                }
+                catch (const std::logic_error&) {
+                    callback_leave_rejected.store(
+                        true, std::memory_order_release);
+                }
+            }))
+    {
+        return 7;
+    }
+
     sintra::Coordinator::rpc_mark_initialization_complete(
         sintra::s_coord_id, sintra::s_mproc_id);
     sintra::enable_recovery();
@@ -168,7 +219,29 @@ int run_child(
                 std::memory_order_acquire) ==
                 sintra::detail::Member_lifetime_role::DETACHED;
     }, k_step_timeout);
-    if (!detached || !write_complete_file(
+    const bool release_delivered = wait_until([&] {
+        return lifeline_events.load(std::memory_order_acquire) == 1;
+    }, k_step_timeout);
+    const auto lifetime = sintra::s_mproc->m_runtime_lifetime;
+    sintra::s_mproc->coordinator_departed(
+        sintra::detail::Coordinator_departure_cause::UNPUBLISHED,
+        lifetime);
+    sintra::s_mproc->coordinator_departed(
+        sintra::detail::Coordinator_departure_cause::SIGNALED_CRASH,
+        lifetime);
+    const bool departure_delivered = wait_until([&] {
+        return departure_events.load(std::memory_order_acquire) == 1;
+    }, k_step_timeout);
+    const bool communication_quiesced =
+        sintra::s_mproc->m_communication_state ==
+            sintra::Managed_process::COMMUNICATION_STOPPED &&
+        !sintra::s_mproc->m_must_stop.load(std::memory_order_acquire);
+    if (!detached || !release_delivered || !departure_delivered ||
+        lifeline_events.load(std::memory_order_acquire) != 1 ||
+        departure_events.load(std::memory_order_acquire) != 1 ||
+        !callback_thread_valid.load(std::memory_order_acquire) ||
+        !callback_leave_rejected.load(std::memory_order_acquire) ||
+        !communication_quiesced || !write_complete_file(
             marker(directory, k_child_detached), "detached=1\n") ||
         !sintra::test::wait_for_file(
             marker(directory, k_child_leave), k_child_timeout, k_poll_interval) ||
@@ -285,14 +358,33 @@ bool check_committed_detach(
     s_before_commit.store(0, std::memory_order_release);
     s_after_commit.store(0, std::memory_order_release);
 
+    s_pending_watch_ready_marker = marker(directory, k_success_ready);
+    Scoped_test_hook pending_watch_hook(
+        sintra::detail::test_hooks::s_managed_child_failure,
+        &hold_native_handoff_until_watch_ready);
     auto custody = spawn_child(binary_path, process_iid, k_success_child_flag);
     const auto child = wait_for_child_identity(
         marker(directory, k_success_ready), k_step_timeout, k_poll_interval);
+    pending_watch_hook.restore();
     const auto record = custody_record_for(process_iid);
     Managed_child_exit_capture exit;
     auto observation = custody.observe_latest_created_exit(
         [&](const sintra::Managed_child_exit& event) { exit.record(event); });
     const bool observation_registered = static_cast<bool>(observation);
+
+    const auto coordinator_start_stamp =
+        sintra::s_mproc->m_process_start_stamp;
+    sintra::s_mproc->m_process_start_stamp = 0;
+    const auto missing_identity = record
+        ? sintra::s_mproc->detach_child_custody_until(
+            record, std::chrono::steady_clock::now() + k_step_timeout)
+        : sintra::detail::Managed_child_detach_result::CONFLICT;
+    sintra::s_mproc->m_process_start_stamp = coordinator_start_stamp + 1;
+    const auto mismatched_identity = record
+        ? sintra::s_mproc->detach_child_custody_until(
+            record, std::chrono::steady_clock::now() + k_step_timeout)
+        : sintra::detail::Managed_child_detach_result::CONFLICT;
+    sintra::s_mproc->m_process_start_stamp = coordinator_start_stamp;
 
     const auto result = record
         ? sintra::s_mproc->detach_child_custody_until(
@@ -316,6 +408,8 @@ bool check_committed_detach(
         const auto disowned =
             sintra::s_mproc->m_disowned_child_custodies.find(record->identity);
         custody_facts = exact && exact->native.disowned() &&
+            exact->exact_coordinator_watch_ready &&
+            exact->pending_exact_coordinator_watch_start_stamp == 0 &&
             !record->recovery_requested &&
             sintra::s_mproc->m_cached_spawns.find(process_iid) ==
                 sintra::s_mproc->m_cached_spawns.end() &&
@@ -369,6 +463,10 @@ bool check_committed_detach(
     observation.subscription.unsubscribe();
 
     const bool valid = child && record && observation_registered &&
+        missing_identity ==
+            sintra::detail::Managed_child_detach_result::NOT_STARTED &&
+        mismatched_identity ==
+            sintra::detail::Managed_child_detach_result::NOT_STARTED &&
         result == sintra::detail::Managed_child_detach_result::DISOWNED &&
         duplicate == sintra::detail::Managed_child_detach_result::DISOWNED &&
         s_before_commit.load(std::memory_order_acquire) == 1 &&

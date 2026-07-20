@@ -49,6 +49,7 @@ namespace detail {
         begin_process_draining,
         join_swarm,
         claim_external_process_invitation,
+        register_exact_coordinator_watch,
 
         // EXPLICITLY DEFINED SIGNALS
         //instance_invalidated, // sent by Transceiver on destruction

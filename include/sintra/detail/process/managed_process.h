@@ -642,6 +642,8 @@ struct Managed_child_occurrence_record
     instance_id_type           process_instance_id = invalid_instance_id;
     setup_state                setup = setup_state::pending;
     bool                       initialization_reservation_active = false;
+    bool                       exact_coordinator_watch_ready = false;
+    uint64_t                   pending_exact_coordinator_watch_start_stamp = 0;
     Managed_child_transport_retirement
                                transport;
     Managed_child_native_authority
@@ -1292,6 +1294,7 @@ struct Managed_process: Derived_transceiver<Managed_process>
 
     // Stops the readers and causes their threads to exit.
     void stop();
+    void quiesce_communication();
 
 
     void wait_for_stop();
@@ -1416,6 +1419,22 @@ struct Managed_process: Derived_transceiver<Managed_process>
         detail::Coordinator_departure_cause cause,
         const std::shared_ptr<const detail::Managed_process_lifetime>&
             runtime_lifetime);
+
+    bool prepare_exact_coordinator_watch(
+        uint32_t coordinator_pid,
+        uint64_t coordinator_start_stamp) noexcept;
+    bool activate_exact_coordinator_watch(
+        const std::shared_ptr<const detail::Managed_process_lifetime>&
+            runtime_lifetime) noexcept;
+    void stop_exact_coordinator_watch() noexcept;
+
+    bool set_member_lifecycle_handler(
+        detail::Member_lifecycle_handler handler);
+    void note_lifeline_released(
+        const std::shared_ptr<const detail::Managed_process_lifetime>&
+            runtime_lifetime);
+    void admit_member_host_departure() noexcept;
+    void stop_member_lifecycle_dispatcher() noexcept;
 
     void start_lifeline_watcher(
         const Lifetime_policy& policy,
@@ -1544,6 +1563,36 @@ struct Managed_process: Derived_transceiver<Managed_process>
     int                                 m_lifeline_cancel_write = -1;
 #endif
 
+    std::mutex                          m_coordinator_watch_mutex;
+    std::thread                         m_coordinator_watcher;
+    std::atomic<bool>                   m_coordinator_watch_cancelled{false};
+    bool                                m_coordinator_watch_prepared = false;
+    bool                                m_coordinator_watch_already_gone = false;
+#ifdef _WIN32
+    uintptr_t                           m_coordinator_watch_process = 0;
+    uintptr_t                           m_coordinator_watch_cancel = 0;
+#else
+    int                                 m_coordinator_watch_native = -1;
+    int                                 m_coordinator_watch_cancel_read = -1;
+    int                                 m_coordinator_watch_cancel_write = -1;
+#endif
+
+    std::mutex                          m_member_lifecycle_mutex;
+    std::condition_variable             m_member_lifecycle_changed;
+    std::thread                         m_member_lifecycle_thread;
+    detail::Member_lifecycle_handler    m_member_lifecycle_handler;
+    bool                                m_member_lifecycle_stopping = false;
+    bool                                m_member_host_departure_admitted = false;
+    bool                                m_lifeline_release_pending = false;
+    bool                                m_lifeline_release_delivered = false;
+    bool                                m_coordinator_departure_pending = false;
+    bool                                m_coordinator_departure_delivered = false;
+    bool ensure_member_lifecycle_dispatcher() noexcept;
+    void run_member_lifecycle_dispatcher() noexcept;
+    void queue_member_coordinator_departure(
+        const std::shared_ptr<const detail::Managed_process_lifetime>&
+            runtime_lifetime);
+
     Spawn_result spawn_swarm_process(
         const Spawn_swarm_process_args& ssp_args,
         detail::Managed_child_launch_attempt& launch_attempt);
@@ -1597,6 +1646,11 @@ struct Managed_process: Derived_transceiver<Managed_process>
         uint32_t         occurrence) const;
     void note_child_initialization_complete(
         const detail::Managed_child_occurrence_token& token);
+    bool note_child_exact_coordinator_watch_ready(
+        uint64_t          custody_identity,
+        instance_id_type process_instance_id,
+        uint32_t         occurrence,
+        uint64_t         process_start_stamp);
     void mark_child_coordinator_initialization_complete(
         Coordinator* coordinator,
         instance_id_type process_instance_id);
