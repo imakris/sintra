@@ -466,9 +466,21 @@ inline bool env_key_equal(const std::string& lhs, const std::string& rhs)
 }
 
 #ifdef _WIN32
+inline int compare_env_keys(const std::wstring& lhs, const std::wstring& rhs)
+{
+    const auto lhs_key = env_key_of(lhs);
+    const auto rhs_key = env_key_of(rhs);
+    return CompareStringOrdinal(
+        lhs_key.c_str(),
+        -1,
+        rhs_key.c_str(),
+        -1,
+        TRUE);
+}
+
 inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
 {
-    return _wcsicmp(lhs.c_str(), rhs.c_str()) == 0;
+    return compare_env_keys(lhs, rhs) == CSTR_EQUAL;
 }
 #endif
 
@@ -547,12 +559,7 @@ inline std::vector<wchar_t> build_environment_block(const std::vector<std::strin
         env_entries.begin(),
         env_entries.end(),
         [](const std::wstring& lhs, const std::wstring& rhs) {
-            return CompareStringOrdinal(
-                lhs.c_str(),
-                -1,
-                rhs.c_str(),
-                -1,
-                TRUE) == CSTR_LESS_THAN;
+            return compare_env_keys(lhs, rhs) == CSTR_LESS_THAN;
         });
 
     size_t total_chars = 1;

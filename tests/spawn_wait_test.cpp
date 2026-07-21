@@ -45,6 +45,9 @@ constexpr std::string_view k_env_worker_mode           = "SPAWN_WAIT_TEST_WORKER
 constexpr const char*      k_worker_instance_name      = "spawn_wait_dynamic_worker";
 constexpr const char*      k_nonexistent_instance_name = "nonexistent_instance_will_timeout";
 constexpr const char*      k_timeout_child_pid_file     = "timeout_child.pid";
+#ifdef _WIN32
+constexpr const char*      k_drive_environment_dir_name = "drive_environment_current_directory";
+#endif
 
 struct done_signal_t {};
 
@@ -93,6 +96,36 @@ int read_timeout_child_pid(const std::filesystem::path& shared_dir)
 }
 
 #ifdef _WIN32
+bool has_expected_drive_environment_entry(const std::filesystem::path& shared_dir)
+{
+    const auto expected_directory =
+        std::filesystem::absolute(shared_dir / k_drive_environment_dir_name);
+    const auto drive_name = expected_directory.root_name().wstring();
+    if (drive_name.size() != 2 || drive_name[1] != L':') {
+        return false;
+    }
+
+    const std::wstring expected_entry =
+        L"=" + drive_name + L"=" + expected_directory.wstring();
+    LPWCH raw_environment = GetEnvironmentStringsW();
+    if (!raw_environment) {
+        return false;
+    }
+
+    bool found = false;
+    for (const wchar_t* cursor = raw_environment; *cursor != L'\0'; ) {
+        const std::wstring entry(cursor);
+        if (entry == expected_entry) {
+            found = true;
+            break;
+        }
+        cursor += entry.size() + 1;
+    }
+
+    FreeEnvironmentStringsW(raw_environment);
+    return found;
+}
+
 bool wait_for_process_exit_or_terminate(int pid, std::chrono::milliseconds timeout)
 {
     if (pid <= 0) {
@@ -191,9 +224,17 @@ bool run_preinit_spawn_swarm_validation()
 }
 
 // Worker process entry point - registers itself with a name and waits
-int run_worker()
+int run_worker(const std::filesystem::path& shared_dir)
 {
     std::fprintf(stderr, "[WORKER] Starting dynamic worker\n");
+
+#ifdef _WIN32
+    if (!has_expected_drive_environment_entry(shared_dir)) {
+        std::fprintf(stderr,
+            "[WORKER] Expected Windows drive current-directory environment entry was not inherited\n");
+        return 1;
+    }
+#endif
 
     struct Worker_transceiver : sintra::Derived_transceiver<Worker_transceiver>
     {
@@ -377,6 +418,22 @@ int run_coordinator(const std::string& binary_path)
         sintra::Spawn_options spawn_options;
         spawn_options.binary_path            = binary_path;
         spawn_options.env_overrides.push_back(std::string(k_env_worker_mode) + "=1");
+#ifdef _WIN32
+        const auto drive_directory =
+            std::filesystem::absolute(shared.path() / k_drive_environment_dir_name);
+        std::filesystem::create_directories(drive_directory);
+        const auto drive_name = drive_directory.root_name().string();
+        if (drive_name.size() != 2 || drive_name[1] != ':') {
+            record_failure(
+                all_tests_passed,
+                failure_reason,
+                "Test 2: shared directory should have a Windows drive root");
+        }
+        else {
+            spawn_options.env_overrides.push_back(
+                "=" + drive_name + "=" + drive_directory.string());
+        }
+#endif
         spawn_options.readiness_instance_name = k_worker_instance_name;
 
         const auto custody = sintra::spawn_swarm_process(spawn_options);
@@ -459,7 +516,7 @@ int main(int argc, char* argv[])
     // If spawned by spawn_swarm_process in worker mode, run as worker
     if (is_spawned && is_worker) {
         sintra::init(argc, argv);
-        int result = run_worker();
+        int result = run_worker(shared.path());
         sintra::detail::finalize();
         return result;
     }
@@ -499,9 +556,11 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    std::ifstream in(result_path, std::ios::binary);
     std::string status;
-    in >> status;
+    {
+        std::ifstream in(result_path, std::ios::binary);
+        in >> status;
+    }
 
     // Cleanup
     shared.cleanup();

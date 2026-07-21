@@ -252,6 +252,10 @@ void test_windows_environment_block()
             contains_entry(L"PATH=C:\\changed-path"),
         k_failure_prefix,
         "ordinary Windows environment names should remain case-insensitive");
+    sintra::test::require_true(
+        env_key_equal(L"SINTRA_\u00c4_CASE", L"sintra_\u00e4_case"),
+        k_failure_prefix,
+        "Windows environment names should use locale-independent Unicode case matching");
     sintra::test::require_true(contains_entry(L"Ordinary=preserved"),
         k_failure_prefix,
         "an unrelated ordinary environment entry should be preserved");
@@ -260,7 +264,9 @@ void test_windows_environment_block()
         "SINTRA_ZZZ_ENVIRONMENT_ORDER=last",
         "=D:=D:\\ordered-d",
         "SINTRA_AAA_ENVIRONMENT_ORDER=first",
-        "=C:=C:\\ordered-c"
+        "=C:=C:\\ordered-c",
+        "SINTRA_ENVIRONMENT_PREFIX=short",
+        "SINTRA_ENVIRONMENT_PREFIX1=long"
     });
 
     std::vector<std::wstring> block_entries;
@@ -292,20 +298,41 @@ void test_windows_environment_block()
                 block_entries.end(),
         k_failure_prefix,
         "the final Windows block should contain the D drive entry once");
-    sintra::test::require_true(
-        std::is_sorted(
+    bool keys_are_sorted = true;
+    for (std::size_t i = 1; i < block_entries.size(); ++i) {
+        const auto lhs_key = env_key_of(block_entries[i - 1]);
+        const auto rhs_key = env_key_of(block_entries[i]);
+        const int comparison = CompareStringOrdinal(
+            lhs_key.c_str(),
+            -1,
+            rhs_key.c_str(),
+            -1,
+            TRUE);
+        if (comparison != CSTR_LESS_THAN && comparison != CSTR_EQUAL) {
+            keys_are_sorted = false;
+            break;
+        }
+    }
+    sintra::test::require_true(keys_are_sorted,
+        k_failure_prefix,
+        "a Windows Unicode environment block should be sorted by name");
+
+    auto find_block_key = [&](const std::wstring& key) {
+        return std::find_if(
             block_entries.begin(),
             block_entries.end(),
-            [](const std::wstring& lhs, const std::wstring& rhs) {
-                return CompareStringOrdinal(
-                    lhs.c_str(),
-                    -1,
-                    rhs.c_str(),
-                    -1,
-                    TRUE) == CSTR_LESS_THAN;
-            }),
+            [&](const std::wstring& entry) {
+                return env_key_equal(env_key_of(entry), key);
+            });
+    };
+    const auto prefix_key  = find_block_key(L"SINTRA_ENVIRONMENT_PREFIX");
+    const auto prefix1_key = find_block_key(L"SINTRA_ENVIRONMENT_PREFIX1");
+    sintra::test::require_true(
+        prefix_key != block_entries.end() &&
+            prefix1_key != block_entries.end() &&
+            prefix_key < prefix1_key,
         k_failure_prefix,
-        "a Windows Unicode environment block should be sorted case-insensitively");
+        "a name should sort before a longer name that shares its prefix");
 }
 #endif
 
