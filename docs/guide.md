@@ -291,8 +291,10 @@ struct Spawn_options
 `spawn_swarm_process`. `env_overrides` is merged with the inherited environment
 in order, with the later duplicate winning. Environment names are matched
 case-insensitively on Windows and case-sensitively on POSIX. Recovery
-occurrences reuse the same overrides. Entries are not syntax-validated, so
-provide them in `NAME=VALUE` form and do not rely on malformed input.
+occurrences reuse the same overrides. Windows drive current-directory entries,
+such as `=C:=C:\work`, are supported and retained in the sorted Unicode
+environment block. Other entries are not syntax-validated, so provide them in
+`NAME=VALUE` form and do not rely on malformed input.
 
 ### `sintra::Lifetime_policy`
 

@@ -159,7 +159,9 @@ Contract:
   `NAME=VALUE` form. The child inherits the current environment and Sintra
   merges these entries in order. A later entry for the same name wins. Name
   matching is case-insensitive on Windows and case-sensitive on POSIX. The
-  same overrides are reused for recovery occurrences. Sintra does not validate
+  same overrides are reused for recovery occurrences. On Windows, drive
+  current-directory entries such as `=C:=C:\work` are supported and retained
+  in the sorted Unicode environment block. Sintra does not otherwise validate
   entry syntax; callers must not rely on malformed entries.
 - `process_instance_id` defaults to a fresh process instance id. Setting it
   pins the new process to a specific valid process id. Transceiver ids,

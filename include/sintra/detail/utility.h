@@ -432,7 +432,12 @@ inline std::string env_key_of(const char* entry)
         return {};
     }
     std::string value(entry);
+#ifdef _WIN32
+    const auto key_start = !value.empty() && value.front() == '=' ? 1u : 0u;
+    const auto pos = value.find('=', key_start);
+#else
     const auto pos = value.find('=');
+#endif
     if (pos == std::string::npos) {
         return value;
     }
@@ -442,7 +447,13 @@ inline std::string env_key_of(const char* entry)
 template <typename StringT, typename = std::enable_if_t<!std::is_array_v<StringT>>>
 inline StringT env_key_of(const StringT& entry)
 {
-    const auto pos = entry.find(typename StringT::value_type('='));
+    const auto separator = typename StringT::value_type('=');
+#ifdef _WIN32
+    const auto key_start = !entry.empty() && entry.front() == separator ? 1u : 0u;
+    const auto pos = entry.find(separator, key_start);
+#else
+    const auto pos = entry.find(separator);
+#endif
     if (pos == StringT::npos) {
         return entry;
     }
@@ -532,6 +543,17 @@ inline std::vector<wchar_t> build_environment_block(const std::vector<std::strin
     }
 
     merge_env_overrides(env_entries, override_entries);
+    std::sort(
+        env_entries.begin(),
+        env_entries.end(),
+        [](const std::wstring& lhs, const std::wstring& rhs) {
+            return CompareStringOrdinal(
+                lhs.c_str(),
+                -1,
+                rhs.c_str(),
+                -1,
+                TRUE) == CSTR_LESS_THAN;
+        });
 
     size_t total_chars = 1;
     for (const auto& entry : env_entries) {
