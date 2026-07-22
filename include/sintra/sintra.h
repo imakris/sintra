@@ -128,6 +128,20 @@
 namespace sintra {
 
 
+///\brief Return the process identity that sent the current transported RPC.
+///
+/// The value is the exact process instance id stamped on the RPC request.  It
+/// is valid only while an RPC handler is executing on the transported path and
+/// is restored correctly across nested handler calls.  Outside that scope,
+/// including a same-process direct `SINTRA_RPC` shortcut, this function returns
+/// `invalid_instance_id`.  A same-process `SINTRA_RPC_STRICT` call is
+/// transported and therefore exposes the local process instance id.
+inline instance_id_type current_rpc_caller() noexcept
+{
+    return detail::Scoped_rpc_caller::current();
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Barrier mode tags

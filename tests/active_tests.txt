@@ -98,6 +98,7 @@ ring_lifecycle_attachment_recovery_process_test         10
 rpc_append_test                                        100
 rpc_async_lifecycle_test                                10
 rpc_bounded_result_test                                  3
+rpc_caller_identity_test                                  1
 rpc_destruction_race_test                                3
 rpc_unavailable_typed_test                              10
 semaphore_high_contention_stress                        10

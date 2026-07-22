@@ -62,6 +62,7 @@ inline void process_reader_rpc_unblock_for_test(
 
 struct Outstanding_rpc_control;
 struct Process_message_reader;
+struct Transceiver;
 
 // Note: this should be a specialization of Message_reader (which does not exist), but for the sake
 // of simplicity and code coverage, the Message_reader was not implemented.
@@ -82,6 +83,40 @@ struct Process_message_reader;
 
 inline thread_local Message_prefix*  s_tl_current_message     = nullptr;
 inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
+
+namespace detail {
+
+class Scoped_rpc_caller
+{
+public:
+    static instance_id_type current() noexcept
+    {
+        return s_current;
+    }
+
+private:
+    friend struct ::sintra::Transceiver;
+
+    explicit Scoped_rpc_caller(instance_id_type caller) noexcept
+    :
+        m_previous(s_current)
+    {
+        s_current = caller;
+    }
+
+    ~Scoped_rpc_caller() noexcept
+    {
+        s_current = m_previous;
+    }
+
+    Scoped_rpc_caller(const Scoped_rpc_caller&) = delete;
+    Scoped_rpc_caller& operator=(const Scoped_rpc_caller&) = delete;
+
+    inline static thread_local instance_id_type s_current = invalid_instance_id;
+    instance_id_type m_previous;
+};
+
+} // namespace detail
 
 inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
 

@@ -1094,6 +1094,7 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
     catch (ex_type& e) { etid = (type_id_type)detail::reserved_id::ex_id; what = to_exception_string(e.what()); }
 
     try {
+        detail::Scoped_rpc_caller caller_scope(msg.sender_instance_id);
         vf.call();
     }
     SINTRA_CATCH_STD_EX_(std::invalid_argument,  std_invalid_argument)
@@ -1325,6 +1326,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
             if (!handle.guard) {
                 throw rpc_unavailable("Attempted to call an RPC on a target that is shutting down.");
             }
+            detail::Scoped_rpc_caller caller_scope(invalid_instance_id);
             return (handle.object->*RPCTC::mf())(std::forward<Args>(args)...);
         }
     }
