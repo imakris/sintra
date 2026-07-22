@@ -671,6 +671,12 @@ public:
 
 private:
 
+    template <
+        typename MESSAGE_T,
+        typename SENDER_T,
+        typename... Args>
+    void send_to_process(instance_id_type process_iid, Args&&... args);
+
     class Rpc_execution_guard
     {
     public:
@@ -822,6 +828,20 @@ struct Derived_transceiver: Parent
         void emit_global(Args&&... args)
     {
         base.send<MESSAGE_T, any_local_or_remote, SENDER_T>(std::forward<Args>(args)...);
+    }
+
+    /// Send a typed message to all matching slots in one exact process.
+    /// Delivery is fire-and-forget. A departed process drops the message.
+    /// Throws std::invalid_argument unless process_iid is a canonical process IID.
+    template <
+        typename MESSAGE_T,
+        typename SENDER_T = Transceiver_type,
+        typename... Args>
+        void emit_to_process(instance_id_type process_iid, Args&&... args)
+    {
+        base.send_to_process<MESSAGE_T, SENDER_T>(
+            process_iid,
+            std::forward<Args>(args)...);
     }
 
     /// @}

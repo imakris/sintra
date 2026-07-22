@@ -899,43 +899,58 @@ void Process_message_reader::request_reader_function()
                     (is_service_instance(m->receiver_instance_id) && s_coord) ||
                     (m->sender_instance_id == s_coord_id))
                 {
-                    // If addressed to a specified local receiver, this may only be an RPC call,
-                    // thus the named receiver must exist.
+                    // RPC return-handler IIDs are allocated by make_instance_id()
+                    // and can never have the process-IID transceiver component 1.
+                    // SINTRA_UNICAST continues to use invalid_instance_id.
+                    const bool process_targeted_event =
+                        detail::is_valid_process_instance_id(m->receiver_instance_id) &&
+                        m->function_instance_id == m->receiver_instance_id;
+                    if (process_targeted_event) {
+                        const instance_id_type sender_locality =
+                            is_local(m->sender_instance_id) ? any_local : any_remote;
+                        dispatch_event_handlers(
+                            *m,
+                            {m->sender_instance_id, sender_locality, any_local_or_remote});
+                    }
+                    else {
+                        // If addressed to a specified local receiver, this may
+                        // only be an RPC call, thus the named receiver must exist.
 
-                    // if the receiver registered handler, call the handler
-                    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-                    void (*handler_fn)(Message_prefix&);
-                    {
-                        auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
-                        auto it         = scoped_map.get().find(m->message_type_id);
-                        if (it == scoped_map.get().end()) {
-                            Log_stream(log_level::warning)
-                                << "Received RPC for unknown message type "
-                                << static_cast<unsigned long long>(m->message_type_id)
-                                << "; rejecting the request. "
-                                << diagnostic_summary() << "\n";
+                        // if the receiver registered handler, call the handler
+                        // Hold spinlock while accessing the iterator to prevent use-after-invalidation
+                        void (*handler_fn)(Message_prefix&);
+                        {
+                            auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
+                            auto it         = scoped_map.get().find(m->message_type_id);
+                            if (it == scoped_map.get().end()) {
+                                Log_stream(log_level::warning)
+                                    << "Received RPC for unknown message type "
+                                    << static_cast<unsigned long long>(m->message_type_id)
+                                    << "; rejecting the request. "
+                                    << diagnostic_summary() << "\n";
 
-                            const std::string reason     = "RPC function is not available.";
-                            auto*             placed_msg =
-                                s_mproc->m_out_rep_c->write<Transceiver::exception>(
-                                    vb_size<Transceiver::exception>(reason),
-                                    reason);
-                            placed_msg->sender_instance_id   = m->receiver_instance_id;
-                            placed_msg->receiver_instance_id = m->sender_instance_id;
-                            placed_msg->function_instance_id = m->function_instance_id;
-                            placed_msg->exception_type_id =
-                                (type_id_type)detail::reserved_id::sintra_rpc_unavailable;
-                            s_mproc->m_out_rep_c->done_writing();
-                            publish_request_progress(m_in_req_c->get_message_reading_sequence());
-                            continue;
+                                const std::string reason     = "RPC function is not available.";
+                                auto*             placed_msg =
+                                    s_mproc->m_out_rep_c->write<Transceiver::exception>(
+                                        vb_size<Transceiver::exception>(reason),
+                                        reason);
+                                placed_msg->sender_instance_id   = m->receiver_instance_id;
+                                placed_msg->receiver_instance_id = m->sender_instance_id;
+                                placed_msg->function_instance_id = m->function_instance_id;
+                                placed_msg->exception_type_id =
+                                    (type_id_type)detail::reserved_id::sintra_rpc_unavailable;
+                                s_mproc->m_out_rep_c->done_writing();
+                                publish_request_progress(m_in_req_c->get_message_reading_sequence());
+                                continue;
+                            }
+
+                            // Copy the function pointer while holding the lock
+                            handler_fn = it->second;
+                            // Spinlock released here automatically when scoped_map goes out of scope
                         }
 
-                        // Copy the function pointer while holding the lock
-                        handler_fn = it->second;
-                        // Spinlock released here automatically when scoped_map goes out of scope
+                        (*handler_fn)(*m);
                     }
-
-                    (*handler_fn)(*m);
                 }
             }
         }

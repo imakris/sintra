@@ -648,6 +648,44 @@ void Transceiver::send(Args&&... args)
 }
 
 
+template <
+    typename MESSAGE_T,
+    typename SENDER_T,
+    typename... Args>
+void Transceiver::send_to_process(instance_id_type process_iid, Args&&... args)
+{
+    static_assert(
+        std::is_base_of_v<Message_prefix, MESSAGE_T>,
+        "Attempting to send something that is not a message.");
+
+    if (!detail::is_valid_process_instance_id(process_iid)) {
+        throw std::invalid_argument(
+            "emit_to_process() requires an exact process instance id.");
+    }
+
+    if (!s_mproc) {
+#ifndef NDEBUG
+        Log_stream(log_level::warning)
+            << "Attempted to emit message after teardown "
+               "or before sintra::init(); dropping.\n";
+#endif
+        return;
+    }
+
+    constexpr bool sender_capability =
+        is_same_v    < typename MESSAGE_T::exporter, void     > ||
+        is_base_of_v < typename MESSAGE_T::exporter, SENDER_T >;
+
+    static_assert(sender_capability, "This type of sender cannot send messages of this type.");
+
+    write_outbound_request<MESSAGE_T>(
+        m_instance_id,
+        process_iid,
+        process_iid,
+        std::forward<Args>(args)...);
+}
+
+
  //////////////////////////////////////////////////////////////////////////
 ///// BEGIN RPC ////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
