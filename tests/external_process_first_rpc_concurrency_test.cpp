@@ -97,7 +97,19 @@ bool wait_for_file(
 
 struct Blocking_ping_message : Ping_message
 {
-    using Ping_message::Ping_message;
+    explicit Blocking_ping_message(int value)
+    :
+        Ping_message(value)
+    {}
+
+    // Avoid Clang probing Message's forwarding constructor while synthesizing
+    // a derived copy constructor and treating the message itself as an argument.
+    Blocking_ping_message(const Blocking_ping_message& other)
+    :
+        Blocking_ping_message(
+            sintra::detail::get<0>(
+                static_cast<const sintra::detail::message_args<int>&>(other)))
+    {}
 
     static sintra::type_id_type id()
     {
