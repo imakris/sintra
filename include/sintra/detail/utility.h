@@ -432,7 +432,12 @@ inline std::string env_key_of(const char* entry)
         return {};
     }
     std::string value(entry);
+#ifdef _WIN32
+    const auto key_start = !value.empty() && value.front() == '=' ? 1u : 0u;
+    const auto pos = value.find('=', key_start);
+#else
     const auto pos = value.find('=');
+#endif
     if (pos == std::string::npos) {
         return value;
     }
@@ -442,7 +447,13 @@ inline std::string env_key_of(const char* entry)
 template <typename StringT, typename = std::enable_if_t<!std::is_array_v<StringT>>>
 inline StringT env_key_of(const StringT& entry)
 {
-    const auto pos = entry.find(typename StringT::value_type('='));
+    const auto separator = typename StringT::value_type('=');
+#ifdef _WIN32
+    const auto key_start = !entry.empty() && entry.front() == separator ? 1u : 0u;
+    const auto pos = entry.find(separator, key_start);
+#else
+    const auto pos = entry.find(separator);
+#endif
     if (pos == StringT::npos) {
         return entry;
     }
@@ -455,9 +466,21 @@ inline bool env_key_equal(const std::string& lhs, const std::string& rhs)
 }
 
 #ifdef _WIN32
+inline int compare_env_keys(const std::wstring& lhs, const std::wstring& rhs)
+{
+    const auto lhs_key = env_key_of(lhs);
+    const auto rhs_key = env_key_of(rhs);
+    return CompareStringOrdinal(
+        lhs_key.c_str(),
+        -1,
+        rhs_key.c_str(),
+        -1,
+        TRUE);
+}
+
 inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
 {
-    return _wcsicmp(lhs.c_str(), rhs.c_str()) == 0;
+    return compare_env_keys(lhs, rhs) == CSTR_EQUAL;
 }
 #endif
 
@@ -532,6 +555,12 @@ inline std::vector<wchar_t> build_environment_block(const std::vector<std::strin
     }
 
     merge_env_overrides(env_entries, override_entries);
+    std::sort(
+        env_entries.begin(),
+        env_entries.end(),
+        [](const std::wstring& lhs, const std::wstring& rhs) {
+            return compare_env_keys(lhs, rhs) == CSTR_LESS_THAN;
+        });
 
     size_t total_chars = 1;
     for (const auto& entry : env_entries) {

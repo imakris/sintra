@@ -144,7 +144,6 @@ void test_cstring_vector_empty()
         "Empty C_string_vector should have size 0");
 }
 
-#ifndef _WIN32
 void test_env_key_of()
 {
     using sintra::detail::env_key_of;
@@ -158,8 +157,18 @@ void test_env_key_of()
     sintra::test::require_true(env_key_of("A=B=C") == "A",
         k_failure_prefix,
         "env_key_of should split at first '='");
+
+#ifdef _WIN32
+    sintra::test::require_true(env_key_of("=C:=C:\\working") == "=C:",
+        k_failure_prefix,
+        "env_key_of should preserve a Windows drive pseudo-variable name");
+    sintra::test::require_true(env_key_of(std::wstring(L"=D:=D:\\working")) == L"=D:",
+        k_failure_prefix,
+        "env_key_of should preserve a wide Windows drive pseudo-variable name");
+#endif
 }
 
+#ifndef _WIN32
 void test_build_environment_entries()
 {
     using sintra::detail::build_environment_entries;
@@ -194,6 +203,136 @@ void test_build_environment_entries()
     sintra::test::require_true(found_override,
         k_failure_prefix,
         "override entry should be present");
+}
+#else
+void test_windows_environment_block()
+{
+    using sintra::detail::build_environment_block;
+    using sintra::detail::env_key_equal;
+    using sintra::detail::env_key_of;
+    using sintra::detail::merge_env_overrides;
+
+    std::vector<std::wstring> entries {
+        L"=C:=C:\\stale-c",
+        L"=c:=C:\\duplicate-stale-c",
+        L"=D:=D:\\retained-d",
+        L"Ordinary=preserved",
+        L"Path=C:\\stale-path"
+    };
+    const std::vector<std::wstring> overrides {
+        L"=C:=C:\\changed-c",
+        L"=E:=E:\\added-e",
+        L"PATH=C:\\changed-path"
+    };
+
+    merge_env_overrides(entries, overrides);
+
+    auto count_key = [&](const std::wstring& key) {
+        return std::count_if(entries.begin(), entries.end(), [&](const std::wstring& entry) {
+            return env_key_equal(env_key_of(entry), key);
+        });
+    };
+    auto contains_entry = [&](const std::wstring& expected) {
+        return std::find(entries.begin(), entries.end(), expected) != entries.end();
+    };
+
+    sintra::test::require_true(count_key(L"=C:") == 1 &&
+            contains_entry(L"=C:=C:\\changed-c"),
+        k_failure_prefix,
+        "a drive pseudo-variable override should remove stale same-key entries");
+    sintra::test::require_true(count_key(L"=D:") == 1 &&
+            contains_entry(L"=D:=D:\\retained-d"),
+        k_failure_prefix,
+        "overriding one drive pseudo-variable should retain other drive entries");
+    sintra::test::require_true(count_key(L"=E:") == 1 &&
+            contains_entry(L"=E:=E:\\added-e"),
+        k_failure_prefix,
+        "multiple drive pseudo-variables should coexist after merging overrides");
+    sintra::test::require_true(count_key(L"PATH") == 1 &&
+            contains_entry(L"PATH=C:\\changed-path"),
+        k_failure_prefix,
+        "ordinary Windows environment names should remain case-insensitive");
+    sintra::test::require_true(
+        env_key_equal(L"SINTRA_\u00c4_CASE", L"sintra_\u00e4_case"),
+        k_failure_prefix,
+        "Windows environment names should use locale-independent Unicode case matching");
+    sintra::test::require_true(contains_entry(L"Ordinary=preserved"),
+        k_failure_prefix,
+        "an unrelated ordinary environment entry should be preserved");
+
+    const auto block = build_environment_block({
+        "SINTRA_ZZZ_ENVIRONMENT_ORDER=last",
+        "=D:=D:\\ordered-d",
+        "SINTRA_AAA_ENVIRONMENT_ORDER=first",
+        "=C:=C:\\ordered-c",
+        "SINTRA_ENVIRONMENT_PREFIX=short",
+        "SINTRA_ENVIRONMENT_PREFIX1=long"
+    });
+
+    std::vector<std::wstring> block_entries;
+    for (const wchar_t* cursor = block.data(); *cursor != L'\0'; ) {
+        block_entries.emplace_back(cursor);
+        cursor += block_entries.back().size() + 1;
+    }
+
+    auto count_block_key = [&](const std::wstring& key) {
+        return std::count_if(
+            block_entries.begin(),
+            block_entries.end(),
+            [&](const std::wstring& entry) {
+                return env_key_equal(env_key_of(entry), key);
+            });
+    };
+
+    sintra::test::require_true(block.size() >= 2 &&
+            block[block.size() - 2] == L'\0' && block.back() == L'\0',
+        k_failure_prefix,
+        "a Windows Unicode environment block should be double-null terminated");
+    sintra::test::require_true(count_block_key(L"=C:") == 1 &&
+            std::find(block_entries.begin(), block_entries.end(), L"=C:=C:\\ordered-c") !=
+                block_entries.end(),
+        k_failure_prefix,
+        "the final Windows block should contain the changed C drive entry once");
+    sintra::test::require_true(count_block_key(L"=D:") == 1 &&
+            std::find(block_entries.begin(), block_entries.end(), L"=D:=D:\\ordered-d") !=
+                block_entries.end(),
+        k_failure_prefix,
+        "the final Windows block should contain the D drive entry once");
+    bool keys_are_sorted = true;
+    for (std::size_t i = 1; i < block_entries.size(); ++i) {
+        const auto lhs_key = env_key_of(block_entries[i - 1]);
+        const auto rhs_key = env_key_of(block_entries[i]);
+        const int comparison = CompareStringOrdinal(
+            lhs_key.c_str(),
+            -1,
+            rhs_key.c_str(),
+            -1,
+            TRUE);
+        if (comparison != CSTR_LESS_THAN && comparison != CSTR_EQUAL) {
+            keys_are_sorted = false;
+            break;
+        }
+    }
+    sintra::test::require_true(keys_are_sorted,
+        k_failure_prefix,
+        "a Windows Unicode environment block should be sorted by name");
+
+    auto find_block_key = [&](const std::wstring& key) {
+        return std::find_if(
+            block_entries.begin(),
+            block_entries.end(),
+            [&](const std::wstring& entry) {
+                return env_key_equal(env_key_of(entry), key);
+            });
+    };
+    const auto prefix_key  = find_block_key(L"SINTRA_ENVIRONMENT_PREFIX");
+    const auto prefix1_key = find_block_key(L"SINTRA_ENVIRONMENT_PREFIX1");
+    sintra::test::require_true(
+        prefix_key != block_entries.end() &&
+            prefix1_key != block_entries.end() &&
+            prefix_key < prefix1_key,
+        k_failure_prefix,
+        "a name should sort before a longer name that shares its prefix");
 }
 #endif
 
@@ -352,9 +491,11 @@ int main()
         test_cstring_vector_from_lvalue();
         test_cstring_vector_from_rvalue();
         test_cstring_vector_empty();
-#ifndef _WIN32
         test_env_key_of();
+#ifndef _WIN32
         test_build_environment_entries();
+#else
+        test_windows_environment_block();
 #endif
         test_spinlocked_umap_scoped_erase();
         test_process_utility_helpers();

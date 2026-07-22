@@ -333,9 +333,11 @@ if (launch.readiness_state == sintra::Managed_child_readiness_state::pending) {
 Environment overrides merge with the inherited environment in order; a later
 duplicate wins. Variable names are case-insensitive on Windows and
 case-sensitive on POSIX, and recovery occurrences reuse the same overrides.
-Entries are not syntax-validated, so provide `NAME=VALUE` strings. Custody
-status also retains occurrence-qualified `last_failure` diagnostics. Deadline
-expiry does not request release or cleanup and does not itself create a failure.
+Windows drive current-directory entries such as `=C:=C:\work` are also
+supported. Other entries are not syntax-validated, so provide `NAME=VALUE`
+strings. Custody status also retains occurrence-qualified `last_failure`
+diagnostics. Deadline expiry does not request release or cleanup and does not
+itself create a failure.
 Use `terminate_until()` to request cleanup explicitly. The custody handle's
 boolean conversion is the validity and acceptance fact; status reports typed
 readiness and release states. A
