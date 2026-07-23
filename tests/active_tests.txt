@@ -32,6 +32,7 @@ drain_wake_coordination_test                             5
 dummy_test                                               1
 exception_conversions_test                               5
 explicit_type_id_test                                    5
+external_process_first_rpc_concurrency_test              1
 external_process_invitation_admission_negative_test      1
 external_process_invitation_lifecycle_negative_test      1
 external_process_invitation_rejection_cleanup_test       1
@@ -111,6 +112,7 @@ shutdown_user_barrier_departure_test                     1
 spawn_detached_test                                     50
 spawn_wait_test                                         10
 spinlock_recovery_test                                   1
+targeted_process_message_test                            1
 teardown_targeted_rpc_exception_test                     5
 tls_post_handler_test                                   20
 tn_type_hash_test                                       10
