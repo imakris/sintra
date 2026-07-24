@@ -1171,6 +1171,11 @@ Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
     }
 #endif
 
+    // Dynamic type resolution may perform a nested RPC. Complete it before
+    // registering and locking this outer RPC state so process-unpublish
+    // cancellation cannot form a lock cycle with the nested RPC cleanup.
+    (void)MESSAGE_T::id();
+
     using return_type         = typename rpc_storage_type<typename MESSAGE_T::return_type>::type;
     using return_message_type = Message<Enclosure<return_type>, void, not_defined_type_id>;
 

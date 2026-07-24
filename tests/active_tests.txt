@@ -32,6 +32,7 @@ drain_wake_coordination_test                             5
 dummy_test                                               1
 exception_conversions_test                               5
 explicit_type_id_test                                    5
+external_process_first_rpc_concurrency_test              1
 external_process_invitation_admission_negative_test      1
 external_process_invitation_lifecycle_negative_test      1
 external_process_invitation_rejection_cleanup_test       1

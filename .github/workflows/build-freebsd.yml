@@ -43,6 +43,7 @@ jobs:
         with:
           release: "15.0"
           usesh: true
+          copyback: false
           envs: 'SINTRA_TEST_ITERATION_MULTIPLIER'
           prepare: |
             date +%s > /tmp/ci_start_time
