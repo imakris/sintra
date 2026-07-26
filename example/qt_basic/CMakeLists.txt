@@ -35,4 +35,5 @@ target_link_libraries(
         sintra
         sintra_dev_flags
         Qt6::Widgets
+        vnm_qt_dispatch::vnm_qt_dispatch
 )

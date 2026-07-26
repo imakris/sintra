@@ -139,6 +139,43 @@ option(SINTRA_BUILD_ACTIVE_TESTS_ONLY "Build only tests listed in tests/active_t
 option(SINTRA_BUILD_MANUAL_TESTS "Build Sintra manual/reproduction tests" OFF)
 option(SINTRA_BUILD_QT_EXAMPLES "Build Qt examples (requires Qt6 Widgets)" OFF)
 
+if(SINTRA_BUILD_EXAMPLES AND SINTRA_BUILD_QT_EXAMPLES)
+    find_package(Qt6 COMPONENTS Core Widgets QUIET)
+    if(TARGET Qt6::Widgets AND
+       NOT TARGET vnm_qt_dispatch::vnm_qt_dispatch)
+        include(FetchContent)
+        set(VNM_QT_DISPATCH_SOURCE_DIR "" CACHE PATH
+            "Optional path to a local vnm_qt_dispatch source checkout.")
+        if(VNM_QT_DISPATCH_SOURCE_DIR)
+            if(NOT EXISTS "${VNM_QT_DISPATCH_SOURCE_DIR}/CMakeLists.txt")
+                message(FATAL_ERROR
+                    "VNM_QT_DISPATCH_SOURCE_DIR does not contain a "
+                    "vnm_qt_dispatch CMakeLists.txt:\n"
+                    "  ${VNM_QT_DISPATCH_SOURCE_DIR}")
+            endif()
+            FetchContent_Declare(sintra_qt_dispatch
+                SOURCE_DIR "${VNM_QT_DISPATCH_SOURCE_DIR}"
+                BINARY_DIR
+                    "${CMAKE_BINARY_DIR}/_deps/vnm_qt_dispatch-build")
+        else()
+            FetchContent_Declare(sintra_qt_dispatch
+                GIT_REPOSITORY
+                    "https://github.com/Varinomics/vnm_qt_dispatch.git"
+                GIT_TAG master
+                GIT_SHALLOW FALSE
+                BINARY_DIR
+                    "${CMAKE_BINARY_DIR}/_deps/vnm_qt_dispatch-build")
+        endif()
+        FetchContent_MakeAvailable(sintra_qt_dispatch)
+    endif()
+
+    if(TARGET Qt6::Widgets AND
+       NOT TARGET vnm_qt_dispatch::vnm_qt_dispatch)
+        message(FATAL_ERROR
+            "vnm_qt_dispatch target is unavailable after dependency discovery.")
+    endif()
+endif()
+
 if(SINTRA_BUILD_EXAMPLES)
     add_subdirectory(example/sintra)
     if(SINTRA_BUILD_QT_EXAMPLES)

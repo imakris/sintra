@@ -101,7 +101,7 @@ example\qt_multi_cursor\run_multi_cursor.bat Release
 4. **Join Swarm**: `join_swarm()` spawns each window with a stable branch index
 5. **Recovery Hooks**: `set_recovery_policy()` and `set_recovery_runner()`
 6. **Lifecycle Callbacks**: `set_lifecycle_handler()` coordinates crash vs normal exit
-7. **Thread-safe UI Updates**: `post_to_ui()` helper using `QMetaObject::invokeMethod()` for safe Qt updates from Sintra handlers
+7. **Thread-safe UI Updates**: `post_to_ui()` helper using `vnm_qt_dispatch` for safe Qt updates from Sintra handlers
 
 ## Message Flow
 

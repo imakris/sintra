@@ -14,6 +14,7 @@
 #include "multi_cursor_common.h"
 
 #include <sintra/detail/logging.h>
+#include <vnm_qt_dispatch/vnm_qt_dispatch.h>
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -21,7 +22,6 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
@@ -45,14 +45,16 @@ template<typename Obj, typename Functor>
 void post_to_ui(Obj* obj, Functor&& fn)
 {
     QPointer<Obj> guard(obj);
-    QMetaObject::invokeMethod(
+    const auto result = vnm::qt::post(
         obj,
         [guard, fn = std::forward<Functor>(fn)]() mutable {
             if (guard) {
                 fn(guard.data());
             }
-        },
-        Qt::QueuedConnection);
+        });
+    if (result != vnm::qt::Post_result::QUEUED) {
+        qWarning("Sintra Qt example: Failed to queue a UI update.");
+    }
 }
 
 // Parse window_id from --branch_index (branch_index is 1-based)
