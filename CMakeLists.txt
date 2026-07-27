@@ -118,6 +118,7 @@ endif()
 add_library(sintra_dev_flags INTERFACE)
 if(MSVC)
     target_compile_options(sintra_dev_flags INTERFACE
+        /bigobj
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Z7>
     )
     target_link_options(sintra_dev_flags INTERFACE

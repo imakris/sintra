@@ -95,10 +95,11 @@ jobs:
       - name: Configure CMake
         run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded ${{ steps.flags.outputs.CMAKE_FLAGS }}
 
-      - name: Build
-        run: |
-          cmake --build build --config Debug --parallel ${{ env.BUILD_JOBS }}
-          cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
+      - name: Build Debug
+        run: cmake --build build --config Debug --parallel ${{ env.BUILD_JOBS }}
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
