@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -26,6 +27,12 @@ struct ack_a_t {};
 struct ack_b_t {};
 
 struct data_message_t
+{
+    int    value;
+    double score;
+};
+
+struct phase_two_message_t
 {
     int    value;
     double score;
@@ -68,7 +75,9 @@ int sender_a_process()
     const int    expected_value = 57;
     const double expected_score = 2.718;
 
-    sintra::world() << data_message_t{expected_value, expected_score};
+    for (int value = expected_value; value < expected_value + 2; ++value) {
+        sintra::world() << data_message_t{value, expected_score};
+    }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (std::chrono::steady_clock::now() < deadline && !got_ack.load(std::memory_order_acquire)) {
@@ -100,7 +109,7 @@ int sender_b_process()
     const int    expected_value = 91;
     const double expected_score = 1.414;
 
-    sintra::world() << data_message_t{expected_value, expected_score};
+    sintra::world() << phase_two_message_t{expected_value, expected_score};
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (std::chrono::steady_clock::now() < deadline && !got_ack.load(std::memory_order_acquire)) {
@@ -127,10 +136,9 @@ int receiver_process()
 
     auto msg = sintra::receive<data_message_t>(
         sintra::Typed_instance_id<sintra::Managed_process>(sender_a_id));
-    if (msg.value != 57) {
-        std::fprintf(stderr, "FAIL: expected filtered value 57, got %d\n", msg.value);
-        std::abort();
-    }
+    sintra::test::write_lines(
+        shared_dir / "received_value.txt",
+        {std::to_string(msg.value)});
     if (std::fabs(msg.score - 2.718) > 0.02) {
         std::fprintf(stderr, "FAIL: expected filtered score near 2.718, got %f\n", msg.score);
         std::abort();
@@ -139,8 +147,8 @@ int receiver_process()
 
     std::condition_variable second_cv;
     std::mutex second_mtx;
-    std::optional<data_message_t> second_message;
-    auto second_message_slot = sintra::activate_slot([&](data_message_t msg) {
+    std::optional<phase_two_message_t> second_message;
+    auto second_message_slot = sintra::activate_slot([&](phase_two_message_t msg) {
         std::lock_guard<std::mutex> lock(second_mtx);
         if (!second_message.has_value()) {
             second_message.emplace(std::move(msg));
@@ -150,7 +158,7 @@ int receiver_process()
 
     sintra::barrier("phase-two");
 
-    data_message_t other_msg{};
+    phase_two_message_t other_msg{};
     {
         std::unique_lock<std::mutex> lock(second_mtx);
         second_cv.wait(lock, [&] { return second_message.has_value(); });
@@ -187,7 +195,19 @@ int main(int argc, char* argv[])
     sintra::shutdown();
 
     if (is_coordinator) {
-        std::fprintf(stderr, "receive test PASSED\n");
+        const auto received_values =
+            sintra::test::read_lines(shared_dir_raii.path() / "received_value.txt");
+        const std::string failure_message = received_values.empty()
+            ? "receiver did not record a matching burst message"
+            : "receive() returned later burst value " + received_values.front();
+        const bool ok = sintra::test::assert_true(
+            received_values.size() == 1 && received_values.front() == "57",
+            "receive_test: ",
+            failure_message);
+        if (ok) {
+            std::fprintf(stderr, "receive test PASSED\n");
+        }
+        return ok ? 0 : 1;
     }
 
     return 0;

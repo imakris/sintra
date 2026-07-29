@@ -1796,8 +1796,10 @@ MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
     auto deactivator = activate_slot(
         [&](MESSAGE_T msg) {
             std::lock_guard<std::mutex> lock(mtx);
-            result.emplace(std::move(msg));
-            cv.notify_one();
+            if (!result.has_value()) {
+                result.emplace(std::move(msg));
+                cv.notify_one();
+            }
         },
         sender_id
     );
