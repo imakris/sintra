@@ -28,8 +28,8 @@ constexpr type_id_type make_user_type_id(type_id_type v);
 ```
 
 Use when:
-- Declaring a stable id range (for example, in a header shared across multiple
-  toolchains) and reserving ids inside the user range.
+- Declaring a stable id range (for example, in a header shared across
+  ABI-compatible builds) and reserving ids inside the user range.
 - Inspecting a `type_id_type` to decide whether it was produced by a
   user-pinned id macro versus an auto-assigned id.
 
@@ -46,6 +46,9 @@ Contract:
   at compile time by the explicit-id macros that use it.
 - `is_user_type_id(v)` returns `true` when `v` carries the user flag and is
   not the reserved sentinel `~type_id_type(0)`.
+- User-pinned ids stabilize identity only. They do not stabilize raw C++
+  object representation or allow a process to bypass Sintra's startup ABI
+  check.
 
 Threading and lifecycle:
 - All listed helpers are pure value-level operations. They are safe to call

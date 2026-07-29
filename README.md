@@ -446,10 +446,16 @@ Low-level lifecycle escape hatches and shutdown internals are documented in
 
 ### Optional explicit type ids
 
-Most users do not need explicit type ids as long as every process is built with the same
-toolchain and flags. When toolchains are mixed or there is a need to remove any doubt
-about type id stability, ids can be pinned explicitly for both transceivers and messages.
-The ids must remain unique and consistent across every process in the swarm.
+Most users do not need explicit type ids when every process uses the same compatible
+build. When ids must remain stable across ABI-compatible build boundaries, they can be
+pinned explicitly for both transceivers and messages. Explicit ids stabilize identity
+only. Every joining process must present exactly the coordinator's startup ABI token.
+That token contains compiler, standard-library, platform, and architecture identities
+plus the Sintra ring ABI version. A token mismatch, including between MSVC and MinGW
+builds, is rejected before that joining process opens its request/reply message rings.
+A matching token is required, but it does not guarantee that raw C++ object
+representations are interoperable; explicit ids provide no such guarantee either. The
+ids must remain unique and consistent across every process in the swarm.
 
 ```cpp
 struct Explicit_bus : sintra::Derived_transceiver<Explicit_bus>

@@ -2,9 +2,11 @@
 // Sintra library, example 7
 //
 // This example shows optional explicit type ids for transceivers and messages.
-// Most users can rely on the default type ids as long as every process is built
-// with the same toolchain. Use explicit ids when mixing toolchains or when you
-// want deterministic ids across builds.
+// Most users can rely on the default type ids when every process uses the same
+// compatible build. Explicit ids provide deterministic identity across
+// ABI-compatible builds. They do not stabilize raw C++ object representation,
+// enable mixed-toolchain interoperability, or bypass startup ABI-token
+// admission.
 //
 #include <sintra/sintra.h>
 #include <condition_variable>
@@ -13,7 +15,7 @@
 namespace {
 
 // Choose unique, stable values within your codebase; keep them consistent
-// across builds and toolchains when explicit ids are required.
+// across every participating ABI-compatible build.
 constexpr sintra::type_id_type k_bus_id  = 0x120;
 constexpr sintra::type_id_type k_ping_id = 0x121;
 

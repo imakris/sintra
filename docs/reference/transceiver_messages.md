@@ -53,9 +53,12 @@ Use when:
 - Slots must filter by message type rather than by raw value type.
 - The same payload must be addressable as `Outer::name` from any
   translation unit that sees the transceiver definition.
-- A pinned message id is required across mixed toolchains; in that case
-  use `SINTRA_MESSAGE_EXPLICIT(name, idv, ...)` and follow the
-  [Type IDs section](../guide.md#type-ids) of the guide.
+- A pinned message id is required when identity must remain stable across
+  ABI-compatible build boundaries; in that case use
+  `SINTRA_MESSAGE_EXPLICIT(name, idv, ...)` and follow the
+  [Type IDs section](../guide.md#type-ids) of the guide. Pinning the id does
+  not stabilize the payload's raw C++ representation or bypass the startup
+  ABI check.
 
 Contract:
 

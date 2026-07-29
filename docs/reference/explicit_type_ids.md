@@ -9,8 +9,8 @@ Summary:
 `SINTRA_TYPE_ID(idv)` and `SINTRA_MESSAGE_EXPLICIT(name, idv, fields...)` are
 the two macros for pinning a transceiver type id and a message type id to a
 user-chosen value. They emit the same `type_id_type` on every build that uses
-the same `idv`, which is useful when participating processes are built with
-different toolchains or otherwise need deterministic ids.
+the same `idv`, which makes identity deterministic across ABI-compatible
+builds.
 
 Signature:
 ```cpp
@@ -28,10 +28,10 @@ Both macros require:
 The generated id is `sintra::make_user_type_id(idv)` in both cases.
 
 Use when:
-- Multiple processes in a swarm are built with different compilers or build
-  configurations and the auto-assigned ids would otherwise diverge.
-- A protocol needs deterministic ids for serialisation, logging, or
-  cross-build compatibility within the application.
+- Multiple ABI-compatible builds would otherwise derive different
+  auto-assigned ids.
+- A protocol needs deterministic ids for serialisation metadata, logging, or
+  cross-build identity within an ABI-compatible application.
 
 Contract:
 - `SINTRA_TYPE_ID(idv)` defines a static `sintra_type_id()` member returning
@@ -42,6 +42,17 @@ Contract:
   requires the surrounding type to be a `Derived_transceiver`, since the macro
   emits a static assertion that ties the message to the enclosing
   `Transceiver_type`.
+- Explicit ids stabilize message and transceiver identity only. They do not
+  stabilize raw C++ object representation, including size, alignment, or
+  padding.
+- Every joining process must present exactly the coordinator's startup ABI
+  token. That token contains compiler, standard-library, platform, and
+  architecture identities plus the Sintra ring ABI version.
+- A token mismatch, including between MSVC and MinGW builds, is rejected
+  before that joining process opens its request/reply message rings. A
+  matching token is required, but it does not guarantee that raw C++ object
+  representations are interoperable; explicit ids provide no such guarantee
+  either.
 - The application chooses unique values within its own codebase. The macros
   do not coordinate values for you.
 - `is_user_type_id(...)` returns `true` for ids produced by either macro.

@@ -28,8 +28,9 @@ SINTRA_UNICAST(method)
 Use when:
 
 - `SINTRA_TYPE_ID(idv)`: pin the transceiver's own type id so the value is
-  stable across builds and toolchains. `idv` must be positive and not
-  exceed `sintra::max_user_type_id`.
+  stable across ABI-compatible builds. This pins identity only; it does not
+  stabilize raw C++ object representation or bypass Sintra's startup ABI
+  check. `idv` must be positive and not exceed `sintra::max_user_type_id`.
 - `SINTRA_MESSAGE(name, fields...)`: declare a message type with auto-assigned
   type id. See [Transceiver messages](transceiver_messages.md) for the body
   contract and a worked example.

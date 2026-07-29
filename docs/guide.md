@@ -1105,9 +1105,16 @@ interest but does not cancel remote execution.
 
 ## Type IDs
 
-Automatic type ids are sufficient when all processes are built with the same
-toolchain and relevant flags. Use explicit ids when ids must be pinned across
-build boundaries.
+Automatic type ids are sufficient when all processes use the same compatible
+build. Use explicit ids when ids must be pinned across ABI-compatible build
+boundaries. Explicit ids stabilize message and transceiver identity only.
+Every joining process must present exactly the coordinator's startup ABI token.
+That token contains compiler, standard-library, platform, and architecture
+identities plus the Sintra ring ABI version. A token mismatch, including
+between MSVC and MinGW builds, is rejected before that joining process opens
+its request/reply message rings. A matching token is required, but it does not
+guarantee that raw C++ object representations are interoperable; explicit ids
+provide no such guarantee either.
 
 User-facing explicit-id macros:
 
