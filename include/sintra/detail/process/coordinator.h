@@ -214,13 +214,13 @@ using Coordinator_condition_variable = std::condition_variable;
 
 using Coordinator_external_process_invitations_mutex =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::external_process_invitations>;
-using Coordinator_publication_notifications_mutex =
+using Coordinator_publication_notifications_mutex    =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::publication_notifications>;
-using Coordinator_groups_mutex =
+using Coordinator_groups_mutex                       =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::groups>;
-using Coordinator_publish_mutex =
+using Coordinator_publish_mutex                      =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::publish>;
-using Coordinator_init_tracking_mutex =
+using Coordinator_init_tracking_mutex                =
     Coordinator_ranked_mutex<Coordinator_mutex_rank::init_tracking>;
 
 } // namespace detail
@@ -299,8 +299,10 @@ private:
 
         bool is_external_process() const noexcept
         {
-            return custody_identity == 0 && occurrence != 0 &&
-                process_iid != invalid_instance_id;
+            return
+                custody_identity == 0 &&
+                occurrence       != 0 &&
+                process_iid      != invalid_instance_id;
         }
 
         bool operator==(const Process_reader_identity&) const = default;
@@ -308,15 +310,15 @@ private:
 
     struct Transceiver_publication
     {
-        type_id_type            type_id = 0;
-        string                  name;
-        Process_reader_identity reader_identity;
+        type_id_type               type_id = 0;
+        string                     name;
+        Process_reader_identity    reader_identity;
 
         Transceiver_publication() = default;
 
         Transceiver_publication(
-            type_id_type                  published_type_id,
-            const string&                 assigned_name,
+            type_id_type                   published_type_id,
+            const string&                  assigned_name,
             const Process_reader_identity& identity)
             : type_id(published_type_id),
               name(assigned_name),
@@ -368,10 +370,10 @@ private:
         instance_id_type   instance_id,
         const string&      assigned_name);
     instance_id_type publish_transceiver_with_reader_identity(
-        type_id_type                  type_id,
-        instance_id_type              instance_id,
-        const string&                 assigned_name,
-        const Process_reader_identity& reader_identity);
+        type_id_type                           type_id,
+        instance_id_type                       instance_id,
+        const string&                          assigned_name,
+        const Process_reader_identity&         reader_identity);
 
     // Unpublish a transceiver, erase name mappings, and emit instance_unpublished.
     // If the unpublished instance is a Managed_process, this also drops it from
@@ -379,9 +381,9 @@ private:
     // trigger recovery.
     bool unpublish_transceiver(instance_id_type instance_id);
     bool unpublish_transceiver_exact(
-        instance_id_type instance_id,
-        const std::optional<Process_reader_identity>& expected_identity,
-        const std::optional<Crash_info>& crash_info);
+        instance_id_type                               instance_id,
+        const std::optional<Process_reader_identity>&  expected_identity,
+        const std::optional<Crash_info>&               crash_info);
 
     // Mark a process as draining, remove it from in-flight barriers, and return
     // the coordinator reply-ring watermark for the caller to flush.
@@ -416,7 +418,7 @@ private:
     // delay/logic to the recovery runner and obeys shutdown state.
     void recover_if_required(
         const Crash_info&                              info,
-        const detail::Managed_child_occurrence_token& occurrence);
+        const detail::Managed_child_occurrence_token&  occurrence);
 
     // Release join_swarm in-flight tracking and flush delayed publications once
     // all processes finish initialization.
@@ -547,8 +549,10 @@ public:
     //   m_type_resolution_mutex, m_lifecycle_mutex,
     //   m_recovery_threads_mutex, m_draining_state_mutex
     mutex                                          m_type_resolution_mutex;
+
     detail::Coordinator_publication_notifications_mutex
                                                    m_publication_notifications_mutex;
+
     detail::Coordinator_publish_mutex             m_publish_mutex;
     detail::Coordinator_groups_mutex              m_groups_mutex;
     detail::Coordinator_init_tracking_mutex       m_init_tracking_mutex;
@@ -584,6 +588,7 @@ public:
 
     // access only after acquiring m_publish_mutex
     unordered_map<instance_id_type, uint32_t>      m_external_attached_processes;
+
     mutable std::mutex                             m_lifecycle_mutex;
     Recovery_policy                                m_recovery_policy;
     Recovery_runner                                m_recovery_runner;

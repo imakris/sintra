@@ -215,8 +215,9 @@ std::optional<witnessed_child_identity_t> wait_for_identity(const fs::path& path
 
 bool wait_for_absence(const std::optional<witnessed_child_identity_t>& identity)
 {
-    return identity && wait_for_exact_process_absence(
-        identity->pid, identity->start_stamp, k_step_timeout, k_poll_interval);
+    return
+        identity &&
+        wait_for_exact_process_absence(identity->pid, identity->start_stamp, k_step_timeout, k_poll_interval);
 }
 
 sintra::instance_id_type resolve_name(const std::string& name)
@@ -344,7 +345,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     std::atomic<unsigned> recovery_runner_calls{0};
     std::mutex              recovery_runner_mutex;
     std::condition_variable recovery_runner_changed;
-    bool                    recovery_runner_complete = false;
+    bool recovery_runner_complete = false;
     auto deactivate_relay = sintra::s_mproc->activate<sintra::Managed_process>(
         [&](const sintra::Managed_process::terminated_abnormally& message) {
             relay_log.record(message);
