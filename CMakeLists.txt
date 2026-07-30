@@ -240,7 +240,7 @@ if(SINTRA_INSTALL)
     write_basic_package_version_file(
         ${CMAKE_CURRENT_BINARY_DIR}/sintraConfigVersion.cmake
         VERSION ${PROJECT_VERSION}
-        COMPATIBILITY SameMajorVersion
+        COMPATIBILITY ExactVersion
     )
 
     install(FILES
@@ -248,4 +248,27 @@ if(SINTRA_INSTALL)
         ${CMAKE_CURRENT_BINARY_DIR}/sintraConfigVersion.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/sintra
     )
+endif()
+
+if(SINTRA_BUILD_TESTS AND SINTRA_INSTALL)
+    set(_sintra_package_test_source_dir
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/package_version_policy")
+    set(_sintra_package_test_binary_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/tests/package_version_policy/$<CONFIG>")
+    add_test(
+        NAME sintra_package_version_policy
+        COMMAND ${CMAKE_COMMAND}
+            "-DSINTRA_BINARY_DIR=${CMAKE_BINARY_DIR}"
+            "-DSINTRA_PACKAGE_TEST_SOURCE_DIR=${_sintra_package_test_source_dir}"
+            "-DSINTRA_PACKAGE_TEST_BINARY_DIR=${_sintra_package_test_binary_dir}"
+            "-DSINTRA_PACKAGE_VERSION=${PROJECT_VERSION}"
+            "-DSINTRA_PACKAGE_TEST_GENERATOR=${CMAKE_GENERATOR}"
+            "-DSINTRA_PACKAGE_TEST_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+            "-DSINTRA_PACKAGE_TEST_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+            "-DSINTRA_PACKAGE_TEST_CONFIG=$<CONFIG>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/package_version_policy_test.cmake"
+    )
+    set_tests_properties(sintra_package_version_policy PROPERTIES LABELS package)
+    unset(_sintra_package_test_source_dir)
+    unset(_sintra_package_test_binary_dir)
 endif()
