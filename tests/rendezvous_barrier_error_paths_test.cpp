@@ -216,8 +216,9 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv);
 
-    const auto previous_state = s_mproc->m_communication_state;
-    s_mproc->m_communication_state = sintra::Managed_process::COMMUNICATION_PAUSED;
+    const auto previous_state = s_mproc->communication_state();
+    s_mproc->override_communication_state_for_test(
+        sintra::Managed_process::COMMUNICATION_PAUSED);
 
     bool ok = true;
 
@@ -338,7 +339,8 @@ int main(int argc, char* argv[])
     // Case 3: rpc_cancelled while communication still reports RUNNING, but
     // shutdown has already been signalled via m_must_stop.
     {
-        s_mproc->m_communication_state = sintra::Managed_process::COMMUNICATION_RUNNING;
+        s_mproc->override_communication_state_for_test(
+            sintra::Managed_process::COMMUNICATION_RUNNING);
         s_mproc->m_must_stop.store(true, std::memory_order_release);
 
         const auto group_name   = unique_group_name("rendezvous_must_stop_group");
@@ -400,7 +402,8 @@ int main(int argc, char* argv[])
         }
 
         s_mproc->m_must_stop.store(false, std::memory_order_release);
-        s_mproc->m_communication_state = sintra::Managed_process::COMMUNICATION_PAUSED;
+        s_mproc->override_communication_state_for_test(
+            sintra::Managed_process::COMMUNICATION_PAUSED);
     }
 
     // Case 4: Deadlock path - barrier should hang when peer doesn't exist.
@@ -463,7 +466,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    s_mproc->m_communication_state = previous_state;
+    s_mproc->override_communication_state_for_test(previous_state);
     sintra::detail::finalize();
     return ok ? 0 : 1;
 }

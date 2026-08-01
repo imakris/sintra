@@ -1208,7 +1208,32 @@ struct Managed_process: Derived_transceiver<Managed_process>
         COMMUNICATION_RUNNING   // rings in NORMAL_MODE
     };
 
-    Communication_state                 m_communication_state = COMMUNICATION_STOPPED;
+    // The communication state crosses every synchronization domain of the process:
+    // it is published by init()/pause()/stop() under m_start_stop_mutex, and read by
+    // the reader threads, by the delivery-fence predicate (which runs under
+    // m_delivery_mutex, a different mutex) and by transceiver teardown under no
+    // mutex at all. It is therefore atomic, and it is private so that no reader can
+    // reintroduce an unsynchronized access: communication_state() is the only read
+    // path. The mutex is still required, because the writers publish the state as
+    // the last step of a compound operation over m_readers, and wait_for_stop()
+    // needs it for m_start_stop_condition.
+private:
+    atomic<Communication_state>         m_communication_state = COMMUNICATION_STOPPED;
+
+public:
+    Communication_state communication_state() const
+    {
+        return m_communication_state.load(std::memory_order_acquire);
+    }
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    // Publishes a communication state through the writer path that pause() and
+    // stop() use. Tests that need to exercise the branches keyed off this state
+    // cannot call pause()/stop() for it, because those also tear down the reader
+    // threads and cannot be undone.
+    void override_communication_state_for_test(Communication_state state);
+#endif
+
     mutex                               m_start_stop_mutex;
     condition_variable                  m_start_stop_condition;
 

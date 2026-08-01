@@ -107,7 +107,7 @@ SINTRA_DETAIL_DECL void append_current_communication_state(std::ostringstream& o
     }
 
     out << " communication_state="
-        << Process_message_reader::communication_state_name(s_mproc->m_communication_state);
+        << Process_message_reader::communication_state_name(s_mproc->communication_state());
 }
 
 SINTRA_DETAIL_DECL void append_message_ring_summary(
@@ -1183,7 +1183,7 @@ void Process_message_reader::reply_reader_function()
                         // but do not hard-assert to avoid modal dialogs on Windows Debug.
                         if (!handler_was_retired &&
                             s_mproc &&
-                            s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING)
+                            s_mproc->communication_state() == Managed_process::COMMUNICATION_RUNNING)
                         {
                             Log_stream(log_level::warning)
                                 << "Warning: Reply reader received message for function_instance_id="
@@ -1198,7 +1198,7 @@ void Process_message_reader::reply_reader_function()
                     // The target object no longer exists locally. During shutdown or after
                     // coordinator loss, late replies can legitimately arrive after objects
                     // have been torn down. Do not hard-assert; drop unless we're fully RUNNING.
-                    if (s_mproc && s_mproc->m_communication_state == Managed_process::COMMUNICATION_RUNNING) {
+                    if (s_mproc && s_mproc->communication_state() == Managed_process::COMMUNICATION_RUNNING) {
                         Log_stream(log_level::warning)
                             << "Warning: Reply reader received message for receiver_instance_id="
                             << static_cast<unsigned long long>(m->receiver_instance_id)

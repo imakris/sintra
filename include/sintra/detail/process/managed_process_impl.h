@@ -2627,7 +2627,7 @@ Managed_process::~Managed_process()
 
     release_all_lifelines();
 
-    assert(m_communication_state <= COMMUNICATION_PAUSED); // i.e. paused or stopped
+    assert(communication_state() <= COMMUNICATION_PAUSED); // i.e. paused or stopped
 
     // this is called explicitly, in order to inform the coordinator of the destruction early.
     // it would not be possible to communicate it after the channels were closed.
@@ -3313,7 +3313,7 @@ void Managed_process::init(int argc, const char* const* argv)
 
     m_start_stop_mutex.lock();
 
-    m_communication_state = COMMUNICATION_RUNNING;
+    m_communication_state.store(COMMUNICATION_RUNNING, std::memory_order_release);
     m_start_stop_mutex.unlock();
 
     if (!external_attach_token_arg.empty()) {
@@ -6025,7 +6025,7 @@ void Managed_process::pause()
     // explicitly from one of the handlers, or from the entry function itself.
     // If called when the process is already paused, this should not have any
     // side effects.
-    if (m_communication_state <= COMMUNICATION_PAUSED) {
+    if (communication_state() <= COMMUNICATION_PAUSED) {
         return;
     }
 
@@ -6038,7 +6038,7 @@ void Managed_process::pause()
         }
     }
 
-    m_communication_state = COMMUNICATION_PAUSED;
+    m_communication_state.store(COMMUNICATION_PAUSED, std::memory_order_release);
     m_start_stop_condition.notify_all();
     m_delivery_condition.notify_all();
 }
@@ -6051,7 +6051,7 @@ void Managed_process::stop()
     // stop() might be called explicitly from one of the handlers, or from the
     // entry function. If called when the process is already stopped, this
     // should not have any side effects.
-    if (m_communication_state == COMMUNICATION_STOPPED) {
+    if (communication_state() == COMMUNICATION_STOPPED) {
         return;
     }
 
@@ -6066,7 +6066,7 @@ void Managed_process::stop()
         }
     }
 
-    m_communication_state = COMMUNICATION_STOPPED;
+    m_communication_state.store(COMMUNICATION_STOPPED, std::memory_order_release);
     m_start_stop_condition.notify_all();
     m_delivery_condition.notify_all();
 }
@@ -6075,10 +6075,24 @@ inline
 void Managed_process::wait_for_stop()
 {
     std::unique_lock<mutex> start_stop_lock(m_start_stop_mutex);
-    while (m_communication_state == COMMUNICATION_RUNNING) {
+    while (communication_state() == COMMUNICATION_RUNNING) {
         m_start_stop_condition.wait(start_stop_lock);
     }
 }
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline
+void Managed_process::override_communication_state_for_test(Communication_state state)
+{
+    {
+        std::lock_guard<mutex> start_stop_lock(m_start_stop_mutex);
+        m_communication_state.store(state, std::memory_order_release);
+        m_start_stop_condition.notify_all();
+    }
+
+    notify_delivery_progress();
+}
+#endif
 
   //\       //\       //\       //\       //\       //\       //\       //
  ////\     ////\     ////\     ////\     ////\     ////\     ////\     ////
@@ -6386,7 +6400,7 @@ inline void Managed_process::flush(
     m_flush_sequence.push_back(flush_sequence);
 
     while (reader->get_reply_reading_sequence() <  flush_sequence &&
-        m_communication_state                == COMMUNICATION_RUNNING)
+        communication_state()                == COMMUNICATION_RUNNING)
     {
         m_flush_sequence_condition.wait_for(
             flush_lock,
@@ -6468,7 +6482,7 @@ void Managed_process::wait_for_delivery_fence()
     }
 
     auto all_targets_satisfied = [&]() {
-        if (m_communication_state != COMMUNICATION_RUNNING) {
+        if (communication_state() != COMMUNICATION_RUNNING) {
             return true;
         }
 
