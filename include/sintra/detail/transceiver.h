@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 
 namespace sintra {
@@ -73,6 +74,22 @@ enum class Rpc_completion_state
     // Caller-side interest was dropped locally before a result arrived.
     abandoned,
 };
+
+} // namespace detail
+
+class Transceiver;
+
+namespace detail {
+
+// The transceivers whose exported member functions the current thread is executing,
+// innermost last. Both dispatch routes (Transceiver::rpc_handler on a reader thread
+// and the same-process shortcut in Transceiver::rpc_impl) keep an execution guard
+// alive across the member call, so this is exactly the set of transceivers whose
+// active-call count the current thread is itself holding above zero.
+// Transceiver::ensure_rpc_shutdown() consults it: a transceiver destroyed from
+// inside its own RPC would otherwise wait for a guard that only the waiting thread
+// can release.
+inline thread_local std::vector<const Transceiver*> tl_executing_rpc_targets;
 
 } // namespace detail
 

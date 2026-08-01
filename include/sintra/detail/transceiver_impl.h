@@ -26,6 +26,7 @@ inline constexpr auto k_unpublish_transceiver_reply_timeout = std::chrono::secon
 
 }} // namespace sintra::detail
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <iterator>
@@ -159,6 +160,7 @@ Transceiver::try_acquire_rpc_execution()
     }
 
     ++m_active_rpc_calls;
+    detail::tl_executing_rpc_targets.push_back(this);
     return Rpc_execution_guard(this);
 }
 
@@ -167,6 +169,17 @@ inline
 void
 Transceiver::release_rpc_execution()
 {
+    {
+        // Guards nest in LIFO order within a thread, so the match is normally the
+        // last entry; scanning backwards also covers a guard released out of order
+        // through Rpc_execution_guard::operator=.
+        auto& targets = detail::tl_executing_rpc_targets;
+        auto  it      = std::find(targets.rbegin(), targets.rend(), this);
+        if (it != targets.rend()) {
+            targets.erase(std::next(it).base());
+        }
+    }
+
     unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
     assert(m_active_rpc_calls);
 
@@ -186,6 +199,32 @@ inline
 void
 Transceiver::ensure_rpc_shutdown()
 {
+    // Shutdown waits for m_active_rpc_calls to reach zero. If the calling thread is
+    // itself executing one of this transceiver's exported member functions, it owns
+    // one of those calls and cannot release it until it returns, so the wait would
+    // run out its warning budget and terminate the process 30 seconds later. That is
+    // not a race: it is deterministic, and the only cure is to not destroy the object
+    // from inside its own invocation. Report the cause and fail here instead.
+    // The check comes before any state is published, so a caller that catches this
+    // leaves the transceiver still accepting calls.
+    if (std::find(
+            detail::tl_executing_rpc_targets.begin(),
+            detail::tl_executing_rpc_targets.end(),
+            this) != detail::tl_executing_rpc_targets.end())
+    {
+        const auto diagnostic =
+            "Transceiver instance " + std::to_string(m_instance_id) +
+            " was destroyed from inside one of its own RPC handlers. The handler still "
+            "holds the execution guard that shutdown waits for, so the wait can never "
+            "complete. Destroy the transceiver after the handler returns, for example "
+            "from sintra::s_mproc->run_after_current_handler().";
+
+        // Destruction reaches this through ~Transceiver, where the throw terminates
+        // the process. Log first, so the cause is on the record either way.
+        Log_stream(log_level::error) << diagnostic << "\n";
+        throw std::logic_error(diagnostic);
+    }
+
     unique_lock<mutex> lock(m_rpc_lifecycle_mutex);
 
     if (m_rpc_shutdown_complete) {

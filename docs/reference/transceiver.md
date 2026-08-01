@@ -77,6 +77,12 @@ Threading and lifecycle:
   teardown the destructor short-circuits if the messaging layer has
   already stopped, since RPC would otherwise deadlock.
 - A transceiver must outlive every callback that captures it.
+- A transceiver must outlive its own exported member functions. Destroying it
+  from inside one of its own RPC handlers, directly or by destroying whatever
+  owns it, is not supported: teardown waits for the transceiver's active RPC
+  calls to finish, and the call doing the destroying is one of them. Defer the
+  destruction until after the handler returns, for example with
+  `sintra::s_mproc->run_after_current_handler()`.
 
 Failures:
 
@@ -85,6 +91,10 @@ Failures:
   published, or the per-process publication limit has been reached.
 - `destroy` swallows RPC failures during shutdown so it can be invoked
   from teardown paths without throwing.
+- `destroy` throws `std::logic_error` when the calling thread is executing one
+  of this transceiver's exported member functions, because the teardown it
+  would perform can never complete. Reaching that through `~Transceiver`
+  terminates the process, since a destructor cannot propagate the error.
 
 Example source:
 
