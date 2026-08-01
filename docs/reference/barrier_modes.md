@@ -74,6 +74,14 @@ Each mode causes `sintra::barrier` to return the same shape:
   executing request reader and may run queued post-handlers while waiting.
   It does not wait for the current handler/post-handler, or for messages
   queued behind it on that same request-reader stream.
+- The same exclusion covers every other request-reader thread of the
+  process that is parked in a delivery fence at the same time. Such a
+  thread has stopped reading its own ring, so its stream is skipped rather
+  than waited for; otherwise two handler-invoked fences in one process
+  would wait for each other forever. A fence entered concurrently from two
+  request-reader threads therefore proves nothing about the streams those
+  threads serve. If that proof is needed, call the barrier from a control
+  thread.
 - A `processing_fence_t` barrier is the heaviest. It blocks until both the
   local request stream and every peer's processing have caught up. Avoid
   it on hot paths that fire frequently.

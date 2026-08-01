@@ -137,6 +137,15 @@ struct Process_message_reader
         std::atomic<sequence_counter_type> reply_sequence{invalid_sequence};
         std::atomic<bool>                  request_stopped{false};
         std::atomic<bool>                  reply_stopped{false};
+
+        // Nonzero while this reader's request thread is parked in
+        // Managed_process::wait_for_delivery_fence(). A parked thread cannot read its
+        // own ring, so its request stream cannot advance until it leaves the fence,
+        // and a second fence that waited for that stream would wait for a stream that
+        // is waiting for it. Only the reader's own request thread writes this, but
+        // every fence reads it, so it is atomic. It is a counter rather than a flag
+        // because a fence can drain post-handlers that enter a fence of their own.
+        std::atomic<unsigned>              request_fence_parked{0};
     };
 
     using Delivery_progress_ptr      = std::shared_ptr<Delivery_progress>;

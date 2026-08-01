@@ -6447,6 +6447,48 @@ inline void Managed_process::run_after_current_handler(function<void()> task)
     };
 }
 
+namespace detail {
+
+// Publishes, for the duration of a delivery fence, that the calling request reader
+// thread has stopped reading its ring. Constructing it on a thread that is not a
+// request reader does nothing.
+class Delivery_fence_parking
+{
+public:
+    Delivery_fence_parking()
+    {
+        if (!s_tl_current_request_reader || !s_mproc) {
+            return;
+        }
+
+        m_progress = s_tl_current_request_reader->delivery_progress();
+        if (!m_progress) {
+            return;
+        }
+
+        m_progress->request_fence_parked.fetch_add(1, std::memory_order_release);
+
+        // A peer fence may have captured this stream before the counter was raised,
+        // so wake it to re-evaluate.
+        s_mproc->notify_delivery_progress();
+    }
+
+    ~Delivery_fence_parking()
+    {
+        if (m_progress) {
+            m_progress->request_fence_parked.fetch_sub(1, std::memory_order_release);
+        }
+    }
+
+    Delivery_fence_parking(const Delivery_fence_parking&)            = delete;
+    Delivery_fence_parking& operator=(const Delivery_fence_parking&) = delete;
+
+private:
+    Process_message_reader::Delivery_progress_ptr m_progress;
+};
+
+} // namespace detail
+
 inline
 void Managed_process::wait_for_delivery_fence()
 {
@@ -6518,6 +6560,16 @@ void Managed_process::wait_for_delivery_fence()
                 continue;
             }
 
+            // The reader that serves this request stream may have entered a fence of
+            // its own after the target was captured. It cannot read while it is in
+            // there, so waiting for it any longer is waiting for a thread that is
+            // waiting for this one. See prepare_delivery_target().
+            if (target.stream == Process_message_reader::Delivery_stream::Request &&
+                progress->request_fence_parked.load(std::memory_order_acquire) != 0)
+            {
+                continue;
+            }
+
             return false;
         }
 
@@ -6527,6 +6579,12 @@ void Managed_process::wait_for_delivery_fence()
     if (all_targets_satisfied()) {
         return;
     }
+
+    // From here on this thread is parked. If it is a request reader thread, publish
+    // that fact before blocking, so a peer fence stops waiting for a stream that
+    // cannot advance. The guard must be constructed before m_delivery_mutex is taken:
+    // it notifies through notify_delivery_progress(), which takes that same mutex.
+    detail::Delivery_fence_parking parking;
 
     std::unique_lock<std::mutex> lk(m_delivery_mutex);
 

@@ -1036,7 +1036,14 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
 
     target.progress = progress;
 
-    if (stream == Delivery_stream::Request && s_tl_current_request_reader == this) {
+    // A request stream is only worth waiting for if the thread that serves it can
+    // still read. The calling thread cannot serve its own ring while it is in the
+    // fence, and neither can any other request reader thread that is already parked
+    // in one.
+    if (stream == Delivery_stream::Request &&
+        (s_tl_current_request_reader == this ||
+            progress->request_fence_parked.load(std::memory_order_acquire) != 0))
+    {
         return target;
     }
 
