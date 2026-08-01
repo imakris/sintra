@@ -9,6 +9,8 @@
 #include "logging.h"
 #include "transceiver.h"
 
+#include <chrono>
+
 // Runtime teardown already uses this global flag; keep newer handler-slot TLS
 // under sintra::detail so this public header does not grow more global names.
 inline bool thread_local tl_in_handler_dispatch = false;
@@ -16,6 +18,11 @@ inline bool thread_local tl_in_handler_dispatch = false;
 namespace sintra { namespace detail {
 
 inline thread_local const Handler_slot_state* tl_current_handler_slot_state = nullptr;
+
+// How long Transceiver::destroy() waits for a remote coordinator to acknowledge an
+// unpublish before it gives up. The wait must be bounded: the rings can stop after
+// destroy() has already committed to the rpc, and no reply can arrive after that.
+inline constexpr auto k_unpublish_transceiver_reply_timeout = std::chrono::seconds(5);
 
 }} // namespace sintra::detail
 
@@ -293,21 +300,50 @@ void Transceiver::destroy()
                 s_mproc->emit_remote<Managed_process::unpublish_transceiver_notify>(m_instance_id);
             }
         }
-        else {
-            // During shutdown, the coordinator can already be draining or gone.
-            // Treat RPC failure as non-fatal in that case - the coordinator will
-            // clean up when it detects the process disconnect.
-            bool success = false;
+        else
+        if (s_coord) {
+            // The coordinator lives in this process, so the call resolves to a direct
+            // invocation: no request reaches a ring and there is no reply to wait for.
+            // During shutdown the coordinator can already be draining, so treat a
+            // failure as non-fatal - it cleans up when it detects the disconnect.
             try {
-                success = Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
+                (void)Coordinator::rpc_unpublish_transceiver(s_coord_id, m_instance_id);
             }
             catch (...) {
                 // Coordinator already shutting down or unreachable - ignore
-                success = false;
             }
-            // In normal operation, unpublish should succeed. During shutdown races,
-            // it's acceptable for this to fail silently.
-            (void)success;
+        }
+        else {
+            // The state read above is a check-then-act. stop() publishes
+            // COMMUNICATION_STOPPED from a reader thread and can land between the read
+            // and the call below, and once it has, the reply that would complete this
+            // request can never arrive: the per-reader rescue path
+            // (Process_message_reader::unblock_rpc_once) is a one-shot that
+            // stop_nowait() has already spent, so a plain rpc here would block for the
+            // lifetime of the process. Wait with a deadline instead and unblock the
+            // call ourselves, exactly as the external-attach claim does in
+            // Managed_process::init().
+            try {
+                auto       handle   = Coordinator::rpc_async_unpublish_transceiver(
+                    s_coord_id, m_instance_id);
+                const auto deadline = std::chrono::steady_clock::now() +
+                    detail::k_unpublish_transceiver_reply_timeout;
+
+                if (handle.wait_until(deadline) != detail::Rpc_wait_status::completed) {
+                    Log_stream(log_level::warning)
+                        << "Unpublishing transceiver instance "
+                        << m_instance_id
+                        << " gave up after waiting "
+                        << detail::k_unpublish_transceiver_reply_timeout.count()
+                        << " seconds for the coordinator's reply. The coordinator drops the "
+                        "publication when it detects this process' disconnect.\n";
+                    handle.abandon();
+                    s_mproc->unblock_rpc(process_of(s_coord_id));
+                }
+            }
+            catch (...) {
+                // Coordinator already shutting down or unreachable - ignore
+            }
         }
 
         m_published = false;
