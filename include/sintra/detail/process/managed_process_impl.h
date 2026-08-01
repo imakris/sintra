@@ -6040,7 +6040,12 @@ void Managed_process::pause()
 
     m_communication_state.store(COMMUNICATION_PAUSED, std::memory_order_release);
     m_start_stop_condition.notify_all();
-    m_delivery_condition.notify_all();
+
+    // The delivery condition is only ever notified with m_delivery_mutex held, so
+    // that a waiter cannot miss the wake between its predicate check and its
+    // transition into the wait. Notifying it directly from here would break that
+    // invariant for the state term of the predicate.
+    notify_delivery_progress();
 }
 
 inline
@@ -6068,7 +6073,10 @@ void Managed_process::stop()
 
     m_communication_state.store(COMMUNICATION_STOPPED, std::memory_order_release);
     m_start_stop_condition.notify_all();
-    m_delivery_condition.notify_all();
+
+    // See pause(): every wake of m_delivery_condition goes through the helper that
+    // holds m_delivery_mutex.
+    notify_delivery_progress();
 }
 
 inline
