@@ -484,6 +484,14 @@ public:
         type_id_type       ex_tid,
         instance_id_type   fallback_sender_iid = invalid_instance_id);
 
+    template <typename R_MESSAGE_T, typename VALUE_T, typename OBJECT_T>
+    static void complete_rpc_response(
+        const VALUE_T&     value,
+        instance_id_type   receiver_iid,
+        instance_id_type   function_iid,
+        const OBJECT_T*    ref_obj,
+        type_id_type       ex_tid) noexcept;
+
     template <
         typename RPCTC,
         typename MESSAGE_T
@@ -911,10 +919,15 @@ namespace detail { namespace test_hooks {
 // race deterministically.
 inline constexpr const char* k_stage_rpc_get_until_deadline_before_abandon =
     "rpc_handle/get_until/deadline_before_abandon";
+inline constexpr const char* k_stage_rpc_response_before_fallback =
+    "rpc_response/before_fallback";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Rpc_get_until_stage_callback = void (*)(const char* stage);
 inline std::atomic<Rpc_get_until_stage_callback> s_rpc_get_until_stage{nullptr};
+
+using Rpc_response_stage_callback = void (*)(const char* stage);
+inline std::atomic<Rpc_response_stage_callback> s_rpc_response_stage{nullptr};
 
 // Runs after an RPC invocation has captured and validated its raw target but
 // before transported call state is registered. The test callback may hold the
