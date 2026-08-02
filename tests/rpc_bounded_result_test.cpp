@@ -1,11 +1,14 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -22,6 +25,36 @@
 
 namespace {
 
+thread_local bool g_arm_fallback_allocation_failure = false;
+thread_local bool g_fail_next_allocation             = false;
+
+} // namespace
+
+void* operator new(std::size_t size)
+{
+    if (g_fail_next_allocation) {
+        g_fail_next_allocation = false;
+        throw std::bad_alloc();
+    }
+
+    if (void* memory = std::malloc(size)) {
+        return memory;
+    }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept
+{
+    std::free(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept
+{
+    std::free(memory);
+}
+
+namespace {
+
 using namespace std::chrono_literals;
 
 constexpr std::string_view k_prefix          = "rpc_bounded_result_test: ";
@@ -31,8 +64,34 @@ constexpr const char*      k_done_barrier    = "rpc-bounded-result-done";
 constexpr int              k_race_value      = 731;
 constexpr int              k_remote_value    = 219;
 constexpr int              k_local_value     = 64;
+constexpr int              k_liveness_value  = 583;
 constexpr const char*      k_logic_message   = "bounded logic identity";
 constexpr const char*      k_unavail_message = "bounded unavailable identity";
+constexpr const char*      k_response_error  = "Sintra could not serialize the RPC response.";
+constexpr char             k_string_fill     = 's';
+constexpr unsigned char    k_vector_fill     = 0x5a;
+constexpr char             k_diagnostic_fill = 'd';
+
+using String_response = sintra::Message<
+    sintra::Enclosure<std::string>,
+    void,
+    sintra::not_defined_type_id>;
+using Vector_response = sintra::Message<
+    sintra::Enclosure<std::vector<unsigned char>>,
+    void,
+    sintra::not_defined_type_id>;
+
+template <typename Response>
+constexpr size_t just_fitting_payload_size()
+{
+    return sintra::detail::message_frame_size_limit -
+        sintra::detail::message_frame_alignment - sizeof(Response);
+}
+
+constexpr size_t k_just_fitting_string_size = just_fitting_payload_size<String_response>();
+constexpr size_t k_just_fitting_vector_size = just_fitting_payload_size<Vector_response>();
+constexpr size_t k_just_fitting_diagnostic_size =
+    just_fitting_payload_size<sintra::Transceiver::exception>();
 
 std::filesystem::path marker_path(
     const std::filesystem::path&   shared_dir,
@@ -74,6 +133,73 @@ bool expect_equal(const T& actual, const T& expected, std::string_view context)
 
     std::fprintf(stderr,
         "%.*s%.*s mismatch\n",
+        static_cast<int>(k_prefix.size()),
+        k_prefix.data(),
+        static_cast<int>(context.size()),
+        context.data());
+    return false;
+}
+
+template <typename Range, typename Value>
+bool expect_repeated_value(
+    const Range&       actual,
+    size_t             expected_size,
+    Value              expected_value,
+    std::string_view   context)
+{
+    if (actual.size() == expected_size &&
+        std::all_of(actual.begin(), actual.end(), [&](const auto& value) {
+            return value == expected_value;
+        }))
+    {
+        return true;
+    }
+
+    std::fprintf(stderr,
+        "%.*s%.*s content mismatch (expected size %zu, actual size %zu)\n",
+        static_cast<int>(k_prefix.size()),
+        k_prefix.data(),
+        static_cast<int>(context.size()),
+        context.data(),
+        expected_size,
+        actual.size());
+    return false;
+}
+
+template <typename T>
+bool expect_response_serialization_error(
+    sintra::Rpc_handle<T>& handle,
+    std::string_view       context)
+{
+    try {
+        (void)handle.get_until(std::chrono::steady_clock::now() + 2s);
+    }
+    catch (const std::exception& ex) {
+        if (std::string_view(ex.what()) == k_response_error) {
+            return true;
+        }
+
+        std::fprintf(stderr,
+            "%.*s%.*s returned an unexpected exception: %s\n",
+            static_cast<int>(k_prefix.size()),
+            k_prefix.data(),
+            static_cast<int>(context.size()),
+            context.data(),
+            ex.what());
+        return false;
+    }
+    catch (...) {
+        std::fprintf(stderr,
+            "%.*s%.*s returned an unknown exception\n",
+            static_cast<int>(k_prefix.size()),
+            k_prefix.data(),
+            static_cast<int>(context.size()),
+            context.data());
+        return false;
+    }
+
+    std::fprintf(stderr,
+        "%.*s%.*s unexpectedly returned a value\n",
         static_cast<int>(k_prefix.size()),
         k_prefix.data(),
         static_cast<int>(context.size()),
@@ -182,6 +308,28 @@ struct Bounded_service : sintra::Derived_transceiver<Bounded_service>
         throw sintra::rpc_unavailable(message);
     }
 
+    std::string sized_string(size_t size)
+    {
+        return std::string(size, k_string_fill);
+    }
+
+    std::string sized_string_with_failed_fallback(size_t size)
+    {
+        std::string value(size, k_string_fill);
+        g_arm_fallback_allocation_failure = true;
+        return value;
+    }
+
+    std::vector<unsigned char> sized_vector(size_t size)
+    {
+        return std::vector<unsigned char>(size, k_vector_fill);
+    }
+
+    int throw_sized_logic_error(size_t size)
+    {
+        throw std::logic_error(std::string(size, k_diagnostic_fill));
+    }
+
     SINTRA_RPC(direct_value)
     SINTRA_RPC_STRICT(strict_value)
     SINTRA_RPC_STRICT(strict_void)
@@ -189,6 +337,10 @@ struct Bounded_service : sintra::Derived_transceiver<Bounded_service>
     SINTRA_RPC_STRICT(delayed_void)
     SINTRA_RPC_STRICT(throw_logic)
     SINTRA_RPC_STRICT(throw_unavailable)
+    SINTRA_RPC_STRICT(sized_string)
+    SINTRA_RPC_STRICT(sized_string_with_failed_fallback)
+    SINTRA_RPC_STRICT(sized_vector)
+    SINTRA_RPC_STRICT(throw_sized_logic_error)
 };
 
 sintra::Rpc_state<int>* g_get_until_deadline_state = nullptr;
@@ -360,6 +512,119 @@ bool test_remote_success_and_exceptions(const std::filesystem::path& shared_dir)
     return true;
 }
 
+bool test_remote_response_size_boundary(const std::filesystem::path& shared_dir)
+{
+    auto fitting_string = Bounded_service::rpc_async_sized_string(
+        k_service_name,
+        k_just_fitting_string_size);
+    const auto string_result = fitting_string.get_until(
+        std::chrono::steady_clock::now() + 2s);
+    if (!expect_repeated_value(
+            string_result,
+            k_just_fitting_string_size,
+            k_string_fill,
+            "just-fitting string response"))
+    {
+        return false;
+    }
+    append_client_event(shared_dir, "just_fitting_string_returned");
+
+    auto failed_fallback = Bounded_service::rpc_async_sized_string_with_failed_fallback(
+        k_service_name,
+        k_just_fitting_string_size + 1);
+    try {
+        (void)failed_fallback.get_until(std::chrono::steady_clock::now() + 100ms);
+        return false;
+    }
+    catch (const sintra::rpc_timeout&) {
+    }
+    catch (...) {
+        return false;
+    }
+    append_client_event(shared_dir, "failed_fallback_timed_out");
+
+    auto fallback_liveness = Bounded_service::rpc_async_strict_value(
+        k_service_name,
+        k_liveness_value);
+    if (fallback_liveness.get_until(std::chrono::steady_clock::now() + 2s) !=
+        k_liveness_value)
+    {
+        return false;
+    }
+    append_client_event(shared_dir, "service_reader_survived_failed_fallback");
+
+    auto oversized_string = Bounded_service::rpc_async_sized_string(
+        k_service_name,
+        k_just_fitting_string_size + 1);
+    if (!expect_response_serialization_error(oversized_string, "oversized string response")) {
+        return false;
+    }
+    append_client_event(shared_dir, "oversized_string_rejected");
+
+    auto fitting_vector = Bounded_service::rpc_async_sized_vector(
+        k_service_name,
+        k_just_fitting_vector_size);
+    const auto vector_result = fitting_vector.get_until(
+        std::chrono::steady_clock::now() + 2s);
+    if (!expect_repeated_value(
+            vector_result,
+            k_just_fitting_vector_size,
+            k_vector_fill,
+            "just-fitting vector response"))
+    {
+        return false;
+    }
+    append_client_event(shared_dir, "just_fitting_vector_returned");
+
+    auto oversized_vector = Bounded_service::rpc_async_sized_vector(
+        k_service_name,
+        k_just_fitting_vector_size + 1);
+    if (!expect_response_serialization_error(oversized_vector, "oversized vector response")) {
+        return false;
+    }
+    append_client_event(shared_dir, "oversized_vector_rejected");
+
+    auto fitting_diagnostic = Bounded_service::rpc_async_throw_sized_logic_error(
+        k_service_name,
+        k_just_fitting_diagnostic_size);
+    try {
+        (void)fitting_diagnostic.get_until(std::chrono::steady_clock::now() + 2s);
+        return false;
+    }
+    catch (const std::logic_error& ex) {
+        if (!expect_repeated_value(
+                std::string_view(ex.what()),
+                k_just_fitting_diagnostic_size,
+                k_diagnostic_fill,
+                "just-fitting exception diagnostic"))
+        {
+            return false;
+        }
+    }
+    catch (...) {
+        return false;
+    }
+    append_client_event(shared_dir, "just_fitting_diagnostic_preserved");
+
+    auto oversized_diagnostic = Bounded_service::rpc_async_throw_sized_logic_error(
+        k_service_name,
+        k_just_fitting_diagnostic_size + 1);
+    if (!expect_response_serialization_error(
+            oversized_diagnostic,
+            "oversized exception diagnostic"))
+    {
+        return false;
+    }
+    append_client_event(shared_dir, "oversized_diagnostic_rejected");
+
+    auto liveness = Bounded_service::rpc_async_strict_value(k_service_name, k_liveness_value);
+    if (liveness.get_until(std::chrono::steady_clock::now() + 2s) != k_liveness_value) {
+        return false;
+    }
+    append_client_event(shared_dir, "service_reader_remained_live");
+    return true;
+}
+
 bool expect_timeout_cleanup(
     sintra::Rpc_handle<int>&       handle,
     const std::filesystem::path&   shared_dir,
@@ -490,8 +755,23 @@ int process_owner()
     Bounded_service service;
     service.assign_name(k_service_name);
 
+    sintra::detail::test_hooks::s_rpc_response_stage.store(
+        [](const char* stage) {
+            if (std::string_view(stage) ==
+                    sintra::detail::test_hooks::k_stage_rpc_response_before_fallback &&
+                g_arm_fallback_allocation_failure)
+            {
+                g_arm_fallback_allocation_failure = false;
+                g_fail_next_allocation             = true;
+            }
+        },
+        std::memory_order_release);
+
     sintra::barrier(k_ready_barrier);
     sintra::barrier(k_done_barrier, "_sintra_all_processes");
+    sintra::detail::test_hooks::s_rpc_response_stage.store(
+        nullptr,
+        std::memory_order_release);
     return 0;
 }
 
@@ -507,6 +787,7 @@ int process_client()
     bool ok = true;
     ok = test_same_process_async(shared_dir) && ok;
     ok = ok && test_remote_success_and_exceptions(shared_dir);
+    ok = ok && test_remote_response_size_boundary(shared_dir);
     ok = ok && test_timeouts_and_cancel(shared_dir);
     if (ok) {
         ok = get_until_preserves_completion_when_abandon_loses();
@@ -546,6 +827,15 @@ int verify_results(const std::filesystem::path& shared_dir)
         "remote_void_returned",
         "remote_logic_identity_preserved",
         "remote_unavailable_identity_preserved",
+        "just_fitting_string_returned",
+        "failed_fallback_timed_out",
+        "service_reader_survived_failed_fallback",
+        "oversized_string_rejected",
+        "just_fitting_vector_returned",
+        "oversized_vector_rejected",
+        "just_fitting_diagnostic_preserved",
+        "oversized_diagnostic_rejected",
+        "service_reader_remained_live",
         "timeout_non_void_abandoned",
         "timeout_void_abandoned",
         "cancelled_identity_preserved",

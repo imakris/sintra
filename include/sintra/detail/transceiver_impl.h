@@ -830,6 +830,61 @@ void Transceiver::finalize_rpc_write(
 }
 
 
+template <typename R_MESSAGE_T, typename VALUE_T, typename OBJECT_T>
+void Transceiver::complete_rpc_response(
+    const VALUE_T&     value,
+    instance_id_type   receiver_iid,
+    instance_id_type   function_iid,
+    const OBJECT_T*    ref_obj,
+    type_id_type       ex_tid) noexcept
+{
+    try {
+        auto* placed_rep_msg = s_mproc->m_out_rep_c->write<R_MESSAGE_T>(
+            vb_size<R_MESSAGE_T>(value),
+            value);
+        finalize_rpc_write(
+            placed_rep_msg,
+            receiver_iid,
+            function_iid,
+            ref_obj,
+            ex_tid);
+        return;
+    }
+    catch (...) {
+    }
+
+    try {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (auto callback =
+                detail::test_hooks::s_rpc_response_stage.load(std::memory_order_acquire))
+        {
+            callback(detail::test_hooks::k_stage_rpc_response_before_fallback);
+        }
+#endif
+        static const string response_error =
+            "Sintra could not serialize the RPC response.";
+        auto* exception_msg = s_mproc->m_out_rep_c->write<exception>(
+            vb_size<exception>(response_error),
+            response_error);
+        finalize_rpc_write(
+            exception_msg,
+            receiver_iid,
+            function_iid,
+            ref_obj,
+            (type_id_type)detail::reserved_id::std_runtime_error);
+    }
+    catch (...) {
+        try {
+            log_raw(
+                log_level::error,
+                "Sintra could not serialize an RPC response or its failure reply; reply dropped.\n");
+        }
+        catch (...) {
+        }
+    }
+}
+
+
 template <typename T>
 struct Void_filter
 {
@@ -1181,9 +1236,12 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
             // NOTE: For the recipients in this loop, this will be the second time the function returns,
             // assuming they have already received a deferral.
             for (size_t i = 0; i < s_tl_additional_piids_size; i++) {
-                return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
-                finalize_rpc_write(
-                    placed_msg, s_tl_additional_piids[i], s_tl_common_function_iid, obj, not_defined_type_id);
+                complete_rpc_response<return_message_type>(
+                    vf.result,
+                    s_tl_additional_piids[i],
+                    s_tl_common_function_iid,
+                    obj,
+                    not_defined_type_id);
             }
 
             s_tl_additional_piids_size = 0;
@@ -1191,8 +1249,12 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
         }
 
         // the normal return
-        return_message_type* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(vb_size<return_message_type>(vf.result), vf.result);
-        finalize_rpc_write(placed_msg, msg, obj, etid);
+        complete_rpc_response<return_message_type>(
+            vf.result,
+            msg.sender_instance_id,
+            msg.function_instance_id,
+            obj,
+            etid);
     }
     else {
         if constexpr (RPCTC::is_fire_and_forget) {
@@ -1203,8 +1265,12 @@ void Transceiver::rpc_handler(Message_prefix& untyped_msg)
             return;
         }
 
-        exception* placed_msg = s_mproc->m_out_rep_c->write<exception>(vb_size<exception>(what), what);
-        finalize_rpc_write(placed_msg, msg, obj, etid);
+        complete_rpc_response<exception>(
+            what,
+            msg.sender_instance_id,
+            msg.function_instance_id,
+            obj,
+            etid);
     }
 }
 
