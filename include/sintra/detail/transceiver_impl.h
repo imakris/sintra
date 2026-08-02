@@ -359,9 +359,11 @@ void Transceiver::destroy()
             // request can never arrive: the per-reader rescue path
             // (Process_message_reader::unblock_rpc_once) is a one-shot that
             // stop_nowait() has already spent, so a plain rpc here would block for the
-            // lifetime of the process. Wait with a deadline instead and unblock the
-            // call ourselves, exactly as the external-attach claim does in
-            // Managed_process::init().
+            // lifetime of the process. Wait with a deadline instead, and abandon this
+            // one call when the deadline passes. Abandoning is deliberately narrower
+            // than Managed_process::unblock_rpc(), which would also cancel every other
+            // outstanding call to the coordinator; this teardown has no authority over
+            // calls that other threads are still waiting on.
             try {
                 auto       handle   = Coordinator::rpc_async_unpublish_transceiver(
                     s_coord_id, m_instance_id);
@@ -377,7 +379,6 @@ void Transceiver::destroy()
                         << " seconds for the coordinator's reply. The coordinator drops the "
                         "publication when it detects this process' disconnect.\n";
                     handle.abandon();
-                    s_mproc->unblock_rpc(process_of(s_coord_id));
                 }
             }
             catch (...) {
