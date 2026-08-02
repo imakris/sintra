@@ -212,12 +212,17 @@ Transceiver::ensure_rpc_shutdown()
             detail::tl_executing_rpc_targets.end(),
             this) != detail::tl_executing_rpc_targets.end())
     {
+        // run_after_current_handler() is only a deferral on a reader thread; on any
+        // other thread it runs the task immediately and would land right back here.
+        // Name it for the case it actually solves, and state the requirement itself
+        // for the rest.
         const auto diagnostic =
             "Transceiver instance " + std::to_string(m_instance_id) +
             " was destroyed from inside one of its own RPC handlers. The handler still "
             "holds the execution guard that shutdown waits for, so the wait can never "
-            "complete. Destroy the transceiver after the handler returns, for example "
-            "from sintra::s_mproc->run_after_current_handler().";
+            "complete. Destroy the transceiver after the exported member function has "
+            "returned; from a handler running on a reader thread, "
+            "sintra::s_mproc->run_after_current_handler() defers it to that point.";
 
         // Destruction reaches this through ~Transceiver, where the throw terminates
         // the process. Log first, so the cause is on the record either way.

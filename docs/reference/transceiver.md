@@ -80,9 +80,13 @@ Threading and lifecycle:
 - A transceiver must outlive its own exported member functions. Destroying it
   from inside one of its own RPC handlers, directly or by destroying whatever
   owns it, is not supported: teardown waits for the transceiver's active RPC
-  calls to finish, and the call doing the destroying is one of them. Defer the
-  destruction until after the handler returns, for example with
-  `sintra::s_mproc->run_after_current_handler()`.
+  calls to finish, and the call doing the destroying is one of them. The
+  destruction has to happen after the exported member function has returned.
+  When the member function runs on a reader thread,
+  `sintra::s_mproc->run_after_current_handler()` defers it to exactly that
+  point. Note that on any other thread that call runs the task immediately, so
+  a same-process direct call must instead destroy the transceiver after the
+  call returns, on the calling thread.
 
 Failures:
 
