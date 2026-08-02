@@ -159,8 +159,11 @@ Transceiver::try_acquire_rpc_execution()
         return {};
     }
 
-    ++m_active_rpc_calls;
+    // Record ownership first. push_back is the only operation here that can throw,
+    // and nothing after it can, so a failed allocation leaves the counter untouched
+    // rather than raised with no guard to lower it again.
     detail::tl_executing_rpc_targets.push_back(this);
+    ++m_active_rpc_calls;
     return Rpc_execution_guard(this);
 }
 
