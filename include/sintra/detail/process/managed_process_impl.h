@@ -6562,9 +6562,10 @@ void Managed_process::wait_for_delivery_fence()
 
             // The reader that serves this request stream may have entered a fence of
             // its own after the target was captured. It cannot read while it is in
-            // there, so waiting for it any longer is waiting for a thread that is
-            // waiting for this one. See prepare_delivery_target().
+            // there, so a caller that is itself a request reader would be waiting for
+            // a thread that is waiting for it. See prepare_delivery_target().
             if (target.stream == Process_message_reader::Delivery_stream::Request &&
+                calling_thread_serves_a_request_stream() &&
                 progress->request_fence_parked.load(std::memory_order_acquire) != 0)
             {
                 continue;

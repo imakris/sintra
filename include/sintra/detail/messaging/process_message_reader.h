@@ -85,6 +85,17 @@ inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance
 
 inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
 
+// True while the calling thread is the request reader of some peer's ring, and
+// therefore stops that ring for as long as it blocks. Only such a thread can be a
+// link in a cycle of delivery fences waiting on each other's streams, so only such
+// a thread has to skip the streams of its parked peers. A control thread serves no
+// ring, cannot close a cycle, and keeps the fence's full guarantee.
+// See Managed_process::wait_for_delivery_fence().
+inline bool calling_thread_serves_a_request_stream()
+{
+    return s_tl_current_request_reader != nullptr;
+}
+
 inline thread_local instance_id_type s_tl_additional_piids[max_process_index];
 inline thread_local size_t s_tl_additional_piids_size = 0;
 inline thread_local bool   s_tl_rpc_reply_deferred    = false;

@@ -1038,11 +1038,13 @@ Process_message_reader::Delivery_target Process_message_reader::prepare_delivery
 
     // A request stream is only worth waiting for if the thread that serves it can
     // still read. The calling thread cannot serve its own ring while it is in the
-    // fence, and neither can any other request reader thread that is already parked
-    // in one.
+    // fence. Neither can any other request reader thread that is already parked in
+    // one, but that only has to be skipped by a caller which is itself a request
+    // reader: those are the only threads that can close a wait cycle.
     if (stream == Delivery_stream::Request &&
         (s_tl_current_request_reader == this ||
-            progress->request_fence_parked.load(std::memory_order_acquire) != 0))
+            (calling_thread_serves_a_request_stream() &&
+                progress->request_fence_parked.load(std::memory_order_acquire) != 0)))
     {
         return target;
     }
