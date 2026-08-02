@@ -1,6 +1,7 @@
 #include <sintra/sintra.h>
 
 #include "exact_child_test_support.h"
+#include "external_process_invitation_test_support.h"
 #include "managed_child_test_support.h"
 #include "test_utils.h"
 
@@ -12,7 +13,6 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
@@ -89,33 +89,11 @@ int              g_abort_ack_fd = -1;
 struct sigaction g_previous_abort_action {};
 #endif
 
-struct Runtime_guard
-{
-    bool active = false;
-
-    ~Runtime_guard()
-    {
-        if (!active || !sintra::s_mproc) {
-            return;
-        }
-
-        try {
-            sintra::detail::finalize();
-        }
-        catch (...) {
-        }
-    }
-
-    bool shutdown()
-    {
-        if (!active) {
-            return true;
-        }
-
-        active = false;
-        return sintra::shutdown();
-    }
-};
+using sintra::test::invitation::Runtime_guard;
+using sintra::test::invitation::launch_direct_process;
+using sintra::test::invitation::marker_path;
+using sintra::test::invitation::wait_for_control_file;
+using sintra::test::invitation::write_control_file;
 
 struct Reader_retirement_gate
 {
@@ -202,13 +180,6 @@ private:
     std::atomic<bool>  m_done{false};
     std::thread        m_thread;
 };
-
-std::filesystem::path marker_path(
-    const std::filesystem::path&   dir,
-    const std::string&             marker)
-{
-    return dir / (marker + ".txt");
-}
 
 #ifdef _WIN32
 void acknowledge_abort_signal(int signal_number)
@@ -327,21 +298,14 @@ bool install_abort_signal_acknowledgement(
     return true;
 }
 
-std::filesystem::path control_path(
-    const std::filesystem::path&   dir,
-    const std::string&             marker,
-    const char*                    suffix)
-{
-    return dir / (marker + suffix);
-}
-
+// The shared fixture takes the failure prefix explicitly; bind this file's constant
+// once here rather than at every call.
 void write_marker(
     const std::filesystem::path&   dir,
     const std::string&             marker,
     std::string_view               value)
 {
-    std::ofstream out(marker_path(dir, marker), std::ios::binary | std::ios::trunc);
-    out << value << '\n';
+    sintra::test::invitation::write_marker(k_failure_prefix, dir, marker, value);
 }
 
 bool wait_for_marker(
@@ -350,26 +314,8 @@ bool wait_for_marker(
     std::string_view               expected,
     std::chrono::milliseconds      timeout)
 {
-    const auto path = marker_path(dir, marker);
-    std::string actual;
-
-    if (sintra::test::wait_for_first_line(path, expected, actual, timeout, 20ms)) {
-        return true;
-    }
-
-    if (actual.empty()) {
-        std::fprintf(stderr, "%smarker '%s' was not written\n", k_failure_prefix, marker.c_str());
-    }
-    else {
-        std::fprintf(stderr,
-            "%smarker '%s' mismatch: expected '%.*s', actual '%s'\n",
-            k_failure_prefix,
-            marker.c_str(),
-            static_cast<int>(expected.size()),
-            expected.data(),
-            actual.c_str());
-    }
-    return false;
+    return sintra::test::invitation::wait_for_marker(
+        k_failure_prefix, dir, marker, expected, timeout);
 }
 
 bool wait_for_marker_in(
@@ -397,38 +343,6 @@ bool wait_for_marker_in(
         marker.c_str(),
         actual.empty() ? "<missing>" : actual.c_str());
     return false;
-}
-
-void write_control_file(
-    const std::filesystem::path&       dir,
-    const std::string&                 marker,
-    const char*                        suffix)
-{
-    std::ofstream out(control_path(dir, marker, suffix), std::ios::binary | std::ios::trunc);
-    out << "go\n";
-}
-
-bool wait_for_control_file(
-    const std::filesystem::path&       dir,
-    const std::string&                 marker,
-    const char*                        suffix,
-    std::chrono::milliseconds          timeout)
-{
-    return sintra::test::wait_for_file(control_path(dir, marker, suffix), timeout, 20ms);
-}
-
-bool launch_direct_process(
-    const std::string&                 binary_path,
-    const std::vector<std::string>&    args,
-    sintra::test::Exact_child&         child)
-{
-    std::vector<std::string> all_args;
-    all_args.reserve(args.size() + 1);
-    all_args.push_back(binary_path);
-    all_args.insert(all_args.end(), args.begin(), args.end());
-
-    sintra::C_string_vector cargs(all_args);
-    return child.spawn(binary_path.c_str(), cargs.v());
 }
 
 enum class Expected_child_exit
