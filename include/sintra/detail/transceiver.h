@@ -89,7 +89,37 @@ namespace detail {
 // Transceiver::ensure_rpc_shutdown() consults it: a transceiver destroyed from
 // inside its own RPC would otherwise wait for a guard that only the waiting thread
 // can release.
-inline thread_local std::vector<const Transceiver*> tl_executing_rpc_targets;
+//
+// The list lives in a heap object behind a POD thread_local pointer, the shape
+// tls_post_handler.h uses and for the same two reasons. A dynamically initialized
+// inline thread_local needs a TLS init function, and on PE/COFF GCC emits that
+// function as a strong global in plain .text rather than in a COMDAT, so every
+// translation unit that odr-uses the variable exports a colliding definition and
+// the MinGW link fails outright. It would also register a TLS destructor, which is
+// the thread-shutdown instability those headers already retreated from.
+//
+// A null pointer means the thread is executing nothing, so only the site that
+// records a guard allocates - and that is any thread at all, because the rpc_impl()
+// shortcut acquires the guard on the caller's thread. Only a request reader thread
+// has a thread-exit hook to release the list from, so every other thread frees it in
+// release_rpc_execution() as soon as it drains; a reader thread keeps its buffer for
+// the whole dispatch loop and calls tl_executing_rpc_targets_release() at the end of
+// Process_message_reader::request_reader_function().
+inline thread_local std::vector<const Transceiver*>* tl_executing_rpc_targets = nullptr;
+
+inline std::vector<const Transceiver*>& tl_executing_rpc_targets_ref()
+{
+    if (!tl_executing_rpc_targets) {
+        tl_executing_rpc_targets = new std::vector<const Transceiver*>();
+    }
+    return *tl_executing_rpc_targets;
+}
+
+inline void tl_executing_rpc_targets_release()
+{
+    delete tl_executing_rpc_targets;
+    tl_executing_rpc_targets = nullptr;
+}
 
 } // namespace detail
 

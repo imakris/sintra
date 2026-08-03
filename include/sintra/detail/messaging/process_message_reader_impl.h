@@ -1011,6 +1011,7 @@ void Process_message_reader::request_reader_function()
 
     tl_post_handler_function_clear();
     tl_post_handler_function_release();
+    detail::tl_executing_rpc_targets_release();
 }
 
 

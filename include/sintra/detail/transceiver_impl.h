@@ -55,6 +55,10 @@ using std::is_same_v;
 using std::string;
 using std::unique_lock;
 
+// Defined in messaging/process_message_reader_impl.h, which includes this header
+// before it reaches that definition.
+extern thread_local bool tl_is_req_thread;
+
 
 template <typename/* = void*/>
 Transceiver::Transceiver(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
@@ -159,10 +163,11 @@ Transceiver::try_acquire_rpc_execution()
         return {};
     }
 
-    // Record ownership first. push_back is the only operation here that can throw,
-    // and nothing after it can, so a failed allocation leaves the counter untouched
-    // rather than raised with no guard to lower it again.
-    detail::tl_executing_rpc_targets.push_back(this);
+    // Record ownership first. Allocating the target list and push_back are the only
+    // operations here that can throw, and nothing after them can, so a failed
+    // allocation leaves the counter untouched rather than raised with no guard to
+    // lower it again.
+    detail::tl_executing_rpc_targets_ref().push_back(this);
     ++m_active_rpc_calls;
     return Rpc_execution_guard(this);
 }
@@ -172,14 +177,23 @@ inline
 void
 Transceiver::release_rpc_execution()
 {
-    {
-        // Guards nest in LIFO order within a thread, so the match is normally the
-        // last entry; scanning backwards also covers a guard released out of order
-        // through Rpc_execution_guard::operator=.
-        auto& targets = detail::tl_executing_rpc_targets;
-        auto  it      = std::find(targets.rbegin(), targets.rend(), this);
-        if (it != targets.rend()) {
-            targets.erase(std::next(it).base());
+    // Guards nest in LIFO order within a thread, so the match is normally the last
+    // entry; scanning backwards also covers a guard released out of order through
+    // Rpc_execution_guard::operator=. A thread with no list at all never recorded a
+    // guard here - a moved-to guard can be destroyed on another thread - which is
+    // the same outcome as an entry that is not present.
+    if (auto* targets = detail::tl_executing_rpc_targets) {
+        auto it = std::find(targets->rbegin(), targets->rend(), this);
+        if (it != targets->rend()) {
+            targets->erase(std::next(it).base());
+        }
+
+        // A reader thread releases the list from its own exit hook and reuses the
+        // buffer across every call it dispatches. Any other thread reaches here
+        // through the rpc_impl() shortcut and has no exit hook at all, so keeping a
+        // drained list alive would lose it outright when the thread ends.
+        if (targets->empty() && !tl_is_req_thread) {
+            detail::tl_executing_rpc_targets_release();
         }
     }
 
@@ -210,11 +224,10 @@ Transceiver::ensure_rpc_shutdown()
     // from inside its own invocation. Report the cause and fail here instead.
     // The check comes before any state is published, so a caller that catches this
     // leaves the transceiver still accepting calls.
-    if (std::find(
-            detail::tl_executing_rpc_targets.begin(),
-            detail::tl_executing_rpc_targets.end(),
-            this) != detail::tl_executing_rpc_targets.end())
-    {
+    // Reading the list must not create it: this runs on every transceiver
+    // destruction, including on threads that have never dispatched an RPC.
+    const auto* targets = detail::tl_executing_rpc_targets;
+    if (targets && std::find(targets->begin(), targets->end(), this) != targets->end()) {
         // run_after_current_handler() is only a deferral on a reader thread; on any
         // other thread it runs the task immediately and would land right back here.
         // Name it for the case it actually solves, and state the requirement itself
