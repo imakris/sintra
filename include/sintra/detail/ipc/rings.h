@@ -2943,7 +2943,8 @@ struct Ring_R : Ring<T, true>
                             }
                             return Range<T>{};
                         }
-                        precision_sleep_for(std::chrono::duration<double>(precision_sleep_cycle));
+                        m_precision_sleeper.sleep_for(
+                            std::chrono::duration<double>(precision_sleep_cycle));
                     }
                 }
             }
@@ -3366,6 +3367,7 @@ public:
     }
 
 private:
+    Precision_sleeper                      m_precision_sleeper;
     const size_t                           m_max_trailing_elements;
     std::atomic<sequence_counter_type>*    m_reading_sequence       = &s_zero_rs;
     size_t                                 m_trailing_octile        = 0;

@@ -208,6 +208,51 @@ TEST_CASE(test_mod_helpers)
     ASSERT_EQ(sintra::mod_u64(64, 8), static_cast<size_t>(0));
 }
 
+#if defined(_WIN32)
+TEST_CASE(test_precision_timer_handle_follows_reader_lifetime)
+{
+    Temp_ring_dir tmp("precision_timer_lifetime");
+    const std::string ring_name     = "ring_data";
+    const size_t      ring_elements = pick_ring_elements<uint32_t>(64);
+    sintra::Ring_W<uint32_t> writer(tmp.str(), ring_name, ring_elements);
+
+    constexpr size_t thread_count = 64;
+    auto run_reader_threads = [&](bool use_precision_timer) {
+        for (size_t i = 0; i < thread_count; ++i) {
+            std::thread reader_thread([&]() {
+                sintra::Ring_R<uint32_t> reader(tmp.str(), ring_name, ring_elements);
+                if (use_precision_timer) {
+                    reader.m_precision_sleeper.sleep_for(std::chrono::microseconds(1));
+                }
+            });
+            reader_thread.join();
+        }
+    };
+    auto process_handle_count = []() {
+        DWORD count = 0;
+        ASSERT_TRUE(::GetProcessHandleCount(::GetCurrentProcess(), &count) != FALSE);
+        return count;
+    };
+
+    const auto before_control = process_handle_count();
+    run_reader_threads(false);
+    const auto after_control = process_handle_count();
+
+    const auto before_timer = process_handle_count();
+    run_reader_threads(true);
+    const auto after_timer = process_handle_count();
+
+    const auto control_growth = std::max<int64_t>(
+        0,
+        static_cast<int64_t>(after_control) - static_cast<int64_t>(before_control));
+    const auto timer_growth =
+        static_cast<int64_t>(after_timer) - static_cast<int64_t>(before_timer);
+    constexpr int64_t allowed_handle_noise = 4;
+
+    ASSERT_LE(timer_growth, control_growth + allowed_handle_noise);
+}
+#endif
+
 TEST_CASE(test_directory_helpers)
 {
     Temp_ring_dir tmp("dir_helpers");

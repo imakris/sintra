@@ -170,78 +170,102 @@ inline LONGLONG waitable_timer_100ns_intervals(
     return static_cast<LONGLONG>(intervals);
 }
 
-inline void precision_sleep_for(std::chrono::duration<double> duration)
+// Keep the waitable timer in an ordinary owner object. MinGW's emulated TLS can
+// release a non-POD thread_local object's storage before its destructor reads
+// the handle, while Ring_R can destroy this object at its normal lifetime edge.
+class Precision_sleeper
 {
-    if (duration <= std::chrono::duration<double>::zero()) {
-        return;
-    }
-    if (std::isnan(duration.count())) {
-        return;
-    }
+public:
+    Precision_sleeper() = default;
+    Precision_sleeper(const Precision_sleeper&) = delete;
+    Precision_sleeper& operator=(const Precision_sleeper&) = delete;
 
-    // The handle is held as a POD and is deliberately never closed, for the same
-    // reason tls_post_handler.h leaks its pointer. A thread_local whose type has
-    // a destructor is registered with __cxa_thread_atexit, which mingw runs from
-    // the PE TLS callback inside LdrShutdownThread - after winpthreads has already
-    // released the thread's emulated-TLS block. The destructor would therefore
-    // read this handle out of freed, refilled storage and pass a garbage value to
-    // CloseHandle, closing whatever unrelated object that value happens to name.
-    // One waitable timer per thread that ever precision-sleeps is reclaimed when
-    // the process exits.
-    static thread_local HANDLE timer_handle = create_precision_waitable_timer();
-    if (timer_handle == nullptr) {
-        coarse_sleep_for(duration);
-        return;
-    }
-
-    LARGE_INTEGER due_time{};
-    due_time.QuadPart = -waitable_timer_100ns_intervals(duration);
-
-    if (::SetWaitableTimer(timer_handle, &due_time, 0, nullptr, nullptr, FALSE)) {
-        const DWORD wait_result = ::WaitForSingleObject(timer_handle, INFINITE);
-        if (wait_result != WAIT_FAILED) {
-            return;
+    ~Precision_sleeper()
+    {
+        if (m_handle != nullptr) {
+            (void)::CloseHandle(m_handle);
         }
     }
 
-    coarse_sleep_for(duration);
-}
+    void sleep_for(std::chrono::duration<double> duration)
+    {
+        if (duration <= std::chrono::duration<double>::zero()) {
+            return;
+        }
+        if (std::isnan(duration.count())) {
+            return;
+        }
+
+        if (!m_initialization_attempted) {
+            m_handle = create_precision_waitable_timer();
+            m_initialization_attempted = true;
+        }
+        if (m_handle == nullptr) {
+            coarse_sleep_for(duration);
+            return;
+        }
+
+        LARGE_INTEGER due_time{};
+        due_time.QuadPart = -waitable_timer_100ns_intervals(duration);
+
+        if (::SetWaitableTimer(m_handle, &due_time, 0, nullptr, nullptr, FALSE)) {
+            const DWORD wait_result = ::WaitForSingleObject(m_handle, INFINITE);
+            if (wait_result != WAIT_FAILED) {
+                return;
+            }
+        }
+
+        coarse_sleep_for(duration);
+    }
+
+private:
+    HANDLE m_handle                   = nullptr;
+    bool   m_initialization_attempted = false;
+};
 #elif defined(__APPLE__)
-inline void precision_sleep_for(std::chrono::duration<double> duration)
+class Precision_sleeper
 {
-    if (duration <= std::chrono::duration<double>::zero()) {
-        return;
+public:
+    void sleep_for(std::chrono::duration<double> duration)
+    {
+        if (duration <= std::chrono::duration<double>::zero()) {
+            return;
+        }
+
+        const auto& timebase = mach_timebase_info_cached();
+
+        const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
+        if (nanos.count() <= 0) {
+            return;
+        }
+
+        unsigned __int128 absolute_delta = static_cast<unsigned __int128>(nanos.count()) *
+                                           static_cast<unsigned __int128>(timebase.denom);
+        absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
+        absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
+
+        if (absolute_delta == 0) {
+            std::this_thread::sleep_for(duration);
+            return;
+        }
+
+        const uint64_t target = mach_absolute_time() + static_cast<uint64_t>(absolute_delta);
+
+        auto status = mach_wait_until(target);
+        while (status == KERN_ABORTED) {
+            status = mach_wait_until(target);
+        }
     }
-
-    const auto& timebase = mach_timebase_info_cached();
-
-    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
-    if (nanos.count() <= 0) {
-        return;
-    }
-
-    unsigned __int128 absolute_delta = static_cast<unsigned __int128>(nanos.count()) *
-                                       static_cast<unsigned __int128>(timebase.denom);
-    absolute_delta += static_cast<unsigned __int128>(timebase.numer - 1);
-    absolute_delta /= static_cast<unsigned __int128>(timebase.numer);
-
-    if (absolute_delta == 0) {
-        std::this_thread::sleep_for(duration);
-        return;
-    }
-
-    const uint64_t target = mach_absolute_time() + static_cast<uint64_t>(absolute_delta);
-
-    auto status = mach_wait_until(target);
-    while (status == KERN_ABORTED) {
-        status = mach_wait_until(target);
-    }
-}
+};
 #else
-inline void precision_sleep_for(std::chrono::duration<double> duration)
+class Precision_sleeper
 {
-    std::this_thread::sleep_for(duration);
-}
+public:
+    void sleep_for(std::chrono::duration<double> duration)
+    {
+        std::this_thread::sleep_for(duration);
+    }
+};
 #endif
 
 } // namespace sintra
