@@ -28,6 +28,11 @@ using Process_reader_rpc_unblock_callback =
     void (*)(const char*, instance_id_type, uint32_t);
 inline std::atomic<Process_reader_rpc_unblock_callback>
     s_process_reader_rpc_unblock{nullptr};
+
+using Process_reader_failure_callback =
+    bool (*)(const char*, instance_id_type, uint32_t) noexcept;
+inline std::atomic<Process_reader_failure_callback>
+    s_process_reader_failure{nullptr};
 #endif
 
 inline constexpr const char* k_process_reader_rpc_unblock_entered =
@@ -36,6 +41,14 @@ inline constexpr const char* k_process_reader_rpc_unblock_claimed =
     "process_reader_rpc_unblock_claimed";
 inline constexpr const char* k_process_reader_rpc_unblock_complete =
     "process_reader_rpc_unblock_complete";
+inline constexpr const char* k_process_reader_request_session_start =
+    "process_reader_request_session_start";
+inline constexpr const char* k_process_reader_reply_session_start =
+    "process_reader_reply_session_start";
+inline constexpr const char* k_process_reader_request_thread_creation =
+    "process_reader_request_thread_creation";
+inline constexpr const char* k_process_reader_reply_thread_creation =
+    "process_reader_reply_thread_creation";
 
 } // namespace test_hooks
 
@@ -198,6 +211,11 @@ struct Process_message_reader
     bool running_for_test() const
     {
         return m_req_running.load() || m_rep_running.load();
+    }
+
+    bool ready_for_test() const
+    {
+        return m_req_running.load() && m_rep_running.load();
     }
 
     void set_running_for_test(bool request_running, bool reply_running)

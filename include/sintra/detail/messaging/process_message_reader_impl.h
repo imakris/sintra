@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -532,6 +533,31 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
 // Historical note: mingw 11.2.0 had issues with inline thread_local non-POD objects.
 // Keep the callable in a heap object to avoid TLS destructor crashes.
 
+namespace detail {
+
+SINTRA_DETAIL_DECL void process_reader_failure_for_test(
+    const char* stage,
+    instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_process_reader_failure.load(
+            std::memory_order_acquire);
+        callback && callback(stage, process_instance_id, occurrence))
+    {
+        throw std::system_error(
+            std::make_error_code(std::errc::resource_unavailable_try_again),
+            "Injected process-reader startup failure");
+    }
+#else
+    (void)stage;
+    (void)process_instance_id;
+    (void)occurrence;
+#endif
+}
+
+} // namespace detail
+
 SINTRA_DETAIL_DECL
 Process_message_reader::Process_message_reader(
     instance_id_type process_instance_id,
@@ -558,10 +584,82 @@ Process_message_reader::Process_message_reader(
         "rep",
         m_process_instance_id,
         occurrence);
-    m_request_reader_thread = std::make_unique<thread>([&] () { request_reader_function(); });
-    m_request_reader_thread->detach();
-    m_reply_reader_thread   = std::make_unique<thread>([&] () { reply_reader_function();   });
-    m_reply_reader_thread->detach();
+
+    constexpr unsigned k_startup_pending   = 0;
+    constexpr unsigned k_startup_committed = 1;
+    constexpr unsigned k_startup_cancelled = 2;
+    auto startup_state = std::make_shared<std::atomic<unsigned>>(k_startup_pending);
+    auto await_startup = [startup_state]() {
+        startup_state->wait(k_startup_pending, std::memory_order_acquire);
+        return startup_state->load(std::memory_order_acquire) ==
+            k_startup_committed;
+    };
+    bool request_session_started = false;
+    bool reply_session_started   = false;
+
+    try {
+        // Acquire both reading sessions synchronously. A successful constructor
+        // therefore publishes running lifetime guards before either detached
+        // worker can access this object, and session-start failures propagate to
+        // the constructing thread.
+        detail::process_reader_failure_for_test(
+            detail::test_hooks::k_process_reader_request_session_start,
+            m_process_instance_id,
+            m_occurrence);
+        begin_reading_session(m_in_req_c, m_req_running);
+        request_session_started = true;
+
+        detail::process_reader_failure_for_test(
+            detail::test_hooks::k_process_reader_reply_session_start,
+            m_process_instance_id,
+            m_occurrence);
+        begin_reading_session(m_in_rep_c, m_rep_running);
+        reply_session_started = true;
+
+        detail::process_reader_failure_for_test(
+            detail::test_hooks::k_process_reader_request_thread_creation,
+            m_process_instance_id,
+            m_occurrence);
+        m_request_reader_thread = std::make_unique<thread>(
+            [this, await_startup]() {
+                if (await_startup()) {
+                    request_reader_function();
+                }
+            });
+        detail::process_reader_failure_for_test(
+            detail::test_hooks::k_process_reader_reply_thread_creation,
+            m_process_instance_id,
+            m_occurrence);
+        m_reply_reader_thread = std::make_unique<thread>(
+            [this, await_startup]() {
+                if (await_startup()) {
+                    reply_reader_function();
+                }
+            });
+
+        m_request_reader_thread->detach();
+        m_reply_reader_thread->detach();
+    }
+    catch (...) {
+        startup_state->store(k_startup_cancelled, std::memory_order_release);
+        startup_state->notify_all();
+        if (m_request_reader_thread && m_request_reader_thread->joinable()) {
+            m_request_reader_thread->join();
+        }
+        if (m_reply_reader_thread && m_reply_reader_thread->joinable()) {
+            m_reply_reader_thread->join();
+        }
+        if (reply_session_started) {
+            end_reading_session(m_in_rep_c, m_rep_running);
+        }
+        if (request_session_started) {
+            end_reading_session(m_in_req_c, m_req_running);
+        }
+        throw;
+    }
+
+    startup_state->store(k_startup_committed, std::memory_order_release);
+    startup_state->notify_all();
 }
 
 
@@ -741,14 +839,29 @@ void Process_message_reader::begin_reading_session(
     const std::shared_ptr<Message_ring_R>& ring,
     std::atomic<bool>&                     running_flag)
 {
-    s_mproc->m_num_active_readers_mutex.lock();
-    s_mproc->m_num_active_readers++;
-    s_mproc->m_num_active_readers_mutex.unlock();
-
     ring->start_reading();
-    {
-        std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
-        running_flag = true;
+    bool active_reader_recorded = false;
+    try {
+        {
+            std::lock_guard<std::mutex> active_readers_guard(
+                s_mproc->m_num_active_readers_mutex);
+            ++s_mproc->m_num_active_readers;
+            active_reader_recorded = true;
+        }
+        {
+            std::lock_guard<std::mutex> ready_guard(m_ready_mutex);
+            running_flag = true;
+        }
+    }
+    catch (...) {
+        if (active_reader_recorded) {
+            std::lock_guard<std::mutex> active_readers_guard(
+                s_mproc->m_num_active_readers_mutex);
+            --s_mproc->m_num_active_readers;
+            s_mproc->m_num_active_readers_condition.notify_all();
+        }
+        ring->done_reading();
+        throw;
     }
     m_ready_condition.notify_all();
 }
@@ -814,8 +927,6 @@ void Process_message_reader::request_reader_function()
             m_managed_child_custody_identity,
             m_occurrence);
     };
-
-    begin_reading_session(m_in_req_c, m_req_running);
 
     publish_request_progress(m_in_req_c->get_message_reading_sequence());
 
@@ -1089,8 +1200,6 @@ void Process_message_reader::reply_reader_function()
             s_mproc->notify_delivery_progress();
         }
     };
-
-    begin_reading_session(m_in_rep_c, m_rep_running);
 
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
