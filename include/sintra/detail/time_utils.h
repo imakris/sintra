@@ -179,24 +179,17 @@ inline void precision_sleep_for(std::chrono::duration<double> duration)
         return;
     }
 
-    class Precision_timer
-    {
-    public:
-        ~Precision_timer()
-        {
-            if (m_handle != nullptr) {
-                ::CloseHandle(m_handle);
-            }
-        }
-
-        HANDLE handle() const noexcept { return m_handle; }
-
-    private:
-        HANDLE m_handle = create_precision_waitable_timer();
-    };
-
-    static thread_local Precision_timer timer;
-    if (timer.handle() == nullptr) {
+    // The handle is held as a POD and is deliberately never closed, for the same
+    // reason tls_post_handler.h leaks its pointer. A thread_local whose type has
+    // a destructor is registered with __cxa_thread_atexit, which mingw runs from
+    // the PE TLS callback inside LdrShutdownThread - after winpthreads has already
+    // released the thread's emulated-TLS block. The destructor would therefore
+    // read this handle out of freed, refilled storage and pass a garbage value to
+    // CloseHandle, closing whatever unrelated object that value happens to name.
+    // One waitable timer per thread that ever precision-sleeps is reclaimed when
+    // the process exits.
+    static thread_local HANDLE timer_handle = create_precision_waitable_timer();
+    if (timer_handle == nullptr) {
         coarse_sleep_for(duration);
         return;
     }
@@ -204,8 +197,8 @@ inline void precision_sleep_for(std::chrono::duration<double> duration)
     LARGE_INTEGER due_time{};
     due_time.QuadPart = -waitable_timer_100ns_intervals(duration);
 
-    if (::SetWaitableTimer(timer.handle(), &due_time, 0, nullptr, nullptr, FALSE)) {
-        const DWORD wait_result = ::WaitForSingleObject(timer.handle(), INFINITE);
+    if (::SetWaitableTimer(timer_handle, &due_time, 0, nullptr, nullptr, FALSE)) {
+        const DWORD wait_result = ::WaitForSingleObject(timer_handle, INFINITE);
         if (wait_result != WAIT_FAILED) {
             return;
         }
