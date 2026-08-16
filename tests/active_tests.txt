@@ -87,6 +87,7 @@ ping_pong_test                                          50
 processing_fence_test                                  100
 process_reader_constructor_rollback_test                 5
 receive_test                                            20
+reader_thread_fault_contract_test                        1
 recovery_policy_test                                     1
 recovery_runner_thread_test                              1
 recovery_test                                           30

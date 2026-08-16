@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include "thread_fault_guard.h"
+
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -216,11 +218,19 @@ struct Exception_boundary
 
     /// Returns a callable that wraps fn with exception protection.
     /// Suitable for passing to std::thread or storing as std::function.
+    ///
+    /// Where sintra's thread fault guard is available (Windows, SINTRA_HAS_SEH)
+    /// the callable additionally carries it, so a hardware fault on one of these
+    /// threads is reported to the coordinator instead of passing unseen;
+    /// elsewhere run_fault_guarded is a direct call and this is unchanged. The
+    /// C++ boundary stays innermost either way: an ordinary exception is caught
+    /// and logged here and never reaches the fault guard.
+    /// See detail/thread_fault_guard.h.
     template <typename F>
     auto wrap(F&& fn) const
     {
         return [ctx = context, f = std::forward<F>(fn)]() mutable noexcept {
-            run_protected(ctx, f);
+            run_fault_guarded([ctx, &f]() { run_protected(ctx, f); });
         };
     }
 };

@@ -134,6 +134,26 @@ once, configure with `-DSINTRA_BUILD_COMPILED=ON` and link
 `SINTRA_SEPARATE_COMPILATION` consistently and compile exactly one source file
 containing `#include <sintra/src.hpp>`.
 
+### Windows build switches
+
+Both are optional, and both must be defined identically for every translation unit
+that includes Sintra.
+
+- `SINTRA_HAS_SEH` enables the per-thread fault guard, which lets Sintra report a
+  hardware fault taken on one of its own threads. Windows raises no C signal for a
+  fault outside the main thread, so without it such a fault is invisible to the
+  runtime. It defaults to `1` for MSVC and clang-cl. GCC does not implement
+  `__try`/`__except`, so MinGW GCC builds get `0` and must rely on
+  [`sintra::announce_fatal_windows_exception`](docs/reference/announce_fatal_windows_exception.md);
+  clang targeting `*-w64-windows-gnu` can opt in with
+  `-DSINTRA_HAS_SEH=1 -fms-extensions`. Scope it per platform in a cross-platform
+  build, for example
+  `$<$<PLATFORM_ID:Windows>:SINTRA_HAS_SEH=1>`, because defining it on a
+  non-Windows target is an error.
+- `SINTRA_CRASH_WATCHDOG_GRACE_MS` (default `5000`) bounds how long the host's
+  crash reporter may run on a faulted process before Sintra ends it. Raise it if
+  your reporter needs longer to write a minidump.
+
 ### CMake integration
 
 If Sintra is already available to your build, link the interface target:

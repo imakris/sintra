@@ -108,8 +108,20 @@ Threading and lifecycle:
 - On Windows, Sintra does not install or own the process unhandled-exception
   filter. A host that owns the final unhandled disposition may call
   [`announce_fatal_windows_exception`](announce_fatal_windows_exception.md)
-  only after deciding that execution will not continue. The existing
-  per-thread CRT signal path is separate and unchanged.
+  only after deciding that execution will not continue.
+- On Windows, a `crash` event can originate from the CRT signal path (a
+  main-thread fault), from Sintra's per-thread guard on a thread it owns (a ring
+  reader, recovery runner, or owned lifecycle worker), or from a host calling
+  `announce_fatal_windows_exception`. All three consult the host's filter first,
+  so a fault the host repairs raises no event at all. A fault on a thread the
+  application created raises an event only if the host announces it. The
+  per-thread guard requires `SINTRA_HAS_SEH`; where it is `0` - MinGW GCC, and
+  clang targeting `*-w64-windows-gnu` without the opt-in - faults on Sintra's own
+  threads are not reported and the host must announce them.
+- A faulted Windows process is guaranteed to be gone within the crash watchdog
+  grace period (`SINTRA_CRASH_WATCHDOG_GRACE_MS`, default 5000 ms), but is not
+  necessarily gone the instant its `crash` event is observed. A recovery runner
+  may therefore start a replacement while the predecessor's last moments overlap.
 - Crash notification runs inside the failing process and is necessarily
   best-effort if corruption or termination prevents its bounded dispatch from
   completing. Managed-child exit observation remains OS-authoritative for the

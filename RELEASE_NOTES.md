@@ -11,6 +11,18 @@
   custody, preventing opt-in or delayed runners from crossing process-id reuse.
 - Hardened managed and external publication retirement with exact reader
   generation checks and ordered publication notifications.
+- Reported hardware faults on Sintra-owned Windows threads. A fault on a ring
+  reader thread, where application message handlers run, reaches no CRT signal
+  path; it now runs the abnormal-termination dispatch instead of passing unseen,
+  so a faulted peer is retired and barriers stop waiting for a participant that
+  no longer exists.
+- Preserved crash provenance on Windows. A faulted process now exits with the OS
+  exception code and names the cause on stderr, instead of exiting with a generic
+  `1`, and the host's crash reporter and Windows Error Reporting still run.
+- Gave the host the final say on both Windows fault paths. Sintra consults
+  `UnhandledExceptionFilter` before declaring a death, so a fault the host repairs
+  no longer broadcasts `terminated_abnormally` or stops the ring readers, and a
+  crash watchdog still guarantees that a faulted peer cannot linger.
 
 ### Compatibility
 
@@ -23,6 +35,18 @@
 - Bumped the ring ABI to version 8 for the internal joined-process startup
   protocol. All processes in a swarm must use binaries built against the same
   Sintra ring ABI.
+- Windows fatal-signal exit statuses changed. A hardware fault now exits with the
+  OS exception code, for example `0xC0000005`, instead of `1`, and `SIGABRT` and
+  `SIGTRAP` exit with `3`. `SIGINT` and `SIGTERM` still exit with `1`. Code that
+  compared a managed child's Windows exit status against `1` must test for a
+  non-zero status instead; the exact code is representative, not a contract.
+- `SINTRA_HAS_SEH` selects the Windows per-thread fault guard. It defaults to `1`
+  for MSVC and clang-cl and `0` elsewhere; clang targeting `*-w64-windows-gnu`
+  must opt in with `-DSINTRA_HAS_SEH=1 -fms-extensions`, and MinGW GCC builds keep
+  the previous behaviour because GCC does not implement `__try`/`__except`. Define
+  it identically for every translation unit that includes Sintra.
+- `SINTRA_CRASH_WATCHDOG_GRACE_MS` (default 5000) bounds how long a host crash
+  reporter may run on a faulted Windows process before Sintra ends it.
 
 ## v1.2.0 (2026-04-28)
 

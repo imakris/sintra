@@ -5,6 +5,7 @@
 
 #include "../config.h"
 #include "../logging.h"
+#include "../thread_fault_guard.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
 #include <atomic>
@@ -622,9 +623,14 @@ Process_message_reader::Process_message_reader(
             m_occurrence);
         m_request_reader_thread = std::make_unique<thread>(
             [this, await_startup]() {
-                if (await_startup()) {
-                    request_reader_function();
-                }
+                // Guarded because application message handlers run on this
+                // thread, and on Windows a hardware fault here reaches no CRT
+                // signal path. See detail/thread_fault_guard.h.
+                detail::run_fault_guarded([this, &await_startup]() {
+                    if (await_startup()) {
+                        request_reader_function();
+                    }
+                });
             });
         detail::process_reader_failure_for_test(
             detail::test_hooks::k_process_reader_reply_thread_creation,
@@ -632,9 +638,11 @@ Process_message_reader::Process_message_reader(
             m_occurrence);
         m_reply_reader_thread = std::make_unique<thread>(
             [this, await_startup]() {
-                if (await_startup()) {
-                    reply_reader_function();
-                }
+                detail::run_fault_guarded([this, &await_startup]() {
+                    if (await_startup()) {
+                        reply_reader_function();
+                    }
+                });
             });
 
         m_request_reader_thread->detach();
