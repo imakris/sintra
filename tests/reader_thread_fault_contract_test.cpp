@@ -128,6 +128,13 @@ int child_process()
         k_shared_dir_env, "reader_thread_fault");
     const fs::path dir = shared.path();
 
+    // Both faults below are deliberate, so the debug-pause handlers must not
+    // intercept them. The test runner sets SINTRA_DEBUG_PAUSE_ON_EXIT=1, which
+    // installs a first-chance vectored handler that parks the faulting thread
+    // forever - ahead of any structured-exception frame, so neither the host's
+    // filter nor Sintra's guard would ever see the exception.
+    sintra::disable_debug_pause_for_current_process();
+
     g_repairable_page = VirtualAlloc(
         nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
 
@@ -152,7 +159,6 @@ int child_process()
     });
 
     sintra::activate_slot([](const fatal_t&) {
-        sintra::disable_debug_pause_for_current_process();
         volatile int* nowhere = nullptr;
         *nowhere = 1;
     });
