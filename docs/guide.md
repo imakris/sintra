@@ -942,8 +942,17 @@ Sintra does not own the Windows process unhandled-exception filter. A host that
 does own the final disposition can call
 [`sintra::announce_fatal_windows_exception`](reference/announce_fatal_windows_exception.md)
 after it has decided execution will not continue. Unknown exception codes and
-calls while Sintra is inactive are no-ops. The CRT and POSIX signal paths are
-unchanged.
+calls while Sintra is inactive are no-ops. POSIX signal behaviour is unchanged.
+
+Sintra covers faults on the main thread and on the threads it owns itself, and on
+both paths it consults the host's filter before declaring a death, so a fault the
+host repairs is not treated as one. A fault on a thread the application created
+is still the host's to report, which is what the call above is for. A faulted
+process exits with the OS exception code, for example `0xC0000005`, rather than a
+generic failure code. See
+[`announce_fatal_windows_exception`](reference/announce_fatal_windows_exception.md)
+for the full disposition table, the `SINTRA_HAS_SEH` build switch, and the
+watchdog grace period.
 
 ## Direct Ring Helpers
 

@@ -9,11 +9,13 @@
 #include "../ipc/file_utils.h"
 #include "../ipc/process_utils.h"
 #include "../logging.h"
+#include "../thread_fault_guard.h"
 #include "../tls_post_handler.h"
 #include "dispatch_wait_guard.h"
 
 #include <array>
 #include <atomic>
+#include <cfloat>       // _pxcptinfoptrs, for the exception record behind a CRT signal
 #include <chrono>
 #include <algorithm>
 #include <cstdlib>
@@ -741,6 +743,130 @@ namespace {
                 // Event was closed or error occurred - exit the loop
                 break;
             }
+        }
+    }
+
+    // --- fatal-signal exit identity (Windows) ------------------------------
+    //
+    // A faulted process must never be reportable as an ordinary failure exit,
+    // so every status sintra produces names the cause that produced it. These
+    // are the statuses sintra exits with, and also what the watchdog uses if it
+    // has to end the process itself.
+    //
+    // For the three hardware faults the value is the NTSTATUS the OS would have
+    // produced. The mapping is representative rather than exact: SIGFPE covers
+    // several arithmetic exceptions, so an integer divide by zero reports
+    // 0xC000008E rather than 0xC0000094. Callers must test for a non-zero
+    // status, not for a particular one.
+
+    inline unsigned windows_signal_exit_status(int sig) noexcept
+    {
+        switch (sig) {
+            case SIGSEGV: return 0xC0000005u;   // STATUS_ACCESS_VIOLATION
+            case SIGILL:  return 0xC000001Du;   // STATUS_ILLEGAL_INSTRUCTION
+            case SIGFPE:  return 0xC000008Eu;   // STATUS_FLOAT_DIVIDE_BY_ZERO
+            case SIGABRT: return 3u;            // UCRT abort() convention
+#ifdef SIGTRAP
+            case SIGTRAP: return 3u;
+#endif
+            // SIGINT and SIGTERM are termination *requests*, not evidence of a
+            // broken process. Their disposition is a shutdown-policy question
+            // and is deliberately left unchanged here.
+            default:      return 1u;
+        }
+    }
+
+    inline const char* windows_signal_exit_message(int sig) noexcept
+    {
+        switch (sig) {
+            case SIGSEGV: return "[sintra] fatal SIGSEGV (access violation)\n";
+            case SIGILL:  return "[sintra] fatal SIGILL (illegal instruction)\n";
+            case SIGFPE:  return "[sintra] fatal SIGFPE (arithmetic fault)\n";
+            case SIGABRT: return "[sintra] fatal SIGABRT (abort)\n";
+#ifdef SIGTRAP
+            case SIGTRAP: return "[sintra] fatal SIGTRAP\n";
+#endif
+            case SIGINT:  return "[sintra] terminating on SIGINT\n";
+            case SIGTERM: return "[sintra] terminating on SIGTERM\n";
+            default:      return "[sintra] terminating on a trapped signal\n";
+        }
+    }
+
+    // These three can only have arrived from the UCRT's _seh_filter_exe, i.e.
+    // from a real hardware exception that every first-chance and __except filter
+    // already declined. That is what makes it safe to consult the host's
+    // unhandled-exception filter for them and to treat its answer as final.
+    //
+    // Note what _seh_filter_exe does NOT do: it does not fall through to the
+    // startup code's __except body. It resets the thread's disposition to
+    // SIG_DFL, calls the handler, and on return resumes the faulting
+    // instruction. So returning from the handler is only correct once the host
+    // has repaired the fault; for a fatal one sintra must terminate itself.
+    inline bool windows_signal_is_hardware_fault(int sig) noexcept
+    {
+        return sig == SIGSEGV || sig == SIGILL || sig == SIGFPE;
+    }
+
+    using detail::format_hex32;
+    using detail::write_stderr_raw;
+
+    // The EXCEPTION_POINTERS of the hardware exception that caused the CRT to
+    // raise this signal, or null when there was none.
+    //
+    // The UCRT stashes them in _pxcptinfoptrs before calling the handler, which
+    // is what lets a SIGFPE handler inspect the faulting operation. It is set
+    // only for a genuine hardware exception: a software raise() leaves it null,
+    // which is exactly the discrimination needed here. MinGW leaves it null in
+    // both cases, so those builds take the conservative path below.
+    inline EXCEPTION_POINTERS* crt_exception_pointers() noexcept
+    {
+#if defined(_MSC_VER)
+        return static_cast<EXCEPTION_POINTERS*>(_pxcptinfoptrs);
+#else
+        return nullptr;
+#endif
+    }
+
+    // Installed into the thread fault guard, which calls this only after the
+    // host's unhandled-exception filter has been consulted and has decided the
+    // process will not continue. See detail/thread_fault_guard.h.
+    //
+    // This is the same second half as the CRT signal path: the same bounded
+    // dispatch tells the coordinator a peer is dying, and the process then stops
+    // without unwinding. The host has already had its turn by now, so there is
+    // nothing left to defer to.
+    inline void report_and_die_from_thread_fault(unsigned long exception_code) noexcept
+    {
+        const int sig =
+            windows_hardware_exception_signal(static_cast<DWORD>(exception_code));
+        if (sig != 0) {
+            queue_signal_dispatch_win(sig);
+        }
+
+        char        line[96];
+        std::size_t at     = 0;
+        auto        append = [&line, &at](const char* text) {
+            while (*text != '\0' && at + 1 < sizeof(line)) {
+                line[at++] = *text++;
+            }
+        };
+        append("[sintra] fatal exception ");
+        if (at + 10 + 1 <= sizeof(line)) {
+            format_hex32(exception_code, line + at);
+            at += 10;
+        }
+        append(" on a sintra-owned thread\n");
+        line[at] = '\0';
+        write_stderr_raw(line);
+
+        TerminateProcess(
+            GetCurrentProcess(),
+            exception_code != 0 ? static_cast<UINT>(exception_code) : 0xC0000005u);
+
+        // TerminateProcess does not return for the current process. Spin rather
+        // than fall back into a faulted thread if that ever changes.
+        for (;;) {
+            Sleep(1000);
         }
     }
 
@@ -2272,6 +2398,63 @@ static void s_signal_handler(int sig)
 
     auto& slot_table = signal_slots();
 
+    // A hardware fault arrives here from _seh_filter_exe, which runs *before*
+    // UnhandledExceptionFilter. Sintra therefore holds the fault at a point
+    // where the host has not yet had its say, and must not declare a death the
+    // host might still repair - broadcasting terminated_abnormally for a
+    // recovered fault, and stopping every reader, is the regression pinned by
+    // handled_exception_survival_contract_test.
+    //
+    // So consult the host first, in the same order the thread fault guard uses,
+    // and dispatch only once the answer is "this process will not continue".
+    // The host's filter therefore still runs, WER can still produce a dump, and
+    // the process still exits with the real exception code - none of which the
+    // unconditional TerminateProcess(..., 1) this replaced allowed.
+    if (windows_signal_is_hardware_fault(sig)) {
+        if (EXCEPTION_POINTERS* info = crt_exception_pointers()) {
+            const unsigned status = windows_signal_exit_status(sig);
+
+            const LONG host_decision =
+                detail::consult_host_exception_filter(info, status);
+            if (host_decision != EXCEPTION_EXECUTE_HANDLER) {
+                // Repaired, or a debugger has taken it. Not a death: nothing
+                // was dispatched and the readers are untouched.
+                //
+                // _seh_filter_exe resets this thread's disposition to SIG_DFL
+                // before calling us, so re-arm it or a second fault on this
+                // thread would go unseen. Returning makes the CRT resume the
+                // faulting instruction, which is what the host just repaired.
+                std::signal(sig, s_signal_handler);
+                return;
+            }
+
+            // The host decided the process will not continue, so the dispatch
+            // below is truthful.
+            queue_signal_dispatch_win(sig);
+
+            // A previously installed handler still gets its turn, and still
+            // gets it after the dispatch, exactly as on the path below.
+            if (auto* slot = find_slot(slot_table, sig); slot && slot->has_previous) {
+                auto prev = slot->previous;
+                if (prev != SIG_DFL && prev != SIG_IGN && prev != s_signal_handler) {
+                    prev(sig);
+                    return;
+                }
+            }
+
+            write_stderr_raw(windows_signal_exit_message(sig));
+
+            // Nothing here unwinds or runs atexit: reader threads may be blocked
+            // on ring semaphores, and unwinding through arbitrary destructors
+            // while shared ring state is mid-mutation is what must be avoided.
+            TerminateProcess(GetCurrentProcess(), status);
+            return;
+        }
+        // No exception pointers - a software raise(), or a CRT that does not
+        // publish them (MinGW). The host cannot be consulted, so take the
+        // conservative path: terminate, which keeps the dispatch below truthful.
+    }
+
     queue_signal_dispatch_win(sig);
 
     // Chain to previous handler (e.g., debug_pause handler)
@@ -2283,12 +2466,8 @@ static void s_signal_handler(int sig)
         }
     }
 
-    // Default: terminate the process
-    // Reader threads may be blocked on semaphores, and Windows shutdown waits for
-    // all threads to exit. Since this is a crashing process (signal handler was called),
-    // we don't need graceful shutdown - the coordinator will detect the death and
-    // respawn if recovery is enabled.
-    TerminateProcess(GetCurrentProcess(), 1);
+    write_stderr_raw(windows_signal_exit_message(sig));
+    TerminateProcess(GetCurrentProcess(), windows_signal_exit_status(sig));
 }
 #else
 inline
@@ -2394,6 +2573,15 @@ void install_signal_handler()
 
 #ifdef _WIN32
         ensure_signal_dispatcher_win();
+
+        // Arm the guard that covers every thread sintra owns. The CRT signal
+        // path below only ever fires for a main-thread fault; without this, a
+        // fault on a reader thread - where message handlers run - is never
+        // reported to the coordinator at all. Both paths share the watchdog
+        // that bounds the host's filter.
+        detail::ensure_crash_watchdog();
+        detail::thread_fault_action().store(
+            &report_and_die_from_thread_fault, std::memory_order_release);
 
         for (auto& slot : slot_table) {
             auto previous = std::signal(slot.sig, s_signal_handler);
