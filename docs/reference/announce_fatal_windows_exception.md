@@ -54,8 +54,13 @@ Both paths call `UnhandledExceptionFilter` before declaring anything, so:
 - A fault the host declines while a debugger is attached is left to the debugger,
   and is not reported.
 - Only once the host has decided that execution will not continue does Sintra
-  dispatch the abnormal termination and end the process, using the exception code
-  as the exit status.
+  dispatch the abnormal termination and end the process, using the exception
+  record's own code as the exit status. An integer divide by zero therefore
+  exits with `0xC0000094` and an in-page error with `0xC0000006`, not with the
+  representative status of the signal that carried them. Where no exception
+  record is available, which means a software `raise()` or a CRT that does not
+  publish one, Sintra falls back to one representative status per signal, so
+  test for a non-zero exit status rather than for a particular value.
 
 Two deliberate exceptions to "the host decides first":
 
