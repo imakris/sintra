@@ -627,8 +627,13 @@ namespace {
             case EXCEPTION_ILLEGAL_INSTRUCTION:
             case EXCEPTION_PRIV_INSTRUCTION:
                 return SIGILL;
+            // The floating-point set matches is_terminal_hardware_exception:
+            // the two tables decide the same faults and must not disagree.
             case EXCEPTION_FLT_DIVIDE_BY_ZERO:
             case EXCEPTION_FLT_INVALID_OPERATION:
+            case EXCEPTION_FLT_OVERFLOW:
+            case EXCEPTION_FLT_UNDERFLOW:
+            case EXCEPTION_FLT_DENORMAL_OPERAND:
             case EXCEPTION_INT_DIVIDE_BY_ZERO:
                 return SIGFPE;
             default:
@@ -754,10 +759,13 @@ namespace {
     // has to end the process itself.
     //
     // For the three hardware faults the value is the NTSTATUS the OS would have
-    // produced. The mapping is representative rather than exact: SIGFPE covers
-    // several arithmetic exceptions, so an integer divide by zero reports
-    // 0xC000008E rather than 0xC0000094. Callers must test for a non-zero
-    // status, not for a particular one.
+    // produced. A signal names only the class of its fault - SIGFPE covers every
+    // arithmetic exception, SIGSEGV both an access violation and an in-page
+    // error - so this mapping has to pick one status per class and is
+    // representative rather than exact. Both fault paths therefore take the
+    // exception record's own code instead, and reach this only where no record
+    // was published: a software raise(), or a CRT that does not publish one.
+    // Callers must test for a non-zero status, not for a particular one.
 
     inline unsigned windows_signal_exit_status(int sig) noexcept
     {
@@ -2412,7 +2420,17 @@ static void s_signal_handler(int sig)
     // unconditional TerminateProcess(..., 1) this replaced allowed.
     if (windows_signal_is_hardware_fault(sig)) {
         if (EXCEPTION_POINTERS* info = crt_exception_pointers()) {
-            const unsigned status = windows_signal_exit_status(sig);
+            // The exception record names the fault exactly, where the signal
+            // names only its class. Reporting the record's own code is what
+            // makes an integer divide by zero exit as 0xC0000094 instead of the
+            // 0xC000008E its SIGFPE stands for, and an in-page error as
+            // 0xC0000006 instead of 0xC0000005 - and it is the status the guard
+            // path already reports, so the two paths cannot disagree about the
+            // same fault. windows_signal_exit_status is left for the record-less
+            // case, which is the only place its approximation still applies.
+            const unsigned status = info->ExceptionRecord
+                ? static_cast<unsigned>(info->ExceptionRecord->ExceptionCode)
+                : windows_signal_exit_status(sig);
 
             const LONG host_decision =
                 detail::consult_host_exception_filter(info, status);
@@ -2433,12 +2451,20 @@ static void s_signal_handler(int sig)
             queue_signal_dispatch_win(sig);
 
             // A previously installed handler still gets its turn, and still
-            // gets it after the dispatch, exactly as on the path below.
+            // gets it after the dispatch. What it does not get is the last
+            // word: _seh_filter_exe resumes the faulting instruction as soon as
+            // this handler returns, so a previous handler that returns would
+            // leave the process running the very instruction that faulted, with
+            // its disposition reset to SIG_DFL, after the coordinator has
+            // already been told the peer is dead. Control therefore falls
+            // through to the termination below. A previous handler that never
+            // returns - debug_pause parks the thread - is unaffected. The
+            // non-terminal tail further down keeps its own return, because
+            // nothing there has declared that the process will not continue.
             if (auto* slot = find_slot(slot_table, sig); slot && slot->has_previous) {
                 auto prev = slot->previous;
                 if (prev != SIG_DFL && prev != SIG_IGN && prev != s_signal_handler) {
                     prev(sig);
-                    return;
                 }
             }
 
