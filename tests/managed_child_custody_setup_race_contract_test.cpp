@@ -410,6 +410,11 @@ struct Concurrent_posix_reap_observation
 Concurrent_posix_reap_observation s_concurrent_posix_reap;
 std::atomic<pid_t> s_immediate_exit_pid{-1};
 std::atomic<bool> s_immediate_exit_observed{false};
+// Why the handshake gave up, when it did: 0 for a deadline that expired with
+// the child still running, ECHILD for a child something else had already
+// collected. The two call for opposite investigations, and the reap count
+// alone cannot tell them apart.
+std::atomic<int> s_immediate_exit_waitid_error{0};
 
 // The classification under test is decided by the waitpid(WNOHANG) that
 // spawn_detached_posix issues the instant this handshake returns, so the
@@ -450,6 +455,7 @@ void wait_after_immediate_exec_handshake(pid_t pid)
             break;
         }
         if (result == -1 && errno != EINTR) {
+            s_immediate_exit_waitid_error.store(errno, std::memory_order_relaxed);
             break;
         }
         std::this_thread::sleep_for(10ms);
@@ -2997,6 +3003,7 @@ bool run_immediate_reaped_classification(
     }
     s_immediate_exit_pid.store(-1, std::memory_order_relaxed);
     s_immediate_exit_observed.store(false, std::memory_order_relaxed);
+    s_immediate_exit_waitid_error.store(0, std::memory_order_relaxed);
     s_posix_reap.expected_pid.store(-1, std::memory_order_relaxed);
     s_posix_reap.count.store(0, std::memory_order_relaxed);
     s_posix_reap.status.store(0, std::memory_order_relaxed);
@@ -3058,7 +3065,8 @@ bool run_immediate_reaped_classification(
             "observed_created=%d observed_exited=%d observed_open=%d "
             "released_complete=%d released_created=%d released_exited=%d "
             "roster_unchanged=%d reap_normal=%d reap_count=%u "
-            "reap_status=0x%x survivor_absent=%d finalized=%d\n",
+            "reap_status=0x%x waitid_errno=%d survivor_absent=%d "
+            "finalized=%d\n",
             exit_observed ? 1 : 0,
             static_cast<bool>(custody) ? 1 : 0,
             observed.created_occurrences == 1 ? 1 : 0,
@@ -3071,6 +3079,7 @@ bool run_immediate_reaped_classification(
             reap_normal ? 1 : 0,
             reap_count,
             static_cast<unsigned>(reap_status),
+            s_immediate_exit_waitid_error.load(std::memory_order_relaxed),
             survivor_absent ? 1 : 0,
             finalized ? 1 : 0);
     }
