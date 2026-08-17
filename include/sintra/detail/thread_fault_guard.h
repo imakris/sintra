@@ -95,7 +95,10 @@ inline void write_stderr_raw(const char* text) noexcept
         ++length;
     }
     // A pipe can accept less than asked for; the whole line or nothing is the
-    // difference between a usable diagnostic and a truncated one.
+    // difference between a usable diagnostic and a truncated one. The loop
+    // blocks for as long as the reader on the other end makes it: bounding it
+    // would need overlapped I/O on a handle sintra does not own, or a second
+    // thread, and a fault path may have neither.
     DWORD offset = 0;
     while (offset < length) {
         DWORD written = 0;
@@ -126,13 +129,21 @@ inline void format_hex32(unsigned long value, char* out10) noexcept
 // network share, or one that waits on a lock the faulted thread was holding. A
 // faulted peer must never be allowed to hang there, so the call is bounded.
 //
-// Thread and events are created while the process is still healthy, so arming
-// from a fault path is a bare SetEvent: no allocation, and no dependency on a
-// heap the fault may have corrupted.
+// Thread and event are created while the process is still healthy, so arming
+// from a fault path is a handful of atomics and a bare SetEvent: no allocation,
+// and no dependency on a heap the fault may have corrupted.
 //
-// Both events are auto-reset. Arming is scoped to one host call and is released
-// again when the host turns out to have repaired the fault, so a recovered
-// process is never killed by a watchdog left over from its recovery.
+// Arming is *counted*, not signalled. Faults are concurrent - the gate below
+// admits one thread at a time into the host's filter, but every other faulted
+// thread is already armed and queued behind it - and an event cannot express
+// how many. Two SetEvents on an already-signalled auto-reset event are one
+// signal, so a third fault would come out of the arithmetic with no bound at
+// all and make an unbounded host call: exactly the hang this watchdog exists to
+// prevent. A counter is conserved under concurrency; a signal is not.
+//
+// Arming is scoped to one host call and is released again when the host turns
+// out to have repaired the fault, so a recovered process is never killed by a
+// watchdog left over from its recovery.
 //
 // The grace period bounds how long a host crash reporter may take. A minidump
 // of a large multi-process address space can take a while, so it is overridable.
@@ -141,13 +152,12 @@ inline void format_hex32(unsigned long value, char* out10) noexcept
 #endif
 constexpr DWORD k_crash_watchdog_grace_ms = SINTRA_CRASH_WATCHDOG_GRACE_MS;
 
-inline HANDLE& crash_watchdog_armed_event()
-{
-    static HANDLE evt = NULL;
-    return evt;
-}
+// How often the watchdog re-reads the deadline while faults are in flight.
+// Coarse enough that waiting costs nothing, fine enough to add no meaningful
+// slack to a grace period measured in seconds.
+constexpr DWORD k_crash_watchdog_poll_ms = 50;
 
-inline HANDLE& crash_watchdog_release_event()
+inline HANDLE& crash_watchdog_armed_event()
 {
     static HANDLE evt = NULL;
     return evt;
@@ -159,7 +169,33 @@ inline std::atomic<unsigned>& crash_watchdog_exit_status()
     return status;
 }
 
-// Set only once the watchdog thread is actually running. Creating the events is
+// Faults currently inside a host call. Zero means there is nothing to bound.
+inline std::atomic<unsigned>& crash_watchdog_armed_faults()
+{
+    static std::atomic<unsigned> armed{0};
+    return armed;
+}
+
+// The GetTickCount64 value past which the armed faults have taken too long.
+// Ticks never run backwards and the grace period is a constant, so a later arm
+// always computes a later deadline: the bound can only ever be pushed out. That
+// is what gives every newly armed fault its own full interval, and it is also
+// why a release needs to touch nothing but the count - it cannot shorten the
+// bound another fault is still relying on.
+//
+// One deadline is shared by every armed fault, so a fault that arrived first
+// waits out the newest arrival's interval too. Per-fault deadlines would need a
+// table indexed by something a faulted thread can produce without allocating,
+// and the swarm gains nothing from the finer bound: the guarantee owed is that a
+// faulted peer disappears within a grace period of the last thread to fault, not
+// of the first.
+inline std::atomic<ULONGLONG>& crash_watchdog_deadline()
+{
+    static std::atomic<ULONGLONG> deadline{0};
+    return deadline;
+}
+
+// Set only once the watchdog thread is actually running. Creating the event is
 // not enough: an armed event with no waiter is not a backstop.
 inline std::atomic<bool>& crash_watchdog_ready()
 {
@@ -175,18 +211,47 @@ inline void crash_watchdog_loop()
         {
             return;
         }
-        if (WaitForSingleObject(crash_watchdog_release_event(),
-                                k_crash_watchdog_grace_ms) == WAIT_OBJECT_0)
-        {
-            // The fault was repaired and the process is healthy again.
-            continue;
+        // Awake because something armed. Watch the count rather than wait for a
+        // matching release: arms and releases interleave freely across faulted
+        // threads, and only the count says whether anything is still in flight.
+        //
+        // Every iteration reads both halves of the answer and there is exactly
+        // one place that decides, so termination always rests on a fault being
+        // in flight *and* the deadline it was armed with having passed. A count
+        // watched by the loop and a deadline tested outside it would let a
+        // non-zero count stand on its own for an expired deadline, which it
+        // never is: a release and a fresh arm can both land while the watchdog
+        // sits between the two reads, and the newly faulted thread would then be
+        // killed at the start of its grace period instead of at the end of it.
+        for (;;) {
+            if (crash_watchdog_armed_faults().load(std::memory_order_acquire)
+                    == 0)
+            {
+                break;              // nothing in flight; back to the long wait
+            }
+            // Read after the count, because arm_crash_watchdog writes the
+            // deadline before it publishes the count and publishes it with
+            // release: an acquire load that observes an arm therefore also
+            // observes that arm's deadline. Reading the deadline first would
+            // pair a fault with its predecessor's bound, which has by then
+            // expired.
+            if (GetTickCount64() <
+                crash_watchdog_deadline().load(std::memory_order_acquire))
+            {
+                Sleep(k_crash_watchdog_poll_ms);
+                continue;
+            }
+            // Blocking here would defeat the bound this thread exists to
+            // enforce - see the note on write_stderr_raw. It is accepted because
+            // without this line a watchdog kill is indistinguishable from an
+            // ordinary fault exit: both carry the same status.
+            write_stderr_raw(
+                "[sintra] crash path did not complete - forcing termination\n");
+            TerminateProcess(
+                GetCurrentProcess(),
+                crash_watchdog_exit_status().load(std::memory_order_acquire));
+            return;
         }
-        write_stderr_raw(
-            "[sintra] crash path did not complete - forcing termination\n");
-        TerminateProcess(
-            GetCurrentProcess(),
-            crash_watchdog_exit_status().load(std::memory_order_acquire));
-        return;
     }
 }
 
@@ -194,11 +259,8 @@ inline void ensure_crash_watchdog() noexcept
 {
     static std::once_flag once;
     std::call_once(once, [] {
-        crash_watchdog_armed_event()   = CreateEventW(NULL, FALSE, FALSE, NULL);
-        crash_watchdog_release_event() = CreateEventW(NULL, FALSE, FALSE, NULL);
-        if (crash_watchdog_armed_event() == NULL ||
-            crash_watchdog_release_event() == NULL)
-        {
+        crash_watchdog_armed_event() = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (crash_watchdog_armed_event() == NULL) {
             return;
         }
         try {
@@ -208,7 +270,10 @@ inline void ensure_crash_watchdog() noexcept
         catch (...) {
             // No watchdog. Callers see that through arm_crash_watchdog and can
             // choose not to make an unbounded host call. Failing to create one
-            // thread must not fail runtime initialisation.
+            // thread must not fail runtime initialisation - but the event has no
+            // waiter now and no second chance to acquire one, so give it back.
+            CloseHandle(crash_watchdog_armed_event());
+            crash_watchdog_armed_event() = NULL;
         }
     });
 }
@@ -220,15 +285,32 @@ inline bool arm_crash_watchdog(unsigned exit_status) noexcept
     if (!crash_watchdog_ready().load(std::memory_order_acquire)) {
         return false;
     }
-    crash_watchdog_exit_status().store(exit_status, std::memory_order_release);
-    return SetEvent(crash_watchdog_armed_event()) != 0;
+    crash_watchdog_exit_status().store(exit_status, std::memory_order_relaxed);
+    crash_watchdog_deadline().store(
+        GetTickCount64() + k_crash_watchdog_grace_ms, std::memory_order_relaxed);
+
+    // The count is published last, and with release, so that the watchdog's
+    // acquire load of it also brings the deadline written above. Publishing the
+    // count first would let the watchdog pair a fault it has only just seen with
+    // the previous fault's deadline, which has by then expired - an immediate
+    // kill of a process still inside its own grace period.
+    crash_watchdog_armed_faults().fetch_add(1, std::memory_order_release);
+
+    if (SetEvent(crash_watchdog_armed_event()) == 0) {
+        // Nothing is guaranteed to wake for this bound, so take it back rather
+        // than leave a count no release will ever balance: the watchdog would
+        // then terminate the process on some later fault's deadline.
+        crash_watchdog_armed_faults().fetch_sub(1, std::memory_order_release);
+        return false;
+    }
+    return true;
 }
 
+// Paired with an arm_crash_watchdog that returned true, and reached only from
+// there. An unbounded host call has no bound to give back.
 inline void release_crash_watchdog() noexcept
 {
-    if (crash_watchdog_ready().load(std::memory_order_acquire)) {
-        SetEvent(crash_watchdog_release_event());
-    }
+    crash_watchdog_armed_faults().fetch_sub(1, std::memory_order_release);
 }
 
 // Installed by the runtime once it can report a death. Called only after the
@@ -246,6 +328,21 @@ inline std::atomic<Thread_fault_action>& thread_fault_action()
 // application may legitimately raise and handle is excluded, in particular C++
 // exceptions (0xE06D7363), breakpoints and single steps, and the MSVC
 // thread-naming exception (0x406D1388).
+//
+// The floating-point codes share one precondition: the UCRT masks every FP
+// class, so none of them is raised unless the application unmasked it with
+// _controlfp_s. They are therefore listed as a complete class rather than a
+// selection - covering an unmasked invalid operation but not an unmasked
+// overflow would make sintra's reporting depend on which classes an application
+// happened to unmask. A code outside this set leaves thread_fault_filter
+// returning EXCEPTION_CONTINUE_SEARCH, and the process then dies through the
+// host with no dispatch at all.
+//
+// EXCEPTION_FLT_INEXACT_RESULT is deliberately absent: unmasking it faults on
+// ordinary floating-point arithmetic, so no working program has it unmasked.
+// So are EXCEPTION_FLT_STACK_CHECK, which reports an x87 register-stack
+// condition, and EXCEPTION_INT_OVERFLOW, which needs an explicit INTO or BOUND
+// that C++ code does not generate.
 inline bool is_terminal_hardware_exception(DWORD code) noexcept
 {
     switch (code) {
@@ -257,6 +354,9 @@ inline bool is_terminal_hardware_exception(DWORD code) noexcept
         case EXCEPTION_INT_DIVIDE_BY_ZERO:
         case EXCEPTION_FLT_DIVIDE_BY_ZERO:
         case EXCEPTION_FLT_INVALID_OPERATION:
+        case EXCEPTION_FLT_OVERFLOW:
+        case EXCEPTION_FLT_UNDERFLOW:
+        case EXCEPTION_FLT_DENORMAL_OPERAND:
             return true;
         default:
             return false;
