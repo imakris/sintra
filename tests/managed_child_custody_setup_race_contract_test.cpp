@@ -9,9 +9,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -409,19 +411,50 @@ Concurrent_posix_reap_observation s_concurrent_posix_reap;
 std::atomic<pid_t> s_immediate_exit_pid{-1};
 std::atomic<bool> s_immediate_exit_observed{false};
 
+// The classification under test is decided by the waitpid(WNOHANG) that
+// spawn_detached_posix issues the instant this handshake returns, so the
+// handshake has to hold the parent until the child's exit is collectable -
+// not merely until the child stops being alive.
+//
+// Those are the same instant on Linux, where is_process_alive() calls a child
+// dead only for the /proc states 'Z' and 'X', which is exactly when its status
+// can be collected. They are not the same instant on macOS:
+// macos_process_is_exited_or_zombie() answers "exited" as soon as proc_pidinfo
+// reports ESRCH, and the kernel stops resolving a pid through that path once
+// the process is flagged as terminating - which is before it becomes the
+// zombie waitpid() can reap. Gating on liveness let the parent run its probe
+// inside that window, where a child that had genuinely exited was classified
+// created_live, left in the reap roster, and collected only later off the
+// SIGCHLD path - after spawn_swarm_process had returned the facts this
+// scenario checks.
+//
+// waitid() with WEXITED | WNOWAIT reports the exit without collecting it. It
+// observes precisely the condition the probe needs, and leaves the zombie for
+// the code under test to reap.
 void wait_after_immediate_exec_handshake(pid_t pid)
 {
     s_immediate_exit_pid.store(pid, std::memory_order_release);
     s_posix_reap.expected_pid.store(pid, std::memory_order_release);
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (sintra::is_process_alive(static_cast<uint32_t>(pid)) &&
-        std::chrono::steady_clock::now() < deadline)
-    {
+    bool collectable = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        siginfo_t info;
+        std::memset(&info, 0, sizeof(info));
+        const int result = ::waitid(
+            P_PID,
+            static_cast<id_t>(pid),
+            &info,
+            WEXITED | WNOWAIT | WNOHANG);
+        if (result == 0 && info.si_pid == pid) {
+            collectable = true;
+            break;
+        }
+        if (result == -1 && errno != EINTR) {
+            break;
+        }
         std::this_thread::sleep_for(10ms);
     }
-    s_immediate_exit_observed.store(
-        !sintra::is_process_alive(static_cast<uint32_t>(pid)),
-        std::memory_order_release);
+    s_immediate_exit_observed.store(collectable, std::memory_order_release);
 }
 
 void observe_posix_reap(pid_t pid, int status) noexcept
@@ -2997,25 +3030,51 @@ bool run_immediate_reaped_classification(
     const auto released = custody.release_until(
         std::chrono::steady_clock::now() + 5s);
     const bool reap_normal = posix_reap_normal();
+    const auto reap_count = s_posix_reap.count.load(std::memory_order_acquire);
+    const auto reap_status = s_posix_reap.status.load(std::memory_order_relaxed);
     const bool survivor_absent = child_pid > 0 &&
         !sintra::is_process_alive(static_cast<uint32_t>(child_pid));
     sintra::testing::set_spawn_detached_exec_handshake(nullptr);
     clear_posix_reap();
     const bool finalized = settle_detail_finalize("immediate_reaped_classification");
 
-    return
-        s_immediate_exit_observed.load(std::memory_order_acquire) &&
-        custody                                                   &&
-        observed.created_occurrences == 1                         &&
-        observed.exited_occurrences  == 1                         &&
-        observed.release_state == sintra::Managed_child_release_state::open &&
-        released.release_state == sintra::Managed_child_release_state::complete &&
-        released.created_occurrences == 1                         &&
-        released.exited_occurrences  == 1                         &&
-        roster_unchanged                                          &&
-        reap_normal                                               &&
-        survivor_absent                                           &&
-        finalized;
+    const bool exit_observed =
+        s_immediate_exit_observed.load(std::memory_order_acquire);
+    const bool observed_open =
+        observed.release_state == sintra::Managed_child_release_state::open;
+    const bool released_complete =
+        released.release_state == sintra::Managed_child_release_state::complete;
+
+    const bool valid = exit_observed && custody &&
+        observed.created_occurrences == 1 &&
+        observed.exited_occurrences  == 1 &&
+        observed_open && released_complete &&
+        released.created_occurrences == 1 &&
+        released.exited_occurrences  == 1 &&
+        roster_unchanged && reap_normal && survivor_absent && finalized;
+    if (!valid) {
+        std::fprintf(stderr,
+            "IMMEDIATE_REAPED_INVALID exit_observed=%d custody=%d "
+            "observed_created=%d observed_exited=%d observed_open=%d "
+            "released_complete=%d released_created=%d released_exited=%d "
+            "roster_unchanged=%d reap_normal=%d reap_count=%u "
+            "reap_status=0x%x survivor_absent=%d finalized=%d\n",
+            exit_observed ? 1 : 0,
+            static_cast<bool>(custody) ? 1 : 0,
+            observed.created_occurrences == 1 ? 1 : 0,
+            observed.exited_occurrences  == 1 ? 1 : 0,
+            observed_open ? 1 : 0,
+            released_complete ? 1 : 0,
+            released.created_occurrences == 1 ? 1 : 0,
+            released.exited_occurrences  == 1 ? 1 : 0,
+            roster_unchanged ? 1 : 0,
+            reap_normal ? 1 : 0,
+            reap_count,
+            static_cast<unsigned>(reap_status),
+            survivor_absent ? 1 : 0,
+            finalized ? 1 : 0);
+    }
+    return valid;
 #endif
 }
 
