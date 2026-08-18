@@ -1108,6 +1108,7 @@ private:
         static_cast<uintptr_t>(-1);
 
     void rollback() noexcept;
+    void reset_after_move() noexcept;
     void rollback_initialization() noexcept;
     void rollback_reader() noexcept;
 #ifndef _WIN32
