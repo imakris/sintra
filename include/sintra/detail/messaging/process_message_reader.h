@@ -371,9 +371,6 @@ private:
 
     Delivery_progress_ptr               m_delivery_progress;
 
-    std::unique_ptr<thread>             m_request_reader_thread;
-    std::unique_ptr<thread>             m_reply_reader_thread;
-    
     atomic<bool>                        m_req_running               = false;
     atomic<bool>                        m_rep_running               = false;
     std::once_flag                      m_rpc_unblock_once;
