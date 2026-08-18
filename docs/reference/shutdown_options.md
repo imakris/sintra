@@ -36,8 +36,9 @@ Contract:
   participants pass the same options object but their hook is never
   called locally.
 - The hook runs after the collective processing-fence barrier and before
-  the coordinator's drain-wait. By the time it runs, all participants
-  have entered the protocol and message dispatching is in service mode.
+  the coordinator's drain-wait. By the time it runs, all participants have
+  entered the protocol. Readers are still in normal mode: the switch to
+  service mode happens later, inside finalization.
 - The hook must be coordinator-local. It must not initiate new peer
   coordination, additional barriers, or extra custom protocol steps; the
   runtime owns the surrounding synchronisation.

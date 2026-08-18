@@ -154,15 +154,74 @@ Calling `detail::finalize()` performs the following steps:
    Coordinator::wait_for_all_draining in coordinator_impl.h)*
 2. **Pause, then unpublish under service-mode communication.** With the
    coordinator aware of the shutdown and remote callers flushed, the process
-   first switches its readers to service mode via `pause()`. In this mode only
-   coordinator/service messages are processed. While paused, the process
-   deactivates handlers and unpublishes its transceivers (via
+   first switches its readers to service mode via `pause()`. While paused, the
+   process deactivates handlers and unpublishes its transceivers (via
    `deactivate_all()` / `unpublish_all_transceivers()`), keeping the synchronous
    unpublish path free of shutdown races while still allowing coordinator RPCs
-   to flow.
+   to flow. Service mode is narrower than normal mode for targeted requests and
+   replies, but it is *not* restricted to coordinator traffic for events; see
+   [Service mode](#service-mode) for what it actually admits, and why
+   finalization does not depend on `pause()` alone.
 3. **Destroy the managed process.** After transceivers are unpublished, the
    runtime destroys the `Managed_process` singleton. Its destructor stops the
    reader threads and releases all Sintra resources owned by the process.
+
+## Service mode
+
+`pause()` moves every reader of the calling process from `READER_NORMAL` to
+`READER_SERVICE`. The reader loops then apply three independent admission
+rules, collected in `detail::Reader_service_dispatch_policy`
+(`detail/messaging/process_message_reader.h`):
+
+| Traffic | Admitted while paused |
+|---|---|
+| Targeted request (RPC) | the receiver is a reserved service instance and the coordinator object lives in this process, or the sender is the coordinator |
+| Reply | the receiver is the local coordinator object, or the sender is the coordinator |
+| Event | the coordinator object lives in this process **and** the message type id is numerically greater than `reserved_id::base_of_messages_handled_by_coordinator` (`0x80000000`) |
+
+The request and reply rules match the name. The event rule does not, and it
+diverges in both directions:
+
+- **Ordinary user events still dispatch in the coordinator process.**
+  Automatically assigned message ids start at `num_reserved_type_ids`, which is
+  above `0x80000000`, and explicitly assigned user ids set bit 63. Every
+  application event type therefore clears the threshold, so a user event
+  handler registered in the coordinator process keeps running after `pause()`
+  and stops only at `deactivate_all()`. In every other process the rule denies
+  all events, because no coordinator object is local.
+- **Internal teardown events are suppressed.** `instance_unpublished` and
+  `unpublish_transceiver_notify` carry reserved ids far below `0x80000000`, so
+  as events they reach no handler in service mode, in any process. This is
+  reachable rather than hypothetical: `Transceiver::destroy()` falls back to
+  emitting `unpublish_transceiver_notify` as a remote event instead of issuing
+  an RPC exactly when the departing process is at or below
+  `COMMUNICATION_PAUSED`, and a coordinator process that has itself entered
+  service mode will not dispatch it. On the finalization path that costs
+  nothing, because such a coordinator is on its way to deleting the registry
+  the notification would have updated. A process that is paused without
+  finalizing keeps dropping them.
+
+`tests/process_reader_service_dispatch_policy_test.cpp` pins both behaviours,
+at the level of the predicates and against the real runtime. They are recorded
+as current behaviour rather than as a contract. Narrowing service-mode event
+eligibility — for example by classifying handlers explicitly instead of
+comparing type ids — is a deliberate change to teardown semantics and needs its
+own remote-teardown coverage before it is worth making.
+
+### `pause()` publishes a mode; it is not a fence
+
+`Managed_process::pause()` stores `READER_SERVICE` into every reader and
+returns. It neither wakes readers nor waits for an acknowledgement. A reader
+samples its state once at the top of each loop iteration and may then block
+inside `fetch_message()`, so a message enqueued immediately after `pause()`
+returns can still be processed by an iteration that sampled `READER_NORMAL`.
+
+Finalization does not rely on `pause()` for quiescence. The guarantee it needs
+comes from `deactivate_all()`, which clears each handler slot's `active` flag
+and then waits for that slot's in-flight invocations to complete. Any code that
+needs a strict reader fence has to establish one explicitly; returning from
+`pause()` does not mean that every subsequent message is observed in service
+mode.
 
 ## Barrier behaviour during shutdown
 

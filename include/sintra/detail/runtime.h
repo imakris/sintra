@@ -641,9 +641,13 @@ inline bool finalize_impl()
     }
 
     // Transition into service mode before deactivating slots and unpublishing
-    // transceivers. This prevents user-level event handlers from running
-    // concurrently with teardown while still allowing RPCs and service
-    // messages (including unpublish notifications) to flow.
+    // transceivers, so that ordinary targeted requests and replies stop being
+    // admitted while coordinator RPCs keep flowing. Service mode is not what
+    // stops user-level event handlers: in the coordinator process the reader's
+    // event rule admits every user message id, and pause() does not wake a
+    // reader that is already blocked in fetch_message(). Handler quiescence is
+    // established below, by deactivate_all(). See the "Service mode" section of
+    // docs/barriers_and_shutdown.md.
     s_mproc->pause();
 
     s_mproc->unblock_rpc();
