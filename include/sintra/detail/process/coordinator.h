@@ -74,11 +74,9 @@ struct Process_group: Derived_transceiver<Process_group>
     struct Barrier
     {
         mutex                                   m;
-        condition_variable                      cv;
         unordered_set<instance_id_type>         processes_pending;
         unordered_set<instance_id_type>         processes_arrived;
         //sequence_counter_type                   flush_sequence = 0;
-        bool                                    failed = false;
         int32_t                                 mode_tag = 0;
         instance_id_type                        common_function_iid = invalid_instance_id;
     };
