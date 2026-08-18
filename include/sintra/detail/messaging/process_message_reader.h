@@ -192,7 +192,7 @@ struct Process_message_reader
     enum State
     {
         READER_NORMAL,      // full functionality
-        READER_SERVICE,     // only basic functionality
+        READER_SERVICE,     // teardown mode; see Reader_service_dispatch_policy
         READER_STOPPING
     };
 
@@ -239,6 +239,11 @@ struct Process_message_reader
     ~Process_message_reader();
 
 
+    // Publishes the service state. This is not a fence: the reader samples
+    // m_reader_state once per loop iteration and may already be blocked in
+    // fetch_message(), so a message enqueued right after pause() returns can
+    // still be handled by an iteration that sampled READER_NORMAL. Teardown
+    // gets its quiescence from Transceiver::deactivate_all() instead.
     void pause() { m_reader_state = READER_SERVICE; }
 
 

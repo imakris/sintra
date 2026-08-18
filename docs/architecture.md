@@ -159,14 +159,20 @@ enum Communication_state {
 };
 ```
 
-**PAUSED** mode is critical for shutdown: readers continue processing, but only handle coordinator messages (enables graceful unpublish without deadlocks).
+**PAUSED** mode is critical for shutdown: readers keep running, but they stop
+admitting ordinary targeted requests and replies, which is what lets a process
+unpublish synchronously without deadlocking. Event admission is governed by a
+separate and considerably broader rule; see
+[Service mode](barriers_and_shutdown.md#service-mode) for what is actually
+processed while paused.
 
 #### Key Methods
 
 - `init()`: Initialize process from command-line arguments
 - `branch()`: Spawn child processes
 - `go()`: Start reader threads
-- `pause()`: Switch to SERVICE_MODE (coordinator-only messages)
+- `pause()`: Publish SERVICE_MODE to every reader. Asynchronous: it does not
+  wake blocked readers or wait for acknowledgement
 - `stop()`: Stop and join all reader threads
 - `flush()`: Wait for a specific sequence to be visible
 - `run_after_current_handler()`: Queue deferred task execution (avoids re-entrancy)
@@ -340,9 +346,9 @@ while one of them is held.
 │ 3. Pause (SERVICE_MODE)                                    │
 │    ┌─────────────────────────────────────────────────────┐ │
 │    │ pause()                                             │ │
-│    │ -> Switches readers to SERVICE_MODE                 │ │
-│    │ -> Only coordinator/service messages processed      │ │
-│    │ -> User-level handlers no longer run concurrently   │ │
+│    │ -> Publishes SERVICE_MODE to every reader           │ │
+│    │ -> Ordinary targeted requests and replies denied    │ │
+│    │ -> Handler quiescence comes from deactivate_all()   │ │
 │    └─────────────────────────────────────────────────────┘ │
 ├────────────────────────────────────────────────────────────┤
 │ 4. Deactivate and Unpublish                                │
