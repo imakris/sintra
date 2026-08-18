@@ -150,42 +150,40 @@ inline sequence_counter_type barrier_dispatch(
     return rendezvous_seq;
 }
 
+inline sequence_counter_type processing_fence_barrier_unchecked(
+    const std::string& barrier_name,
+    const std::string& group_name)
+{
+    const auto rendezvous_seq = rendezvous_barrier(
+        barrier_name,
+        group_name,
+        k_barrier_mode_processing);
+    if (rendezvous_seq == invalid_sequence) {
+        return invalid_sequence;
+    }
+
+    wait_for_processing_quiescence();
+
+    return rendezvous_barrier(
+        make_processing_phase_barrier_name(barrier_name),
+        group_name,
+        k_barrier_mode_processing_phase);
+}
+
 inline sequence_counter_type barrier_dispatch(
     processing_fence_t,
     const std::string& barrier_name,
     const std::string& group_name)
 {
     validate_user_barrier(barrier_name, group_name);
-    const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_processing);
-    if (rendezvous_seq == invalid_sequence) {
-        return invalid_sequence;
-    }
-
-    wait_for_processing_quiescence();
-
-    const auto processing_phase_name = make_processing_phase_barrier_name(barrier_name);
-    return rendezvous_barrier(
-        processing_phase_name,
-        group_name,
-        k_barrier_mode_processing_phase);
+    return processing_fence_barrier_unchecked(barrier_name, group_name);
 }
 
 inline sequence_counter_type internal_processing_fence_barrier(
     const std::string& barrier_name,
     const std::string& group_name)
 {
-    const auto rendezvous_seq = rendezvous_barrier(barrier_name, group_name, k_barrier_mode_processing);
-    if (rendezvous_seq == invalid_sequence) {
-        return invalid_sequence;
-    }
-
-    wait_for_processing_quiescence();
-
-    const auto processing_phase_name = make_processing_phase_barrier_name(barrier_name);
-    return rendezvous_barrier(
-        processing_phase_name,
-        group_name,
-        k_barrier_mode_processing_phase);
+    return processing_fence_barrier_unchecked(barrier_name, group_name);
 }
 
 inline void wait_for_processing_quiescence()

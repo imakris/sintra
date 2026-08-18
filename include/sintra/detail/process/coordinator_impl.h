@@ -239,7 +239,6 @@ sequence_counter_type Process_group::barrier(
         // new or reused barrier (may have failed previously)
         b.processes_pending = m_process_ids;
         b.processes_arrived.clear();
-        b.failed              = false;
         b.mode_tag            = barrier_mode_tag;
         b.common_function_iid = make_instance_id();
 
