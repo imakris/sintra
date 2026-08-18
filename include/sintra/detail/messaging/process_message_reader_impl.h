@@ -597,6 +597,8 @@ Process_message_reader::Process_message_reader(
     };
     bool request_session_started = false;
     bool reply_session_started   = false;
+    thread request_reader_thread;
+    thread reply_reader_thread;
 
     try {
         // Acquire both reading sessions synchronously. A successful constructor
@@ -621,7 +623,7 @@ Process_message_reader::Process_message_reader(
             detail::test_hooks::k_process_reader_request_thread_creation,
             m_process_instance_id,
             m_occurrence);
-        m_request_reader_thread = std::make_unique<thread>(
+        request_reader_thread = thread(
             [this, await_startup]() {
                 // Guarded because application message handlers run on this
                 // thread, and on Windows a hardware fault here reaches no CRT
@@ -636,7 +638,7 @@ Process_message_reader::Process_message_reader(
             detail::test_hooks::k_process_reader_reply_thread_creation,
             m_process_instance_id,
             m_occurrence);
-        m_reply_reader_thread = std::make_unique<thread>(
+        reply_reader_thread = thread(
             [this, await_startup]() {
                 detail::run_fault_guarded([this, &await_startup]() {
                     if (await_startup()) {
@@ -645,17 +647,17 @@ Process_message_reader::Process_message_reader(
                 });
             });
 
-        m_request_reader_thread->detach();
-        m_reply_reader_thread->detach();
+        request_reader_thread.detach();
+        reply_reader_thread.detach();
     }
     catch (...) {
         startup_state->store(k_startup_cancelled, std::memory_order_release);
         startup_state->notify_all();
-        if (m_request_reader_thread && m_request_reader_thread->joinable()) {
-            m_request_reader_thread->join();
+        if (request_reader_thread.joinable()) {
+            request_reader_thread.join();
         }
-        if (m_reply_reader_thread && m_reply_reader_thread->joinable()) {
-            m_reply_reader_thread->join();
+        if (reply_reader_thread.joinable()) {
+            reply_reader_thread.join();
         }
         if (reply_session_started) {
             end_reading_session(m_in_rep_c, m_rep_running);
@@ -836,9 +838,7 @@ Process_message_reader::~Process_message_reader()
         exit(1);
     }
 
-    m_request_reader_thread.reset();
     m_in_req_c.reset();
-    m_reply_reader_thread.reset();
     m_in_rep_c.reset();
 }
 
