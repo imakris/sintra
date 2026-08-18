@@ -333,63 +333,6 @@ SINTRA_DETAIL_DECL bool validate_reply_message(
 namespace detail
 {
 
-class Collected_handler_slot
-{
-public:
-    Collected_handler_slot(
-        const function<void(const Message_prefix&)>& handler,
-        std::shared_ptr<Handler_slot_state>          state)
-    :
-        m_handler(handler),
-        m_state(std::move(state))
-    {}
-
-    Collected_handler_slot(Collected_handler_slot&& other) noexcept
-    :
-        m_handler(std::move(other.m_handler)),
-        m_state(std::move(other.m_state))
-    {}
-
-    Collected_handler_slot& operator=(Collected_handler_slot&& other) noexcept
-    {
-        if (this != &other) {
-            m_handler = std::move(other.m_handler);
-            m_state   = std::move(other.m_state);
-        }
-        return *this;
-    }
-
-    ~Collected_handler_slot() noexcept = default;
-
-    Collected_handler_slot(const Collected_handler_slot&) = delete;
-    Collected_handler_slot& operator=(const Collected_handler_slot&) = delete;
-
-    void clear_handler() noexcept
-    {
-        m_handler = nullptr;
-    }
-
-    bool active() const noexcept
-    {
-        return m_state && m_state->active.load(std::memory_order_acquire);
-    }
-
-    const std::shared_ptr<Handler_slot_state>& state() const noexcept
-    {
-        return m_state;
-    }
-
-    void invoke(Message_prefix& message)
-    {
-        m_handler(message);
-    }
-
-private:
-    function<void(const Message_prefix&)>   m_handler;
-    std::shared_ptr<Handler_slot_state>     m_state;
-};
-
-
 class Handler_dispatch_depth_scope
 {
 public:
@@ -464,7 +407,7 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
     // thread trying to register a handler via activate_slot() / receive<T>().
     // Releasing before invocation gives waiting threads a chance to acquire the
     // lock between messages.
-    std::vector<detail::Collected_handler_slot> collected;
+    std::vector<std::shared_ptr<detail::Handler_slot_state>> collected;
     bool dispatch_registered = false;
 
     {
@@ -479,9 +422,10 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
         for (auto sid : scope_ids) {
             auto shl = sender_map->find(sid);
             if (shl != sender_map->end()) {
-                for (auto& handler : shl->second) {
-                    collected.emplace_back(handler, detail::handler_slot_state_for(handler));
-                }
+                collected.insert(
+                    collected.end(),
+                    shl->second.begin(),
+                    shl->second.end());
             }
         }
 
@@ -500,27 +444,21 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
 
     try {
         for (auto& collected_slot : collected) {
-            detail::Collected_handler_slot slot = std::move(collected_slot);
-            if (!slot.active()) {
+            auto slot = std::move(collected_slot);
+            if (!slot || !slot->active.load(std::memory_order_acquire)) {
                 continue;
             }
 
-            std::unique_lock<std::mutex> slot_invocation_lock(slot.state()->invocation_mutex);
-            if (!slot.active()) {
+            std::unique_lock<std::mutex> slot_invocation_lock(
+                slot->invocation_mutex);
+            if (!slot->active.load(std::memory_order_acquire)) {
                 continue;
             }
 
-            detail::Handler_slot_invocation_scope invocation(slot.state());
-            try {
-                if (slot.active()) {
-                    slot.invoke(message);
-                }
+            detail::Handler_slot_invocation_scope invocation(slot);
+            if (slot->active.load(std::memory_order_acquire)) {
+                slot->handler(message);
             }
-            catch (...) {
-                slot.clear_handler();
-                throw;
-            }
-            slot.clear_handler();
         }
     }
     catch (...) {

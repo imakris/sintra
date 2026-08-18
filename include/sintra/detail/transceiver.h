@@ -231,49 +231,17 @@ namespace detail
 
 struct Handler_slot_state
 {
-    std::atomic<bool>     active{true};
-    std::atomic<bool>     deactivation_claimed{false};
-    std::atomic<uint32_t> invocations{0};
-    std::mutex            invocation_mutex;
+    explicit Handler_slot_state(
+        function<void(const Message_prefix&)> handler_function)
+        : handler(std::move(handler_function))
+    {}
+
+    function<void(const Message_prefix&)> handler;
+    std::atomic<bool>                     active{true};
+    std::atomic<bool>                     deactivation_claimed{false};
+    std::atomic<uint32_t>                 invocations{0};
+    std::mutex                            invocation_mutex;
 };
-
-
-using handler_slot_key_t = const void*;
-
-
-inline handler_slot_key_t handler_slot_key(
-    const function<void(const Message_prefix&)>& handler) noexcept
-{
-    return std::addressof(handler);
-}
-
-
-inline unordered_map<handler_slot_key_t, std::shared_ptr<Handler_slot_state>>&
-handler_slot_states()
-{
-    // This registry is used by the init() cleanup guard during static teardown.
-    // Keep it alive until process exit so deactivation cannot race a destroyed
-    // function-local static.
-    static auto* states =
-        new unordered_map<handler_slot_key_t, std::shared_ptr<Handler_slot_state>>();
-    return *states;
-}
-
-
-inline std::shared_ptr<Handler_slot_state> handler_slot_state_for(
-    const function<void(const Message_prefix&)>& handler)
-{
-    auto& states = handler_slot_states();
-    const auto key = handler_slot_key(handler);
-    auto it = states.find(key);
-    if (it != states.end()) {
-        return it->second;
-    }
-
-    auto state = std::make_shared<Handler_slot_state>();
-    states.emplace(key, state);
-    return state;
-}
 
 } // namespace detail
 
@@ -281,7 +249,7 @@ inline std::shared_ptr<Handler_slot_state> handler_slot_state_for(
 using handler_proc_registry_mid_record_type =
     unordered_map<
         instance_id_type,                                // sender
-        list<function<void(const Message_prefix&)>>
+        list<std::shared_ptr<detail::Handler_slot_state>>
     >;
 
 

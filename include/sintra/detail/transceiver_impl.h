@@ -459,17 +459,15 @@ Transceiver::activate_impl(
         handler_fn(static_cast<const MESSAGE_T&>(prefix));
     };
 
-    function<void(const Message_prefix&)> wrapper(wrapper_lambda);
-    auto slot_state = std::make_shared<detail::Handler_slot_state>();
+    auto slot_state = std::make_shared<detail::Handler_slot_state>(
+        function<void(const Message_prefix&)>(std::move(wrapper_lambda)));
 
     lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
 
     auto& sender_map = s_mproc->m_active_handlers[message_type_id];
 
     auto& handler_list = sender_map[effective_sender_id];
-    auto mid_sid_it = handler_list.emplace(handler_list.end(), std::move(wrapper));
-    const auto slot_key = detail::handler_slot_key(*mid_sid_it);
-    detail::handler_slot_states()[slot_key] = slot_state;
+    auto mid_sid_it = handler_list.emplace(handler_list.end(), slot_state);
 
     decltype(m_deactivators)::iterator deactivator_it;
 
@@ -488,7 +486,6 @@ Transceiver::activate_impl(
         message_type_id,
         effective_sender_id,
         mid_sid_it,
-        slot_key,
         deactivator_it,
         slot_state
     ] () {
@@ -499,7 +496,6 @@ Transceiver::activate_impl(
             !state->deactivation_claimed.exchange(true, std::memory_order_acq_rel);
         if (claimed_deactivation) {
             lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
-            detail::handler_slot_states().erase(slot_key);
             auto it_mt = s_mproc->m_active_handlers.find(message_type_id);
             if (it_mt != s_mproc->m_active_handlers.end()) {
                 auto& sender_map = it_mt->second;
