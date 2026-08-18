@@ -1232,10 +1232,6 @@ inline instance_id_type Coordinator::publish_transceiver_with_reader_identity(
         assigned_name,
         reader_identity};
 
-    auto notify_publication_changed = [&]() {
-        m_managed_child_publication_changed.notify_all();
-    };
-
     auto true_sequence = [&](bool allow_notification_delay) {
         bool queued_notification = false;
         if (allow_notification_delay) {
@@ -1275,58 +1271,48 @@ inline instance_id_type Coordinator::publish_transceiver_with_reader_identity(
         return iid;
     };
 
-    if (pr_it != m_transceiver_registry.end()) { // the transceiver's process is known
-        
-        auto& pr = pr_it->second; // process registry
+    const bool process_is_known = pr_it != m_transceiver_registry.end();
+    if (process_is_known) {
+        auto& process_registry = pr_it->second;
 
-        // observe the limit of transceivers per process
-        if (pr.size() >= max_public_transceivers_per_proc) {
+        // Observe the limit of transceivers per process and reject duplicate
+        // publication of the same instance.
+        if (process_registry.size() >= max_public_transceivers_per_proc ||
+            process_registry.find(iid) != process_registry.end())
+        {
             return invalid_instance_id;
         }
-
-        // the transceiver must not have been already published
-        if (pr.find(iid) != pr.end()) {
-            return invalid_instance_id;
-        }
-
-        // the assigned_name should not be taken
-        if (resolve_instance(assigned_name) != invalid_instance_id) {
-            return invalid_instance_id;
-        }
-
-        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
-        pr.emplace(iid, entry);
-        notify_publication_changed();
-
-        // Do NOT reset draining state here - only reset when publishing a NEW PROCESS (Managed_process),
-        // not when publishing a regular transceiver. Resetting here could interfere with shutdown.
-
-        return true_sequence(false);
     }
     else
-    if (iid == process_iid) { // the transceiver is a Managed_process
+    if (iid != process_iid) {
+        // A process registry can only be introduced by publishing its
+        // Managed_process instance.
+        return invalid_instance_id;
+    }
 
-        // the assigned_name should not be taken
-        if (resolve_instance(assigned_name) != invalid_instance_id) {
-            return invalid_instance_id;
-        }
+    if (resolve_instance(assigned_name) != invalid_instance_id) {
+        return invalid_instance_id;
+    }
 
-        s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
+    s_mproc->m_instance_id_of_assigned_name.set_value(entry.name, iid);
+    if (process_is_known) {
+        pr_it->second.emplace(iid, entry);
+        // Do not reset draining state for a regular transceiver: that could
+        // reactivate a process which has already entered shutdown.
+    }
+    else {
         map<instance_id_type, Transceiver_publication> process_registry;
         process_registry.emplace(iid, entry);
         m_transceiver_registry.emplace(iid, std::move(process_registry));
-        notify_publication_changed();
 
-        // Reset draining state to 0 (ACTIVE) when publishing a Managed_process.
-        // This handles recovery/restart scenarios where the process slot might still be marked as draining.
+        // A newly published Managed_process starts a fresh process occurrence,
+        // including when a recovered process reuses a process slot.
         set_collective_shutdown_state(process_iid, 0);
         set_draining_state(process_iid, 0);
+    }
 
-        return true_sequence(true);
-    }
-    else {
-        return invalid_instance_id;
-    }
+    m_managed_child_publication_changed.notify_all();
+    return true_sequence(!process_is_known);
 }
 
 
