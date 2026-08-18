@@ -70,6 +70,47 @@ inline void process_reader_rpc_unblock_for_test(
 #endif
 }
 
+// Centralizes the current READER_SERVICE local-dispatch policy. This is a
+// characterization seam, not a redefinition of service traffic: validation,
+// relaying, unavailable-target replies, progress publication, reply-ring flush
+// processing, and post-handler execution remain in the reader loops.
+struct Reader_service_dispatch_policy
+{
+    [[nodiscard]] static constexpr bool allow_event(
+        bool         coordinator_is_local,
+        type_id_type message_type_id) noexcept
+    {
+        return
+            coordinator_is_local &&
+            message_type_id > static_cast<type_id_type>(
+                reserved_id::base_of_messages_handled_by_coordinator);
+    }
+
+    [[nodiscard]] static bool allow_targeted_request(
+        bool             coordinator_is_local,
+        instance_id_type receiver_instance_id,
+        instance_id_type sender_instance_id,
+        instance_id_type coordinator_instance_id) noexcept
+    {
+        return
+            (coordinator_is_local &&
+                is_service_instance(receiver_instance_id)) ||
+            sender_instance_id == coordinator_instance_id;
+    }
+
+    [[nodiscard]] static constexpr bool allow_reply(
+        bool             coordinator_is_local,
+        instance_id_type receiver_instance_id,
+        instance_id_type sender_instance_id,
+        instance_id_type coordinator_instance_id) noexcept
+    {
+        return
+            (coordinator_is_local &&
+                receiver_instance_id == coordinator_instance_id) ||
+            sender_instance_id == coordinator_instance_id;
+    }
+};
+
 } // namespace detail
 
 

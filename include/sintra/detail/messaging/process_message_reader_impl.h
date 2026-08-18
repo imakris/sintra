@@ -967,8 +967,9 @@ void Process_message_reader::request_reader_function()
                     has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c);
                 if (reading_local_ring &&
                     ((reader_state == READER_NORMAL) ||
-                     (s_coord && m->message_type_id >
-                         (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator)))
+                        detail::Reader_service_dispatch_policy::allow_event(
+                            s_coord != nullptr,
+                            m->message_type_id)))
                 {
                     dispatch_event_handlers(
                         *m,
@@ -1015,8 +1016,12 @@ void Process_message_reader::request_reader_function()
                 }
 
                 if ((reader_state == READER_NORMAL) ||
-                    (is_service_instance(m->receiver_instance_id) && s_coord) ||
-                    (m->sender_instance_id == s_coord_id))
+                    detail::Reader_service_dispatch_policy::
+                        allow_targeted_request(
+                            s_coord != nullptr,
+                            m->receiver_instance_id,
+                            m->sender_instance_id,
+                            s_coord_id))
                 {
                     // If addressed to a specified local receiver, this may only be an RPC call,
                     // thus the named receiver must exist.
@@ -1064,7 +1069,9 @@ void Process_message_reader::request_reader_function()
             // this is an interprocess event message.
 
             if ((reader_state == READER_NORMAL) ||
-                (s_coord && m->message_type_id > (type_id_type)detail::reserved_id::base_of_messages_handled_by_coordinator))
+                detail::Reader_service_dispatch_policy::allow_event(
+                    s_coord != nullptr,
+                    m->message_type_id))
             {
                 // Avoid double-handling on the coordinator: when the coordinator is
                 // reading a remote ring, it will relay below to its own ring as well.
@@ -1253,8 +1260,11 @@ void Process_message_reader::reply_reader_function()
         if (is_local_instance(m->receiver_instance_id)) {
 
             if ((reader_state == READER_NORMAL) ||
-                (m->receiver_instance_id == s_coord_id && s_coord) ||
-                (m->sender_instance_id   == s_coord_id))
+                detail::Reader_service_dispatch_policy::allow_reply(
+                    s_coord != nullptr,
+                    m->receiver_instance_id,
+                    m->sender_instance_id,
+                    s_coord_id))
             {
                 // Hold the spinlock for the entire critical section to prevent use-after-free.
                 // The Transceiver destructor erases from this map, so holding the lock ensures
