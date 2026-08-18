@@ -1491,21 +1491,7 @@ inline detail::Managed_child_launch_attempt::Managed_child_launch_attempt(
     , m_lifeline_read_endpoint(other.m_lifeline_read_endpoint)
     , m_lifeline_write_endpoint(other.m_lifeline_write_endpoint)
 {
-    other.m_owner = nullptr;
-    other.m_process_instance_id = invalid_instance_id;
-    other.m_occurrence = 0;
-    other.m_reader = Reader_ownership::absent;
-    other.m_initialization = Initialization_ownership::absent;
-    other.m_initialization_coordinator = nullptr;
-#ifndef _WIN32
-    other.m_posix_reap = Posix_reap_ownership::absent;
-    other.m_posix_reap_reservation_id = 0;
-#else
-    other.m_windows_native = Windows_native_ownership::absent;
-    other.m_windows_process_handle = 0;
-#endif
-    other.m_lifeline_read_endpoint = invalid_lifeline_endpoint;
-    other.m_lifeline_write_endpoint = invalid_lifeline_endpoint;
+    other.reset_after_move();
 }
 
 inline detail::Managed_child_launch_attempt&
@@ -1533,23 +1519,28 @@ detail::Managed_child_launch_attempt::operator=(
         m_lifeline_read_endpoint = other.m_lifeline_read_endpoint;
         m_lifeline_write_endpoint = other.m_lifeline_write_endpoint;
 
-        other.m_owner = nullptr;
-        other.m_process_instance_id = invalid_instance_id;
-        other.m_occurrence = 0;
-        other.m_reader = Reader_ownership::absent;
-        other.m_initialization = Initialization_ownership::absent;
-        other.m_initialization_coordinator = nullptr;
-#ifndef _WIN32
-        other.m_posix_reap = Posix_reap_ownership::absent;
-        other.m_posix_reap_reservation_id = 0;
-#else
-        other.m_windows_native = Windows_native_ownership::absent;
-        other.m_windows_process_handle = 0;
-#endif
-        other.m_lifeline_read_endpoint = invalid_lifeline_endpoint;
-        other.m_lifeline_write_endpoint = invalid_lifeline_endpoint;
+        other.reset_after_move();
     }
     return *this;
+}
+
+inline void detail::Managed_child_launch_attempt::reset_after_move() noexcept
+{
+    m_owner = nullptr;
+    m_process_instance_id = invalid_instance_id;
+    m_occurrence = 0;
+    m_reader = Reader_ownership::absent;
+    m_initialization = Initialization_ownership::absent;
+    m_initialization_coordinator = nullptr;
+#ifndef _WIN32
+    m_posix_reap = Posix_reap_ownership::absent;
+    m_posix_reap_reservation_id = 0;
+#else
+    m_windows_native = Windows_native_ownership::absent;
+    m_windows_process_handle = 0;
+#endif
+    m_lifeline_read_endpoint = invalid_lifeline_endpoint;
+    m_lifeline_write_endpoint = invalid_lifeline_endpoint;
 }
 
 inline detail::Managed_child_launch_attempt::~Managed_child_launch_attempt() noexcept
