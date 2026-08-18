@@ -11,6 +11,7 @@
 //
 
 #include <sintra/sintra.h>
+#include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/process/managed_process.h>
 
 #include "test_utils.h"
@@ -161,11 +162,10 @@ bool process_is_alive(int pid)
         return false;
     }
 
-    if (::kill(static_cast<pid_t>(pid), 0) == 0) {
-        return true;
-    }
-
-    return errno == EPERM;
+    // Deliberately not kill(pid, 0): that also succeeds for a process which has
+    // terminated but has not been reaped yet, which is exactly the state an
+    // orphaned child sits in until its inherited parent collects it.
+    return sintra::is_process_alive(static_cast<uint32_t>(pid));
 }
 
 bool wait_for_process_exit_or_terminate(int pid, std::chrono::milliseconds timeout)

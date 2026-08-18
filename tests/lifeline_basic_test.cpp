@@ -1,6 +1,7 @@
 // Lifeline process lifetime tests.
 
 #include <sintra/sintra.h>
+#include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/process/managed_process.h>
 
 #include "test_utils.h"
@@ -366,15 +367,20 @@ bool poll_exit(process_handle_t& process)
     }
 
     if (!process.waitable) {
-        if (::kill(process.pid, 0) == 0) { return false; }
-        if (errno == EPERM)              { return false; }
-        if (errno == ESRCH) {
-            process.exit_code = 0;
-            process.exited = true;
-            return true;
+        // Not our child, so it cannot be waited on: it stays a zombie until
+        // whoever inherited it reaps it, and an orphan inherited by an init
+        // that does not reap stays one indefinitely. kill(pid, 0) succeeds for
+        // the whole of that window, so it cannot answer the question these
+        // tests ask. sintra::is_process_alive() reports termination itself, on
+        // every supported platform.
+        if (sintra::is_process_alive(static_cast<uint32_t>(process.pid))) {
+            return false;
         }
-        process.exit_code = 1;
-        process.exited = true;
+
+        // The exit status of a non-child is not observable here. Callers that
+        // need it use the waitable path or the Windows handle path.
+        process.exit_code = 0;
+        process.exited    = true;
         return true;
     }
 
