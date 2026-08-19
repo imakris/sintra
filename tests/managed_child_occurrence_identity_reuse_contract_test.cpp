@@ -156,9 +156,9 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         ? read_marker(shared_path / k_child_a_file)
         : Child_marker{};
     Managed_child_exit_capture capture_a;
-    auto observation_a = observe(custody_a, capture_a);
-    const bool a_exit_seen = capture_a.wait_for_one(5s);
-    const auto released_a = custody_a.release_until(
+    auto       observation_a = observe(custody_a, capture_a);
+    const bool a_exit_seen   = capture_a.wait_for_one(5s);
+    const auto released_a    = custody_a.release_until(
         std::chrono::steady_clock::now() + 5s);
 
     auto custody_b = spawn(k_child_b_flag);
