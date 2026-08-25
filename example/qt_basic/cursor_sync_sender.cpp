@@ -1,4 +1,4 @@
-﻿#include "cursor_sync_common.h"
+#include "cursor_sync_common.h"
 
 #include <sintra/detail/logging.h>
 

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file multi_cursor_window.cpp
  * @brief Window process for the multi-cursor Qt example.
  *

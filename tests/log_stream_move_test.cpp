@@ -1,4 +1,4 @@
-﻿//
+//
 // sintra::Log_stream Move Semantics Test
 //
 // This test validates the move constructor and move assignment operator
