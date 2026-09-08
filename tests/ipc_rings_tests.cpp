@@ -277,6 +277,83 @@ TEST_CASE(test_directory_helpers)
     ASSERT_FALSE(std::filesystem::exists(dir_to_create));
 }
 
+TEST_CASE(test_directory_helpers_accept_concurrent_creation)
+{
+    Temp_ring_dir tmp("directory_creation_race");
+    for (bool replace_file : {false, true}) {
+        const auto path = tmp.path / (replace_file ? "replacement" : "missing");
+        if (replace_file) {
+            std::ofstream file(path);
+            file << "existing helper replacement contract";
+        }
+        bool peer_created = false;
+        std::error_code peer_error;
+        sintra::detail::before_directory_create_for_test = [&](const auto& candidate) {
+            // The helper has observed absence (or removed the old file).
+            // A real competing creator wins before its native create call.
+            std::thread peer([&]() {
+                peer_created = std::filesystem::create_directory(candidate, peer_error);
+            });
+            peer.join();
+        };
+        bool accepted = false;
+        try {
+            accepted = sintra::check_or_create_directory(path.string());
+        }
+        catch (...) {
+            sintra::detail::before_directory_create_for_test = {};
+            throw;
+        }
+        sintra::detail::before_directory_create_for_test = {};
+        ASSERT_TRUE(peer_created);
+        ASSERT_FALSE(peer_error);
+        ASSERT_TRUE(std::filesystem::is_directory(path));
+        ASSERT_TRUE(accepted);
+    }
+}
+
+TEST_CASE(test_directory_helpers_report_creation_errors)
+{
+    Temp_ring_dir tmp("directory_creation_errors");
+    const auto path = tmp.path / "contested";
+    std::error_code error;
+    bool peer_created = false;
+    sintra::detail::before_directory_create_for_test = [&](const auto& candidate) {
+        std::thread peer([&]() {
+            std::ofstream file(candidate);
+            file << "peer file";
+            file.flush();
+            peer_created = file.good();
+        });
+        peer.join();
+    };
+    bool accepted = false;
+    try {
+        accepted = sintra::check_or_create_directory(path.string(), &error);
+    }
+    catch (...) {
+        sintra::detail::before_directory_create_for_test = {};
+        throw;
+    }
+    sintra::detail::before_directory_create_for_test = {};
+    ASSERT_TRUE(peer_created);
+    ASSERT_FALSE(accepted);
+    ASSERT_TRUE(error);
+    ASSERT_TRUE(std::filesystem::is_regular_file(path));
+    std::ifstream file(path);
+    std::string content;
+    std::getline(file, content);
+    ASSERT_EQ(std::string("peer file"), content);
+
+    ASSERT_FALSE(sintra::check_or_create_directory((tmp.path / "missing" / "child").string(), &error));
+    ASSERT_TRUE(error);
+    ASSERT_TRUE(sintra::check_or_create_directory((tmp.path / "success").string(), &error));
+    ASSERT_FALSE(error);
+    error = std::make_error_code(std::errc::permission_denied);
+    ASSERT_TRUE(sintra::check_or_create_directory((tmp.path / "success").string(), &error));
+    ASSERT_FALSE(error);
+}
+
 TEST_CASE(test_control_file_first_attach_is_published_initialized)
 {
     Temp_ring_dir tmp("control_first_attach");

@@ -6602,8 +6602,10 @@ inline
 std::string Managed_process::obtain_swarm_directory()
 {
     const std::filesystem::path sintra_directory = std::filesystem::temp_directory_path() / "sintra";
-    if (!check_or_create_directory(sintra_directory.string())) {
-        throw std::runtime_error("access to a working directory failed");
+    std::error_code directory_error;
+    if (!check_or_create_directory(sintra_directory.string(), &directory_error)) {
+        throw std::filesystem::filesystem_error(
+            "access to a working directory failed", sintra_directory, directory_error);
     }
 
     cleanup_stale_swarm_directories(
@@ -6614,8 +6616,9 @@ std::string Managed_process::obtain_swarm_directory()
     std::stringstream stream;
     stream << std::hex << m_swarm_id;
     const std::filesystem::path swarm_directory = sintra_directory / stream.str();
-    if (!check_or_create_directory(swarm_directory.string())) {
-        throw std::runtime_error("access to a working directory failed");
+    if (!check_or_create_directory(swarm_directory.string(), &directory_error)) {
+        throw std::filesystem::filesystem_error(
+            "access to a working directory failed", swarm_directory, directory_error);
     }
 
     return swarm_directory.string();

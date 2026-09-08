@@ -9,6 +9,10 @@
 #include <limits>
 #include <string>
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+#include <functional>
+#endif
+
 #ifdef _WIN32
   #include "../sintra_windows.h"
 #else
@@ -22,6 +26,10 @@
 namespace sintra {
 
 namespace detail {
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline std::function<void(const std::filesystem::path&)> before_directory_create_for_test;
+#endif
 
 enum class publish_file_result
 {
@@ -181,16 +189,35 @@ inline publish_file_result publish_file_if_absent(
 
 } // namespace detail
 
-inline bool check_or_create_directory(const std::string& dir_name)
+inline bool check_or_create_directory(
+    const std::string& dir_name,
+    std::error_code*   out_error = nullptr)
 {
     std::error_code ec;
+    if (out_error) {
+        out_error->clear();
+    }
     std::filesystem::path ps(dir_name);
+    const auto create = [&]() {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (detail::before_directory_create_for_test) {
+            detail::before_directory_create_for_test(ps);
+        }
+#endif
+        // A concurrent creator may have won after our existence check.
+        // create_directory returns false with no error for an existing directory.
+        (void)std::filesystem::create_directory(ps, ec);
+        if (out_error) {
+            *out_error = ec;
+        }
+        return !ec;
+    };
     if (!std::filesystem::exists(ps)) {
-        return std::filesystem::create_directory(ps, ec);
+        return create();
     }
     if (std::filesystem::is_regular_file(ps)) {
         (void)std::filesystem::remove(ps, ec);
-        return std::filesystem::create_directory(ps, ec);
+        return create();
     }
     return true;
 }
