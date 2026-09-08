@@ -13,6 +13,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <unordered_set>
@@ -189,6 +190,7 @@ struct Spawn_detached_options
     bool                       inherit_standard_handles = true;
     std::vector<HANDLE>        inherit_handles;
     HANDLE*                    child_process_handle_out = nullptr;
+    HANDLE                     native_family_job = nullptr;
 #endif
 };
 
@@ -208,6 +210,7 @@ struct Spawn_detached_result
     int   pid = -1;
     int   wait_status = 0;
     bool  wait_status_available = false;
+    std::error_code error;
 
     bool created() const noexcept { return state != State::no_child; }
 };
@@ -720,6 +723,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
 
     if (prog == nullptr || argv == nullptr) {
         reset_child_outputs();
+        _set_errno(EINVAL);
         return false;
     }
 
@@ -833,7 +837,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         : nullptr;
     const auto update_proc_thread_attribute_list = kernel32
         ? reinterpret_cast<update_proc_thread_attribute_list_fn>(
-            GetProcAddress(kernel32, "UpdateProcThreadAttributeList"))
+            GetProcAddress(kernel32, "UpdateProcThreadAttribute"))
         : nullptr;
     const auto delete_proc_thread_attribute_list = kernel32
         ? reinterpret_cast<delete_proc_thread_attribute_list_fn>(
@@ -847,17 +851,31 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     std::vector<unsigned char> attr_buffer;
     STARTUPINFOEXW si_ex {};
     bool use_handle_list = !inherited_handles.empty() && has_attribute_list_api;
+    const bool use_family_job = options.native_family_job != nullptr;
+    HANDLE family_job = options.native_family_job;
+    if (use_family_job && !has_attribute_list_api) {
+        reset_child_outputs();
+        _set_errno(ENOTSUP);
+        _set_doserrno(ERROR_NOT_SUPPORTED);
+        for (const auto& guard : handle_guards) {
+            SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT,
+                guard.flags & HANDLE_FLAG_INHERIT);
+        }
+        return false;
+    }
 
-    if (use_handle_list) {
-        init_proc_thread_attribute_list(nullptr, 1, 0, &attr_list_size);
+    if (use_handle_list || use_family_job) {
+        const DWORD attribute_count = static_cast<DWORD>(use_handle_list) +
+            static_cast<DWORD>(use_family_job);
+        init_proc_thread_attribute_list(nullptr, attribute_count, 0, &attr_list_size);
         if (attr_list_size != 0) {
             attr_buffer.resize(attr_list_size);
             si_ex.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buffer.data());
-            if (!init_proc_thread_attribute_list(si_ex.lpAttributeList, 1, 0, &attr_list_size)) {
+            if (!init_proc_thread_attribute_list(si_ex.lpAttributeList, attribute_count, 0, &attr_list_size)) {
                 attr_buffer.clear();
                 si_ex.lpAttributeList = nullptr;
             }
-            if (si_ex.lpAttributeList) {
+            if (si_ex.lpAttributeList && use_handle_list) {
                 if (!update_proc_thread_attribute_list(
                         si_ex.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited_handles.data(),
                         inherited_handles.size() * sizeof(HANDLE), nullptr, nullptr))
@@ -873,8 +891,35 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         }
     }
 
+    if (use_family_job) {
+        // The optional Windows 10 attribute must not raise Sintra's Windows
+        // baseline. Its stable SDK value is negotiated by Update... below.
+        constexpr DWORD_PTR k_job_list_attribute = ProcThreadAttributeValue(13, FALSE, TRUE, FALSE);
+        // Assignment is part of CreateProcess, before its first instruction.
+        // Failure therefore never leaves an unassigned suspended child behind.
+        if (!si_ex.lpAttributeList || !update_proc_thread_attribute_list(
+                si_ex.lpAttributeList, 0, k_job_list_attribute,
+                &family_job, sizeof(family_job), nullptr, nullptr))
+        {
+            const DWORD error = GetLastError();
+            if (si_ex.lpAttributeList) {
+                delete_proc_thread_attribute_list(si_ex.lpAttributeList);
+            }
+            for (const auto& guard : handle_guards) {
+                SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT,
+                    guard.flags & HANDLE_FLAG_INHERIT);
+            }
+            reset_child_outputs();
+            _set_errno(EACCES);
+            _set_doserrno(error);
+            return false;
+        }
+    }
+
     auto init_startup_info = [](STARTUPINFOW& si_ref, DWORD cb_size) {
-        ZeroMemory(&si_ref, cb_size);
+        // The extended attribute pointer follows STARTUPINFO and already owns
+        // the handle/job attributes prepared above.
+        ZeroMemory(&si_ref, sizeof(si_ref));
         si_ref.cb         = cb_size;
         si_ref.dwFlags    = STARTF_USESTDHANDLES;
         si_ref.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
@@ -894,7 +939,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     for (unsigned attempt = 0; attempt < k_max_attempts; ++attempt) {
         STARTUPINFOW si {};
         STARTUPINFOW* si_ptr = nullptr;
-        if (use_handle_list) {
+        if (use_handle_list || use_family_job) {
             init_startup_info(si_ex.StartupInfo, sizeof(si_ex));
             si_ptr = &si_ex.StartupInfo;
         }
@@ -909,7 +954,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         // CREATE_NEW_PROCESS_GROUP: Like Unix setsid() - new process group for Ctrl-C isolation
         // Note: CREATE_BREAKAWAY_FROM_JOB removed - it requires special permissions and may fail
         DWORD creation_flags = CREATE_NEW_PROCESS_GROUP;
-        if (use_handle_list) {
+        if (use_handle_list || use_family_job) {
             creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
         }
         if (has_env_override) {
@@ -944,7 +989,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
             // to the caller when requested.
             CloseHandle(pi.hThread);
 
-            if (use_handle_list && si_ex.lpAttributeList) {
+            if (si_ex.lpAttributeList) {
                 delete_proc_thread_attribute_list(si_ex.lpAttributeList);
             }
             restore_handle_flags();
@@ -983,7 +1028,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     if (last_errno != 0) { _set_errno(last_errno); }
 
     if (last_doserrno != 0)                       { _set_doserrno(last_doserrno);                             }
-    if (use_handle_list && si_ex.lpAttributeList) { delete_proc_thread_attribute_list(si_ex.lpAttributeList); }
+    if (si_ex.lpAttributeList) { delete_proc_thread_attribute_list(si_ex.lpAttributeList); }
     restore_handle_flags();
     return false;
 }
@@ -1257,13 +1302,24 @@ inline Spawn_detached_result spawn_detached_with_result(
     const Spawn_detached_options& options)
 {
 #ifdef _WIN32
+    _set_doserrno(0);
     if (!spawn_detached_win32(options)) {
-        return {};
+        unsigned long native_error = 0;
+        _get_doserrno(&native_error);
+        Spawn_detached_result result;
+        result.error = native_error != 0
+            ? std::error_code(static_cast<int>(native_error), std::system_category())
+            : std::error_code(errno, std::generic_category());
+        return result;
     }
     const int pid = options.child_pid_out ? *options.child_pid_out : -1;
     return {Spawn_detached_result::State::created_live, pid, 0, false};
 #else
-    return spawn_detached_posix(options);
+    auto result = spawn_detached_posix(options);
+    if (!result.created()) {
+        result.error = std::error_code(errno, std::generic_category());
+    }
+    return result;
 #endif
 }
 

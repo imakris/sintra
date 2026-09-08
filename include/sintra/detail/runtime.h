@@ -354,6 +354,13 @@ public:
     Managed_child_native_request request_native_termination(
         const Managed_child_occurrence_identity& occurrence,
         std::chrono::steady_clock::time_point deadline) const;
+
+    /// Reserves an explicit consent/action episode, capped to two minutes.
+    /// Native rights acquisition and UAC belong to the application's scoped
+    /// broker; unsupported platforms reject without changing custody.
+    Managed_child_native_elevation_request request_native_elevation(
+        const Managed_child_occurrence_identity& occurrence,
+        std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
 
@@ -502,6 +509,102 @@ inline void cleanup_failed_init_noexcept()
 
 } // namespace detail
 
+/// Activate before init and before any child creation. The caller dedicates
+/// this process to its native family and grants Sintra sole child wait custody.
+/// Unmanaged external viewers and recovery controllers must already be outside
+/// this process ancestry on Linux.
+inline bool activate_native_family()
+{
+    if (s_init_once || s_mproc) {
+        return false;
+    }
+    return detail::native_process_family().activate();
+}
+
+inline void close_native_family_admission()
+{
+    std::shared_ptr<const detail::Managed_process_lifetime> lifetime;
+    {
+        Dispatch_shared_lock lock(dispatch_shutdown_mutex_instance);
+        if (s_mproc) {
+            lifetime = s_mproc->m_runtime_lifetime;
+        }
+    }
+    std::unique_lock<std::mutex> native_lock;
+    if (lifetime) {
+        native_lock = std::unique_lock<std::mutex>(lifetime->m_native_admission_mutex);
+    }
+    // Native family closure never waits for general transport admission.
+    auto& family = detail::native_process_family();
+    std::lock_guard<std::mutex> family_lock(family.m_mutex);
+    if (family.m_active.load()) {
+        family.m_closed.store(true);
+        family.m_status.admission_closed = true;
+        family.wake_observer();
+        if (lifetime && lifetime->m_native_owner) {
+            lifetime->m_native_owner->m_native_family_changed.notify_all();
+        }
+    }
+}
+
+inline Native_family_status native_family_status()
+{
+    std::shared_ptr<const detail::Managed_process_lifetime> lifetime;
+    {
+        Dispatch_shared_lock lock(dispatch_shutdown_mutex_instance);
+        if (s_mproc) {
+            lifetime = s_mproc->m_runtime_lifetime;
+        }
+    }
+    if (lifetime) {
+        std::lock_guard<std::mutex> lock(lifetime->m_native_admission_mutex);
+        if (lifetime->m_native_owner) {
+            return lifetime->m_native_owner->observe_native_family();
+        }
+    }
+    auto& family = detail::native_process_family();
+    std::lock_guard<std::mutex> lock(family.m_mutex);
+    return family.m_status;
+}
+
+inline void observe_native_family_changes(const Managed_child_native_change_signal& signal)
+{
+    std::shared_ptr<const detail::Managed_process_lifetime> lifetime;
+    {
+        Dispatch_shared_lock lock(dispatch_shutdown_mutex_instance);
+        if (s_mproc) {
+            lifetime = s_mproc->m_runtime_lifetime;
+        }
+    }
+    if (!lifetime) {
+        signal.notify();
+        return;
+    }
+    std::lock_guard<std::mutex> lock(lifetime->m_native_admission_mutex);
+    if (lifetime->m_native_owner) {
+        lifetime->m_native_owner->observe_native_family_changes(signal);
+    }
+}
+
+/// Native-only bounded action. Root occurrence release remains with its
+/// existing custody. Admission must already be closed for this global action.
+inline bool request_native_family_termination(std::chrono::steady_clock::time_point deadline)
+{
+    std::shared_ptr<const detail::Managed_process_lifetime> lifetime;
+    {
+        Dispatch_shared_lock lock(dispatch_shutdown_mutex_instance);
+        if (s_mproc) {
+            lifetime = s_mproc->m_runtime_lifetime;
+        }
+    }
+    if (!lifetime) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(lifetime->m_native_admission_mutex);
+    return lifetime->m_native_owner &&
+        lifetime->m_native_owner->request_native_family_termination(deadline);
+}
+
 inline void init(
     int                                argc,
     const char* const*                 argv,
@@ -649,6 +752,13 @@ inline bool finalize_impl()
             std::chrono::steady_clock::now() + std::chrono::milliseconds(250)))
     {
         return false;
+    }
+
+    if (native_process_family().m_active.load()) {
+        close_native_family_admission();
+        if (!s_mproc->observe_native_family().native_empty) {
+            return false;
+        }
     }
 
     const auto prev = s_shutdown_state.exchange(
@@ -1106,7 +1216,9 @@ inline External_process_invitation create_external_process_invitation(
         return {};
     }
 
-    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire)) {
+    if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
+        detail::native_process_family().m_closed.load(std::memory_order_acquire))
+    {
         Log_stream(log_level::warning)
             << "create_external_process_invitation: rejected because lifecycle "
             << "teardown is in progress\n";
@@ -1336,7 +1448,9 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
     // Ensure argv[0] is the program name (required on Windows); avoid duplicates.
     {
         std::lock_guard<std::mutex> admission_lock(detail::s_teardown_admission_mutex);
-        if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) || !s_mproc) {
+        if (detail::s_teardown_admission_closed.load(std::memory_order_acquire) ||
+            detail::native_process_family().m_closed.load(std::memory_order_acquire) || !s_mproc)
+        {
             Log_stream(log_level::warning)
                 << "spawn_swarm_process: rejected because lifecycle teardown is in progress\n";
             return {};
@@ -1651,6 +1765,29 @@ inline Managed_child_native_request Managed_child_custody::request_native_termin
             {Managed_child_native_error_domain::PROVIDER, 0, "Native action runtime retired"}};
     }
     return lifetime->m_native_owner->request_child_native_termination(m_record, occurrence, deadline);
+}
+
+inline Managed_child_native_elevation_request Managed_child_custody::request_native_elevation(
+    const Managed_child_occurrence_identity& occurrence,
+    std::chrono::steady_clock::time_point deadline) const
+{
+    auto unavailable = []() {
+        return Managed_child_native_elevation_request{
+            {Managed_child_native_admission::REJECTED, 0,
+                {Managed_child_native_error_domain::PROVIDER, 0, "Native elevation runtime unavailable"}}, {}};
+    };
+    if (!m_record) {
+        return unavailable();
+    }
+    const auto lifetime = m_record->runtime_lifetime.lock();
+    if (!lifetime) {
+        return unavailable();
+    }
+    std::lock_guard<std::mutex> admission_lock(lifetime->m_native_admission_mutex);
+    if (!lifetime->m_native_owner) {
+        return unavailable();
+    }
+    return lifetime->m_native_owner->request_child_native_elevation(m_record, occurrence, deadline);
 }
 
 inline Managed_child_status Managed_child_custody::status() const

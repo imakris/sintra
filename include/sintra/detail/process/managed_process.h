@@ -14,6 +14,7 @@
 #include "../ipc/spinlocked_containers.h"
 #include "../transceiver.h"
 #include "../messaging/call_function_with_message_args.h"
+#include "native_process_family.h"
 
 #include <algorithm>
 #include <atomic>
@@ -256,6 +257,8 @@ enum class Managed_child_native_stage
     SOFT_WAIT,
     HARD_TERMINATION,
     HARD_WAIT,
+    ELEVATION_PENDING,
+    ELEVATION_GRANTED,
     FINISHED,
 };
 
@@ -266,6 +269,7 @@ enum class Managed_child_native_outcome
     EXITED,
     DEADLINE_EXPIRED,
     FAILED,
+    CANCELLED,
 };
 
 enum class Managed_child_native_error_domain
@@ -326,6 +330,64 @@ struct Managed_child_native_request
 };
 
 namespace detail {
+struct Managed_child_native_elevation_state;
+}
+
+struct managed_child_native_elevation_reference_t
+{
+    uint32_t  source_pid = 0;
+    uintptr_t reference_handle = 0;
+    uint32_t  target_pid = 0;
+};
+
+/// One explicit elevated native action within the original occurrence's
+/// serializer. Export is a reduced-rights reference for object comparison,
+/// never authority to terminate a process selected only by its PID.
+class Managed_child_native_elevation_ticket
+{
+public:
+    ~Managed_child_native_elevation_ticket();
+    Managed_child_native_elevation_ticket(const Managed_child_native_elevation_ticket&) = delete;
+    Managed_child_native_elevation_ticket& operator=(const Managed_child_native_elevation_ticket&) = delete;
+
+    Managed_child_occurrence_identity occurrence() const;
+    uint64_t action_generation() const;
+    Managed_child_native_error last_error() const;
+    managed_child_native_elevation_reference_t export_reference() const;
+
+    /// Retains the exact broker process object before export/grant. The caller
+    /// authenticates its broker connection against this same process object.
+    bool bind_broker(uintptr_t broker_process_handle);
+
+    /// Transfers one already-owned launched broker handle without duplication.
+    /// True consumes that exact handle; false leaves ownership with the caller.
+    /// Identity validation can fail after ownership is accepted: last_error()
+    /// then explains the rejection, export/grant stay disabled, and the broker
+    /// remains observed. Late or already-exited brokers are still accounted for.
+    bool adopt_broker(uintptr_t owned_broker_process_handle);
+    bool commit();
+
+    /// Once bound, completion requires observed exit of that exact broker.
+    /// Pipe loss or destruction alone retains the native action reservation;
+    /// an abandoned ticket settles only when its bound broker exits.
+    bool finish(Managed_child_native_outcome outcome, Managed_child_native_error error = {});
+
+private:
+    explicit Managed_child_native_elevation_ticket(
+        std::shared_ptr<detail::Managed_child_native_elevation_state> state);
+
+    std::shared_ptr<detail::Managed_child_native_elevation_state> m_state;
+
+    friend struct Managed_process;
+};
+
+struct Managed_child_native_elevation_request
+{
+    Managed_child_native_request request;
+    std::unique_ptr<Managed_child_native_elevation_ticket> ticket;
+};
+
+namespace detail {
 class Managed_child_change_condition;
 }
 
@@ -380,6 +442,7 @@ private:
     std::shared_ptr<State> m_state = std::make_shared<State>();
 
     friend class detail::Managed_child_change_condition;
+    friend struct Managed_process;
 };
 
 
@@ -1191,6 +1254,7 @@ public:
 
         if (changed) {
             m_custody->changed.notify_all();
+            native_process_family().wake_observer();
         }
         if (terminal) {
             m_custody.reset();
@@ -1729,6 +1793,10 @@ public:
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         const Managed_child_occurrence_identity& identity,
         std::chrono::steady_clock::time_point deadline);
+    Managed_child_native_elevation_request request_child_native_elevation(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        const Managed_child_occurrence_identity& identity,
+        std::chrono::steady_clock::time_point deadline);
     void execute_child_native_action(
         const detail::Managed_child_occurrence_token& token,
         uint64_t generation,
@@ -1740,6 +1808,21 @@ public:
         instance_id_type failure_process_instance_id = invalid_instance_id,
         uint32_t failure_occurrence = 0);
     void join_owned_lifecycle_workers();
+    Native_family_status observe_native_family();
+    void observe_native_family_changes(const Managed_child_native_change_signal& signal);
+    detail::Managed_child_change_condition m_native_family_changed;
+    std::vector<Managed_child_native_change_signal> m_native_family_observers;
+    std::vector<std::weak_ptr<detail::Managed_child_custody_record>> m_native_family_custodies;
+    bool request_native_family_termination(std::chrono::steady_clock::time_point deadline);
+    void execute_native_family_termination(std::chrono::steady_clock::time_point deadline);
+    bool native_family_roots_settled();
+#ifdef _WIN32
+    void observe_native_family_job();
+#endif
+#if defined(__linux__)
+    void reap_native_family_children();
+    std::map<pid_t, int> m_native_family_pidfds;
+#endif
     void retire_child_custody_if_complete(
         const std::shared_ptr<detail::Managed_child_custody_record>& custody);
 

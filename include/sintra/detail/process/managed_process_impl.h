@@ -2811,6 +2811,11 @@ Managed_process::Managed_process():
 inline
 Managed_process::~Managed_process()
 {
+    auto& family = detail::native_process_family();
+    if (family.m_active.load()) {
+        family.m_closed.store(true);
+        family.wake_observer();
+    }
     {
         std::lock_guard<std::mutex> lock(m_runtime_lifetime->m_native_admission_mutex);
         m_runtime_lifetime->m_native_owner = nullptr;
@@ -3013,6 +3018,20 @@ Managed_process::~Managed_process()
 #ifndef _WIN32
 inline void Managed_process::reap_finished_children()
 {
+#if defined(__linux__)
+    if (detail::native_process_family().m_active.load(std::memory_order_acquire)) {
+        try {
+            reap_native_family_children();
+        }
+        catch (...) {
+            auto& family = detail::native_process_family();
+            std::lock_guard<std::mutex> lock(family.m_mutex);
+            family.fail(EIO, "inspect native family children");
+            m_native_family_changed.notify_all();
+        }
+        return;
+    }
+#endif
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     std::vector<std::pair<pid_t, int>> reaped_children;
 #endif
@@ -3075,6 +3094,11 @@ inline void Managed_process::reap_finished_children()
 inline
 void Managed_process::init(int argc, const char* const* argv)
 {
+#ifdef _WIN32
+    if (detail::native_process_family().m_active.load()) {
+        start_owned_lifecycle_worker([this]() { observe_native_family_job(); });
+    }
+#endif
     m_binary_name = argv[0];
     m_skip_startup_barrier = false;
 
@@ -3592,6 +3616,17 @@ Managed_process::accept_child_custody()
     {
         std::lock_guard<std::mutex> lock(m_child_custody_mutex);
         custody->identity = m_next_child_custody_identity++;
+        for (const auto& signal : m_native_family_observers) {
+            custody->changed.observe(signal);
+        }
+        if (detail::native_process_family().m_active.load()) {
+            // A ticket may retain exact native authority after ordinary
+            // release retires the registry entry. Keep it visible to family
+            // action admission without taking over its settlement owner.
+            std::erase_if(m_native_family_custodies,
+                [](const auto& original) { return original.expired(); });
+            m_native_family_custodies.push_back(custody);
+        }
         m_child_custodies.emplace(custody->identity, custody);
     }
     return custody;
@@ -3625,6 +3660,11 @@ Managed_process::admit_child_custody_occurrence(
     if (!custody) {
         return {};
     }
+    auto& family = detail::native_process_family();
+    std::unique_lock<std::mutex> family_lock(family.m_mutex);
+    if (family.m_closed.load(std::memory_order_acquire)) {
+        return {};
+    }
     {
         std::lock_guard<std::mutex> lock(custody->mutex);
         if (!custody->release_state.open()) {
@@ -3638,6 +3678,7 @@ Managed_process::admit_child_custody_occurrence(
         admitted.process_instance_id = process_instance_id;
         custody->occurrences.push_back(admitted);
     }
+    family_lock.unlock();
     try {
         detail::managed_child_failure_for_test(
             detail::test_hooks::k_managed_child_fail_admission_mapping,
@@ -5949,6 +5990,10 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     spawn_options.env_overrides = s.env_overrides;
 #ifdef _WIN32
     spawn_options.child_process_handle_out = &spawned_process_handle;
+    auto& family = detail::native_process_family();
+    if (family.m_active.load(std::memory_order_acquire)) {
+        spawn_options.native_family_job = family.m_job;
+    }
 #endif
 
     if (s.lifetime.enable_lifeline) {
@@ -6027,6 +6072,13 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
 
         const auto native_result =
             detail::spawn_detached_with_result(spawn_options);
+        if (native_result.error) {
+            result.failure.kind = Managed_child_failure_kind::native_spawn;
+            result.failure.native_error = native_result.error.value();
+            result.failure.message = std::string("Failed to spawn process (") +
+                native_result.error.category().name() + " error " +
+                std::to_string(native_result.error.value()) + ": " + native_result.error.message() + ')';
+        }
 #ifdef _WIN32
         launch_attempt.adopt_windows_process_handle(
             reinterpret_cast<uintptr_t>(spawned_process_handle));
@@ -6188,7 +6240,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         launch_attempt.confirm_windows_native_absent();
 #endif
         // Log spawn failures to stderr
-        if (!spawn_ready && !result.failure.message.empty()) {
+        if (!result.failure.message.empty()) {
             Log_stream(log_level::error) << result.failure.message << "\n";
         }
         else
@@ -7097,3 +7149,6 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 }
 
 } // sintra
+
+#include "managed_child_native_elevation_impl.h"
+#include "native_process_family_impl.h"
