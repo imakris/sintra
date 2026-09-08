@@ -113,6 +113,11 @@ foreach(FULL_TEST_PATH IN LISTS TEST_FILES)
     get_filename_component(TEST_NAME "${FULL_TEST_PATH}" NAME_WE)
     set(TARGET_NAME sintra_${TEST_NAME})
 
+    if(TEST_NAME STREQUAL "managed_child_native_peer_contract_test" AND
+       NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        continue()
+    endif()
+
     add_executable(${TARGET_NAME} ${TEST_FILE})
     target_link_libraries(${TARGET_NAME} PRIVATE sintra_for_tests)
 

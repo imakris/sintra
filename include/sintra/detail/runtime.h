@@ -342,6 +342,20 @@ public:
     /// supplies the native facts. Destroying the signal detaches its watches.
     bool observe_native_changes(const Managed_child_native_change_signal& signal) const;
 
+    /// Read-only, point-in-time proof against original native custody. The caller
+    /// borrows a connected server-side named-pipe HANDLE (Windows) or accepted
+    /// AF_UNIX socket fd (Linux), and must keep it connected and unrebound for
+    /// this call. No caller-supplied PID participates in authentication.
+    /// Capture the selected executable before launch. MATCH grants no product
+    /// authority: the caller still validates its one-use ticket and full scope
+    /// at admission. Exit and inspection failure never imply custody release.
+    /// Windows dynamically requires NtQueryInformationProcess image-file mapping
+    /// comparison; an unavailable native capability fails closed.
+    Managed_child_native_peer_proof verify_native_peer(
+        const Managed_child_occurrence_identity& occurrence,
+        uintptr_t connected_server_endpoint,
+        const Managed_child_executable_reference& executable) const;
+
     /// Requests forced native termination of one exact, ownership-ready child.
     /// Admission fences further custody recovery before starting an independent
     /// Sintra-owned native worker. A concurrent ordinary/native cleanup shares
@@ -1788,6 +1802,25 @@ inline Managed_child_native_elevation_request Managed_child_custody::request_nat
         return unavailable();
     }
     return lifetime->m_native_owner->request_child_native_elevation(m_record, occurrence, deadline);
+}
+
+inline Managed_child_native_peer_proof Managed_child_custody::verify_native_peer(
+    const Managed_child_occurrence_identity& occurrence,
+    uintptr_t connected_server_endpoint,
+    const Managed_child_executable_reference& executable) const
+{
+    const auto lifetime = m_record ? m_record->runtime_lifetime.lock() : nullptr;
+    if (!lifetime) {
+        return {Managed_child_native_peer_state::UNAVAILABLE, occurrence,
+            {Managed_child_native_error_domain::PROVIDER, 0, "Native proof runtime unavailable"}};
+    }
+    std::lock_guard<std::mutex> admission_lock(lifetime->m_native_admission_mutex);
+    if (!lifetime->m_native_owner) {
+        return {Managed_child_native_peer_state::UNAVAILABLE, occurrence,
+            {Managed_child_native_error_domain::PROVIDER, 0, "Native proof runtime retired"}};
+    }
+    return lifetime->m_native_owner->verify_child_native_peer(
+        m_record, occurrence, connected_server_endpoint, executable);
 }
 
 inline Managed_child_status Managed_child_custody::status() const

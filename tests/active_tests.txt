@@ -125,3 +125,4 @@ transceiver_ctor_test                                   10
 utility_test                                             1
 variable_buffer_alignment_test                           5
 native_process_family_contract_test
+managed_child_native_peer_contract_test

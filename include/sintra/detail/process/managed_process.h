@@ -289,6 +289,53 @@ struct Managed_child_native_error
     bool operator==(const Managed_child_native_error&) const = default;
 };
 
+namespace detail {
+class Managed_child_native_reference;
+}
+
+struct Managed_child_executable_capture;
+
+/// An opaque, retained executable file object. Capture the fixed payload before
+/// launch and retain the same reference through native peer admission. This is
+/// file identity, not a content signature or a claim about future process exec.
+class Managed_child_executable_reference
+{
+public:
+    Managed_child_executable_reference() = default;
+    explicit operator bool() const noexcept { return static_cast<bool>(m_state); }
+
+private:
+    std::shared_ptr<const detail::Managed_child_native_reference> m_state;
+
+    friend Managed_child_executable_capture capture_managed_child_executable(const std::string&);
+    friend struct Managed_process;
+};
+
+struct Managed_child_executable_capture
+{
+    Managed_child_executable_reference reference;
+    Managed_child_native_error         error;
+};
+
+/// Opens one absolute executable path without exporting its native handle.
+/// Replacement of that path does not retarget the returned reference.
+Managed_child_executable_capture capture_managed_child_executable(const std::string& path);
+
+enum class Managed_child_native_peer_state
+{
+    MATCH,
+    MISMATCH,
+    UNAVAILABLE,
+    EXITED,
+};
+
+struct Managed_child_native_peer_proof
+{
+    Managed_child_native_peer_state    state = Managed_child_native_peer_state::UNAVAILABLE;
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_native_error        error;
+};
+
 struct Managed_child_native_action
 {
     uint64_t                         generation = 0;
@@ -1797,6 +1844,11 @@ public:
         const std::shared_ptr<detail::Managed_child_custody_record>& custody,
         const Managed_child_occurrence_identity& identity,
         std::chrono::steady_clock::time_point deadline);
+    Managed_child_native_peer_proof verify_child_native_peer(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        const Managed_child_occurrence_identity& identity,
+        uintptr_t connected_server_endpoint,
+        const Managed_child_executable_reference& executable);
     void execute_child_native_action(
         const detail::Managed_child_occurrence_token& token,
         uint64_t generation,

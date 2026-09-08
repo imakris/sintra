@@ -7154,4 +7154,5 @@ size_t Managed_process::unblock_rpc(instance_id_type process_instance_id)
 } // sintra
 
 #include "managed_child_native_elevation_impl.h"
+#include "managed_child_native_peer_impl.h"
 #include "native_process_family_impl.h"
