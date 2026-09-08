@@ -332,6 +332,28 @@ public:
     explicit operator bool() const noexcept { return static_cast<bool>(m_record); }
 
     Managed_child_status status() const;
+
+    /// Native facts for every admitted exact occurrence. Pending native creation
+    /// is not absence; native exit is not communication/custody release.
+    std::vector<Managed_child_native_status> native_snapshot() const;
+
+    /// Weakly registers a shared inventory wake source. Registration signals
+    /// immediately. Additional readiness/release wakes are allowed; snapshot()
+    /// supplies the native facts. Destroying the signal detaches its watches.
+    bool observe_native_changes(const Managed_child_native_change_signal& signal) const;
+
+    /// Requests forced native termination of one exact, ownership-ready child.
+    /// Admission fences further custody recovery before starting an independent
+    /// Sintra-owned native worker. A concurrent ordinary/native cleanup shares
+    /// that occurrence's existing action; it never creates a second claimant.
+    /// Once recovery is requested, a failed/expired native action requires an
+    /// explicit native retry; ordinary custody cleanup only observes its result.
+    /// The finite deadline is capped to the provider's native cleanup budget.
+    /// This call does not wait for native exit or communication retirement.
+    /// The matching runtime must remain active until its owned work finishes.
+    Managed_child_native_request request_native_termination(
+        const Managed_child_occurrence_identity& occurrence,
+        std::chrono::steady_clock::time_point deadline) const;
     Managed_child_status wait_for_readiness_until(
         std::chrono::steady_clock::time_point deadline) const;
 
@@ -1553,6 +1575,82 @@ inline Managed_child_custody spawn_swarm_process(const Spawn_options& options)
 
     Managed_child_custody custody(custody_record);
     return custody;
+}
+
+namespace detail {
+
+inline std::vector<Managed_child_native_status> child_native_snapshot_locked(
+    const Managed_child_custody_record& custody)
+{
+    std::vector<Managed_child_native_status> snapshot;
+    snapshot.reserve(custody.occurrences.size());
+    for (const auto& occurrence : custody.occurrences) {
+        Managed_child_native_status status;
+        status.occurrence = {
+            occurrence.process_instance_id, occurrence.occurrence, custody.identity};
+        if (occurrence.native.exited()) {
+            status.state = Managed_child_native_state::EXITED;
+        }
+        else
+        if (occurrence.native.created()) {
+            status.state = Managed_child_native_state::RUNNING;
+        }
+        else
+        if (occurrence.setup == Managed_child_occurrence_record::setup_state::no_child) {
+            status.state = Managed_child_native_state::ABSENT;
+        }
+        status.ownership_ready =
+            occurrence.setup == Managed_child_occurrence_record::setup_state::ownership_ready;
+        status.pid                          = occurrence.native.pid();
+        status.action                       = occurrence.native_action;
+        status.native_exit_status           = occurrence.native.wait_status();
+        status.native_exit_status_available = occurrence.native.wait_status_available();
+        snapshot.push_back(std::move(status));
+    }
+    return snapshot;
+}
+
+} // namespace detail
+
+inline std::vector<Managed_child_native_status>
+Managed_child_custody::native_snapshot() const
+{
+    if (!m_record) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(m_record->mutex);
+    return detail::child_native_snapshot_locked(*m_record);
+}
+
+inline bool Managed_child_custody::observe_native_changes(
+    const Managed_child_native_change_signal& signal) const
+{
+    if (!m_record) {
+        return false;
+    }
+    m_record->changed.observe(signal);
+    return true;
+}
+
+inline Managed_child_native_request Managed_child_custody::request_native_termination(
+    const Managed_child_occurrence_identity& occurrence,
+    std::chrono::steady_clock::time_point deadline) const
+{
+    if (!m_record) {
+        return {Managed_child_native_admission::REJECTED, 0,
+            {Managed_child_native_error_domain::PROVIDER, 0, "Native action runtime unavailable"}};
+    }
+    const auto lifetime = m_record->runtime_lifetime.lock();
+    if (!lifetime) {
+        return {Managed_child_native_admission::REJECTED, 0,
+            {Managed_child_native_error_domain::PROVIDER, 0, "Native action runtime unavailable"}};
+    }
+    std::lock_guard<std::mutex> admission_lock(lifetime->m_native_admission_mutex);
+    if (!lifetime->m_native_owner) {
+        return {Managed_child_native_admission::REJECTED, 0,
+            {Managed_child_native_error_domain::PROVIDER, 0, "Native action runtime retired"}};
+    }
+    return lifetime->m_native_owner->request_child_native_termination(m_record, occurrence, deadline);
 }
 
 inline Managed_child_status Managed_child_custody::status() const

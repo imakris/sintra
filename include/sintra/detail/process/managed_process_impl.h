@@ -376,6 +376,11 @@ inline constexpr const char* k_managed_child_cleanup_hard_termination =
     "managed_child_cleanup_hard_termination";
 inline constexpr const char* k_managed_child_cleanup_native_exit_confirmed =
     "managed_child_cleanup_native_exit_confirmed";
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Managed_child_native_termination_error = int (*)(instance_id_type, uint32_t);
+inline std::atomic<Managed_child_native_termination_error>
+    s_managed_child_native_termination_error{nullptr};
+#endif
 inline constexpr const char* k_managed_child_release_waiting_passive =
     "managed_child_release_waiting_passive";
 inline constexpr const char* k_managed_child_communication_before_join =
@@ -393,6 +398,23 @@ inline constexpr const char* k_managed_child_custody_retirement_complete =
     "managed_child_custody_retirement/complete";
 
 } // namespace test_hooks
+
+inline int managed_child_native_termination_error_for_test(
+    instance_id_type process_instance_id,
+    uint32_t occurrence)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_managed_child_native_termination_error.load(
+            std::memory_order_acquire))
+    {
+        return callback(process_instance_id, occurrence);
+    }
+#else
+    (void)process_instance_id;
+    (void)occurrence;
+#endif
+    return 0;
+}
 
 inline void managed_child_custody_retirement_for_test(
     const char* stage,
@@ -2789,6 +2811,10 @@ Managed_process::Managed_process():
 inline
 Managed_process::~Managed_process()
 {
+    {
+        std::lock_guard<std::mutex> lock(m_runtime_lifetime->m_native_admission_mutex);
+        m_runtime_lifetime->m_native_owner = nullptr;
+    }
 #ifndef _WIN32
     // SIGCHLD publication runs under the shared dispatch lock. Wait for any
     // active producer to enqueue its owned callbacks before draining.
@@ -4325,6 +4351,9 @@ inline void Managed_process::execute_child_custody_release_attempt(
     uint32_t failure_occurrence)
 {
     try {
+        if (s_coord) {
+            s_coord->notify_managed_child_readiness_cancelled();
+        }
         detail::managed_child_failure_for_test(
             detail::test_hooks::k_managed_child_fail_release_worker,
             failure_iid,
@@ -5267,13 +5296,13 @@ inline void Managed_process::note_child_os_exit(
 }
 
 #ifndef _WIN32
-inline bool Managed_process::signal_child_native_exact(
+inline Managed_child_native_error Managed_process::signal_child_native_exact(
     const detail::Managed_child_occurrence_token& token,
     int signal_number)
 {
     auto custody = token.custody.lock();
     if (!custody) {
-        return false;
+        return {Managed_child_native_error_domain::PROVIDER, 0, "Native custody unavailable"};
     }
 
     std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
@@ -5296,15 +5325,20 @@ inline bool Managed_process::signal_child_native_exact(
     if (slot == m_spawned_child_pids.end() ||
         !slot->start_stamp_available)
     {
-        return false;
+        return {Managed_child_native_error_domain::PROVIDER, 0, "Exact native reap slot unavailable"};
     }
 
     const auto observed = query_process_start_stamp(
         static_cast<uint32_t>(slot->pid));
     if (!observed || *observed != slot->start_stamp) {
-        return false;
+        return {Managed_child_native_error_domain::PROVIDER, 0, "Native process creation identity mismatch"};
     }
-    return ::kill(slot->pid, signal_number) == 0;
+    if (::kill(slot->pid, signal_number) != 0) {
+        const auto error = errno;
+        return {Managed_child_native_error_domain::POSIX, error,
+            signal_number == SIGKILL ? "kill(SIGKILL)" : "kill(SIGTERM)"};
+    }
+    return {};
 }
 #endif
 
@@ -5326,212 +5360,410 @@ inline bool Managed_process::wait_for_child_native_exit(
     return exited();
 }
 
+namespace detail {
+
+inline constexpr auto k_child_native_cleanup_budget = std::chrono::milliseconds(11250);
+
+inline uint64_t begin_child_native_action_locked(Managed_child_occurrence_record& occurrence)
+{
+    auto generation = occurrence.native_action.generation + 1;
+    if (generation == 0) {
+        ++generation;
+    }
+    occurrence.native_action = {
+        generation, Managed_child_native_stage::IDLE, Managed_child_native_outcome::ACTIVE, {}};
+    return generation;
+}
+
+} // namespace detail
+
+inline Managed_child_native_request Managed_process::request_child_native_termination(
+    const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+    const Managed_child_occurrence_identity& identity,
+    std::chrono::steady_clock::time_point deadline)
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (deadline <= now || deadline == std::chrono::steady_clock::time_point::max()) {
+        return {Managed_child_native_admission::REJECTED, 0,
+            {Managed_child_native_error_domain::PROVIDER, 0, "Native action requires a finite future deadline"}};
+    }
+    deadline = std::min(deadline, now + detail::k_child_native_cleanup_budget);
+    uint64_t generation = 0;
+    uint64_t release_generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(custody->mutex);
+        auto* occurrence = custody->find_occurrence_locked(
+            identity.process_instance_id, identity.occurrence);
+        if (identity.custody_identity != custody->identity || !occurrence) {
+            return {Managed_child_native_admission::REJECTED, 0,
+                {Managed_child_native_error_domain::PROVIDER, 0, "Native action occurrence mismatch"}};
+        }
+        if (occurrence->native.exited()) {
+            return {Managed_child_native_admission::ALREADY_EXITED,
+                occurrence->native_action.generation, {}};
+        }
+        if (occurrence->setup != detail::Managed_child_occurrence_record::setup_state::ownership_ready ||
+            !occurrence->native.created())
+        {
+            return {Managed_child_native_admission::REJECTED, 0,
+                {Managed_child_native_error_domain::PROVIDER, 0, "Native child ownership is not ready"}};
+        }
+        occurrence->native_recovery_requested = true;
+        if (occurrence->native_action.outcome == Managed_child_native_outcome::ACTIVE) {
+            return {Managed_child_native_admission::ALREADY_ACTIVE,
+                occurrence->native_action.generation, {}};
+        }
+        // The existing release fence prevents native death from admitting a
+        // recovery occurrence. It does not settle transport or lease custody.
+        release_generation = custody->release_state.request(detail::Release_mode::cleanup);
+        custody->readiness_cancelled.store(true, std::memory_order_release);
+        generation = detail::begin_child_native_action_locked(*occurrence);
+    }
+    custody->changed.notify_all();
+    const detail::Managed_child_occurrence_token token{
+        custody, identity.process_instance_id, identity.occurrence};
+    Managed_child_native_request request{
+        Managed_child_native_admission::STARTED, generation, {}};
+    try {
+        // A dedicated owned worker, not the release worker whose communication
+        // retirement may already be blocked. Both share native_action below.
+        start_owned_lifecycle_worker([this, token, generation, deadline]() {
+            execute_child_native_action(token, generation, deadline, false);
+        });
+    }
+    catch (const std::exception& exception) {
+        request.admission = Managed_child_native_admission::REJECTED;
+        request.error = {Managed_child_native_error_domain::PROVIDER, 0, exception.what()};
+        {
+            std::lock_guard<std::mutex> lock(custody->mutex);
+            auto* occurrence = custody->find_occurrence_locked(
+                identity.process_instance_id, identity.occurrence);
+            occurrence->native_action.stage   = Managed_child_native_stage::FINISHED;
+            occurrence->native_action.outcome = Managed_child_native_outcome::FAILED;
+            occurrence->native_action.error   = request.error;
+        }
+        custody->changed.notify_all();
+    }
+    if (release_generation != 0) {
+        start_child_custody_release_worker(custody, release_generation);
+    }
+    return request;
+}
+
 inline bool Managed_process::cleanup_child_native(
     const detail::Managed_child_occurrence_token& token)
 {
-    constexpr auto grace_period = std::chrono::seconds(6);
-    constexpr auto soft_period  = std::chrono::milliseconds(250);
-    constexpr auto hard_period  = std::chrono::seconds(5);
-
-#ifndef _WIN32
-    if (wait_for_child_native_exit(
-            token, std::chrono::steady_clock::now() + grace_period))
-    {
-        detail::managed_child_cleanup_for_test(
-            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
-            token.process_instance_id,
-            token.occurrence);
-        return true;
-    }
-#endif
-
     auto custody = token.custody.lock();
     if (!custody) {
         return false;
     }
-
-#ifdef _WIN32
-    HANDLE process = nullptr;
-    DWORD pid = 0;
-    uintptr_t retained_handle_value = 0;
+    const auto deadline = std::chrono::steady_clock::now() + detail::k_child_native_cleanup_budget;
+    uint64_t generation = 0;
     {
-        std::lock_guard<std::mutex> lock(custody->mutex);
-        auto* occurrence = custody->find_occurrence_locked(
-            token.process_instance_id, token.occurrence);
+        std::unique_lock<std::mutex> lock(custody->mutex);
+        auto* occurrence = custody->find_occurrence_locked(token.process_instance_id, token.occurrence);
         if (!occurrence) {
             return false;
         }
         if (occurrence->native.exited()) {
             return true;
         }
-        if (!occurrence->native.process_handle_owned() ||
-            occurrence->native.process_handle() == 0)
-        {
+        if (occurrence->native_action.outcome == Managed_child_native_outcome::ACTIVE) {
+            // Joining an existing action cannot start a competing native kill.
+            custody->changed.wait_until(lock, deadline, [&]() {
+                const auto* current = custody->find_occurrence_locked(
+                    token.process_instance_id, token.occurrence);
+                return current->native.exited() ||
+                    current->native_action.outcome != Managed_child_native_outcome::ACTIVE;
+            });
+            return custody->find_occurrence_locked(
+                token.process_instance_id, token.occurrence)->native.exited();
+        }
+        if (occurrence->native_recovery_requested) {
+            // Recovery exposes this exact failed attempt to its caller. The
+            // ordinary release worker still settles custody, but must not
+            // replace a visible failure with an unsolicited native retry.
             return false;
         }
-        pid = static_cast<DWORD>(occurrence->native.pid());
-        retained_handle_value = occurrence->native.process_handle();
-        HANDLE retained = reinterpret_cast<HANDLE>(retained_handle_value);
-        if (!DuplicateHandle(
-                GetCurrentProcess(),
-                retained,
-                GetCurrentProcess(),
-                &process,
-                0,
-                FALSE,
-                DUPLICATE_SAME_ACCESS))
-        {
-            return false;
-        }
+        generation = detail::begin_child_native_action_locked(*occurrence);
     }
-    Instantiator process_guard(std::function<void()>([&]() {
-        if (process) {
-            CloseHandle(process);
-        }
-    }));
+    custody->changed.notify_all();
+    execute_child_native_action(token, generation, deadline, true);
+    std::lock_guard<std::mutex> lock(custody->mutex);
+    return custody->find_occurrence_locked(token.process_instance_id, token.occurrence)->native.exited();
+}
 
-    auto record_exit = [&]() -> bool {
-        DWORD exit_code = 0;
-        if (GetExitCodeProcess(process, &exit_code) == 0) {
-            return false;
-        }
-        uintptr_t released_handle = 0;
-        bool transition_valid = false;
-        detail::Managed_child_exit_publication exit_publication;
+inline void Managed_process::execute_child_native_action(
+    const detail::Managed_child_occurrence_token& token,
+    uint64_t generation,
+    std::chrono::steady_clock::time_point deadline,
+    bool graceful)
+{
+    auto custody = token.custody.lock();
+    if (!custody) {
+        return;
+    }
+    auto publish = [&](Managed_child_native_stage stage,
+                       Managed_child_native_outcome outcome,
+                       Managed_child_native_error error = {}) {
         {
             std::lock_guard<std::mutex> lock(custody->mutex);
-            auto* occurrence = custody->find_occurrence_locked(
+            auto* occurrence = custody->find_occurrence_locked(token.process_instance_id, token.occurrence);
+            if (occurrence->native_action.generation != generation) {
+                return;
+            }
+            occurrence->native_action.stage   = stage;
+            occurrence->native_action.outcome = outcome;
+            occurrence->native_action.error   = std::move(error);
+        }
+        custody->changed.notify_all();
+    };
+    auto finish = [&](Managed_child_native_outcome outcome, Managed_child_native_error error = {}) {
+        if (wait_for_child_native_exit(token, std::chrono::steady_clock::now())) {
+            outcome = Managed_child_native_outcome::EXITED;
+            error = {};
+        }
+        else
+        if (outcome == Managed_child_native_outcome::EXITED) {
+            outcome = Managed_child_native_outcome::FAILED;
+            error = {Managed_child_native_error_domain::PROVIDER, 0,
+                "Exact native exit publication incomplete"};
+        }
+        publish(Managed_child_native_stage::FINISHED, outcome, std::move(error));
+        if (outcome == Managed_child_native_outcome::EXITED) {
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
                 token.process_instance_id, token.occurrence);
-            if (occurrence) {
-                exit_publication = detail::record_managed_child_exit_locked(
-                    custody->identity,
-                    *occurrence,
-                    exit_code,
-                    true);
-                transition_valid = exit_publication.transition_valid;
-                if (transition_valid &&
-                    !occurrence->native.exit_observer_registered() &&
+        }
+    };
+    auto stage = [&](Managed_child_native_stage value) {
+        publish(value, Managed_child_native_outcome::ACTIVE);
+    };
+    auto period_end = [&](auto period) {
+        return std::min(deadline, std::chrono::steady_clock::now() + period);
+    };
+    try {
+        if (wait_for_child_native_exit(token, std::chrono::steady_clock::now())) {
+            finish(Managed_child_native_outcome::EXITED);
+            return;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
+            return;
+        }
+#ifdef _WIN32
+        HANDLE process = nullptr;
+        DWORD pid = 0;
+        uintptr_t retained_handle_value = 0;
+        {
+            std::lock_guard<std::mutex> lock(custody->mutex);
+            auto* occurrence = custody->find_occurrence_locked(token.process_instance_id, token.occurrence);
+            if (occurrence->native.exited()) {
+                // Finish outside the custody mutex.
+            }
+            else {
+                pid = (DWORD)occurrence->native.pid();
+                retained_handle_value = occurrence->native.process_handle();
+                if (!occurrence->native.process_handle_owned() || retained_handle_value == 0) {
+                    throw std::runtime_error("Exact native process handle unavailable");
+                }
+                if (!DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(retained_handle_value),
+                    GetCurrentProcess(), &process, 0, FALSE, DUPLICATE_SAME_ACCESS))
+                {
+                    const auto error = GetLastError();
+                    throw std::system_error((int)error, std::system_category(), "DuplicateHandle");
+                }
+            }
+        }
+        if (!process) {
+            finish(Managed_child_native_outcome::EXITED);
+            return;
+        }
+        Instantiator process_guard(std::function<void()>([&]() { CloseHandle(process); }));
+        auto record_exit = [&]() {
+            DWORD exit_code = 0;
+            if (!GetExitCodeProcess(process, &exit_code)) {
+                const auto error = GetLastError();
+                finish(Managed_child_native_outcome::FAILED,
+                    {Managed_child_native_error_domain::WINDOWS, (int)error, "GetExitCodeProcess"});
+                return;
+            }
+            uintptr_t released_handle = 0;
+            detail::Managed_child_exit_publication publication;
+            {
+                std::lock_guard<std::mutex> lock(custody->mutex);
+                auto* occurrence = custody->find_occurrence_locked(token.process_instance_id, token.occurrence);
+                publication = detail::record_managed_child_exit_locked(
+                    custody->identity, *occurrence, exit_code, true);
+                if (publication.transition_valid && !occurrence->native.exit_observer_registered() &&
                     occurrence->native.process_handle_owned())
                 {
-                    transition_valid =
-                        occurrence->native.take_owned_process_handle(
-                            retained_handle_value, released_handle);
+                    occurrence->native.take_owned_process_handle(retained_handle_value, released_handle);
                 }
-                custody->changed.notify_all();
+            }
+            custody->changed.notify_all();
+            dispatch_child_exit_publication(std::move(publication));
+            if (released_handle != 0) {
+                CloseHandle(reinterpret_cast<HANDLE>(released_handle));
+            }
+            finish(Managed_child_native_outcome::EXITED);
+        };
+        auto wait_until = [&](std::chrono::steady_clock::time_point end) {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                end - std::chrono::steady_clock::now()).count();
+            return WaitForSingleObject(process, remaining > 0 ? (DWORD)remaining : 0);
+        };
+        auto handle_wait = [&](DWORD result) {
+            if (result == WAIT_OBJECT_0) {
+                record_exit();
+                return true;
+            }
+            if (result != WAIT_TIMEOUT) {
+                const auto error = GetLastError();
+                finish(Managed_child_native_outcome::FAILED,
+                    {Managed_child_native_error_domain::WINDOWS, (int)error, "WaitForSingleObject"});
+                return true;
+            }
+            return false;
+        };
+        if (graceful) {
+            // Both platforms preserve the existing ordinary cleanup grace;
+            // an explicit native recovery action bypasses it.
+            stage(Managed_child_native_stage::GRACE_WAIT);
+            if (handle_wait(wait_until(period_end(std::chrono::seconds(6))))) {
+                return;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
+                return;
+            }
+            stage(Managed_child_native_stage::SOFT_TERMINATION);
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::k_managed_child_cleanup_soft_termination,
+                token.process_instance_id, token.occurrence);
+            if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)) {
+                const auto error = GetLastError();
+                publish(Managed_child_native_stage::SOFT_WAIT, Managed_child_native_outcome::ACTIVE,
+                    {Managed_child_native_error_domain::WINDOWS, (int)error, "GenerateConsoleCtrlEvent"});
+            }
+            else {
+                stage(Managed_child_native_stage::SOFT_WAIT);
+            }
+            if (handle_wait(wait_until(period_end(std::chrono::milliseconds(250))))) {
+                return;
             }
         }
-        dispatch_child_exit_publication(std::move(exit_publication));
-        if (released_handle != 0) {
-            CloseHandle(reinterpret_cast<HANDLE>(released_handle));
+        if (std::chrono::steady_clock::now() >= deadline) {
+            finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
+            return;
         }
-        return transition_valid;
-    };
-    const auto grace_ms = static_cast<DWORD>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            grace_period).count());
-    const auto grace_wait = WaitForSingleObject(process, grace_ms);
-    if (grace_wait == WAIT_OBJECT_0) {
-        const bool recorded = record_exit();
-        if (!recorded) {
-            return false;
-        }
-        detail::managed_child_cleanup_for_test(
-            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
-            token.process_instance_id,
-            token.occurrence);
-        return true;
-    }
-    if (grace_wait != WAIT_TIMEOUT) {
-        return false;
-    }
-
-    detail::managed_child_cleanup_for_test(
-        detail::test_hooks::k_managed_child_cleanup_soft_termination,
-        token.process_instance_id,
-        token.occurrence);
-    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
-    DWORD wait_result = WaitForSingleObject(
-        process, static_cast<DWORD>(soft_period.count()));
-    if (wait_result == WAIT_TIMEOUT) {
+        stage(Managed_child_native_stage::HARD_TERMINATION);
         detail::managed_child_failure_for_test(
             detail::test_hooks::k_managed_child_fail_native_hard_termination,
-            token.process_instance_id,
-            token.occurrence);
+            token.process_instance_id, token.occurrence);
         detail::managed_child_cleanup_for_test(
             detail::test_hooks::k_managed_child_cleanup_hard_termination,
-            token.process_instance_id,
-            token.occurrence);
-        if (!TerminateProcess(process, 137)) {
-            wait_result = WaitForSingleObject(process, 0);
-            if (wait_result != WAIT_OBJECT_0) {
-                return false;
+            token.process_instance_id, token.occurrence);
+        const auto injected_error = detail::managed_child_native_termination_error_for_test(
+            token.process_instance_id, token.occurrence);
+        if (std::chrono::steady_clock::now() >= deadline) {
+            finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
+            return;
+        }
+        if (injected_error != 0 || !TerminateProcess(process, 137)) {
+            const auto error = injected_error != 0 ? (DWORD)injected_error : GetLastError();
+            // ERROR_ACCESS_DENIED also means an already exited process. The
+            // retained exact handle, not the error alone, decides that case.
+            if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) {
+                record_exit();
+            }
+            else {
+                finish(Managed_child_native_outcome::FAILED,
+                    {Managed_child_native_error_domain::WINDOWS, (int)error, "TerminateProcess"});
+            }
+            return;
+        }
+        stage(Managed_child_native_stage::HARD_WAIT);
+        if (handle_wait(wait_until(period_end(std::chrono::seconds(5))))) {
+            return;
+        }
+#else
+        if (graceful) {
+            stage(Managed_child_native_stage::GRACE_WAIT);
+            if (wait_for_child_native_exit(token, period_end(std::chrono::seconds(6)))) {
+                finish(Managed_child_native_outcome::EXITED);
+                return;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
+                return;
+            }
+            stage(Managed_child_native_stage::SOFT_TERMINATION);
+            detail::managed_child_cleanup_for_test(
+                detail::test_hooks::k_managed_child_cleanup_soft_termination,
+                token.process_instance_id, token.occurrence);
+            const auto error = signal_child_native_exact(token, SIGTERM);
+            publish(Managed_child_native_stage::SOFT_WAIT, Managed_child_native_outcome::ACTIVE, error);
+            if (wait_for_child_native_exit(token, period_end(std::chrono::milliseconds(250)))) {
+                finish(Managed_child_native_outcome::EXITED);
+                return;
+            }
+            if (error.domain != Managed_child_native_error_domain::NONE) {
+                finish(Managed_child_native_outcome::FAILED, error);
+                return;
             }
         }
-        else {
-            wait_result = WaitForSingleObject(
-                process, static_cast<DWORD>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        hard_period).count()));
+        if (std::chrono::steady_clock::now() >= deadline) {
+            finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
+            return;
         }
-    }
-    if (wait_result != WAIT_OBJECT_0) {
-        return false;
-    }
-    const bool recorded = record_exit();
-    if (!recorded) {
-        return false;
-    }
-    detail::managed_child_cleanup_for_test(
-        detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
-        token.process_instance_id,
-        token.occurrence);
-    return true;
-#else
-    detail::managed_child_cleanup_for_test(
-        detail::test_hooks::k_managed_child_cleanup_soft_termination,
-        token.process_instance_id,
-        token.occurrence);
-    const bool soft_signaled = signal_child_native_exact(token, SIGTERM);
-    if (wait_for_child_native_exit(
-            token, std::chrono::steady_clock::now() + soft_period))
-    {
+        stage(Managed_child_native_stage::HARD_TERMINATION);
+        detail::managed_child_failure_for_test(
+            detail::test_hooks::k_managed_child_fail_native_hard_termination,
+            token.process_instance_id, token.occurrence);
         detail::managed_child_cleanup_for_test(
-            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
-            token.process_instance_id,
-            token.occurrence);
-        return true;
-    }
-    if (!soft_signaled) {
-        return false;
-    }
-
-    detail::managed_child_failure_for_test(
-        detail::test_hooks::k_managed_child_fail_native_hard_termination,
-        token.process_instance_id,
-        token.occurrence);
-    detail::managed_child_cleanup_for_test(
-        detail::test_hooks::k_managed_child_cleanup_hard_termination,
-        token.process_instance_id,
-        token.occurrence);
-    const bool hard_signaled = signal_child_native_exact(token, SIGKILL);
-    if (!hard_signaled &&
-        !wait_for_child_native_exit(
-            token, std::chrono::steady_clock::now()))
-    {
-        return false;
-    }
+            detail::test_hooks::k_managed_child_cleanup_hard_termination,
+            token.process_instance_id, token.occurrence);
+        const auto injected_error = detail::managed_child_native_termination_error_for_test(
+            token.process_instance_id, token.occurrence);
+        if (std::chrono::steady_clock::now() >= deadline) {
+            finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
+            return;
+        }
+        const auto error = injected_error != 0
+            ? Managed_child_native_error{
+                  Managed_child_native_error_domain::POSIX, injected_error, "kill(SIGKILL)"}
+            : signal_child_native_exact(token, SIGKILL);
+        if (error.domain != Managed_child_native_error_domain::NONE) {
+            finish(Managed_child_native_outcome::FAILED, error);
+            return;
+        }
+        stage(Managed_child_native_stage::HARD_WAIT);
+        if (wait_for_child_native_exit(token, period_end(std::chrono::seconds(5)))) {
+            finish(Managed_child_native_outcome::EXITED);
+            return;
+        }
 #endif
-
-    if (wait_for_child_native_exit(
-            token, std::chrono::steady_clock::now() + hard_period))
-    {
-        detail::managed_child_cleanup_for_test(
-            detail::test_hooks::k_managed_child_cleanup_native_exit_confirmed,
-            token.process_instance_id,
-            token.occurrence);
-        return true;
+        finish(Managed_child_native_outcome::DEADLINE_EXPIRED);
     }
-    return false;
+    catch (const std::system_error& exception) {
+        finish(Managed_child_native_outcome::FAILED,
+            {
+#ifdef _WIN32
+                Managed_child_native_error_domain::WINDOWS,
+#else
+                Managed_child_native_error_domain::POSIX,
+#endif
+                exception.code().value(), exception.what()});
+    }
+    catch (const std::exception& exception) {
+        finish(Managed_child_native_outcome::FAILED,
+            {Managed_child_native_error_domain::PROVIDER, 0, exception.what()});
+    }
+    catch (...) {
+        finish(Managed_child_native_outcome::FAILED,
+            {Managed_child_native_error_domain::PROVIDER, 0, "Unknown native action exception"});
+    }
 }
 
 inline Managed_process::Spawn_result Managed_process::spawn_swarm_process(

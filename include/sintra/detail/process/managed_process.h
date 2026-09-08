@@ -33,9 +33,11 @@
 #include <mutex>
 #include <cstdint>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -238,6 +240,148 @@ struct Managed_child_exit_observation
     }
 };
 
+enum class Managed_child_native_state
+{
+    PENDING,
+    ABSENT,
+    RUNNING,
+    EXITED,
+};
+
+enum class Managed_child_native_stage
+{
+    IDLE,
+    GRACE_WAIT,
+    SOFT_TERMINATION,
+    SOFT_WAIT,
+    HARD_TERMINATION,
+    HARD_WAIT,
+    FINISHED,
+};
+
+enum class Managed_child_native_outcome
+{
+    NONE,
+    ACTIVE,
+    EXITED,
+    DEADLINE_EXPIRED,
+    FAILED,
+};
+
+enum class Managed_child_native_error_domain
+{
+    NONE,
+    PROVIDER,
+    WINDOWS,
+    POSIX,
+};
+
+struct Managed_child_native_error
+{
+    Managed_child_native_error_domain domain = Managed_child_native_error_domain::NONE;
+    int                              code = 0;
+    std::string                      operation;
+
+    bool operator==(const Managed_child_native_error&) const = default;
+};
+
+struct Managed_child_native_action
+{
+    uint64_t                         generation = 0;
+    Managed_child_native_stage        stage = Managed_child_native_stage::IDLE;
+    Managed_child_native_outcome      outcome = Managed_child_native_outcome::NONE;
+    Managed_child_native_error        error;
+
+    bool operator==(const Managed_child_native_action&) const = default;
+};
+
+struct Managed_child_native_status
+{
+    Managed_child_occurrence_identity occurrence;
+    Managed_child_native_state        state = Managed_child_native_state::PENDING;
+    // Native creation precedes completed ownership transfer during setup.
+    bool                             ownership_ready = false;
+    // Diagnostic only: requests are authorized by the custody and occurrence.
+    int                              pid = -1;
+    Managed_child_native_action       action;
+    std::uint32_t                    native_exit_status = 0;
+    bool                             native_exit_status_available = false;
+
+    bool operator==(const Managed_child_native_status&) const = default;
+};
+
+enum class Managed_child_native_admission
+{
+    REJECTED,
+    STARTED,
+    ALREADY_ACTIVE,
+    ALREADY_EXITED,
+};
+
+struct Managed_child_native_request
+{
+    Managed_child_native_admission admission = Managed_child_native_admission::REJECTED;
+    uint64_t                      action_generation = 0;
+    Managed_child_native_error     error;
+};
+
+namespace detail {
+class Managed_child_change_condition;
+}
+
+/// A shared wake source for a caller's custody inventory. Several custodies
+/// and application-owned reservation changes may feed the same signal. Wakes
+/// are coalesced; read generation before the inventory, then wait on that value.
+/// No caller code executes in a native/custody producer's thread.
+class Managed_child_native_change_signal
+{
+public:
+    uint64_t generation() const
+    {
+        std::lock_guard<std::mutex> lock(m_state->mutex);
+        return m_state->generation;
+    }
+
+    void notify() const { notify_state(*m_state); }
+
+    uint64_t wait_for_change(
+        uint64_t previous,
+        std::chrono::steady_clock::time_point deadline,
+        std::stop_token stop = {}) const
+    {
+        std::stop_callback wake(stop, [state = m_state]() {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->changed.notify_all();
+        });
+        std::unique_lock<std::mutex> lock(m_state->mutex);
+        m_state->changed.wait_until(lock, deadline, [&]() {
+            return stop.stop_requested() || m_state->generation != previous;
+        });
+        return m_state->generation;
+    }
+
+private:
+    struct State
+    {
+        std::mutex              mutex;
+        std::condition_variable changed;
+        uint64_t                generation = 0;
+    };
+
+    static void notify_state(State& state)
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (++state.generation == 0) {
+            ++state.generation;
+        }
+        state.changed.notify_all();
+    }
+
+    std::shared_ptr<State> m_state = std::make_shared<State>();
+
+    friend class detail::Managed_child_change_condition;
+};
+
 
 // Branch indices have the following meaning:
 // -1: No branching has taken place - this variable is not relevant
@@ -250,6 +394,52 @@ inline uint32_t s_recovery_occurrence = 0;
 
 
 namespace detail {
+
+// All existing custody producers use this condition. Fan-in therefore includes
+// native creation/exit as well as actions, without an extra watcher per child.
+class Managed_child_change_condition
+{
+public:
+    void observe(const Managed_child_native_change_signal& signal)
+    {
+        std::lock_guard<std::mutex> lock(m_signal_mutex);
+        for (const auto& observer : m_signals) {
+            if (observer.lock() == signal.m_state) {
+                return;
+            }
+        }
+        m_signals.push_back(signal.m_state);
+        signal.notify();
+    }
+
+    void notify_all()
+    {
+        m_changed.notify_all();
+        std::lock_guard<std::mutex> lock(m_signal_mutex);
+        std::erase_if(m_signals, [](const auto& observer) {
+            auto state = observer.lock();
+            if (!state) {
+                return true;
+            }
+            Managed_child_native_change_signal::notify_state(*state);
+            return false;
+        });
+    }
+
+    template <typename... Args>
+    void wait(Args&&... args) { m_changed.wait(std::forward<Args>(args)...); }
+
+    template <typename... Args>
+    auto wait_until(Args&&... args)
+    {
+        return m_changed.wait_until(std::forward<Args>(args)...);
+    }
+
+private:
+    std::condition_variable m_changed;
+    std::mutex              m_signal_mutex;
+    std::vector<std::weak_ptr<Managed_child_native_change_signal::State>> m_signals;
+};
 
 inline constexpr const char* k_external_attach_token_arg      = "--external_attach_token";
 inline constexpr const char* k_external_attach_occurrence_arg = "--external_attach_occurrence";
@@ -572,6 +762,8 @@ struct Managed_child_occurrence_record
                                transport;
     Managed_child_native_authority
                                native;
+    Managed_child_native_action native_action;
+    bool                       native_recovery_requested = false;
     std::vector<std::shared_ptr<Managed_child_exit_subscription_state>>
                                exit_subscriptions;
 };
@@ -847,13 +1039,24 @@ private:
 
 // One retained logical custody record.  Subsystems remain authoritative for
 // their own facts; this record only joins their exact-occurrence reports.
-struct Managed_process_lifetime
-{};
+class Managed_process_lifetime
+{
+public:
+    explicit Managed_process_lifetime(Managed_process* owner)
+    :
+        m_native_owner(owner)
+    {}
+
+    // Independent of spawn/transport admission: only native action scheduling
+    // and the runtime destructor cross this short boundary.
+    mutable std::mutex       m_native_admission_mutex;
+    mutable Managed_process* m_native_owner;
+};
 
 struct Managed_child_custody_record
 {
     mutable std::mutex                         mutex;
-    std::condition_variable                    changed;
+    Managed_child_change_condition             changed;
     std::weak_ptr<const Managed_process_lifetime>
                                                 runtime_lifetime;
     uint64_t                                   identity = 0;
@@ -1513,7 +1716,7 @@ public:
         std::shared_ptr<detail::Managed_child_exit_subscription_state> subscription,
         Managed_child_exit event) noexcept;
 #ifndef _WIN32
-    bool signal_child_native_exact(
+    Managed_child_native_error signal_child_native_exact(
         const detail::Managed_child_occurrence_token& token,
         int signal_number);
 #endif
@@ -1522,6 +1725,15 @@ public:
         std::chrono::steady_clock::time_point deadline);
     bool cleanup_child_native(
         const detail::Managed_child_occurrence_token& token);
+    Managed_child_native_request request_child_native_termination(
+        const std::shared_ptr<detail::Managed_child_custody_record>& custody,
+        const Managed_child_occurrence_identity& identity,
+        std::chrono::steady_clock::time_point deadline);
+    void execute_child_native_action(
+        const detail::Managed_child_occurrence_token& token,
+        uint64_t generation,
+        std::chrono::steady_clock::time_point deadline,
+        bool graceful);
     void start_owned_lifecycle_worker(
         std::function<void()> worker,
         const char* failure_stage = nullptr,
@@ -1539,7 +1751,7 @@ public:
     std::condition_variable             m_child_custody_changed;
     std::shared_ptr<const detail::Managed_process_lifetime>
                                         m_runtime_lifetime = std::make_shared<
-                                            const detail::Managed_process_lifetime>();
+                                            const detail::Managed_process_lifetime>(this);
     uint64_t                            m_next_child_custody_identity = 1;
     std::map<uint64_t, std::shared_ptr<detail::Managed_child_custody_record>>
                                         m_child_custodies;
