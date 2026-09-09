@@ -334,6 +334,10 @@ struct Managed_child_native_peer_proof
     Managed_child_native_peer_state    state = Managed_child_native_peer_state::UNAVAILABLE;
     Managed_child_occurrence_identity occurrence;
     Managed_child_native_error        error;
+    // Only MATCH carries native identity, sampled from the retained process
+    // object or locked original reap slot. Every other result leaves it absent.
+    uint64_t                         native_process_id = 0;
+    uint64_t                         native_process_creation_identity = 0;
 };
 
 struct Managed_child_native_action

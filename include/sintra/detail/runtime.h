@@ -345,10 +345,18 @@ public:
     /// Read-only, point-in-time proof against original native custody. The caller
     /// borrows a connected server-side named-pipe HANDLE (Windows) or accepted
     /// AF_UNIX socket fd (Linux), and must keep it connected and unrebound for
-    /// this call. No caller-supplied PID participates in authentication.
+    /// this call. The trusted caller must create a unique new server endpoint
+    /// AFTER this child's native birth and original custody acquisition, and
+    /// supply only connections accepted by that server. Reserving a name before
+    /// birth is allowed; reusing an earlier listener or connection is not.
+    /// Native endpoint PID metadata can outlive its original peer and be reused;
+    /// this primitive cannot infer endpoint freshness from the borrowed handle.
+    /// No caller-supplied PID participates in authentication.
     /// Capture the selected executable before launch. MATCH grants no product
     /// authority: the caller still validates its one-use ticket and full scope
-    /// at admission. Exit and inspection failure never imply custody release.
+    /// at admission. Only MATCH carries native_process_id and
+    /// native_process_creation_identity from original native custody; both are
+    /// zero otherwise. Exit and inspection failure never imply custody release.
     /// Windows dynamically requires NtQueryInformationProcess image-file mapping
     /// comparison; an unavailable native capability fails closed.
     Managed_child_native_peer_proof verify_native_peer(

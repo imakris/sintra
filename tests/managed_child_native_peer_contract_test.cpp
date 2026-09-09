@@ -1,7 +1,31 @@
 // Copyright (c) 2025, Ioannis Makris
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
+// Public framework headers permanently clean these Windows status macros before
+// including Sintra. Exercise that real include order without a framework build
+// dependency, and require Sintra to preserve the consumer's cleaned namespace.
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+// The harness's DbgHelp declarations require the original SDK annotations.
+// Load them before simulating the public consumer's permanent macro cleanup.
+#include "test_environment.h"
+#undef OPTIONAL
+#undef FAILED
+#undef ERROR
+#undef NO_DATA
+#undef DATA_AVAILABLE
+#undef EVICTED
+#endif
+
 #include <sintra/sintra.h>
+
+#if defined(_WIN32) && (defined(OPTIONAL) || defined(FAILED) || defined(ERROR) || \
+    defined(NO_DATA) || defined(DATA_AVAILABLE) || defined(EVICTED))
+#error Sintra must preserve cleaned Windows status macros
+#endif
 
 #include "test_utils.h"
 
@@ -34,6 +58,7 @@ using std::chrono_literals::operator""s;
 constexpr auto k_child_iid = sintra::compose_instance(57u, 1ull);
 constexpr const char* k_child_flag = "--native-peer-child";
 constexpr const char* k_endpoint_flag = "--native-peer-endpoint";
+constexpr const char* k_control_flag = "--native-peer-control";
 constexpr const char* k_exec_path_flag = "--native-peer-exec-path";
 
 void require(bool condition, const char* expectation)
@@ -120,6 +145,12 @@ public:
             std::to_string(Clock::now().time_since_epoch().count());
 #ifdef _WIN32
         m_name = "\\\\.\\pipe\\" + m_name;
+#endif
+    }
+
+    void listen()
+    {
+#ifdef _WIN32
         m_listener = CreateNamedPipeA(m_name.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
@@ -131,7 +162,7 @@ public:
         const auto address = socket_address(m_name);
         require(bind(m_listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0,
             "bind owned Unix listener");
-        require(listen(m_listener, 1) == 0, "listen for actual child peer");
+        require(::listen(m_listener, 1) == 0, "listen for actual child peer");
 #endif
     }
     ~Endpoint()
@@ -249,16 +280,44 @@ int inspection_error()
 #endif
 }
 
-sintra::Managed_child_custody launch(const std::filesystem::path& image, Endpoint& endpoint,
+sintra::Managed_child_custody launch(
+    const std::filesystem::path& image,
+    Endpoint&                   endpoint,
     const std::filesystem::path& exec_image)
 {
+    // This earlier connection only coordinates test startup. It is never passed
+    // to verify_native_peer: its birth cannot establish the proof precondition.
+    Endpoint control;
+    control.listen();
     sintra::Spawn_options options;
     options.binary_path = image.string();
-    options.args = {k_child_flag, k_endpoint_flag, endpoint.name(), k_exec_path_flag, exec_image.string()};
+    options.args = {k_child_flag, k_endpoint_flag, endpoint.name(),
+        k_control_flag, control.name(), k_exec_path_flag, exec_image.string()};
     options.process_instance_id = k_child_iid;
     auto custody = sintra::spawn_swarm_process(options);
     require(static_cast<bool>(custody), "managed spawn retains original native custody");
+    wait_native_ready(custody);
+    // Only the name existed before launch. No listener or accepted proof
+    // connection can predate this selected child's original native custody.
+    endpoint.listen();
+    control.accept_peer();
+    control.expect('R');
+    control.send('G');
     return custody;
+}
+
+void require_native_facts(const sintra::Managed_child_native_peer_proof& proof)
+{
+    if (proof.state != State::MATCH) {
+        require(proof.native_process_id == 0 && proof.native_process_creation_identity == 0,
+            "nonmatching proof carries no native authority identity");
+        return;
+    }
+    require(proof.native_process_id != 0 && proof.native_process_creation_identity != 0,
+        "matching proof supplies native process and creation identity");
+    const auto stamp = sintra::query_process_start_stamp((uint32_t)proof.native_process_id);
+    require(stamp && *stamp == proof.native_process_creation_identity,
+        "matching creation identity equals the independent live native query");
 }
 
 int run_root(int argc, char** argv, const std::filesystem::path& directory)
@@ -282,9 +341,14 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         endpoint.accept_peer();
         endpoint.expect('R');
         auto prove = [&](const auto& occurrence, const auto& executable) {
-            return custody.verify_native_peer(occurrence, endpoint.borrowed(), executable);
+            const auto proof = custody.verify_native_peer(occurrence, endpoint.borrowed(), executable);
+            require_native_facts(proof);
+            return proof;
         };
-        require(prove(identity, selected.reference).state == State::MATCH, "actual authenticated original peer and image match");
+        const auto original_proof = prove(identity, selected.reference);
+        require(original_proof.state == State::MATCH, "actual authenticated original peer and image match");
+        require(original_proof.native_process_id == (uint64_t)custody.native_snapshot().front().pid,
+            "matching native PID belongs to the exact selected custody");
         require(prove(identity, other.reference).state == State::MISMATCH, "identical bytes in a different file do not match");
         auto stale = identity;
         ++stale.custody_identity;
@@ -294,14 +358,18 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         require(prove(stale, selected.reference).state == State::MISMATCH, "wrong occurrence cannot match");
         require(prove(identity, sintra::Managed_child_executable_reference{}).state == State::UNAVAILABLE,
             "missing selected image reference is unavailable");
-        require(custody.verify_native_peer(identity, static_cast<uintptr_t>(-1), selected.reference).state == State::UNAVAILABLE,
+        const auto invalid = custody.verify_native_peer(identity, static_cast<uintptr_t>(-1), selected.reference);
+        require_native_facts(invalid);
+        require(invalid.state == State::UNAVAILABLE,
             "invalid connection is unavailable, not death");
         {
             Endpoint wrong_peer;
+            wrong_peer.listen();
             const auto impostor = connect_peer(wrong_peer.name());
             require(impostor != k_invalid_endpoint, "create actual wrong-process connection");
             wrong_peer.accept_peer();
             const auto proof = custody.verify_native_peer(identity, wrong_peer.borrowed(), selected.reference);
+            require_native_facts(proof);
             close_endpoint(impostor);
             require(proof.state == State::MISMATCH, "OS-authenticated different peer cannot claim child");
         }
@@ -311,9 +379,9 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         require(unreadable.state == State::UNAVAILABLE && unreadable.error.code == inspection_error(),
             "native inspection denial remains unavailable with exact error");
 #ifdef _WIN32
-        require(sintra::detail::native_image_mapping_state(static_cast<NTSTATUS>(0xc0000003u)) == State::UNAVAILABLE,
+        require(sintra::detail::native_image_mapping_state((LONG)0xc0000003u) == State::UNAVAILABLE,
             "unsupported native class never becomes mismatch or death");
-        require(sintra::detail::native_image_mapping_state(static_cast<NTSTATUS>(0xc0123456u)) == State::UNAVAILABLE,
+        require(sintra::detail::native_image_mapping_state((LONG)0xc0123456u) == State::UNAVAILABLE,
             "unknown NT error never becomes mismatch or death");
 #endif
         require(prove(identity, selected.reference).state == State::MATCH, "inspection failure changes no native custody");
@@ -327,7 +395,11 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         endpoint.send('E');
         endpoint.expect('E');
         require(prove(identity, selected.reference).state == State::MISMATCH, "same native process after exec is wrong image");
-        require(prove(identity, other.reference).state == State::MATCH, "exec image comparison uses actual loaded file");
+        const auto after_exec = prove(identity, other.reference);
+        require(after_exec.state == State::MATCH, "exec image comparison uses actual loaded file");
+        require(after_exec.native_process_id == original_proof.native_process_id &&
+            after_exec.native_process_creation_identity == original_proof.native_process_creation_identity,
+            "exec preserves the original native PID and creation identity");
 #endif
         endpoint.send('Q');
         const auto settled = custody.terminate_until(Clock::now() + 10s);
@@ -338,11 +410,16 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         const auto successor_identity = wait_native_ready(successor);
         successor_endpoint.accept_peer();
         successor_endpoint.expect('R');
-        require(successor.verify_native_peer(identity, successor_endpoint.borrowed(), replacement.reference).state == State::MISMATCH,
+        auto prove_successor = [&](const auto& occurrence, const auto& executable) {
+            const auto proof = successor.verify_native_peer(occurrence, successor_endpoint.borrowed(), executable);
+            require_native_facts(proof);
+            return proof;
+        };
+        require(prove_successor(identity, replacement.reference).state == State::MISMATCH,
             "reused managed IID cannot revive the retired custody token");
-        require(successor.verify_native_peer(successor_identity, successor_endpoint.borrowed(), selected.reference).state == State::MISMATCH,
+        require(prove_successor(successor_identity, selected.reference).state == State::MISMATCH,
             "path replacement before launch cannot retarget original selection");
-        require(successor.verify_native_peer(successor_identity, successor_endpoint.borrowed(), replacement.reference).state == State::MATCH,
+        require(prove_successor(successor_identity, replacement.reference).state == State::MATCH,
             "new exact custody matches its preselected executable object");
         successor_endpoint.send('Q');
         require(successor.terminate_until(Clock::now() + 10s).release_state == sintra::Managed_child_release_state::complete,
@@ -369,6 +446,17 @@ int main(int argc, char** argv)
     }
 #endif
     if (sintra::test::has_argv_flag(argc, argv, k_child_flag)) {
+        const auto control = connect_peer(sintra::test::get_argv_value(argc, argv, k_control_flag));
+        if (control == k_invalid_endpoint) {
+            return 2;
+        }
+        char command = 'R';
+        const bool released = exchange_byte(control, command, true, false) &&
+            exchange_byte(control, command, false, false) && command == 'G';
+        close_endpoint(control);
+        if (!released) {
+            return 2;
+        }
         const auto peer = connect_peer(sintra::test::get_argv_value(argc, argv, k_endpoint_flag));
         if (peer == k_invalid_endpoint) return 2;
         return child_loop(peer, sintra::test::get_argv_value(argc, argv, k_exec_path_flag), 'R');

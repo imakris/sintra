@@ -8,7 +8,6 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <winternl.h>
 #elif defined(__linux__)
 #include <fcntl.h>
 #include <poll.h>
@@ -75,7 +74,7 @@ inline int native_peer_inspection_error_for_test()
 }
 
 #ifdef _WIN32
-inline Managed_child_native_peer_state native_image_mapping_state(NTSTATUS status)
+inline Managed_child_native_peer_state native_image_mapping_state(LONG status)
 {
     // ProcessImageFileMapping is an undocumented native information class.
     // Its defined nonmatching-file result is STATUS_UNSUCCESSFUL. Never turn
@@ -229,26 +228,48 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
         return result(error == ERROR_NOT_SAME_OBJECT ? State::MISMATCH : State::UNAVAILABLE,
             {Domain::WINDOWS, static_cast<int>(error), "CompareObjectHandles(authenticated peer)"});
     }
-    using Query = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+    // Mirror only the native call's scalar ABI. Including winternl.h here
+    // requires OPTIONAL even when a consumer deliberately cleaned that macro
+    // after windows.h; restoring it would leak into the consumer's public APIs.
+    using Query = LONG(WINAPI*)(HANDLE, ULONG, void*, ULONG, ULONG*);
     const auto query = reinterpret_cast<Query>(GetProcAddress(
         GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
     if (!query) {
         return result(State::UNAVAILABLE, {Domain::WINDOWS, ERROR_PROC_NOT_FOUND, "NtQueryInformationProcess unavailable"});
     }
+    const auto native_pid = GetProcessId(process);
+    if (native_pid == 0) {
+        return result(State::UNAVAILABLE,
+            {Domain::WINDOWS, (int)GetLastError(), "GetProcessId(original native proof)"});
+    }
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    if (!GetProcessTimes(process, &creation, &exit, &kernel, &user)) {
+        return result(State::UNAVAILABLE,
+            {Domain::WINDOWS, (int)GetLastError(), "GetProcessTimes(original native proof)"});
+    }
+    ULARGE_INTEGER creation_identity{};
+    creation_identity.LowPart  = creation.dwLowDateTime;
+    creation_identity.HighPart = creation.dwHighDateTime;
     HANDLE image = executable.m_state->handle();
     // Class 44 takes an input file HANDLE and compares the process image's file
     // object. Path queries/reopening cannot substitute: rename and replacement
     // must not make an unrelated file satisfy the selected payload identity.
     const auto injected = detail::native_peer_inspection_error_for_test();
-    const auto status = injected != 0 ? static_cast<NTSTATUS>(injected) :
-        query(process, static_cast<PROCESSINFOCLASS>(44), &image, sizeof(image), nullptr);
+    const auto status = injected != 0 ? (LONG)injected :
+        query(process, 44ul, &image, sizeof(image), nullptr);
     const auto final = liveness();
     if (final.state != State::MATCH) {
         return final;
     }
     const auto state = detail::native_image_mapping_state(status);
-    return state == State::MATCH ? result(state) : result(state,
-        {Domain::WINDOWS, static_cast<int>(status), "NtQueryInformationProcess(ProcessImageFileMapping): NTSTATUS"});
+    if (state != State::MATCH) {
+        return result(state,
+            {Domain::WINDOWS, (int)status, "NtQueryInformationProcess(ProcessImageFileMapping): NTSTATUS"});
+    }
+    auto proof = result(State::MATCH);
+    proof.native_process_id                = native_pid;
+    proof.native_process_creation_identity = creation_identity.QuadPart;
+    return proof;
 #elif defined(__linux__)
     const auto slot = std::find_if(m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
         [&](const Spawned_child_reap_slot& candidate) {
@@ -330,9 +351,13 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
     if (final.state != State::MATCH) {
         return final;
     }
-    return expected.st_dev == actual.st_dev && expected.st_ino == actual.st_ino
-        ? result(State::MATCH)
-        : result(State::MISMATCH, {Domain::PROVIDER, 0, "Loaded executable file differs from selection"});
+    if (expected.st_dev != actual.st_dev || expected.st_ino != actual.st_ino) {
+        return result(State::MISMATCH, {Domain::PROVIDER, 0, "Loaded executable file differs from selection"});
+    }
+    auto proof = result(State::MATCH);
+    proof.native_process_id                = (uint64_t)slot->pid;
+    proof.native_process_creation_identity = slot->start_stamp;
+    return proof;
 #else
     (void)connected_server_endpoint;
     return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Native peer identity unsupported"});
