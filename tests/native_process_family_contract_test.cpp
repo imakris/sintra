@@ -3,6 +3,8 @@
 
 #include <sintra/sintra.h>
 
+#if defined(_WIN32) || defined(__linux__)
+
 #include "managed_child_test_support.h"
 #include "test_utils.h"
 
@@ -380,8 +382,10 @@ int run_owner(int argc, char* argv[], const std::string& binary, const fs::path&
         valid &= check(custody.terminate_until(Clock::now() + 3s).release_state ==
             sintra::Managed_child_release_state::complete, "ordinary custody retires while native ticket retains record");
         {
-            std::lock_guard<std::mutex> lock(sintra::s_mproc->m_child_custody_mutex);
-            valid &= check(sintra::s_mproc->m_child_custodies.count(retained_ticket_record->identity) == 0,
+            std::unique_lock<std::mutex> lock(sintra::s_mproc->m_child_custody_mutex);
+            valid &= check(sintra::s_mproc->m_child_custody_changed.wait_until(lock, Clock::now() + 3s, [&]() {
+                return sintra::s_mproc->m_child_custodies.count(retained_ticket_record->identity) == 0;
+            }),
                 "ticket record is absent from ordinary active custody registry");
         }
         valid &= check(!sintra::s_mproc->native_family_roots_settled(),
@@ -493,3 +497,25 @@ int main(int argc, char* argv[])
     fs::remove_all(root, cleanup_error);
     return valid ? 0 : 1;
 }
+
+#else
+
+#include <cerrno>
+#include <cstdio>
+
+int main()
+{
+    const bool activated = sintra::activate_native_family();
+    const auto status = sintra::native_family_status();
+    if (activated || status.active || status.native_empty || status.native_error != ENOTSUP ||
+        status.failed_operation.empty())
+    {
+        std::fprintf(stderr, "FAIL: unavailable native family must report ENOTSUP without activation "
+            "or an empty-family claim: activated=%d active=%d empty=%d error=%u operation=%s\n",
+            activated, status.active, status.native_empty, status.native_error, status.failed_operation.c_str());
+        return 1;
+    }
+    return 0;
+}
+
+#endif
