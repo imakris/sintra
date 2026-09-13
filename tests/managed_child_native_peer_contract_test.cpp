@@ -22,6 +22,8 @@
 
 #include <sintra/sintra.h>
 
+#if defined(_WIN32) || defined(__linux__)
+
 #if defined(_WIN32) && (defined(OPTIONAL) || defined(FAILED) || defined(ERROR) || \
     defined(NO_DATA) || defined(DATA_AVAILABLE) || defined(EVICTED))
 #error Sintra must preserve cleaned Windows status macros
@@ -464,3 +466,29 @@ int main(int argc, char** argv)
     sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "native_peer_identity");
     return run_root(argc, argv, std::filesystem::absolute(shared.path()));
 }
+
+#else
+
+#include "test_utils.h"
+
+#include <cstdio>
+#include <filesystem>
+
+int main(int argc, char* argv[])
+{
+    const auto binary = std::filesystem::absolute(sintra::test::get_binary_path(argc, argv));
+    const auto capture = sintra::capture_managed_child_executable(binary.string());
+    if (capture.reference || capture.error.domain != sintra::Managed_child_native_error_domain::PROVIDER ||
+        capture.error.operation.empty() ||
+        sintra::compare_managed_child_executables(capture.reference, capture.reference))
+    {
+        std::fprintf(stderr, "FAILED: unavailable native executable identity must report a provider diagnostic "
+            "without a reference or an equality claim: reference=%d domain=%u operation=%s\n",
+            static_cast<bool>(capture.reference), static_cast<unsigned>(capture.error.domain),
+            capture.error.operation.c_str());
+        return 1;
+    }
+    return 0;
+}
+
+#endif
