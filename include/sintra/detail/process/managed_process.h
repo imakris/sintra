@@ -294,6 +294,7 @@ class Managed_child_native_reference;
 }
 
 struct Managed_child_executable_capture;
+struct Managed_child_native_peer_proof;
 
 /// An opaque, retained executable file object. Capture the fixed payload before
 /// launch and retain the same reference through native peer admission. This is
@@ -308,6 +309,10 @@ private:
     std::shared_ptr<const detail::Managed_child_native_reference> m_state;
 
     friend Managed_child_executable_capture capture_managed_child_executable(const std::string&);
+    friend bool compare_managed_child_executables(
+        const Managed_child_executable_reference&, const Managed_child_executable_reference&);
+    friend Managed_child_native_peer_proof verify_process_executable(
+        uint64_t, const Managed_child_executable_reference&);
     friend struct Managed_process;
 };
 
@@ -320,6 +325,12 @@ struct Managed_child_executable_capture
 /// Opens one absolute executable path without exporting its native handle.
 /// Replacement of that path does not retarget the returned reference.
 Managed_child_executable_capture capture_managed_child_executable(const std::string& path);
+
+/// Compares retained file identities; unavailable references or native inspection
+/// failures are not equality. This does not compare paths or file contents.
+bool compare_managed_child_executables(
+    const Managed_child_executable_reference& first,
+    const Managed_child_executable_reference& second);
 
 enum class Managed_child_native_peer_state
 {
@@ -335,10 +346,17 @@ struct Managed_child_native_peer_proof
     Managed_child_occurrence_identity occurrence;
     Managed_child_native_error        error;
     // Only MATCH carries native identity, sampled from the retained process
-    // object or locked original reap slot. Every other result leaves it absent.
+    // object or caller-retained/locked child. Every other result leaves it absent.
     uint64_t                         native_process_id = 0;
     uint64_t                         native_process_creation_identity = 0;
 };
+
+/// Verifies a caller-owned direct child's image without adopting or reaping it.
+/// The caller must prevent reaping/PID reuse throughout this call (for example,
+/// retain its live child awaiting an acknowledgement on the process-owning thread).
+/// MATCH carries native identity only; no managed custody occurrence is asserted.
+Managed_child_native_peer_proof verify_process_executable(
+    uint64_t native_pid, const Managed_child_executable_reference& executable);
 
 struct Managed_child_native_action
 {
