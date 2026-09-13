@@ -342,8 +342,10 @@ int run_owner(int argc, char* argv[], const std::string& binary, const fs::path&
     valid &= check(roots.size() == 1 && custody.native_snapshot().front().state ==
         sintra::Managed_child_native_state::RUNNING,
         "family action cannot bypass original root native authority");
+    uint64_t root_action_generation = 0;
     if (roots.size() == 1) {
         const auto action = custody.request_native_termination(roots.front().occurrence, Clock::now() + 3s);
+        root_action_generation = action.action_generation;
         valid &= check(action.admission == sintra::Managed_child_native_admission::STARTED,
             "hard host death through exact original custody");
         const auto deadline = Clock::now() + 4s;
@@ -368,7 +370,21 @@ int run_owner(int argc, char* argv[], const std::string& binary, const fs::path&
     valid &= check(!after_host.native_empty, "direct host exit does not prove descendant containment");
     valid &= check(leaf_stamp && sintra::test::managed_child::exact_process_is_live(leaf, *leaf_stamp),
         "HUP/TERM-ignoring detached descendant survives hard host death");
+    bool root_action_finished = false;
     if (retained_ticket_record) {
+        std::unique_lock<std::mutex> lock(retained_ticket_record->mutex);
+        // Native exit precedes the action worker's terminal publication. The
+        // fixture must own the action state before it simulates a retained ticket.
+        root_action_finished = retained_ticket_record->changed.wait_until(lock, Clock::now() + 3s, [&]() {
+            const auto& occurrence = retained_ticket_record->occurrences.front();
+            return occurrence.native.exited() &&
+                occurrence.native_action.generation == root_action_generation &&
+                occurrence.native_action.stage == sintra::Managed_child_native_stage::FINISHED &&
+                occurrence.native_action.outcome == sintra::Managed_child_native_outcome::EXITED;
+        });
+        valid &= check(root_action_finished, "original native action finishes before retained ticket simulation");
+    }
+    if (retained_ticket_record && root_action_finished) {
         sintra::Managed_child_native_action completed_action;
         {
             std::lock_guard<std::mutex> lock(retained_ticket_record->mutex);
@@ -398,7 +414,8 @@ int run_owner(int argc, char* argv[], const std::string& binary, const fs::path&
         valid &= check(sintra::s_mproc->native_family_roots_settled(),
             "settled original ticket releases family action gate");
     }
-    else {
+    else
+    if (!retained_ticket_record) {
         valid &= check(false, "original native record retained for family action ownership test");
     }
     valid &= check(sintra::request_native_family_termination(Clock::now() + 6s),
