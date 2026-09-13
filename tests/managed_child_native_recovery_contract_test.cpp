@@ -358,6 +358,7 @@ int run_root(int argc, char* argv[])
         Managed_child_native_admission::ALREADY_EXITED, "already exited child needs no further termination");
     valid &= check(custody.status().admitted_occurrences == 1, "cleanup fence prevents replacement occurrence");
 
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     // A single aggregate waiter can stop without periodic polling or one
     // waiting thread per child, including when no further native event occurs.
     std::atomic<bool> waiter_stopped = false;
@@ -368,6 +369,7 @@ int run_root(int argc, char* argv[])
     waiter.request_stop();
     waiter.join();
     valid &= check(waiter_stopped.load(std::memory_order_acquire), "aggregate wait cancellation wakes immediately");
+#endif
 
     held.release();
     const auto released = custody.terminate_until(Clock::now() + 12s);

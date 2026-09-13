@@ -34,7 +34,10 @@
 #include <mutex>
 #include <cstdint>
 #include <stdexcept>
+#include <version>
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
 #include <stop_token>
+#endif
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -475,10 +478,22 @@ public:
 
     void notify() const { notify_state(*m_state); }
 
+    uint64_t wait_for_change(uint64_t previous, std::chrono::steady_clock::time_point deadline) const
+    {
+        std::unique_lock<std::mutex> lock(m_state->mutex);
+        m_state->changed.wait_until(lock, deadline, [&]() {
+            return m_state->generation != previous;
+        });
+        return m_state->generation;
+    }
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+    // Cancellation is available when the selected standard library supplies
+    // cooperative stop tokens; deadline-based waiting remains portable.
     uint64_t wait_for_change(
         uint64_t previous,
         std::chrono::steady_clock::time_point deadline,
-        std::stop_token stop = {}) const
+        std::stop_token stop) const
     {
         std::stop_callback wake(stop, [state = m_state]() {
             std::lock_guard<std::mutex> lock(state->mutex);
@@ -490,6 +505,7 @@ public:
         });
         return m_state->generation;
     }
+#endif
 
 private:
     struct State
