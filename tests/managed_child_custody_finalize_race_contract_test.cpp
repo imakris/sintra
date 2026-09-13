@@ -252,6 +252,10 @@ int run_child(int argc, char* argv[], const fs::path& shared_dir)
 
     bool begin_draining_confirmed = false;
     try {
+        // Standalone initialization does not run branch()'s completion notification.
+        // Release any startup-delayed publication before asserting its delivery.
+        sintra::Coordinator::rpc_mark_initialization_complete(
+            sintra::s_coord_id, sintra::s_mproc_id);
         auto handle = sintra::Coordinator::rpc_async_begin_process_draining(
             sintra::s_coord_id,
             sintra::s_mproc_id);

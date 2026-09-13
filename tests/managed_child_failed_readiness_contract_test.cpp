@@ -610,6 +610,14 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     std::thread spawn_thread([&]() {
         try {
             call.custody = sintra::spawn_swarm_process(options);
+            // Start the readiness wait after the root observes the exact child.
+            // Custody admission alone does not mean asynchronous setup finished.
+            {
+                std::unique_lock<std::mutex> lock(gate.mutex);
+                gate.cv.wait(lock, [&]() {
+                    return gate.released;
+                });
+            }
             call.custody.wait_for_readiness_until(
                 std::chrono::steady_clock::now() + k_requested_wait_timeout);
             call.custody.terminate_until(std::chrono::steady_clock::now());
