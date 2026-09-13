@@ -1632,6 +1632,13 @@ Release_worker_retry_result run_release_worker_retry(
     const auto hits_after_first = failure_hits(plan);
     bool release_written = false;
     bool retry_window_valid = !force_terminal_capture_race;
+    bool unpublish_parked = false;
+    bool cleanup_parked = false;
+    bool communication_terminal_parked = false;
+    bool child_finalized = false;
+    bool exit_written = false;
+    bool native_exit_confirmed = false;
+    bool communication_resumed = false;
     sintra::Managed_child_status second;
     if (!force_terminal_capture_race) {
         release_written = write_release_marker(marker);
@@ -1652,34 +1659,29 @@ Release_worker_retry_result run_release_worker_retry(
             &hold_release_worker_start_communication,
             std::memory_order_release);
 
-        release_written = write_release_marker(marker);
-        bool unpublish_parked = false;
-        {
-            std::unique_lock<std::mutex> lock(gate.mutex);
-            unpublish_parked = gate.changed.wait_for(lock, 5s, [&]() {
-                return gate.unpublish_parked;
-            });
-        }
-
-        std::thread retry_caller;
-        if (unpublish_parked) {
-            retry_caller = std::thread([&]() {
-                second = custody.terminate_until(
-                    std::chrono::steady_clock::now() + 5s);
-            });
-        }
-
-        bool cleanup_parked = false;
+        // Let retry startup pass the coordinator publication lock before
+        // the child parks unpublish while holding that same lock.
+        std::thread retry_caller([&]() {
+            second = custody.terminate_until(
+                std::chrono::steady_clock::now() + 5s);
+        });
         {
             std::unique_lock<std::mutex> lock(gate.mutex);
             cleanup_parked = gate.changed.wait_for(lock, 5s, [&]() {
                 return gate.cleanup_parked;
             });
+        }
+
+        release_written = write_release_marker(marker);
+        {
+            std::unique_lock<std::mutex> lock(gate.mutex);
+            unpublish_parked = gate.changed.wait_for(lock, 5s, [&]() {
+                return gate.unpublish_parked;
+            });
             gate.release_unpublish = true;
             gate.changed.notify_all();
         }
 
-        bool communication_terminal_parked = false;
         {
             std::unique_lock<std::mutex> lock(gate.mutex);
             communication_terminal_parked = gate.changed.wait_for(
@@ -1687,10 +1689,9 @@ Release_worker_retry_result run_release_worker_retry(
                     return gate.communication_terminal_parked;
                 });
         }
-        const bool child_finalized = wait_for_file(finalized_signal, 5s);
-        const bool exit_written = child_finalized &&
+        child_finalized = wait_for_file(finalized_signal, 5s);
+        exit_written = child_finalized &&
             write_signal_marker(exit, "exit");
-        bool native_exit_confirmed = false;
         const auto exit_deadline = std::chrono::steady_clock::now() + 5s;
         do {
             native_exit_confirmed = custody.status().exited_occurrences == 1;
@@ -1705,14 +1706,12 @@ Release_worker_retry_result run_release_worker_retry(
             gate.release_cleanup = true;
             gate.changed.notify_all();
         }
-        if (retry_caller.joinable()) {
-            retry_caller.join();
-        }
+        retry_caller.join();
         {
             std::unique_lock<std::mutex> lock(gate.mutex);
             gate.release_communication = true;
             gate.changed.notify_all();
-            gate.changed.wait_for(lock, 5s, [&]() {
+            communication_resumed = gate.changed.wait_for(lock, 5s, [&]() {
                 return gate.communication_resumed;
             });
         }
@@ -1726,7 +1725,7 @@ Release_worker_retry_result run_release_worker_retry(
         s_release_worker_start_retry_gate = nullptr;
         retry_window_valid = unpublish_parked && cleanup_parked &&
             communication_terminal_parked && child_finalized && exit_written &&
-            native_exit_confirmed && gate.communication_resumed;
+            native_exit_confirmed && communication_resumed;
 
         if (second.release_state !=
             sintra::Managed_child_release_state::complete)
@@ -1775,6 +1774,29 @@ Release_worker_retry_result run_release_worker_retry(
     {
         return Release_worker_retry_result::green;
     }
+
+    std::fprintf(stderr,
+        "RELEASE_WORKER_RETRY_INVALID phase=%s "
+        "identity_available=%d hits_after_first=%d custody_valid=%d "
+        "retry_window_valid=%d unpublish_parked=%d cleanup_parked=%d "
+        "communication_terminal_parked=%d child_finalized=%d exit_written=%d "
+        "native_exit_confirmed=%d communication_resumed=%d release_written=%d "
+        "first_release=%d second_release=%d second_created=%llu second_exited=%llu "
+        "survivor_absent=%d reap_seen=%d reap_normal=%d finalized=%d "
+        "first_failure_typed=%d historical_failure_exact=%d "
+        "first_failure_kind=%d second_failure_kind=%d "
+        "first_native_error=%d second_native_error=%d\n",
+        phase, identity ? 1 : 0, static_cast<int>(hits_after_first), custody ? 1 : 0,
+        retry_window_valid ? 1 : 0, unpublish_parked ? 1 : 0, cleanup_parked ? 1 : 0,
+        communication_terminal_parked ? 1 : 0, child_finalized ? 1 : 0, exit_written ? 1 : 0,
+        native_exit_confirmed ? 1 : 0, communication_resumed ? 1 : 0, release_written ? 1 : 0,
+        static_cast<int>(first.release_state), static_cast<int>(second.release_state),
+        static_cast<unsigned long long>(second.created_occurrences),
+        static_cast<unsigned long long>(second.exited_occurrences),
+        survivor_absent ? 1 : 0, reap_seen ? 1 : 0, reap_normal ? 1 : 0, finalized ? 1 : 0,
+        first_failure_is_typed ? 1 : 0, historical_failure_is_exact ? 1 : 0,
+        static_cast<int>(first.last_failure.kind), static_cast<int>(second.last_failure.kind),
+        first.last_failure.native_error, second.last_failure.native_error);
 
     const bool report_missing =
         first.last_failure.kind == sintra::Managed_child_failure_kind::none &&

@@ -578,6 +578,12 @@ public:
     void wait(Args&&... args) { m_changed.wait(std::forward<Args>(args)...); }
 
     template <typename... Args>
+    auto wait_for(Args&&... args)
+    {
+        return m_changed.wait_for(std::forward<Args>(args)...);
+    }
+
+    template <typename... Args>
     auto wait_until(Args&&... args)
     {
         return m_changed.wait_until(std::forward<Args>(args)...);
