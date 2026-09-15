@@ -68,7 +68,10 @@ inline void Managed_process::reap_native_family_children()
     auto& status = family.m_status;
     detail::Native_family_change_publication publication(status, m_native_family_changed);
     status.native_empty = false;
-    if (std::any_of(m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
+    const bool external_birth_pending = std::any_of(
+        family.m_external_children.begin(), family.m_external_children.end(),
+        [](const auto& child) { return child->phase == detail::External_native_child::Phase::PENDING; });
+    if (external_birth_pending || std::any_of(m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
             [](const Spawned_child_reap_slot& slot) { return slot.pid <= 0; }))
     {
         // A different launch may remain unresolved. Its unpublished PID must
@@ -105,7 +108,11 @@ inline void Managed_process::reap_native_family_children()
         return;
     }
 
-    while (true) {
+    // P_ALL is unavailable while a maintained caller owns an exact direct
+    // waiter: even observing and then skipping its zombie would starve the
+    // other children. Enumerate below and consume only individually owned
+    // results until every external wait authority has settled.
+    while (family.m_external_children.empty()) {
         siginfo_t info{};
         int result;
         do {
@@ -183,6 +190,96 @@ inline void Managed_process::reap_native_family_children()
     }
     status.observed_process_ids.assign(children.begin(), children.end());
     for (const pid_t child : children) {
+        int identity_error = 0;
+        const auto external = std::find_if(
+            family.m_external_children.begin(), family.m_external_children.end(),
+            [child, &identity_error](const auto& entry) {
+                if (entry->phase != detail::External_native_child::Phase::CREATED ||
+                    entry->process_id != static_cast<std::uint32_t>(child)) return false;
+                siginfo_t exact{};
+                // A retained pidfd whose original child has already been
+                // reaped cannot exclude a successor that reused its PID.
+                int inspected;
+                do {
+                    inspected = waitid(P_PIDFD, static_cast<id_t>(entry->native), &exact,
+                        WEXITED | WNOHANG | WNOWAIT | __WALL);
+                } while (inspected < 0 && errno == EINTR);
+                if (inspected < 0 && errno != ECHILD) identity_error = errno;
+                return inspected == 0;
+            });
+        if (identity_error != 0) {
+            family.fail(identity_error, "waitid(external child identity)");
+            return;
+        }
+        if (external != family.m_external_children.end()) {
+            const auto entry = *external;
+            if (!entry->direct_waiter) {
+                siginfo_t exact{};
+                int reaped;
+                do {
+                    reaped = waitid(P_PIDFD, static_cast<id_t>(entry->native), &exact,
+                        WEXITED | WNOHANG | __WALL);
+                } while (reaped < 0 && errno == EINTR);
+                if (reaped == 0 && exact.si_pid != 0) {
+                    entry->phase = detail::External_native_child::Phase::EXITED;
+                    family.m_external_children.erase(external);
+                    // This pass enumerated before consuming the child. Publish
+                    // its removal and schedule the now-unblocked P_ALL pass;
+                    // no later SIGCHLD is guaranteed for the last handoff.
+                    status.observed_process_ids.erase(std::remove(
+                        status.observed_process_ids.begin(), status.observed_process_ids.end(), child),
+                        status.observed_process_ids.end());
+                    family.wake_observer();
+                    continue;
+                }
+                if (reaped < 0) {
+                    family.fail(errno, "waitid(external child handoff)");
+                    return;
+                }
+            }
+            if (family.m_force_enabled && family.m_status.action_active &&
+                std::chrono::steady_clock::now() < family.m_force_until &&
+                syscall(SYS_pidfd_send_signal, entry->native, SIGKILL, nullptr, 0) != 0 && errno != ESRCH)
+            {
+                family.fail(errno, "pidfd_send_signal(external child)");
+            }
+            continue;
+        }
+        if (!family.m_external_children.empty()) {
+            siginfo_t ready{};
+            int observed;
+            do {
+                observed = waitid(P_PID, static_cast<id_t>(child), &ready,
+                    WEXITED | WNOHANG | WNOWAIT | __WALL);
+            } while (observed < 0 && errno == EINTR);
+            if (observed < 0) {
+                family.fail(errno, "waitid(individually owned family child)");
+                return;
+            }
+            if (ready.si_pid != 0) {
+                int wait_status = 0;
+                pid_t reaped;
+                do { reaped = waitpid(child, &wait_status, WNOHANG | __WALL); }
+                while (reaped < 0 && errno == EINTR);
+                if (reaped != child) {
+                    family.fail(reaped < 0 ? errno : EAGAIN, "waitpid(individually owned family child)");
+                    return;
+                }
+                const auto slot = std::find_if(m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
+                    [child](const Spawned_child_reap_slot& candidate) { return candidate.pid == child; });
+                if (slot != m_spawned_child_pids.end()) {
+                    note_child_os_exit(slot->occurrence, wait_status);
+                    m_spawned_child_pids.erase(slot);
+                }
+                const auto retained = m_native_family_pidfds.find(child);
+                if (retained != m_native_family_pidfds.end()) {
+                    close(retained->second);
+                    m_native_family_pidfds.erase(retained);
+                }
+                detail::child_reaped_for_test(child, wait_status);
+                continue;
+            }
+        }
         auto retained = m_native_family_pidfds.find(child);
         if (retained == m_native_family_pidfds.end()) {
             // With the sole reaper locked, an own child cannot be reaped and
@@ -249,8 +346,14 @@ inline Native_family_status Managed_process::observe_native_family()
     auto& status = family.m_status;
     detail::Native_family_change_publication publication(status, m_native_family_changed);
     status.admission_closed = family.m_closed.load(std::memory_order_acquire);
+    pending_launches |= std::any_of(family.m_external_children.begin(), family.m_external_children.end(),
+        [](const auto& child) { return child->phase == detail::External_native_child::Phase::PENDING; });
     status.pending_launches = pending_launches;
 #ifdef _WIN32
+    std::erase_if(family.m_external_children, [](const auto& child) {
+        return child->phase == detail::External_native_child::Phase::CREATED &&
+            !child->direct_waiter && WaitForSingleObject(child->native, 0) == WAIT_OBJECT_0;
+    });
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
     if (QueryInformationJobObject(family.m_job, JobObjectBasicAccountingInformation,
             &accounting, sizeof(accounting), nullptr))
@@ -290,7 +393,7 @@ inline Native_family_status Managed_process::observe_native_family()
     auto result = status;
     // An empty OS observation is final only after native launch outcomes have
     // settled under closed admission. Communication release remains separate.
-    result.native_empty &= result.admission_closed && !pending_launches;
+    result.native_empty &= result.admission_closed && !pending_launches && family.m_external_children.empty();
     return result;
 }
 
