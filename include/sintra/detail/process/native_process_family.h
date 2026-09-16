@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <memory>
 #include <fstream>
@@ -56,6 +57,30 @@ struct Native_family_status
 };
 
 namespace detail {
+
+#if defined(__linux__)
+
+/// The directory whose entries are this process's own threads. The family
+/// reaper enumerates it, and activation checks the calling thread's entry, so
+/// the spelling is stated once.
+inline constexpr const char* k_owned_thread_root = "/proc/self/task";
+
+/// Sole readability authority for one owned thread's child list. The file
+/// exists only in a kernel built with CONFIG_PROC_CHILDREN, and a restricted
+/// procfs mount can withhold it from a process whose kernel provides it.
+/// Activation and the reaper open through here so the two cannot disagree on
+/// what readable means, or on which errno a failure reports. What an
+/// unreadable stream means is the caller's: the reaper tolerates a task
+/// directory that vanished mid-scan, activation tolerates nothing.
+inline std::ifstream open_owned_thread_children(const std::filesystem::path& task_directory)
+{
+    // The errno a caller reports must belong to this open, not to an earlier
+    // unrelated call that happened to leave one behind.
+    errno = 0;
+    return std::ifstream(task_directory / "children");
+}
+
+#endif
 
 struct External_native_child
 {
@@ -144,6 +169,34 @@ public:
             return false;
         }
         close(probe);
+        // The reaper enumerates every owned thread's child list before it can
+        // adopt a descendant, and a list it cannot read is a permanent failure:
+        // fail() pins native_empty false for the process lifetime, so a family
+        // admitted without this would accept native children and then never be
+        // able to conclude it is empty. Refusing here is that same failure,
+        // stated before anything has come to depend on it, and reported with
+        // the reaper's own operation names.
+        //
+        // The caveat this cannot remove: activation requires that the process
+        // has no children yet, so this proves the list opens and parses, not
+        // that enumeration reports a correct membership. A later remount or
+        // container reconfiguration can still withdraw it after admission, and
+        // the reaper's own failure remains the backstop for that.
+        {
+            std::ifstream children = open_owned_thread_children(
+                std::filesystem::path(k_owned_thread_root) / std::to_string(syscall(SYS_gettid)));
+            if (!children) {
+                const int error = errno;
+                fail(error && error != ENOENT ? error : ENOTSUP, "read owned thread children");
+                return false;
+            }
+            pid_t enumerated = 0;
+            while (children >> enumerated) {}
+            if (!children.eof()) {
+                fail(EIO, "parse owned thread children");
+                return false;
+            }
+        }
         if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) {
             fail(errno, "prctl(PR_SET_CHILD_SUBREAPER)");
             return false;
