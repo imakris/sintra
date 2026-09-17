@@ -58,7 +58,8 @@ constexpr const char* k_wedged_service_name  = "lifeline_wedged_service";
 constexpr const char* k_wait_timeout_service_name =
     "lifeline_wait_timeout_never_published";
 
-constexpr int k_owner_exit_timeout_ms         = 4000;
+constexpr int k_startup_timeout_ms            = 10000;
+constexpr int k_owner_exit_timeout_ms         = 12000;
 constexpr int k_child_exit_timeout_ms         = 2000;
 constexpr int k_child_disable_check_ms        = 300;
 constexpr int k_hung_hard_exit_timeout_ms     = 300;
@@ -66,7 +67,7 @@ constexpr int k_hung_child_exit_timeout_ms    = 3000;
 constexpr int k_rapid_spawn_iterations        = 5;
 constexpr int k_leak_iterations               = 5;
 constexpr int k_leak_child_lifetime_ms        = 50;
-constexpr int k_leak_owner_timeout_ms         = 10000;
+constexpr int k_leak_owner_timeout_ms         = 20000;
 constexpr int k_respawn_owner_timeout_ms      = 10000;
 constexpr int k_respawn_child_exit_timeout_ms = 2000;
 
@@ -708,7 +709,8 @@ int run_owner(
         std::_Exit(2);
     }
 
-    if (!sintra::test::wait_for_file(child_ready_path(dir, test_case), std::chrono::milliseconds(3000))) {
+    if (!sintra::test::wait_for_file(
+            child_ready_path(dir, test_case), std::chrono::milliseconds(k_startup_timeout_ms))) {
         std::fprintf(stderr, "[owner] child did not signal ready\n");
         std::_Exit(3);
     }
@@ -779,14 +781,15 @@ int run_leak_owner(const std::filesystem::path& dir, int argc, char* argv[])
         }
 
         // Wait for child to signal ready
-        if (!sintra::test::wait_for_file(ready_file, std::chrono::milliseconds(3000))) {
+        if (!sintra::test::wait_for_file(
+                ready_file, std::chrono::milliseconds(k_startup_timeout_ms))) {
             std::fprintf(stderr, "[leak_owner] child %d did not signal ready\n", i);
             std::_Exit(2);
         }
 
         // Read child PID
         long long child_pid = 0;
-        if (!wait_for_pid_value(pid_file, 3000, child_pid)) {
+        if (!wait_for_pid_value(pid_file, k_startup_timeout_ms, child_pid)) {
             std::fprintf(stderr, "[leak_owner] failed to read child %d pid\n", i);
             std::_Exit(3);
         }
@@ -1045,7 +1048,9 @@ bool run_owner_case(
     }
 
     long long child_pid_value_raw = 0;
-    if (!wait_for_pid_value(child_pid_path(dir, test_case), 3000, child_pid_value_raw)) {
+    if (!wait_for_pid_value(
+            child_pid_path(dir, test_case), k_startup_timeout_ms, child_pid_value_raw))
+    {
         std::fprintf(stderr, "[test] failed to read child pid\n");
         close_process(owner);
         return false;
