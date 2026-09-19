@@ -371,14 +371,15 @@ bool run_worker_rejection(
     auto custody = sintra::spawn_swarm_process(options);
     const bool outcome_written = wait_for_file(outcome, 10s);
 
+    const auto released = custody.release_until(
+        std::chrono::steady_clock::now() + 15s);
+    // File creation precedes the worker's write; read only after its release wait.
     int nested_accepted = 1;
     int worker_finalized = 0;
     if (outcome_written) {
         std::ifstream in(outcome, std::ios::binary);
         in >> nested_accepted >> worker_finalized;
     }
-    const auto released = custody.release_until(
-        std::chrono::steady_clock::now() + 15s);
     if (released.release_state != sintra::Managed_child_release_state::complete) {
         custody.terminate_until(std::chrono::steady_clock::now() + 15s);
     }
