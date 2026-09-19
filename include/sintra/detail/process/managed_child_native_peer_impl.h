@@ -190,14 +190,16 @@ inline Managed_child_executable_capture capture_managed_child_executable(const s
 {
     using Domain = Managed_child_native_error_domain;
     Managed_child_executable_capture result;
-    if (path.empty() || path.find('\0') != std::string::npos ||
-        !std::filesystem::u8path(path).is_absolute())
+    std::filesystem::path native_path;
+    if (!path.empty() && path.find('\0') == std::string::npos) {
+        native_path = std::filesystem::path(std::u8string(path.begin(), path.end()));
+    }
+    if (!native_path.is_absolute())
     {
         result.error = {Domain::PROVIDER, 0, "Selected executable path must be absolute"};
         return result;
     }
 #ifdef _WIN32
-    const auto native_path = std::filesystem::u8path(path);
     const auto handle = CreateFileW(native_path.c_str(), GENERIC_READ | GENERIC_EXECUTE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
