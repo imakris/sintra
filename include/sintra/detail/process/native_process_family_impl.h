@@ -164,29 +164,36 @@ inline void Managed_process::reap_native_family_children()
     // threads; looking only at thread-self misses their adopted descendants.
     std::set<pid_t> children;
     std::error_code directory_error;
-    const std::filesystem::directory_iterator tasks(detail::k_owned_thread_root, directory_error);
+    std::filesystem::directory_iterator task(detail::k_owned_thread_root, directory_error);
+    const std::filesystem::directory_iterator end;
     if (directory_error) {
         family.fail(directory_error.value(), "enumerate /proc/self/task");
         return;
     }
-    for (const auto& task : tasks) {
-        std::ifstream child_file = detail::open_owned_thread_children(task.path());
+    for (; task != end; task.increment(directory_error)) {
+        if (directory_error) {
+            break;
+        }
+        std::ifstream child_file = detail::open_owned_thread_children(task->path());
         if (!child_file) {
             std::error_code exists_error;
-            if (!std::filesystem::exists(task.path(), exists_error) && !exists_error) {
+            if (!std::filesystem::exists(task->path(), exists_error) && !exists_error) {
                 continue;
             }
             family.fail(errno ? errno : EIO, "read owned thread children");
             return;
         }
-        pid_t child;
-        while (child_file >> child) {
-            children.insert(child);
-        }
-        if (!child_file.eof()) {
+        if (!detail::parse_owned_thread_children(child_file, [&children](pid_t child) {
+                children.insert(child);
+            }))
+        {
             family.fail(EIO, "parse owned thread children");
             return;
         }
+    }
+    if (directory_error) {
+        family.fail(directory_error.value(), "enumerate /proc/self/task");
+        return;
     }
     status.observed_process_ids.assign(children.begin(), children.end());
     for (const pid_t child : children) {

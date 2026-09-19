@@ -7,14 +7,15 @@
 // would only confirm its own premise. Its oracle is a child the fixture
 // creates itself and can prove exists, and it holds both outcomes to it: an
 // activated family must observe that exact child and then prove it empty once
-// it exits, and a refused activation must be unable to observe it at all.
+// it exits. A refusal exercises the child-list oracle only when activation
+// names that prerequisite. Other admission failures do not imply that child
+// enumeration is unavailable and leave this prerequisite unqualified.
 #include <sintra/sintra.h>
 
 #if defined(__linux__)
 
 #include <sintra/detail/process/native_process_family.h>
 
-#include <signal.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -25,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <sstream>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
@@ -83,6 +85,11 @@ public:
         }
         m_pid = fork();
         if (m_pid < 0) {
+            const int error = errno;
+            close(m_release[0]);
+            close(m_release[1]);
+            m_release[0] = m_release[1] = -1;
+            errno = error;
             return false;
         }
         if (m_pid == 0) {
@@ -108,19 +115,16 @@ public:
         }
     }
 
-    /// After an observed reap the number is no longer this fixture's to signal.
-    void disown() { m_pid = 0; }
-
     pid_t pid() const { return m_pid; }
 
     ~Fixture_child()
     {
         release();
-        if (m_pid <= 0) {
-            return;
-        }
-        kill(m_pid, SIGKILL);
-        if (m_owns_wait) {
+        // EOF is the child's termination protocol. In the active case the
+        // family's sole reaper may already have consumed its exit, including
+        // after a failed observation or during shutdown. Never signal that
+        // saved numeric PID. Only the never-activated fixture owns a wait.
+        if (m_owns_wait && m_pid > 0) {
             while (waitpid(m_pid, nullptr, 0) < 0 && errno == EINTR) {}
         }
     }
@@ -133,28 +137,64 @@ private:
 
 /// The reaper's own enumeration, run directly by the fixture: every owned
 /// thread's child list, opened through the same authority activation consults.
-/// `readable` reports whether any of those lists could be read at all.
-bool enumeration_observes(pid_t subject, bool& readable)
+/// `readable` reports whether any list could be read; `complete` additionally
+/// requires a successful directory traversal and every opened list to parse.
+/// Seeing one child in a partial census does not refute a parse/read refusal.
+bool enumeration_observes(pid_t subject, bool& readable, bool& complete)
 {
     readable = false;
+    complete = false;
     bool observed = false;
+    bool all_lists_complete = true;
     std::error_code directory_error;
-    const fs::directory_iterator tasks(sintra::detail::k_owned_thread_root, directory_error);
+    fs::directory_iterator task(sintra::detail::k_owned_thread_root, directory_error);
+    const fs::directory_iterator end;
     if (directory_error) {
         return false;
     }
-    for (const auto& task : tasks) {
-        std::ifstream children = sintra::detail::open_owned_thread_children(task.path());
+    for (; task != end; task.increment(directory_error)) {
+        if (directory_error) {
+            break;
+        }
+        std::ifstream children = sintra::detail::open_owned_thread_children(task->path());
         if (!children) {
+            all_lists_complete = false;
             continue;
         }
         readable = true;
-        pid_t child = 0;
-        while (children >> child) {
-            observed |= child == subject;
+        all_lists_complete &= sintra::detail::parse_owned_thread_children(children,
+            [&](pid_t child) { observed |= child == subject; });
+    }
+    complete = readable && all_lists_complete && !directory_error;
+    return observed;
+}
+
+bool parser_contract()
+{
+    bool valid = true;
+    for (const std::string text : {"", " \t\n", "41", "41 42 \n"}) {
+        std::istringstream input(text);
+        valid &= check(sintra::detail::parse_owned_thread_children(input, [](pid_t) {}),
+            "complete empty and valid child lists parse successfully");
+    }
+    for (const std::string text : {"41 broken", "41 999999999999999999999999999999", "0", "-1"}) {
+        std::istringstream input(text);
+        bool saw_known_child = false;
+        const bool complete = sintra::detail::parse_owned_thread_children(input,
+            [&](pid_t pid) { saw_known_child |= pid == 41; });
+        valid &= check(!complete, "malformed, overflowing and invalid child IDs are not complete lists");
+        if (text.starts_with("41")) {
+            valid &= check(saw_known_child, "partial enumeration can observe a child without being complete");
         }
     }
-    return observed;
+    std::istringstream failed;
+    failed.setstate(std::ios::badbit | std::ios::eofbit);
+    valid &= check(!sintra::detail::parse_owned_thread_children(failed, [](pid_t) {}),
+        "EOF with an I/O error is never complete enumeration");
+    if (valid) {
+        std::fprintf(stderr, "PASS: child-list parser distinguishes complete, partial, overflow and I/O failure\n");
+    }
+    return valid;
 }
 
 bool contains(const std::vector<std::uint32_t>& members, pid_t pid)
@@ -167,7 +207,11 @@ int run_activated(int argc, char* argv[])
 {
     sintra::init(argc, argv);
     Fixture_child child(false);
-    bool valid = check(child.start(), "fixture creates a real child of its own");
+    if (!check(child.start(), "fixture creates a real child of its own")) {
+        (void)sintra::shutdown();
+        return 1;
+    }
+    bool valid = true;
     const pid_t subject = child.pid();
     const char birth_state = process_state(subject);
     valid &= check(birth_state == 'R' || birth_state == 'S',
@@ -204,7 +248,6 @@ int run_activated(int argc, char* argv[])
     if (empty) {
         valid &= check(process_state(subject) == '\0',
             "the empty claim is truthful: no corpse of that child is left unwaited");
-        child.disown();
     }
     valid &= check(observation.native_error == 0,
         "an activated family that completed this cycle reports no failure");
@@ -221,21 +264,46 @@ int run_refused()
         !status.failed_operation.empty(),
         "a refused activation reports its failure without claiming an empty family");
 
+    if (!valid) {
+        return 1;
+    }
+
+    const bool child_list_refusal = status.failed_operation == "read owned thread children" ||
+        status.failed_operation == "parse owned thread children";
+    if (!child_list_refusal) {
+        const bool other_prerequisite = status.failed_operation == "pidfd_open" ||
+            status.failed_operation == "prctl(PR_SET_CHILD_SUBREAPER)" ||
+            status.failed_operation == "native family activation requires no existing children";
+        if (!check(other_prerequisite, "activation reports a recognized prerequisite failure")) {
+            return 1;
+        }
+        // The runner records this marker as did_not_run, not a semantic pass.
+        // Readable child lists cannot disprove a different prerequisite failure.
+        std::fprintf(stderr, "[SINTRA_DID_NOT_RUN] child-list prerequisite unqualified: "
+            "activation refused at %s (error=%u)\n",
+            status.failed_operation.c_str(), status.native_error);
+        return 0;
+    }
+
     Fixture_child child(true);
-    valid &= check(child.start(), "fixture creates a real child of its own");
+    if (!check(child.start(), "fixture creates a real child of its own")) {
+        return 1;
+    }
     const char birth_state = process_state(child.pid());
     valid &= check(birth_state == 'R' || birth_state == 'S',
         "fixture child provably exists before the enumeration is asked about it");
 
     bool readable = false;
-    const bool observed = enumeration_observes(child.pid(), readable);
-    std::fprintf(stderr, "refused: error=%u operation=%s any_list_readable=%d\n",
-        status.native_error, status.failed_operation.c_str(), readable ? 1 : 0);
-    // The guarantee refused must be genuinely unobtainable. Fork and observe
-    // succeeding here would mean the product newly refuses to start in an
-    // environment where its reaper works.
-    valid &= check(!observed,
-        "activation refused although the reaper's own enumeration observes a child that provably exists");
+    bool complete = false;
+    const bool observed = enumeration_observes(child.pid(), readable, complete);
+    std::fprintf(stderr, "refused: error=%u operation=%s any_list_readable=%d complete=%d\n",
+        status.native_error, status.failed_operation.c_str(), readable ? 1 : 0, complete ? 1 : 0);
+    // Under the fixture's stable-prerequisite premise, complete enumeration of
+    // the known child contradicts a child-list-specific refusal. Partial data
+    // does not: a list may contain the child and still fail parsing afterward.
+    valid &= check(!(observed && complete),
+        "child-list admission refused despite complete enumeration of the fixture child; "
+        "check that the prerequisite stayed fixed during this run");
     return valid ? 0 : 1;
 }
 
@@ -243,6 +311,9 @@ int run_refused()
 
 int main(int argc, char* argv[])
 {
+    if (!parser_contract()) {
+        return 1;
+    }
     return sintra::activate_native_family() ? run_activated(argc, argv) : run_refused();
 }
 
@@ -254,7 +325,7 @@ int main()
 {
     // The per-thread child list is a Linux prerequisite. Every other platform
     // observes its native family by other means and admits on other grounds.
-    std::printf("per-thread child list is a Linux prerequisite; nothing to admit on here\n");
+    std::printf("[SINTRA_DID_NOT_RUN] per-thread child-list prerequisite is Linux-only\n");
     return 0;
 }
 

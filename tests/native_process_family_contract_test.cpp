@@ -471,25 +471,42 @@ int main(int argc, char* argv[])
     startup.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
     startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     startup.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
-    PROCESS_INFORMATION process{};
-    const BOOL oracle_created = CreateProcessW(invalid_image.c_str(), oracle_buffer.data(),
-        nullptr, nullptr, TRUE, CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &startup, &process);
-    const DWORD oracle_error = oracle_created ? ERROR_SUCCESS : GetLastError();
-    if (process.hThread) {
-        CloseHandle(process.hThread);
+    // Both invalid-image launches must fail without opening an OS loader dialog.
+    DWORD previous_error_mode = 0;
+    if (!check(SetThreadErrorMode(GetThreadErrorMode() | SEM_FAILCRITICALERRORS, &previous_error_mode),
+            "enable thread error-mode suppression for invalid-image launches"))
+    {
+        return 1;
     }
-    if (process.hProcess) {
-        CloseHandle(process.hProcess);
+    try {
+        PROCESS_INFORMATION process{};
+        const BOOL oracle_created = CreateProcessW(invalid_image.c_str(), oracle_buffer.data(),
+            nullptr, nullptr, TRUE, CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &startup, &process);
+        const DWORD oracle_error = oracle_created ? ERROR_SUCCESS : GetLastError();
+        if (process.hThread) {
+            CloseHandle(process.hThread);
+        }
+        if (process.hProcess) {
+            CloseHandle(process.hProcess);
+        }
+        valid &= check(!oracle_created, "direct native invalid-image oracle fails");
+        const auto invalid_result = sintra::detail::spawn_detached_with_result(invalid_options);
+        std::fprintf(stderr, "INVALID_IMAGE_NATIVE_ERROR created=%d value=%d category=%s message='%s' oracle=%lu\n",
+            invalid_result.created(), invalid_result.error.value(), invalid_result.error.category().name(),
+            invalid_result.error.message().c_str(), static_cast<unsigned long>(oracle_error));
+        valid &= check(!invalid_result.created() &&
+            invalid_result.error.category() == std::system_category() &&
+            invalid_result.error.value() == static_cast<int>(oracle_error),
+            "spawn failure retains actual Win32 error and category instead of mapped CRT errno");
     }
-    valid &= check(!oracle_created, "direct native invalid-image oracle fails");
-    const auto invalid_result = sintra::detail::spawn_detached_with_result(invalid_options);
-    std::fprintf(stderr, "INVALID_IMAGE_NATIVE_ERROR created=%d value=%d category=%s message='%s' oracle=%lu\n",
-        invalid_result.created(), invalid_result.error.value(), invalid_result.error.category().name(),
-        invalid_result.error.message().c_str(), static_cast<unsigned long>(oracle_error));
-    valid &= check(!invalid_result.created() &&
-        invalid_result.error.category() == std::system_category() &&
-        invalid_result.error.value() == static_cast<int>(oracle_error),
-        "spawn failure retains actual Win32 error and category instead of mapped CRT errno");
+    catch (...) {
+        valid = check(false, "invalid-image fixture threw an exception");
+    }
+    valid &= check(SetThreadErrorMode(previous_error_mode, nullptr),
+        "restore thread error mode after invalid-image launches");
+    if (!valid) {
+        return 1;
+    }
 #endif
     Test_child pending;
     valid &= check(pending.spawn(binary, {"--family-role", "pending"}), "spawn pending owner");

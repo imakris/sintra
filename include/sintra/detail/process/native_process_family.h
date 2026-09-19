@@ -80,6 +80,33 @@ inline std::ifstream open_owned_thread_children(const std::filesystem::path& tas
     return std::ifstream(task_directory / "children");
 }
 
+// EOF is complete only when reached between valid PID tokens. A failed integer
+// extraction can set eofbit too (for example overflow in the last token), so
+// checking eof() after a failed extraction alone is insufficient.
+template<class Observe>
+inline bool parse_owned_thread_children(std::istream& input, Observe&& observe)
+{
+    for (;;) {
+        input >> std::ws;
+        if (input.bad()) {
+            return false;
+        }
+        if (input.eof()) {
+            return !input.fail();
+        }
+        pid_t child = 0;
+        if (!(input >> child) || child <= 0) {
+            return false;
+        }
+        observe(child);
+        // A valid final token can itself reach EOF. Do not call ws again on
+        // that stream: its sentry would add failbit to a successful parse.
+        if (input.eof()) {
+            return !input.bad();
+        }
+    }
+}
+
 #endif
 
 struct External_native_child
@@ -190,9 +217,7 @@ public:
                 fail(error && error != ENOENT ? error : ENOTSUP, "read owned thread children");
                 return false;
             }
-            pid_t enumerated = 0;
-            while (children >> enumerated) {}
-            if (!children.eof()) {
+            if (!parse_owned_thread_children(children, [](pid_t) {})) {
                 fail(EIO, "parse owned thread children");
                 return false;
             }
