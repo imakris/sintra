@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -84,6 +85,10 @@ def parse_active_tests(tests_dir: Path) -> Dict[str, int]:
                 active_tests[test_path] = iterations
     except OSError as exc:
         raise RuntimeError(f"Failed to read {active_tests_file}: {exc}") from exc
+
+    # This prerequisite exercises Linux per-thread child lists, not other native backends.
+    if sys.platform != "linux":
+        active_tests.pop("native_process_family_prerequisite_contract_test", None)
 
     return active_tests
 
