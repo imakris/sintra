@@ -362,8 +362,15 @@ bool exact_lifeline_absent(sintra::instance_id_type process_iid)
     if (!sintra::s_mproc) {
         return false;
     }
+    const auto token = sintra::s_mproc->child_custody_occurrence_token(process_iid);
+    const auto custody = token.custody.lock();
+    if (!custody || token.occurrence != 0) {
+        return false;
+    }
+    const sintra::Managed_process::Lifeline_key key{
+        custody->identity, process_iid, token.occurrence};
     std::lock_guard<std::mutex> lock(sintra::s_mproc->m_lifeline_mutex);
-    return sintra::s_mproc->m_lifeline_writes.find(process_iid) ==
+    return sintra::s_mproc->m_lifeline_writes.find(key) ==
         sintra::s_mproc->m_lifeline_writes.end();
 }
 

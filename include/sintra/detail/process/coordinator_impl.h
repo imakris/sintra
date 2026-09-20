@@ -1567,7 +1567,8 @@ inline bool Coordinator::unpublish_transceiver_exact(
                 s_mproc->note_child_initialization_complete(custody_occurrence);
                 s_mproc->note_child_publication_retired(custody_occurrence);
             }
-            s_mproc->release_lifeline(process_iid);
+            // IPC departure does not authorize terminating a live native child.
+            // Exact native exit and explicit cleanup own lifeline retirement.
         }
         if (retiring_reader) {
             if (process_publication_identity.is_external_process() && s_mproc) {

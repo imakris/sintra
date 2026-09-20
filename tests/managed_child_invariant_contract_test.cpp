@@ -207,9 +207,18 @@ Case_result run_case(
             sintra::s_mproc->has_process_reader(process_iid);
         bool lifeline_retained_before_cleanup = false;
         {
+            const auto occurrences = custody.native_snapshot();
             std::lock_guard<std::mutex> lock(sintra::s_mproc->m_lifeline_mutex);
-            lifeline_retained_before_cleanup =
-                sintra::s_mproc->m_lifeline_writes.count(process_iid) == 1;
+            for (const auto& native : occurrences) {
+                if (native.occurrence.process_instance_id == process_iid &&
+                    native.occurrence.occurrence == 0)
+                {
+                    const sintra::Managed_process::Lifeline_key key{
+                        native.occurrence.custody_identity, process_iid, 0};
+                    lifeline_retained_before_cleanup =
+                        sintra::s_mproc->m_lifeline_writes.count(key) == 1;
+                }
+            }
         }
         bool init_clear_before_cleanup = false;
         {

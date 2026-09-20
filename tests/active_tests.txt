@@ -127,3 +127,5 @@ variable_buffer_alignment_test                           5
 native_process_family_contract_test                      1
 managed_child_native_peer_contract_test                  1
 native_process_family_prerequisite_contract_test         1
+managed_child_orderly_lifeline_contract_test              5
+managed_child_graceful_lifeline_contract_test             5

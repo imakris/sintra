@@ -40,6 +40,7 @@
 #endif
 #include <string>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -1760,11 +1761,14 @@ public:
 #endif
 
     using lifeline_handle_type = uintptr_t;
-    map<instance_id_type, lifeline_handle_type>
+    // A retired publication may share its IID with a later occurrence while
+    // its original native process still owns a live lifeline.
+    using Lifeline_key = std::tuple<uint64_t, instance_id_type, uint32_t>;
+    map<Lifeline_key, lifeline_handle_type>
                                         m_lifeline_writes;
     mutable std::mutex                  m_lifeline_mutex;
 
-    bool release_lifeline(instance_id_type process_instance_id);
+    bool release_lifeline(const Managed_child_occurrence_identity& occurrence);
     void release_all_lifelines();
 
     Spawn_result spawn_swarm_process(

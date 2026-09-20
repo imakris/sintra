@@ -1245,7 +1245,7 @@ namespace {
 
         log_lifeline_message(
             detail::log_level::error,
-            std::string("[sintra] Lifeline broken - owner exited - terminating in ") +
+            std::string("[sintra] Lifeline closed - terminating in ") +
                 std::to_string(timeout_ms) + "ms\n");
 
         // Arm the hard-exit watchdog before local teardown; stop() can block
@@ -1643,18 +1643,26 @@ detail::Managed_child_launch_attempt::close_lifeline_write_endpoint() noexcept
 
 inline bool detail::Managed_child_launch_attempt::transfer_lifeline_write()
 {
-    if (!m_owner || !lifeline_endpoint_valid(m_lifeline_write_endpoint)) {
+    if (!m_owner || !m_custody || !lifeline_endpoint_valid(m_lifeline_write_endpoint)) {
+        return false;
+    }
+    // Native exit may precede this transfer (including the POSIX immediate
+    // reaping path). Serialize the check and insertion against exit publication
+    // so an already-retired occurrence cannot acquire an orphaned writer.
+    std::lock_guard<std::mutex> custody_lock(m_custody->mutex);
+    const auto* occurrence = m_custody->find_occurrence_locked(
+        m_process_instance_id, m_occurrence);
+    if (!occurrence || occurrence->native.exited()) {
+        close_lifeline_write_endpoint();
         return false;
     }
     std::lock_guard<std::mutex> guard(m_owner->m_lifeline_mutex);
-    auto it = m_owner->m_lifeline_writes.find(m_process_instance_id);
-    if (it != m_owner->m_lifeline_writes.end()) {
-        close_lifeline_handle(it->second);
-        it->second = m_lifeline_write_endpoint;
-    }
-    else {
-        m_owner->m_lifeline_writes.emplace(
-            m_process_instance_id, m_lifeline_write_endpoint);
+    const Managed_process::Lifeline_key key{
+        m_custody->identity, m_process_instance_id, m_occurrence};
+    const bool inserted = m_owner->m_lifeline_writes.emplace(
+        key, m_lifeline_write_endpoint).second;
+    if (!inserted) {
+        throw std::logic_error("An exact managed-child occurrence already owns its lifeline");
     }
     m_lifeline_write_endpoint = invalid_lifeline_endpoint;
     return true;
@@ -3977,6 +3985,12 @@ inline void Managed_process::enqueue_child_exit_subscription_locked(
 inline void Managed_process::dispatch_child_exit_publication(
     detail::Managed_child_exit_publication publication) noexcept
 {
+    // Publication retirement is not native death. Retain the parent endpoint
+    // through ordinary leave; close it only for this exact native exit or an
+    // explicitly requested cleanup. This is required even without subscribers.
+    if (publication.event.occurrence.custody_identity != 0) {
+        release_lifeline(publication.event.occurrence);
+    }
     if (publication.subscriptions.empty()) {
         return;
     }
@@ -5068,7 +5082,7 @@ inline bool Managed_process::execute_current_slot_child_retirement(
             s_coord->note_draining_state_change();
         }
         if (release_mode == detail::Release_mode::cleanup) {
-            release_lifeline(process_iid);
+            release_lifeline({process_iid, occurrence, custody->identity});
             detail::managed_child_cleanup_for_test(
                 detail::test_hooks::k_managed_child_cleanup_lifeline_released,
                 process_iid,
@@ -6442,10 +6456,12 @@ bool Managed_process::branch(vector<Process_descriptor>& branch_vector)
 }
 
 inline
-bool Managed_process::release_lifeline(instance_id_type process_instance_id)
+bool Managed_process::release_lifeline(const Managed_child_occurrence_identity& occurrence)
 {
     std::lock_guard<mutex> lock(m_lifeline_mutex);
-    auto it = m_lifeline_writes.find(process_instance_id);
+    const Lifeline_key key{
+        occurrence.custody_identity, occurrence.process_instance_id, occurrence.occurrence};
+    auto it = m_lifeline_writes.find(key);
     if (it == m_lifeline_writes.end()) {
         return false;
     }
