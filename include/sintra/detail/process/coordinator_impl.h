@@ -54,8 +54,8 @@ inline void emit_direct_publish_waiters(
         return;
     }
 
-    // publish_process_group() calls publish_transceiver() directly, outside an
-    // RPC handler return path. Complete wait_for_instance() deferrals here.
+    // Direct coordinator publication has no RPC handler return path to
+    // complete wait_for_instance() deferrals. Deliver those replies here.
     using return_message_type =
         Message<Enclosure<instance_id_type>, void, not_defined_type_id>;
 
@@ -1193,6 +1193,47 @@ instance_id_type Coordinator::publish_transceiver(
         iid,
         assigned_name,
         reader_identity);
+}
+
+
+inline instance_id_type Coordinator::publish_local_transceiver(
+    type_id_type       tid,
+    instance_id_type   iid,
+    const string&      assigned_name)
+{
+    if (this != s_coord || !s_mproc || process_of(iid) != s_mproc_id) {
+        return invalid_instance_id;
+    }
+
+    // A coordinator-local publication may itself run inside an RPC handler.
+    // Its name waiters are independent of that handler's pending replies.
+    struct Deferred_reply_scope
+    {
+        instance_id_type common_function_iid = s_tl_common_function_iid;
+        std::vector<instance_id_type> recipients{
+            s_tl_additional_piids,
+            s_tl_additional_piids + s_tl_additional_piids_size};
+
+        Deferred_reply_scope()
+        {
+            s_tl_common_function_iid   = invalid_instance_id;
+            s_tl_additional_piids_size = 0;
+        }
+
+        ~Deferred_reply_scope()
+        {
+            std::copy(recipients.begin(), recipients.end(), s_tl_additional_piids);
+            s_tl_additional_piids_size = recipients.size();
+            s_tl_common_function_iid   = common_function_iid;
+        }
+    } replies;
+
+    const auto published = publish_transceiver_with_reader_identity(
+        tid, iid, assigned_name, Process_reader_identity{});
+    if (published != invalid_instance_id) {
+        emit_direct_publish_waiters(published, this);
+    }
+    return published;
 }
 
 

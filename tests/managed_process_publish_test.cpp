@@ -13,14 +13,17 @@
 
 #include "test_utils.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -108,6 +111,181 @@ struct Publication_waiter
     bool                       expected_ready       = false;
     bool                       seen                 = false;
 };
+
+struct Local_publication_object : sintra::Derived_transceiver<Local_publication_object> {};
+
+struct Publication_reader : sintra::Derived_transceiver<Publication_reader>
+{
+    std::promise<void>         entered;
+    std::shared_future<void>   release;
+
+    int hold()
+    {
+        entered.set_value();
+        if (release.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            throw std::runtime_error("publication reader release timed out");
+        }
+        return 17;
+    }
+
+    int fail()
+    {
+        throw std::runtime_error("publication transport sentinel");
+    }
+
+    SINTRA_RPC_STRICT(hold)
+    SINTRA_RPC_STRICT(fail)
+};
+
+bool run_held_reader_publication()
+{
+    Local_publication_object object;
+    Publication_reader reader;
+    std::promise<void> release;
+    reader.release = release.get_future().share();
+    auto entered = reader.entered.get_future();
+    std::future<bool> publication;
+
+    // Release before destroying the publication future or the reader, including
+    // exception/failed-setup paths. The reader also has its own bounded wait.
+    struct Release_reader
+    {
+        std::promise<void>& promise;
+        bool released = false;
+
+        void finish()
+        {
+            if (!released) {
+                promise.set_value();
+                released = true;
+            }
+        }
+
+        ~Release_reader() { finish(); }
+    } release_reader{release};
+
+    try {
+        const std::string name = "managed_process_publish/held_reader";
+        auto waiter = sintra::Coordinator::rpc_async_wait_for_instance(s_coord_id, name);
+        auto held = Publication_reader::rpc_async_hold(reader.instance_id());
+        if (entered.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+            std::fprintf(stderr, "managed_process_publish_test: reader did not enter hold\n");
+            return false;
+        }
+        publication = std::async(std::launch::async, [&, name] { return object.assign_name(name); });
+        const bool completed_while_held =
+            publication.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+        release_reader.finish();
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const bool held_result = held.get_until(deadline) == 17;
+        const bool published = publication.get();
+        const bool exact_waiter = waiter.get_until(deadline) == object.instance_id();
+        bool exact_exception = false;
+        try {
+            auto failed = Publication_reader::rpc_async_fail(reader.instance_id());
+            (void)failed.get_until(std::chrono::steady_clock::now() + std::chrono::seconds(3));
+        }
+        catch (const std::runtime_error& error) {
+            exact_exception = std::string_view(error.what()) == "publication transport sentinel";
+        }
+        std::fprintf(stderr,
+            "managed_process_publish_test: held_reader publication=%d hold=%d published=%d waiter=%d exception=%d\n",
+            completed_while_held, held_result, published, exact_waiter, exact_exception);
+        return completed_while_held && held_result && published && exact_waiter && exact_exception;
+    }
+    catch (const std::exception& error) {
+        std::fprintf(stderr, "managed_process_publish_test: held-reader exception: %s\n", error.what());
+        return false;
+    }
+}
+
+bool publication_guard_observed = false;
+
+void throw_from_publication_stage(const char* stage)
+{
+    if (std::string_view(stage) !=
+        sintra::detail::test_hooks::k_stage_publish_transceiver_locked)
+    {
+        return;
+    }
+    const auto* targets = sintra::detail::tl_executing_rpc_targets;
+    publication_guard_observed = targets &&
+        std::find(targets->begin(), targets->end(), s_coord) != targets->end();
+    // Only observe the execution guard; never re-enter coordinator APIs here.
+    throw std::runtime_error("publication unwind sentinel");
+}
+
+bool run_local_publication_contract()
+{
+    Local_publication_object object;
+    Local_publication_object duplicate;
+    Local_publication_object unwound;
+    const auto sentinel = object.instance_id();
+
+    struct Restore_reply_state
+    {
+        sintra::instance_id_type common = sintra::s_tl_common_function_iid;
+        std::vector<sintra::instance_id_type> recipients{
+            sintra::s_tl_additional_piids,
+            sintra::s_tl_additional_piids + sintra::s_tl_additional_piids_size};
+        sintra::detail::test_hooks::Coordinator_lock_stage_callback hook =
+            sintra::detail::test_hooks::s_coordinator_lock_stage.load();
+
+        ~Restore_reply_state()
+        {
+            sintra::detail::test_hooks::s_coordinator_lock_stage.store(hook);
+            std::copy(recipients.begin(), recipients.end(), sintra::s_tl_additional_piids);
+            sintra::s_tl_additional_piids_size = recipients.size();
+            sintra::s_tl_common_function_iid = common;
+        }
+    } restore;
+
+    sintra::s_tl_common_function_iid = sentinel;
+    sintra::s_tl_additional_piids[0] = s_mproc_id;
+    sintra::s_tl_additional_piids_size = 1;
+    const auto state_preserved = [&] {
+        return sintra::s_tl_common_function_iid == sentinel &&
+            sintra::s_tl_additional_piids_size == 1 &&
+            sintra::s_tl_additional_piids[0] == s_mproc_id;
+    };
+
+    try {
+        const bool published = object.assign_name("managed_process_publish/local_contract");
+        const bool success_tls = state_preserved();
+        const bool duplicate_rejected = !duplicate.assign_name("managed_process_publish/local_contract");
+        const bool duplicate_tls = state_preserved();
+        const bool empty_rejected = !duplicate.assign_name("");
+        const bool empty_tls = state_preserved();
+
+        publication_guard_observed = false;
+        sintra::detail::test_hooks::s_coordinator_lock_stage.store(throw_from_publication_stage);
+        bool exact_exception = false;
+        try {
+            (void)unwound.assign_name("managed_process_publish/unwind");
+        }
+        catch (const std::runtime_error& error) {
+            exact_exception = std::string_view(error.what()) == "publication unwind sentinel";
+        }
+        sintra::detail::test_hooks::s_coordinator_lock_stage.store(restore.hook);
+        const bool unwind_tls = state_preserved();
+        const auto* targets = sintra::detail::tl_executing_rpc_targets;
+        const bool guard_released = !targets || targets->empty();
+        const bool retry = unwound.assign_name("managed_process_publish/unwind");
+        const bool retry_tls = state_preserved();
+        const bool tls = success_tls && duplicate_tls && empty_tls && unwind_tls && retry_tls;
+        std::fprintf(stderr,
+            "managed_process_publish_test: local_contract published=%d duplicate=%d empty=%d tls=%d guard=%d exception=%d released=%d retry=%d\n",
+            published, duplicate_rejected, empty_rejected, tls, publication_guard_observed,
+            exact_exception, guard_released, retry);
+        return published && duplicate_rejected && empty_rejected && tls &&
+            publication_guard_observed && exact_exception && guard_released && retry;
+    }
+    catch (const std::exception& error) {
+        std::fprintf(stderr, "managed_process_publish_test: local-contract exception: %s\n", error.what());
+        return false;
+    }
+}
 
 bool run_drain_timeout_probe()
 {
@@ -517,7 +695,10 @@ int main(int argc, char* argv[])
 
     sintra::init(argc, argv);
 
-    bool ok = true;
+    bool ok = run_held_reader_publication();
+    if (ok) {
+        ok = run_local_publication_contract();
+    }
     if (!run_drain_timeout_probe()) {
         ok = false;
     }

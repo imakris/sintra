@@ -299,7 +299,20 @@ template <typename/* = void*/>
 bool Transceiver::assign_name(const string& name)
 {
     initialize_type_id();
-    if (Coordinator::rpc_publish_transceiver(s_coord_id, m_type_id, m_instance_id, name)) {
+    instance_id_type published = invalid_instance_id;
+    if (s_coord) {
+        // Use the normal atomic target lookup/execution guard even though this
+        // owning-process publication must not queue a strict self RPC.
+        auto target = acquire_rpc_target<Coordinator::publish_transceiver_mftc>(s_coord_id);
+        if (!target.object || !target.guard) {
+            throw rpc_unavailable("The local publication coordinator is shutting down.");
+        }
+        published = target.object->publish_local_transceiver(m_type_id, m_instance_id, name);
+    }
+    else {
+        published = Coordinator::rpc_publish_transceiver(s_coord_id, m_type_id, m_instance_id, name);
+    }
+    if (published != invalid_instance_id) {
         m_published = true;
 
         if (!s_coord) {

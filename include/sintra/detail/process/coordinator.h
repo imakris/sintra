@@ -365,6 +365,13 @@ private:
         type_id_type       type_id,
         instance_id_type   instance_id,
         const string&      assigned_name);
+    // Coordinator-owned objects must not enqueue a self RPC behind a reader
+    // which is waiting for their creating thread. Completes deferred name
+    // waiters without borrowing an unrelated transported caller's identity.
+    instance_id_type publish_local_transceiver(
+        type_id_type       type_id,
+        instance_id_type   instance_id,
+        const string&      assigned_name);
     instance_id_type publish_transceiver_with_reader_identity(
         type_id_type                  type_id,
         instance_id_type              instance_id,
