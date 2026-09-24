@@ -506,12 +506,6 @@ cmake --build build
 - Check for race conditions or non-deterministic failures
 - Increase local iteration counts in `active_tests.txt` to reproduce
 
-### Build is Slow
-
-- Comment out tests you're not working on in `active_tests.txt`
-- CMake will skip building them
-- Remember to uncomment before committing
-
 ## Migration from Old System
 
 If you're used to the old test selection flags, here's the mapping:
