@@ -868,11 +868,11 @@ int main(int argc, char* argv[])
         }
         catch (const std::exception& ex) {
             ++failures;
-            std::cout << "[  FAILED  ] " << test.name << " - " << ex.what() << std::endl;
+            std::cerr << "[  FAILED  ] " << test.name << " - " << ex.what() << std::endl;
         }
         catch (...) {
             ++failures;
-            std::cout << "[  FAILED  ] " << test.name << " - unknown exception" << std::endl;
+            std::cerr << "[  FAILED  ] " << test.name << " - unknown exception" << std::endl;
         }
     }
 
