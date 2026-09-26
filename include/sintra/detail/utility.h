@@ -659,37 +659,33 @@ inline std::wstring build_command_line(const char* const* argv)
         first = false;
 
         std::wstring ws = to_wide_utf8(*arg);
-        // Quote argument if it contains space or is empty
-        bool needs_quoting = ws.find(L' ') != std::wstring::npos || ws.empty();
+        const bool needs_quoting = ws.empty() ||
+            ws.find_first_of(L" \t") != std::wstring::npos;
 
         if (needs_quoting) {
             cmdline += L'"';
         }
 
-        // Escape internal quotes and backslashes before quotes
-        for (size_t i = 0; i < ws.length(); ++i) {
-            wchar_t c = ws[i];
-            if (c == L'"') {
-                cmdline += L"\\\"";
-            }
-            else
-            if (c == L'\\') {
-                // Check if backslash is before quote
-                if (i + 1 < ws.length() && ws[i + 1] == L'"') {
-                    cmdline += L"\\\\";
+        // The CRT treats argv[0] as a pathname, without backslash escaping.
+        if (arg == argv) {
+            cmdline += ws;
+        }
+        else {
+            size_t backslashes = 0;
+            for (wchar_t c : ws) {
+                if (c == L'\\') {
+                    ++backslashes;
+                    continue;
                 }
-                // Check if trailing backslash in quoted argument
-                else
-                if (i + 1 == ws.length() && needs_quoting) {
-                    cmdline += L"\\\\";
-                }
-                else {
-                    cmdline += L'\\';
-                }
-            }
-            else {
+
+                // A literal quote needs 2N+1 preceding backslashes to preserve
+                // the N input backslashes and escape the quote itself.
+                cmdline.append(c == L'"' ? 2 * backslashes + 1 : backslashes, L'\\');
                 cmdline += c;
+                backslashes = 0;
             }
+            // A closing quote also consumes backslash pairs.
+            cmdline.append(needs_quoting ? 2 * backslashes : backslashes, L'\\');
         }
 
         if (needs_quoting) {

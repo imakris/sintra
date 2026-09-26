@@ -417,10 +417,118 @@ int main()
 
 #else
 
-int main()
+#include <windows.h>
+
+#include <cerrno>
+#include <iomanip>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace {
+
+std::vector<std::string> command_line_arguments()
 {
-    std::cout << "spawn_detached_test is a POSIX-only test" << std::endl;
-    return 0;
+    std::vector<std::string> args = {
+        R"(C:\program files\sintra.exe)", "--argv-child", "", "plain",
+        "two words", "\t", "left\tright", " leading", "trailing ",
+        "\"", "\"\"", "before\"after"
+    };
+    for (size_t count = 0; count != 5; ++count) {
+        const std::string slashes(count, '\\');
+        args.push_back(slashes);
+        args.push_back("prefix" + slashes + "\"suffix");
+        args.push_back("prefix " + slashes + "\"suffix");
+        args.push_back("prefix " + slashes);
+        args.push_back("prefix\t" + slashes);
+        args.push_back(slashes + "ordinary");
+    }
+    return args;
+}
+
+bool check_child_arguments(int argc, char* argv[])
+{
+    const auto expected = command_line_arguments();
+    bool ok = (size_t)argc == expected.size();
+    if (!ok) {
+        std::cerr << "spawn_detached_test: expected " << expected.size()
+            << " arguments, received " << argc << '\n';
+    }
+    for (size_t i = 0; i < expected.size() && i < (size_t)argc; ++i) {
+        if (expected[i] != argv[i]) {
+            std::cerr << "spawn_detached_test: argv[" << i << "] expected "
+                << std::quoted(expected[i]) << ", received "
+                << std::quoted(argv[i]) << '\n';
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool spawn_preserves_arguments(const char* executable, bool use_handle_list)
+{
+    const auto args = command_line_arguments();
+    std::vector<const char*> argv;
+    for (const auto& arg : args) {
+        argv.push_back(arg.c_str());
+    }
+    argv.push_back(nullptr);
+
+    HANDLE event = nullptr;
+    if (use_handle_list) {
+        event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!event) {
+            std::cerr << "spawn_detached_test: CreateEventW failed: "
+                << GetLastError() << '\n';
+            return false;
+        }
+    }
+
+    HANDLE process = nullptr;
+    sintra::Spawn_detached_options options;
+    options.prog                     = executable;
+    options.argv                     = argv.data();
+    options.child_process_handle_out = &process;
+    if (event) {
+        options.inherit_handles.push_back(event);
+    }
+    const bool spawned = sintra::spawn_detached(options);
+    if (event) {
+        CloseHandle(event);
+    }
+    if (!spawned) {
+        std::cerr << "spawn_detached_test: failed to spawn argv child: "
+            << errno << '\n';
+        return false;
+    }
+
+    const DWORD wait_result = WaitForSingleObject(process, 10000);
+    DWORD exit_code = 1;
+    const bool exited = wait_result == WAIT_OBJECT_0 &&
+        GetExitCodeProcess(process, &exit_code);
+    if (!exited) {
+        std::cerr << "spawn_detached_test: argv child did not exit: "
+            << wait_result << '\n';
+        TerminateProcess(process, 1);
+        WaitForSingleObject(process, 10000);
+    }
+    CloseHandle(process);
+    return exited && exit_code == 0;
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    if (argc > 1 && std::string_view(argv[1]) == "--argv-child") {
+        return check_child_arguments(argc, argv) ? 0 : 1;
+    }
+
+    // The child CRT parses the actual CreateProcessW command line. The oracle
+    // is Microsoft's documented C command-line parsing, not another encoder.
+    bool ok = spawn_preserves_arguments(argv[0], false);
+    ok &= spawn_preserves_arguments(argv[0], true);
+    return ok ? 0 : 1;
 }
 
 #endif
