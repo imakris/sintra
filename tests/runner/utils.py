@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
-from typing import List, Optional, Sequence, Tuple
-from .platform._psutil import load_psutil
-
-_PSUTIL = load_psutil()
+from typing import Optional
 
 
 class Color:
@@ -65,45 +61,3 @@ def env_flag(name: str) -> bool:
         return False
 
     return normalized not in {"0", "false", "no", "off"}
-
-
-def find_lingering_processes(prefixes: Sequence[str]) -> List[Tuple[int, str]]:
-    """Return processes whose names start with one of ``prefixes``."""
-
-    normalized_prefixes = tuple(prefixes)
-    matches: List[Tuple[int, str]] = []
-
-    if _PSUTIL is not None:
-        try:
-            for proc in _PSUTIL.process_iter(["name"]):
-                name = proc.info.get("name") or ""
-                if name.startswith(normalized_prefixes):
-                    matches.append((proc.pid, name))
-        except Exception:
-            pass
-        if matches:
-            return matches
-
-    try:
-        ps_output = subprocess.run(
-            ["ps", "-axo", "pid=,comm="],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        return matches
-
-    for line in ps_output.stdout.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        name = parts[1]
-        if name.startswith(normalized_prefixes):
-            matches.append((pid, name))
-
-    return matches

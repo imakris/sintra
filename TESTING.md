@@ -371,6 +371,29 @@ Options:
                         test still runs at least once
 ```
 
+### Process isolation and Windows diagnostics
+
+Concurrent runners own separate scratch directories and clean up only their
+own test processes. Windows cleanup retains process handles and checks parent
+lifetimes; it does not use executable names to select processes. A detached
+descendant whose intermediate parents all exit before observation cannot be
+identified safely. An inherited pipe that remains open is reported as a hang.
+
+The Windows runner looks for `cdb`, `ntsd`, or `windbg` on `PATH`, in installed
+Windows Kits, and in an existing Sintra debugger cache. It does not download or
+install an SDK, change JIT-debugger settings, or enable Windows Error Reporting.
+Install Windows Debugging Tools separately when stack capture is needed. Live
+stack capture and minidump fallback remain available with an installed debugger.
+Post-mortem capture reads existing WER destinations and requires a dump name
+identifying the failed process. Automatic core-file deletion is restricted to
+the invocation's private scratch directory; shared-location dumps are preserved.
+
+Run the Python harness checks from the repository root:
+
+```bash
+python3 -m unittest tests.test_runner_safety -v
+```
+
 ### Configuration
 
 The runner automatically detects your build directory structure:

@@ -50,11 +50,6 @@ class PlatformSupport:
 
         raise NotImplementedError
 
-    def kill_all_sintra_processes(self) -> None:
-        """Best effort termination of lingering Sintra test binaries."""
-
-        # Most platforms do not need additional work.
-
     def collect_descendant_pids(self, root_pid: int) -> List[int]:
         """Return all descendant process IDs for ``root_pid``."""
 

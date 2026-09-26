@@ -1,31 +1,18 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from .base import DebuggerStrategy
 
 WINDOWS_DEBUGGER_CACHE_ENV = "SINTRA_WINDOWS_DEBUGGER_CACHE"
-WINSDK_INSTALLER_URL_ENV = "SINTRA_WINSDK_INSTALLER_URL"
-WINSDK_FEATURE_ENV = "SINTRA_WINSDK_FEATURE"
-WINSDK_DEBUGGER_MSI_ENV = "SINTRA_WINSDK_DEBUGGER_MSI"
 WINDOWS_SYMBOL_PATH_ENV = "SINTRA_WINDOWS_SYMBOL_PATH"
-WINSDK_INSTALLER_URL = os.environ.get(
-    WINSDK_INSTALLER_URL_ENV,
-    "https://download.microsoft.com/download/7/9/6/7962e9ce-cd69-4574-978c-1202654bd729/windowssdk/winsdksetup.exe",
-)
-WINSDK_FEATURE_ID = os.environ.get(WINSDK_FEATURE_ENV, "OptionId.WindowsDesktopDebuggers")
-WINSDK_DEBUGGER_MSI_NAME = os.environ.get(
-    WINSDK_DEBUGGER_MSI_ENV,
-    "X64 Debuggers And Tools-x64_en-us.msi",
-)
 
 
 class WindowsDebuggerStrategy(DebuggerStrategy):
@@ -36,8 +23,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
     def __init__(self, verbose: bool, **kwargs) -> None:
         super().__init__(verbose, **kwargs)
         self._debugger_cache: Dict[str, Tuple[Optional[str], str]] = {}
-        self._downloaded_windows_debugger_root: Optional[Path] = None
-        self._windows_crash_dump_dir: Optional[Path] = None
 
     # Interface methods -------------------------------------------------
     def prepare(self) -> None:
@@ -50,12 +35,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             self._log(
                 f"{self._color.YELLOW}Warning: {error}. Stack capture may be unavailable.{self._color.RESET}"
             )
-
-    def ensure_crash_dumps(self) -> Optional[str]:
-        return self._ensure_windows_local_dumps()
-
-    def configure_jit_debugging(self) -> Optional[str]:
-        return self._configure_windows_jit_debugging()
 
     def capture_process_stacks(
         self,
@@ -72,81 +51,32 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
     ) -> Tuple[str, str]:
         return self._capture_windows_crash_dump(invocation, start_time, pid)
 
-    # Downloader helpers ------------------------------------------------
+    # Discovery never installs tools or changes machine configuration.
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
-        if sys.platform != "win32":
-            return None, f"{executable} not available on this platform"
-
         cache_key = executable.lower()
         if cache_key in self._debugger_cache:
             return self._debugger_cache[cache_key]
 
-        debugger_root, prepare_error = self._ensure_downloaded_windows_debugger_root()
-        if not debugger_root:
-            error = prepare_error or f"failed to prepare debugger payload for {executable}"
-            result = (None, error)
-            self._debugger_cache[cache_key] = result
-            return result
+        path = shutil.which(executable)
+        if not path:
+            roots = [
+                Path(value) / "Windows Kits" / "10" / "Debuggers"
+                for name in ("ProgramFiles(x86)", "ProgramFiles")
+                if (value := os.environ.get(name))
+            ]
+            roots.append(self._get_windows_debugger_cache_dir() /
+                         "winsdk_debuggers" / "Windows Kits" / "10" / "Debuggers")
+            names = [executable] if executable.endswith(".exe") else [executable + ".exe"]
+            for root in roots:
+                located = self._find_debugger_executable(root, names)
+                if located:
+                    path = str(located)
+                    break
 
-        candidates = [executable]
-        if not executable.lower().endswith(".exe"):
-            candidates.append(f"{executable}.exe")
-
-        located = self._find_downloaded_debugger_executable(debugger_root, candidates)
-        if located:
-            result = (str(located), "")
-            self._debugger_cache[cache_key] = result
-            return result
-
-        error = f"{executable} not found in downloaded debugger cache ({debugger_root})"
-        result = (None, error)
+        result = (path, "" if path else
+                  f"{executable} unavailable; install Windows Debugging Tools or add it to PATH")
         self._debugger_cache[cache_key] = result
         return result
-
-    def _ensure_downloaded_windows_debugger_root(self) -> Tuple[Optional[Path], str]:
-        if self._downloaded_windows_debugger_root:
-            return self._downloaded_windows_debugger_root, ""
-
-        cache_dir = self._get_windows_debugger_cache_dir()
-        try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return None, f"failed to create debugger cache directory {cache_dir}: {exc}"
-
-        install_root = cache_dir / "winsdk_debuggers"
-        debugger_root = install_root / "Windows Kits" / "10" / "Debuggers"
-        sentinel = debugger_root / "x64" / "cdb.exe"
-        try:
-            if sentinel.exists():
-                self._downloaded_windows_debugger_root = debugger_root
-                return debugger_root, ""
-        except OSError:
-            pass
-
-        layout_dir = cache_dir / "winsdk_layout"
-        msi_path = layout_dir / "Installers" / WINSDK_DEBUGGER_MSI_NAME
-
-        if not msi_path.exists():
-            layout_error = self._ensure_winsdk_layout(layout_dir)
-            if layout_error:
-                return None, layout_error
-            if not msi_path.exists():
-                return None, (
-                    f"expected debugger MSI {WINSDK_DEBUGGER_MSI_NAME} missing from layout ({layout_dir})"
-                )
-
-        extract_error = self._extract_debugger_msi(msi_path, install_root)
-        if extract_error:
-            return None, extract_error
-
-        try:
-            if not sentinel.exists():
-                return None, f"debugger executable not found at {sentinel}"
-        except OSError as exc:
-            return None, f"failed to verify debugger installation at {sentinel}: {exc}"
-
-        self._downloaded_windows_debugger_root = debugger_root
-        return debugger_root, ""
 
     def _symbol_path_command(self) -> str:
         """Return the debugger command prefix that configures symbol paths.
@@ -171,76 +101,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         # path separators by the debugger.
         return f'.symfix; .sympath+ "{symbol_path}"; .reload'
 
-    def _ensure_winsdk_layout(self, layout_dir: Path) -> Optional[str]:
-        installer_path, installer_error = self._ensure_winsdk_installer()
-        if installer_error:
-            return installer_error
-        assert installer_path is not None
-
-        if layout_dir.exists():
-            shutil.rmtree(layout_dir, ignore_errors=True)
-
-        try:
-            layout_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return f"failed to create layout directory {layout_dir}: {exc}"
-
-        log_path = layout_dir.parent / "winsdksetup-layout.log"
-        command = [
-            str(installer_path),
-            "/quiet",
-            "/norestart",
-            "/layout",
-            str(layout_dir),
-            "/features",
-            WINSDK_FEATURE_ID,
-            "/log",
-            str(log_path),
-        ]
-
-        try:
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=3600,
-            )
-        except (subprocess.SubprocessError, OSError) as exc:
-            return f"winsdksetup.exe failed to create layout: {exc}"
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip()
-            return (
-                f"winsdksetup.exe layout failed with exit code {result.returncode}: "
-                f"{detail or f'see {log_path} for details'}"
-            )
-
-        return None
-
-    def _ensure_winsdk_installer(self) -> Tuple[Optional[Path], Optional[str]]:
-        cache_dir = self._get_windows_debugger_cache_dir()
-        installer_path = cache_dir / "winsdksetup.exe"
-        if installer_path.exists():
-            return installer_path, None
-
-        download_error = self._download_file(WINSDK_INSTALLER_URL, installer_path)
-        if download_error:
-            return None, f"failed to download WinSDK installer: {download_error}"
-
-        return installer_path, None
-
-    def _extract_debugger_msi(self, msi_path: Path, destination: Path) -> Optional[str]:
-        if destination.exists():
-            shutil.rmtree(destination, ignore_errors=True)
-
-        extract_error = self._extract_msi_package(msi_path, destination)
-        if extract_error:
-            shutil.rmtree(destination, ignore_errors=True)
-            return extract_error
-
-        return None
-
     def _get_windows_debugger_cache_dir(self) -> Path:
         override = os.environ.get(WINDOWS_DEBUGGER_CACHE_ENV)
         if override:
@@ -254,83 +114,7 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
         return base_dir / "sintra" / "debugger_cache"
 
-    def _download_file(self, url: str, destination: Path) -> Optional[str]:
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return f"failed to create directory for {destination}: {exc}"
-
-        temp_file = tempfile.NamedTemporaryFile(
-            delete=False, dir=str(destination.parent), suffix=".tmp"
-        )
-        temp_path = Path(temp_file.name)
-        try:
-            with urllib.request.urlopen(url) as response:
-                chunk_size = 1024 * 1024
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    temp_file.write(chunk)
-            temp_file.close()
-            os.replace(temp_path, destination)
-            return None
-        except urllib.error.URLError as exc:
-            temp_file.close()
-            try:
-                temp_path.unlink()
-            except FileNotFoundError:
-                pass
-            return f"failed to download {url}: {exc}"
-        except OSError as exc:
-            temp_file.close()
-            try:
-                temp_path.unlink()
-            except FileNotFoundError:
-                pass
-            return f"failed to write {destination}: {exc}"
-
-    def _extract_msi_package(self, package: Path, destination: Path) -> Optional[str]:
-        msiexec = shutil.which("msiexec")
-        if not msiexec:
-            windir = os.environ.get("WINDIR")
-            if windir:
-                candidate = Path(windir) / "System32" / "msiexec.exe"
-                if candidate.exists():
-                    msiexec = str(candidate)
-
-        if not msiexec:
-            return "'msiexec' not available to extract debugger package"
-
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return f"failed to create extraction directory {destination}: {exc}"
-
-        try:
-            result = subprocess.run(
-                [
-                    msiexec,
-                    "/a",
-                    str(package),
-                    "/qn",
-                    f"TARGETDIR={destination}",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=900,
-            )
-        except (subprocess.SubprocessError, OSError) as exc:
-            return f"msiexec failed to extract debugger package: {exc}"
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip()
-            return f"msiexec exited with {result.returncode}: {detail}"
-
-        return None
-
-    def _find_downloaded_debugger_executable(
+    def _find_debugger_executable(
         self,
         debugger_root: Path,
         executable_names: List[str],
@@ -368,146 +152,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
         return None
 
-    # Windows configuration helpers -------------------------------------
-    def _ensure_windows_local_dumps(self) -> Optional[str]:
-        if sys.platform != "win32":
-            return None
-
-        if self._windows_crash_dump_dir is not None:
-            return None
-
-        try:
-            import winreg  # type: ignore
-        except ImportError as exc:  # pragma: no cover - Windows specific
-            return f"winreg unavailable: {exc}"
-
-        reg_subkey = r"Software\Microsoft\Windows\Windows Error Reporting\LocalDumps"
-        desired_folder_value = r"%LOCALAPPDATA%\CrashDumps"
-
-        access_flags = winreg.KEY_READ | winreg.KEY_SET_VALUE
-        try:
-            key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, reg_subkey, 0, access_flags)
-        except OSError as exc:
-            return f"failed to open registry key HKCU\\{reg_subkey}: {exc}"
-
-        with key:
-            local_app_data = os.environ.get("LOCALAPPDATA")
-            if local_app_data:
-                default_dump_dir = Path(local_app_data) / "CrashDumps"
-                folder_value_to_set = desired_folder_value
-                folder_value_type = winreg.REG_EXPAND_SZ
-            else:
-                default_dump_dir = Path.home() / "AppData" / "Local" / "CrashDumps"
-                folder_value_to_set = str(default_dump_dir)
-                folder_value_type = winreg.REG_SZ
-
-            try:
-                existing_folder_value, _ = winreg.QueryValueEx(key, "DumpFolder")
-            except FileNotFoundError:
-                existing_folder_value = None
-
-            if existing_folder_value:
-                expanded = os.path.expandvars(existing_folder_value)
-                dump_dir = Path(expanded).expanduser()
-                if not dump_dir.is_absolute():
-                    dump_dir = default_dump_dir
-            else:
-                dump_dir = default_dump_dir
-                try:
-                    winreg.SetValueEx(key, "DumpFolder", 0, folder_value_type, folder_value_to_set)
-                except OSError as exc:
-                    return f"failed to configure dump folder HKCU\\{reg_subkey}: {exc}"
-
-            try:
-                existing_type = winreg.QueryValueEx(key, "DumpType")[1]
-            except FileNotFoundError:
-                existing_type = None
-
-            if existing_type != winreg.REG_DWORD:
-                try:
-                    winreg.SetValueEx(key, "DumpType", 0, winreg.REG_DWORD, 2)
-                except OSError as exc:
-                    return f"failed to set DumpType for HKCU\\{reg_subkey}: {exc}"
-
-            try:
-                dump_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                return f"failed to create dump directory {dump_dir}: {exc}"
-
-            self._windows_crash_dump_dir = dump_dir
-
-        return None
-
-    def _configure_windows_jit_debugging(self) -> Optional[str]:
-        if sys.platform != "win32":
-            return None
-
-        try:
-            import winreg  # type: ignore
-        except ImportError as exc:  # pragma: no cover - Windows specific
-            return f"winreg unavailable: {exc}"
-
-        errors: List[str] = []
-
-        def set_string(root: int, subkey: str, name: str, value: str, access: int) -> None:
-            try:
-                handle = winreg.CreateKeyEx(root, subkey, 0, access)
-            except OSError as exc:
-                errors.append(f"{subkey}: failed to open key: {exc}")
-                return
-            with handle:
-                try:
-                    winreg.SetValueEx(handle, name, 0, winreg.REG_SZ, value)
-                except OSError as exc:
-                    errors.append(f"{subkey}: failed to set {name}: {exc}")
-
-        def set_dword(root: int, subkey: str, name: str, value: int, access: int) -> None:
-            try:
-                handle = winreg.CreateKeyEx(root, subkey, 0, access)
-            except OSError as exc:
-                errors.append(f"{subkey}: failed to open key: {exc}")
-                return
-            with handle:
-                try:
-                    winreg.SetValueEx(handle, name, 0, winreg.REG_DWORD, value)
-                except OSError as exc:
-                    errors.append(f"{subkey}: failed to set {name}: {exc}")
-
-        debugger_command = '""C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\cdb.exe" -p %ld -e %ld -g'
-        jit_keys = [
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug"),
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\Windows NT\CurrentVersion\AeDebug"),
-            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\AeDebug"),
-        ]
-
-        for root, subkey in jit_keys:
-            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
-            if root == winreg.HKEY_CURRENT_USER:
-                access = winreg.KEY_SET_VALUE
-            elif "Wow6432Node" in subkey:
-                access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_32KEY
-            set_string(root, subkey, "Debugger", debugger_command, access)
-            set_dword(root, subkey, "Auto", 0, access)
-
-        jit_subkeys = [
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\.NETFramework"),
-            (winreg.HKEY_LOCAL_MACHINE, r"Software\Wow6432Node\Microsoft\.NETFramework"),
-            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\.NETFramework"),
-        ]
-
-        for root, subkey in jit_subkeys:
-            access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
-            if root == winreg.HKEY_CURRENT_USER:
-                access = winreg.KEY_SET_VALUE
-            elif "Wow6432Node" in subkey:
-                access = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_32KEY
-            set_dword(root, subkey, "DbgJITDebugLaunchSetting", 2, access)
-
-        if errors:
-            return "; ".join(errors)
-
-        return None
-
     # Debugger resolution ------------------------------------------------
     def _resolve_windows_debugger(self) -> Tuple[Optional[str], Optional[str], str]:
         debugger_candidates = ["cdb", "ntsd", "windbg"]
@@ -526,6 +170,24 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         return None, None, "no Windows debugger available"
 
     # Stack capture helpers ---------------------------------------------
+    def _configured_dump_directories(self, executable: str) -> List[Path]:
+        """Read operator-provided WER destinations without enabling dumps."""
+        if sys.platform != "win32":
+            return []
+        import winreg
+
+        subkey = r"Software\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+        directories = []
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for key_name in (subkey + "\\" + executable, subkey):
+                try:
+                    with winreg.OpenKey(root, key_name, 0, winreg.KEY_READ) as key:
+                        value, _ = winreg.QueryValueEx(key, "DumpFolder")
+                    directories.append(Path(os.path.expandvars(value)))
+                except OSError:
+                    continue
+        return directories
+
     def _capture_windows_crash_dump(
         self,
         invocation: "TestInvocation",
@@ -536,10 +198,8 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         if not debugger_path:
             return "", debugger_error
 
-        candidate_dirs = [invocation.path.parent, Path.cwd()]
-
-        if self._windows_crash_dump_dir:
-            candidate_dirs.insert(0, self._windows_crash_dump_dir)
+        candidate_dirs = self._configured_dump_directories(invocation.path.name)
+        candidate_dirs.extend([invocation.path.parent, Path.cwd()])
 
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
@@ -549,7 +209,7 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
         exe_name_lower = invocation.path.name.lower()
         exe_stem_lower = invocation.path.stem.lower()
-        pid_str = str(pid)
+        pid_pattern = re.compile(rf"(?<!\d){pid}(?!\d)")
 
         candidate_dumps: List[Tuple[float, Path]] = []
 
@@ -571,6 +231,8 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
                 if exe_name_lower not in name_lower and exe_stem_lower not in name_lower:
                     continue
+                if not pid_pattern.search(name_lower):
+                    continue
 
                 try:
                     stat_info = entry.stat()
@@ -584,10 +246,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
         if not candidate_dumps:
             return "", "no recent crash dump found"
-
-        prioritized = [item for item in candidate_dumps if pid_str in item[1].name]
-        if prioritized:
-            candidate_dumps = prioritized
 
         candidate_dumps.sort(key=lambda item: item[0], reverse=True)
 

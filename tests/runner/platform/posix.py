@@ -417,14 +417,3 @@ class PosixPlatformSupport(PlatformSupport):
                 continue
             snapshot.append((pid_value, ppid_value, pgid_value))
         return snapshot
-
-    def kill_all_sintra_processes(self) -> None:
-        try:
-            subprocess.run(
-                ["pkill", "-9", "sintra"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-        except Exception:
-            pass

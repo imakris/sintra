@@ -55,7 +55,6 @@ from tests.runner.utils import (
     Color,
     available_disk_bytes,
     env_flag,
-    find_lingering_processes,
     format_duration,
     format_size,
 )
@@ -367,11 +366,12 @@ class TestRunner:
         self.preserve_on_timeout = preserve_on_timeout
         self.platform: PlatformSupport = get_platform_support(verbose=verbose)
         sanitized_config = ''.join(c.lower() if c.isalnum() else '_' for c in self.config)
-        timestamp_ms = int(time.time() * 1000)
-        scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{timestamp_ms}-{os.getpid()}"
+        scratch_dir_name = f".sintra-test-scratch-{sanitized_config}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._scratch_base = (self.build_dir / scratch_dir_name).resolve()
         self._scratch_base.mkdir(parents=True, exist_ok=True)
         self._scratch_lock = threading.Lock()
+        self._windows_trees = {}
+        self._windows_trees_lock = threading.Lock()
         self._scratch_counter = 0
         self._ipc_rings_cache: Dict[Path, List[Tuple[str, str]]] = {}
         self._stack_capture_history: Dict[str, Set[str]] = defaultdict(set)
@@ -445,9 +445,6 @@ class TestRunner:
         else:
             self.test_dirs = [(None, build_dir / 'tests')]
 
-        # Kill any existing sintra processes for a clean start
-        self._kill_all_sintra_processes()
-
         self._debugger.prepare()
 
         dump_error = self._debugger.ensure_crash_dumps()
@@ -455,13 +452,6 @@ class TestRunner:
             print(
                 f"{Color.YELLOW}Warning: {dump_error}. "
                 f"Crash dumps may be unavailable.{Color.RESET}"
-            )
-
-        jit_error = self._debugger.configure_jit_debugging()
-        if jit_error:
-            print(
-                f"{Color.YELLOW}Warning: {jit_error}. "
-                f"JIT prompts may still block crash dumps.{Color.RESET}"
             )
 
     def instrumentation_active(self) -> bool:
@@ -683,14 +673,14 @@ class TestRunner:
 
     def _find_new_core_dumps(
         self,
-        invocation: TestInvocation,
+        scratch_dir: Path,
         snapshot: Set[Path],
         start_time: float,
     ) -> List[Tuple[Path, float, int]]:
         """Return newly created core dumps after a test run."""
 
         new_dumps: List[Tuple[Path, float, int]] = []
-        for directory in self._core_dump_search_directories(invocation):
+        for directory in (scratch_dir,):
             try:
                 entries = list(directory.iterdir())
             except OSError:
@@ -732,10 +722,11 @@ class TestRunner:
         snapshot: Set[Path],
         start_time: float,
         result_success: Optional[bool],
+        scratch_dir: Path,
     ) -> None:
-        """Remove new core dumps to avoid exhausting disk space."""
+        """Remove only core dumps in this invocation's private scratch directory."""
 
-        new_dumps = self._find_new_core_dumps(invocation, snapshot, start_time)
+        new_dumps = self._find_new_core_dumps(scratch_dir, snapshot, start_time)
         if not new_dumps:
             return
 
@@ -1075,6 +1066,7 @@ class TestRunner:
         run_id = uuid.uuid4().hex[:8]
         scratch_dir = self._allocate_scratch_directory(invocation)
         process = None
+        windows_tree = None
         cleanup_scratch_dir = True
         core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
@@ -1095,6 +1087,15 @@ class TestRunner:
             ]
             for key in keys_to_clear:
                 self._stack_capture_history.pop(key, None)
+        def terminate_owned_processes():
+            if windows_tree is not None:
+                windows_tree.terminate()
+            elif process is not None:
+                if self.platform.is_windows:
+                    process.kill()
+                else:
+                    self._kill_process_tree(process.pid)
+
         try:
             popen_env = self._build_test_environment(invocation, scratch_dir)
             start_time = time.time()
@@ -1351,6 +1352,12 @@ class TestRunner:
 
 
             process = subprocess.Popen(invocation.command(), **popen_kwargs)
+            if self.platform.is_windows:
+                from tests.runner.platform.windows_process_tree import Windows_process_tree
+                windows_tree = Windows_process_tree(process)
+                windows_tree.refresh()
+                with self._windows_trees_lock:
+                    self._windows_trees[process.pid] = windows_tree
 
             if hasattr(os, 'getpgid'):
                 try:
@@ -1365,7 +1372,12 @@ class TestRunner:
             hard_watchdog_stop = threading.Event()
 
             def hard_watchdog() -> None:
-                while not hard_watchdog_stop.wait(1.0):
+                while not hard_watchdog_stop.wait(0.25):
+                    if windows_tree is not None:
+                        try:
+                            windows_tree.refresh()
+                        except OSError as exc:
+                            print(f"Warning: Cannot refresh owned test process tree: {exc}")
                     if time.monotonic() >= hard_deadline:
                         if process.poll() is None:
                             print(
@@ -1373,23 +1385,9 @@ class TestRunner:
                                 f"(pid {process.pid}) - normal timeout mechanism failed{Color.RESET}",
                                 flush=True,
                             )
-                            self._kill_process_tree(process.pid)
-                        else:
-                            # Main process exited but we might be stuck on reader threads
-                            # waiting for child processes. Kill any lingering sintra processes.
-                            lingering = find_lingering_processes(("sintra_",))
-                            if lingering:
-                                pids = [pid for pid, _ in lingering]
-                                print(
-                                    f"\n{Color.RED}HARD WATCHDOG: Main process exited but found "
-                                    f"{len(lingering)} lingering child process(es): {pids} - killing them{Color.RESET}",
-                                    flush=True,
-                                )
-                                for pid, _ in lingering:
-                                    try:
-                                        self._kill_process_tree(pid)
-                                    except Exception:
-                                        pass
+                            terminate_owned_processes()
+                        elif windows_tree is not None:
+                            windows_tree.terminate(include_root=False)
                         break
 
             hard_watchdog_thread = threading.Thread(target=hard_watchdog, daemon=True)
@@ -1829,125 +1827,25 @@ class TestRunner:
                     hang_detected = True
                     hang_notes.append(cleanup_outcome.note)
 
-                # On Windows, terminate_process_group_members does nothing useful because
-                # there's no POSIX process group concept. Kill any lingering child processes
-                # by name pattern to prevent reader threads from blocking on their pipes.
-                if self.platform.is_windows:
-                    prefixes = ("sintra_", invocation.path.stem, invocation.name)
-                    lingering = find_lingering_processes(prefixes)
-                    # Give recently-started children a brief window to exit naturally
-                    # before classifying them as lingering. This avoids flagging short,
-                    # in-flight shutdown phases as hangs while still catching processes
-                    # that survive well beyond the test's lifetime.
-                    if lingering:
-                        grace_deadline = time.time() + 2.0
-                        while lingering and time.time() < grace_deadline:
-                            time.sleep(0.05)
-                            lingering = find_lingering_processes(prefixes)
-                    if lingering or self.verbose:
-                        print(
-                            f"[DEBUG] Found {len(lingering)} lingering processes: {lingering}",
-                            flush=True,
-                        )
-                    lingering_details = self._describe_pids([pid for pid, _ in lingering]) if lingering else {}
-                    if lingering:
-                        for pid, name in lingering:
-                            detail = lingering_details.get(pid)
-                            if detail:
-                                print(f"[DEBUG] Lingering process detail pid={pid} name={name}: {detail}", flush=True)
-                            # Try to capture stacks before killing to understand why it is stuck.
-                            try:
-                                stacks, err = self._capture_process_stacks(pid, None)
-                                if stacks:
-                                    print(f"[DEBUG] Lingering process stacks pid={pid}:\n{stacks}", flush=True)
-                                    hang_notes.append(f"linger pid={pid} stacks captured")
-                                elif err:
-                                    print(f"[DEBUG] Lingering process stack capture failed pid={pid}: {err}", flush=True)
-                                    hang_notes.append(f"linger pid={pid} stack capture failed: {err}")
-                            except Exception as e:
-                                print(f"[DEBUG] Failed to capture stacks for pid={pid}: {e}", flush=True)
-                            print(f"[DEBUG] Killing lingering process {pid} ({name})", flush=True)
-                            try:
-                                self._kill_process_tree(pid)
-                                print(f"[DEBUG] Successfully killed {pid}", flush=True)
-                            except Exception as e:
-                                print(f"[DEBUG] Failed to kill {pid}: {e}", flush=True)
+                if windows_tree is not None:
+                    descendants = windows_tree.live_descendants()
+                    grace_deadline = time.monotonic() + 2.0
+                    while descendants and time.monotonic() < grace_deadline:
+                        time.sleep(0.05)
+                        descendants = windows_tree.live_descendants()
+                    if descendants:
                         hang_detected = True
-                    # Also look for children of this test process that may not match prefixes.
-                    if process and process.pid:
-                        descendants = self._collect_descendant_pids(process.pid)
-                        if descendants:
-                            details = self._describe_pids(descendants)
-                            # Limit heavy-weight debugger work to descendants that look
-                            # like Sintra/test processes. Windows CI sometimes reports
-                            # a large number of unrelated descendants; attaching to
-                            # and killing arbitrary system processes is both fragile
-                            # and unnecessary.
-                            interesting: List[int] = []
-                            for pid in descendants:
-                                detail = details.get(pid, "")
-                                if any(
-                                    prefix
-                                    and prefix in detail
-                                    for prefix in prefixes
-                                ):
-                                    interesting.append(pid)
-
-                            if interesting:
-                                print(
-                                    f"[DEBUG] Descendants of {process.pid} still alive after exit: {interesting}",
-                                    flush=True,
-                                )
-                                hang_detected = True
-                                hang_notes.append(f"descendants after exit: {interesting}")
-                                for pid in interesting:
-                                    detail = details.get(pid)
-                                    if detail:
-                                        print(
-                                            f"[DEBUG] Descendant detail pid={pid}: {detail}",
-                                            flush=True,
-                                        )
-                                    try:
-                                        stacks, err = self._capture_process_stacks(pid, None)
-                                        if stacks:
-                                            print(
-                                                f"[DEBUG] Descendant stacks pid={pid}:\n{stacks}",
-                                                flush=True,
-                                            )
-                                            hang_notes.append(
-                                                f"descendant pid={pid} stacks captured"
-                                            )
-                                        elif err:
-                                            print(
-                                                f"[DEBUG] Descendant stack capture failed pid={pid}: {err}",
-                                                flush=True,
-                                            )
-                                            hang_notes.append(
-                                                f"descendant pid={pid} stack capture failed: {err}"
-                                            )
-                                    except Exception as e:
-                                        print(
-                                            f"[DEBUG] Failed to capture stacks for descendant pid={pid}: {e}",
-                                            flush=True,
-                                        )
-                                    try:
-                                        self._kill_process_tree(pid)
-                                        print(
-                                            f"[DEBUG] Killed descendant pid={pid}",
-                                            flush=True,
-                                        )
-                                    except Exception as e:
-                                        print(
-                                            f"[DEBUG] Failed to kill descendant pid={pid}: {e}",
-                                            flush=True,
-                                        )
-                            else:
-                                if self.verbose:
-                                    print(
-                                        f"[DEBUG] Descendants of {process.pid} still alive after exit "
-                                        f"(no sintra/test descendants): {descendants}",
-                                        flush=True,
-                                    )
+                        hang_notes.append(f"owned descendants after exit: {descendants}")
+                        for pid in descendants:
+                            try:
+                                stacks, error = self._capture_process_stacks(pid, None)
+                                if stacks:
+                                    print(f"[DEBUG] Owned descendant pid={pid} stacks:\n{stacks}")
+                                elif error:
+                                    print(f"[DEBUG] Owned descendant pid={pid}: {error}")
+                            except Exception as exc:
+                                print(f"Warning: Cannot capture owned descendant pid={pid}: {exc}")
+                        windows_tree.terminate(include_root=False)
 
                 duration = time.time() - start_time
 
@@ -2102,30 +2000,7 @@ class TestRunner:
                             stack_error = extra_error
 
                 # Kill the process tree on timeout
-                self._kill_process_tree(process.pid)
-
-                # On Windows, also kill any lingering child processes by name pattern
-                if self.platform.is_windows:
-                    prefixes = ("sintra_", invocation.path.stem, invocation.name)
-                    lingering = find_lingering_processes(prefixes)
-                    if lingering:
-                        lingering_details = self._describe_pids([pid for pid, _ in lingering])
-                        for pid, name in lingering:
-                            detail = lingering_details.get(pid)
-                            if detail:
-                                print(f"[DEBUG] (timeout) lingering pid={pid} name={name} detail={detail}", flush=True)
-                            try:
-                                stacks, err = self._capture_process_stacks(pid, None)
-                                if stacks:
-                                    print(f"[DEBUG] (timeout) lingering stacks pid={pid}:\n{stacks}", flush=True)
-                                elif err:
-                                    print(f"[DEBUG] (timeout) lingering stack capture failed pid={pid}: {err}", flush=True)
-                            except Exception:
-                                pass
-                            try:
-                                self._kill_process_tree(pid)
-                            except Exception:
-                                pass
+                terminate_owned_processes()
 
                 try:
                     process.wait(timeout=1)
@@ -2158,7 +2033,7 @@ class TestRunner:
 
         except Exception as e:
             if process:
-                self._kill_process_tree(process.pid)
+                terminate_owned_processes()
             shutdown_reader_threads()
             stdout = ''.join(stdout_lines) if stdout_lines else ""
             stderr = ''.join(stderr_lines) if stderr_lines else ""
@@ -2197,6 +2072,11 @@ class TestRunner:
                     except Exception:
                         pass
 
+            if windows_tree is not None:
+                with self._windows_trees_lock:
+                    self._windows_trees.pop(process.pid, None)
+                    windows_tree.close()
+
             preserve_failure = self._preserve_scratch and (result_success is False or result_success is None)
             if preserve_failure:
                 cleanup_scratch_dir = False
@@ -2226,7 +2106,7 @@ class TestRunner:
 
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
-            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success)
+            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success, scratch_dir)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -2235,14 +2115,6 @@ class TestRunner:
         except Exception as e:
             # Log but don't fail if cleanup fails
             print(f"\n{Color.YELLOW}Warning: Failed to kill process {pid}: {e}{Color.RESET}")
-            pass
-
-    def _kill_all_sintra_processes(self):
-        """Kill all existing sintra processes to ensure clean start"""
-        try:
-            self.platform.kill_all_sintra_processes()
-        except Exception:
-            # Ignore errors - processes may not exist
             pass
 
     def _line_indicates_failure(self, line: str) -> bool:
@@ -2361,6 +2233,12 @@ class TestRunner:
     def _collect_descendant_pids(self, root_pid: int) -> List[int]:
         """Return all descendant process IDs for the provided root PID."""
 
+        if self.platform.is_windows:
+            with self._windows_trees_lock:
+                for pid, tree in self._windows_trees.items():
+                    if pid == root_pid or tree.owns_live_pid(root_pid):
+                        return tree.live_descendants(root_pid)
+            return []
         return self.platform.collect_descendant_pids(root_pid)
 
     def _describe_pids(self, pids: Iterable[int]) -> Dict[int, str]:
@@ -2760,13 +2638,6 @@ def main():
                 print(f"\n{Color.BLUE}--- Round: {reps_in_this_round} repetition(s) ---{Color.RESET}")
                 for header in header_lines:
                     print(header)
-
-                lingering = find_lingering_processes(("sintra_",))
-                if lingering:
-                    details = _describe_processes(lingering)
-                    print(
-                        f"  {Color.YELLOW}Warning: Detected lingering sintra processes before starting the round: {details}{Color.RESET}"
-                    )
 
                 for i in range(reps_in_this_round):
                     row_segments = ["  "] * len(tests)

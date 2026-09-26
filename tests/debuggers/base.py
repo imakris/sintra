@@ -41,10 +41,6 @@ class DebuggerStrategy(ABC):
         """Return an error string if crash dumps cannot be configured."""
         return None
 
-    def configure_jit_debugging(self) -> Optional[str]:
-        """Return an error string if JIT debugging could not be configured."""
-        return None
-
     @abstractmethod
     def capture_process_stacks(
         self,
