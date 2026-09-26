@@ -460,12 +460,15 @@ void test_process_utility_helpers()
         k_failure_prefix,
         "read_run_marker should reject malformed numeric fields");
 
-    const auto cleanup_base = sintra::test::unique_scratch_directory("utility_process_cleanup");
+    const auto cleanup_base = sintra::test::unique_scratch_directory("utility_process_cleanup") / "private";
+    sintra::test::require_true(sintra::detail::create_private_directory(cleanup_base),
+        k_failure_prefix, "create private cleanup root");
     const auto stale_dir    = cleanup_base / "stale";
-    std::filesystem::create_directories(stale_dir);
-    std::ofstream stale_marker(sintra::run_marker_path(stale_dir), std::ios::trunc);
-    stale_marker << "pid=not-a-pid\n";
-    stale_marker.close();
+    sintra::test::require_true(sintra::detail::create_private_directory(stale_dir),
+        k_failure_prefix, "create private stale directory");
+    sintra::test::require_true(sintra::detail::write_private_file(
+        sintra::run_marker_path(stale_dir), "pid=not-a-pid\n"),
+        k_failure_prefix, "create private malformed marker");
 
     sintra::cleanup_stale_swarm_directories(cleanup_base, current_pid, current_start);
 #if defined(_WIN32)

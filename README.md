@@ -468,6 +468,28 @@ Low-level lifecycle escape hatches and shutdown internals are documented in
 [`docs/barriers_and_shutdown.md`](docs/barriers_and_shutdown.md) and
 [`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md).
 
+### Local account and IPC resources
+
+Managed swarm participants run under the same operating-system account. Sintra
+uses a private per-account directory under the operating system's temporary
+directory (`sintra-<user SID>` on Windows, `sintra-<effective uid>` on POSIX).
+Use a trusted temporary-directory location: the system default or a parent
+directory that other accounts cannot replace or alter.
+
+Session directories are owner-only. Backing files and lifecycle markers use
+current-user Windows ACLs or POSIX mode `0600`; named Windows semaphores also
+use current-user ACLs. Creation and attachment reject permissive resources and
+links, and cleanup skips entries whose private ownership cannot be verified.
+This does not isolate mutually untrusted processes within the same account.
+
+All participants must use the new directory policy together. Existing sessions
+under the former shared `sintra` directory are not migrated or scavenged, and
+old permissive ring files are rejected. The shared-memory ABI is unchanged by
+this permission policy. The generic `sintra::ipc::file_mapping` keeps caller
+access policy and follows links by default; managed rings opt into rejection.
+Windows builds outside CMake must link `advapi32` (MSVC and clang-cl receive an
+automatic library directive).
+
 ### Optional explicit type ids
 
 Most users do not need explicit type ids when every process uses the same compatible

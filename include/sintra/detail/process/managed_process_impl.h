@@ -2923,7 +2923,7 @@ Managed_process::~Managed_process()
         mark_run_directory_for_cleanup(std::filesystem::path(m_directory));
 
         // removes the swarm directory
-        remove_directory(m_directory);
+        detail::remove_private_directory_tree(m_directory);
     }
 
 #ifndef _WIN32
@@ -3394,19 +3394,15 @@ void Managed_process::init(int argc, const char* const* argv)
                 "Sintra failed to persist the coordinator run marker at " + m_directory);
         }
 
-        std::ofstream marker(abi_path, std::ios::out | std::ios::trunc);
-        if (!marker) {
-            throw std::runtime_error(
-                "Sintra failed to write the ABI fingerprint file at " + abi_path.string());
-        }
-        marker << current_abi;
-        marker.close();
-        if (!marker) {
+        if (!detail::write_private_file(abi_path, current_abi)) {
             throw std::runtime_error(
                 "Sintra failed to persist the ABI fingerprint file at " + abi_path.string());
         }
     }
     else {
+        if (!detail::private_file_path_owned(abi_path)) {
+            throw std::runtime_error("Sintra coordinator ABI fingerprint is not private to this account.");
+        }
         std::ifstream marker(abi_path);
         if (!marker) {
             throw std::runtime_error(
@@ -6641,9 +6637,9 @@ void Managed_process::override_communication_state_for_test(Communication_state 
 inline
 std::string Managed_process::obtain_swarm_directory()
 {
-    const std::filesystem::path sintra_directory = std::filesystem::temp_directory_path() / "sintra";
-    std::error_code directory_error;
-    if (!check_or_create_directory(sintra_directory.string(), &directory_error)) {
+    const auto sintra_directory = detail::private_swarm_root();
+    const auto directory_error = std::make_error_code(std::errc::permission_denied);
+    if (!detail::create_private_directory(sintra_directory)) {
         throw std::filesystem::filesystem_error(
             "access to a working directory failed", sintra_directory, directory_error);
     }
@@ -6656,7 +6652,7 @@ std::string Managed_process::obtain_swarm_directory()
     std::stringstream stream;
     stream << std::hex << m_swarm_id;
     const std::filesystem::path swarm_directory = sintra_directory / stream.str();
-    if (!check_or_create_directory(swarm_directory.string(), &directory_error)) {
+    if (!detail::create_private_directory(swarm_directory)) {
         throw std::filesystem::filesystem_error(
             "access to a working directory failed", swarm_directory, directory_error);
     }

@@ -84,6 +84,7 @@ CAVEATS
 
 #include "../../shared_mutex.h"
 #include "../time_utils.h"
+#include "private_resources.h"
 
 // Platform headers MUST be included BEFORE opening namespaces to avoid polluting them
 #if defined(_WIN32)
@@ -325,19 +326,26 @@ static HANDLE ips_win_local_handle(ips_backend& b) noexcept
         }
 
         // We are the first. Create (or open) the handle.
-        HANDLE h = CreateSemaphoreW(nullptr, (LONG)st.initial, (LONG)st.max, st.name);
-        if (!h) {
-            // Last resort: try opening if creation failed for other reasons (e.g., permissions).
-            h = OpenSemaphoreW(SYNCHRONIZE | SEMAPHORE_MODIFY_STATE, FALSE, st.name);
+        HANDLE h = nullptr;
+        try {
+            Private_security security;
+            h = CreateSemaphoreW(security.attributes(), (LONG)st.initial, (LONG)st.max, st.name);
+            if (!h) {
+                h = OpenSemaphoreW(READ_CONTROL | SYNCHRONIZE | SEMAPHORE_MODIFY_STATE,
+                    FALSE, st.name);
+            }
+            if (h && private_object_owned(h, SE_KERNEL_OBJECT)) {
+                cache.map.emplace(std::move(key), h);
+                return h;
+            }
         }
-
-        if (!h) {
-            errno = EINVAL; // Set errno on final failure
-            return nullptr;
+        catch (...) {
         }
-
-        cache.map.emplace(std::move(key), h);
-        return h;
+        if (h) {
+            CloseHandle(h);
+        }
+        errno = EACCES;
+        return nullptr;
     }
 }
 

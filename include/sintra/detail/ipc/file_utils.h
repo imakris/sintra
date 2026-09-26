@@ -9,6 +9,8 @@
 #include <limits>
 #include <string>
 
+#include "private_resources.h"
+
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 #include <functional>
 #endif
@@ -48,23 +50,12 @@ inline native_file_handle invalid_file() noexcept
 
 inline native_file_handle create_new_file(const char* path)
 {
-    SECURITY_ATTRIBUTES  sa{};
-    SECURITY_DESCRIPTOR  sd{};
-    SECURITY_ATTRIBUTES* psa = nullptr;
-
-    if (::InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
-        ::SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE))
-    {
-        sa.nLength              = sizeof(sa);
-        sa.lpSecurityDescriptor = &sd;
-        sa.bInheritHandle       = FALSE;
-        psa                     = &sa;
-    }
+    Private_security security;
 
     return ::CreateFileA(path,
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        psa,
+        security.attributes(),
         CREATE_NEW,
         FILE_ATTRIBUTE_NORMAL,
         nullptr);
@@ -130,11 +121,7 @@ inline native_file_handle invalid_file() noexcept
 
 inline native_file_handle create_new_file(const char* path)
 {
-    native_file_handle fd = ::open(path, O_CREAT | O_EXCL | O_RDWR, 0666);
-    if (fd >= 0) {
-        (void)::fchmod(fd, 0666);
-    }
-    return fd;
+    return ::open(path, O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
 }
 
 inline bool truncate_file(native_file_handle handle, std::uint64_t size)
@@ -186,6 +173,24 @@ inline publish_file_result publish_file_if_absent(
     return publish_file_result::failed;
 }
 #endif
+
+inline bool write_private_file(const std::filesystem::path& path, const std::string& contents)
+{
+    try {
+        const auto created = create_new_file(path.string().c_str());
+        if (created != invalid_file()) {
+            const bool written = write_file(created, contents.data(), contents.size());
+            const bool closed = close_file(created);
+            return written && closed;
+        }
+        auto existing = open_private_file(path, sintra::ipc::read_write);
+        return truncate_file(existing.native_handle(), 0) &&
+            write_file(existing.native_handle(), contents.data(), contents.size());
+    }
+    catch (...) {
+        return false;
+    }
+}
 
 } // namespace detail
 

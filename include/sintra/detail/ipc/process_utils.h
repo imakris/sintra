@@ -15,6 +15,7 @@
 
 #include "../time_utils.h"
 #include "platform_defs.h"
+#include "file_utils.h"
 
 #ifdef _WIN32
   #include "../sintra_windows.h"
@@ -328,17 +329,12 @@ inline bool write_run_marker(
         return false;
     }
 
-    std::ofstream marker(run_marker_path(directory), std::ios::out | std::ios::trunc);
-    if (!marker.is_open()) {
-        return false;
-    }
-
+    std::ostringstream marker;
     marker << "pid=" << record.pid << '\n';
     marker << "start_ns=" << record.start_stamp << '\n';
     marker << "created_ns=" << record.created_monotonic_ns << '\n';
     marker << "occurrence=" << record.recovery_occurrence << '\n';
-    marker.close();
-    return static_cast<bool>(marker);
+    return detail::write_private_file(run_marker_path(directory), marker.str());
 }
 
 inline std::optional<run_marker_record_t> read_run_marker(const std::filesystem::path& marker_path)
@@ -403,16 +399,16 @@ inline void mark_run_directory_for_cleanup(const std::filesystem::path& director
         return;
     }
 
-    std::ofstream cleanup_file(cleanup, std::ios::out | std::ios::trunc);
-    if (cleanup_file.is_open()) {
-        if (record_opt) {
-            const auto& record = *record_opt;
-            cleanup_file << "pid=" << record.pid << '\n';
-            cleanup_file << "start_ns=" << record.start_stamp << '\n';
-            cleanup_file << "created_ns=" << record.created_monotonic_ns << '\n';
-            cleanup_file << "occurrence=" << record.recovery_occurrence << '\n';
-        }
-        cleanup_file.close();
+    std::ostringstream cleanup_file;
+    if (record_opt) {
+        const auto& record = *record_opt;
+        cleanup_file << "pid=" << record.pid << '\n';
+        cleanup_file << "start_ns=" << record.start_stamp << '\n';
+        cleanup_file << "created_ns=" << record.created_monotonic_ns << '\n';
+        cleanup_file << "occurrence=" << record.recovery_occurrence << '\n';
+    }
+    if (!detail::write_private_file(cleanup, cleanup_file.str())) {
+        return;
     }
 
     std::error_code remove_marker_ec;
@@ -452,7 +448,7 @@ inline void cleanup_stale_swarm_directories(
     uint64_t                       current_start_stamp)
 {
     std::error_code ec;
-    if (!std::filesystem::exists(base_dir, ec) || !std::filesystem::is_directory(base_dir, ec)) {
+    if (!detail::private_directory_owned(base_dir)) {
         return;
     }
 
@@ -485,8 +481,7 @@ inline void cleanup_stale_swarm_directories(
     const auto now_monotonic = monotonic_now_ns();
 
     for (std::filesystem::directory_iterator it(base_dir, ec); !ec && it != std::filesystem::directory_iterator(); ++it) {
-        std::error_code status_ec;
-        if (!it->is_directory(status_ec)) {
+        if (!detail::private_directory_owned(it->path())) {
             continue;
         }
 
@@ -550,9 +545,7 @@ inline void cleanup_stale_swarm_directories(
             mark_run_directory_for_cleanup(dir_path);
         }
 
-        std::error_code remove_ec;
-        std::filesystem::remove_all(dir_path, remove_ec);
-        (void)remove_ec;
+        (void)detail::remove_private_directory_tree(dir_path);
     }
 }
 

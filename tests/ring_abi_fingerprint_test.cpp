@@ -73,12 +73,8 @@ void poke_fingerprint(const std::filesystem::path& control_file, std::uint64_t v
 
 void write_fingerprint_prefix(const std::filesystem::path& path, std::uint64_t value)
 {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    sintra::test::require_true(static_cast<bool>(f),
-        k_failure_prefix,
-        "could not create shared file for fingerprint test");
-    f.write(reinterpret_cast<const char*>(&value), sizeof(value));
-    sintra::test::require_true(static_cast<bool>(f),
+    sintra::test::require_true(sintra::detail::write_private_file(path,
+        std::string(reinterpret_cast<const char*>(&value), sizeof(value))),
         k_failure_prefix,
         "fingerprint prefix write failed");
 }

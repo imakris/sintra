@@ -614,9 +614,6 @@ publish_file_result publish_initialized_ring_file(
     for (int attempt = 0; attempt < 16; ++attempt) {
         temp_path = make_ring_publish_temp_path(final_path);
 
-        std::error_code cleanup_ec;
-        (void)fs::remove(temp_path, cleanup_ec);
-
         if (create_ring_backing_file(temp_path.string(), sizeof(SharedObject), directory)) {
             break;
         }
@@ -639,7 +636,7 @@ publish_file_result publish_initialized_ring_file(
         }
 
         try {
-            ipc::file_mapping temp_file(temp_path, ipc::read_write);
+            auto temp_file = open_private_file(temp_path, ipc::read_write);
             ipc::mapped_region temp_region(temp_file, ipc::read_write, 0, 0);
             auto* object = static_cast<SharedObject*>(temp_region.data());
             object->~SharedObject();
@@ -651,7 +648,7 @@ publish_file_result publish_initialized_ring_file(
 
     try {
         {
-            ipc::file_mapping temp_file(temp_path, ipc::read_write);
+            auto temp_file = open_private_file(temp_path, ipc::read_write);
             ipc::mapped_region temp_region(temp_file, ipc::read_write, 0, 0);
             auto* object = static_cast<SharedObject*>(temp_region.data());
 
@@ -819,6 +816,10 @@ protected:
 
         if (!wait_for_lifecycle_anchor_visibility()) {
             throw ring_acquisition_failure_exception();
+        }
+
+        if (!detail::private_file_path_owned(m_lifecycle_anchor_filename)) {
+            throw ring_acquisition_failure_exception("Ring lifecycle anchor is not private to this account.");
         }
 
         std::error_code anchor_size_ec;
@@ -1158,9 +1159,13 @@ private:
     bool remove_ring_files() const noexcept
     {
         std::error_code ec;
-        (void)fs::remove(fs::path(m_lifecycle_control_filename), ec);
+        if (detail::private_file_path_owned(m_lifecycle_control_filename)) {
+            (void)fs::remove(fs::path(m_lifecycle_control_filename), ec);
+        }
         ec.clear();
-        (void)fs::remove(fs::path(m_lifecycle_data_filename), ec);
+        if (detail::private_file_path_owned(m_lifecycle_data_filename)) {
+            (void)fs::remove(fs::path(m_lifecycle_data_filename), ec);
+        }
         return ring_files_absent();
     }
 
@@ -1179,7 +1184,7 @@ private:
     bool attach_anchor()
     {
         try {
-            ipc::file_mapping fm_anchor(m_lifecycle_anchor_filename.c_str(), ipc::read_write);
+            auto fm_anchor = detail::open_private_file(m_lifecycle_anchor_filename, ipc::read_write);
             m_anchor_region = std::make_unique<ipc::mapped_region>(
                 fm_anchor,
                 ipc::read_write,
@@ -1421,7 +1426,7 @@ private:
                 "Ring size (bytes) must be multiple of mapping granularity");
 
             auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
-            ipc::file_mapping file(m_data_filename.c_str(), data_rights);
+            auto file = detail::open_private_file(m_data_filename, data_rights);
 
             // Unified retry logic for all platforms.
             // When multiple threads in the same process try to map the same file simultaneously,
@@ -2401,7 +2406,7 @@ private:
                 return false;
             }
 
-            ipc::file_mapping fm_control(m_control_filename.c_str(), ipc::read_write);
+            auto fm_control = detail::open_private_file(m_control_filename, ipc::read_write);
             m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
             m_control = (Control*)m_control_region->data();
 

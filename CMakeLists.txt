@@ -82,6 +82,9 @@ target_include_directories(sintra INTERFACE
 )
 target_compile_features(sintra INTERFACE cxx_std_20)
 target_link_libraries(sintra INTERFACE Threads::Threads)
+if(WIN32)
+    target_link_libraries(sintra INTERFACE advapi32)
+endif()
 
 option(SINTRA_BUILD_COMPILED "Build the optional separately compiled Sintra target" OFF)
 if(SINTRA_BUILD_COMPILED)
