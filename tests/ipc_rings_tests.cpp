@@ -653,6 +653,41 @@ TEST_CASE(test_snapshot_raii)
     reader.done_reading();
 }
 
+TEST_CASE(test_snapshot_guard_covers_trailing_window)
+{
+    Temp_ring_dir tmp("snapshot_trailing_guard");
+    const size_t ring_elements = pick_ring_elements<uint64_t>(128);
+    const size_t octile_elements = ring_elements / 8;
+    const size_t trailing_cap = 3 * ring_elements / 4;
+    sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint64_t> reader(tmp.str(), "ring_data", ring_elements, trailing_cap);
+
+    std::vector<uint64_t> payload(octile_elements);
+    for (size_t chunk = 0; chunk < 10; ++chunk) {
+        std::iota(payload.begin(), payload.end(), chunk * octile_elements);
+        writer.write_commit(payload.data(), payload.size());
+    }
+
+    const auto leading = writer.get_leading_sequence();
+    const auto oldest_retained = leading - trailing_cap;
+    const auto expected_octile = (oldest_retained % ring_elements) / octile_elements;
+    for (const size_t count : {size_t(0), size_t(1), ring_elements / 4, trailing_cap}) {
+        auto snapshot = sintra::make_snapshot(reader, count);
+        const auto range = snapshot.range();
+        ASSERT_EQ(size_t(range.end - range.begin), count);
+        for (size_t i = 0; i < count; ++i) {
+            ASSERT_EQ(range.begin[i], leading - count + i);
+        }
+
+        // All snapshot sizes retain the configured trailing window. Its first
+        // octile must stop the writer before it can reuse any retained sample.
+        const auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
+        ASSERT_EQ(size_t(slot.trailing_octile()), expected_octile);
+        ASSERT_EQ(reader.c.count_guards_for_octile(uint8_t(expected_octile)), uint32_t(1));
+    }
+    ASSERT_EQ(reader.c.read_access.load(), uint64_t(0));
+}
+
 TEST_CASE(test_done_reading_without_snapshot_requests_stop)
 {
     Temp_ring_dir tmp("reader_stop_without_snapshot");

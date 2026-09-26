@@ -2612,8 +2612,10 @@ struct Ring_R : Ring<T, true>
                 0,
                 int64_t(leading_sequence) - int64_t(num_trailing_elements));
 
+            // The guard retains one trailing window relative to the head;
+            // range_first_sequence already subtracts the requested snapshot.
             size_t trailing_idx = mod_pos_i64(
-                int64_t(range_first_sequence) - int64_t(m_max_trailing_elements),
+                int64_t(leading_sequence) - int64_t(m_max_trailing_elements),
                 this->m_num_elements);
 
             uint8_t trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
@@ -2678,7 +2680,7 @@ struct Ring_R : Ring<T, true>
                 int64_t(confirmed_leading_sequence) - int64_t(num_trailing_elements));
 
             size_t confirmed_trailing_idx = mod_pos_i64(
-                int64_t(confirmed_range_first_sequence) - int64_t(m_max_trailing_elements),
+                int64_t(confirmed_leading_sequence) - int64_t(m_max_trailing_elements),
                 this->m_num_elements);
             uint8_t confirmed_trailing_octile =
                 octile_of_index(confirmed_trailing_idx, this->m_num_elements);
