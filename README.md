@@ -169,6 +169,10 @@ add_subdirectory(external/sintra)
 target_link_libraries(my_app PRIVATE sintra::sintra)
 ```
 
+Tests and examples default to enabled for a top-level Sintra build and disabled
+when included as a subproject. Set `SINTRA_BUILD_TESTS` or
+`SINTRA_BUILD_EXAMPLES` explicitly to override these defaults.
+
 For installed consumers, top-level builds export CMake package metadata. After
 `cmake --install`, use:
 
