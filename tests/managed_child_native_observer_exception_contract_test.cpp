@@ -79,10 +79,12 @@ struct Observer_gate
     unsigned                 fallback_available = 0;
     unsigned                 handle_closed = 0;
     unsigned                 observer_registered = 0;
+    unsigned                 fallback_poll_ready = 0;
     bool                     cancel_before_registration = false;
     bool                     observer_cancelled = false;
     bool                     registration_complete = false;
     bool                     release_observer = false;
+    bool                     release_fallback_poll = false;
 };
 
 Observer_gate* s_observer_gate = nullptr;
@@ -146,6 +148,13 @@ void observe_observer(
     {
         ++gate->fallback_available;
         gate->changed.notify_all();
+    }
+    else if (observed == sintra::detail::test_hooks::
+            k_managed_child_windows_fallback_before_wait)
+    {
+        ++gate->fallback_poll_ready;
+        gate->changed.notify_all();
+        gate->changed.wait(lock, [&]() { return gate->release_fallback_poll; });
     }
     else if (observed == sintra::detail::test_hooks::
             k_managed_child_windows_fallback_handle_closed ||
@@ -221,13 +230,16 @@ struct Case_result
     bool failure_ordered = false;
     bool exit_observation = false;
     bool callback_reentry = false;
+    bool native_race_ordered = true;
+    bool no_spurious_release_failure = true;
 
     bool passed() const noexcept
     {
         return setup && failure_injected && typed_failure &&
             fallback_available && release_complete && exact_exit_once &&
             handle_closed_once && survivor_absent && registration_ordered &&
-            failure_ordered && exit_observation && callback_reentry;
+            failure_ordered && exit_observation && callback_reentry &&
+            native_race_ordered && no_spurious_release_failure;
     }
 };
 
@@ -240,7 +252,8 @@ Case_result run_case(
     bool              cancel_before_registration = false,
     bool              reenter_release = false,
     bool              reenter_terminate = false,
-    bool              exit_before_failure = false)
+    bool              exit_before_failure = false,
+    bool              race_with_native_action = false)
 {
     Case_result result;
     const auto process_iid = sintra::compose_instance(61u + case_number, 1ull);
@@ -256,6 +269,7 @@ Case_result run_case(
     Observer_gate gate;
     gate.process_iid = process_iid;
     gate.cancel_before_registration = cancel_before_registration;
+    gate.release_fallback_poll = !race_with_native_action;
     s_observer_gate = &gate;
     Scoped_test_hook cleanup_hook(
         sintra::detail::test_hooks::s_managed_child_cleanup,
@@ -394,7 +408,35 @@ Case_result run_case(
         failed.created_occurrences == 1 &&
         (exit_before_failure || failed.exited_occurrences == 0);
 
-    if (!exit_before_failure) {
+    if (race_with_native_action) {
+        bool poll_ready = false;
+        {
+            std::unique_lock<std::mutex> lock(gate.mutex);
+            poll_ready = gate.changed.wait_for(lock, 2s, [&]() {
+                return gate.fallback_poll_ready == 1;
+            });
+        }
+        const auto native = custody.native_snapshot();
+        const auto request = poll_ready && native.size() == 1
+            ? custody.request_native_termination(
+                native.front().occurrence,
+                std::chrono::steady_clock::now() + 5s)
+            : sintra::Managed_child_native_request{};
+        bool original_closed = false;
+        {
+            std::unique_lock<std::mutex> lock(gate.mutex);
+            original_closed = gate.changed.wait_for(lock, 5s, [&]() {
+                return gate.handle_closed == 1;
+            });
+            gate.release_fallback_poll = true;
+            gate.changed.notify_all();
+        }
+        result.native_race_ordered = poll_ready && native.size() == 1 &&
+            request.admission == sintra::Managed_child_native_admission::STARTED &&
+            original_closed;
+        exit_requested = result.native_race_ordered;
+    }
+    else if (!exit_before_failure) {
         exit_requested = write_complete_file(exit_path, "exit\n");
     }
     const auto terminated = custody.terminate_until(
@@ -419,6 +461,9 @@ Case_result run_case(
             gate.fallback_available == 1;
     }
     const auto complete = custody.status();
+    result.no_spurious_release_failure = !race_with_native_action ||
+        complete.last_failure.kind !=
+            sintra::Managed_child_failure_kind::release_worker_execution;
     result.release_complete = exit_requested && child_exited &&
         terminated.release_state == sintra::Managed_child_release_state::complete &&
         passive.release_state == sintra::Managed_child_release_state::complete;
@@ -453,7 +498,7 @@ Case_result run_case(
             exit_event.native_status_available &&
             exit_event.status == exit_code &&
             exit_event.native_status == exit_code &&
-            exit_code == k_high_bit_exit_status;
+            (race_with_native_action || exit_code == k_high_bit_exit_status);
 #endif
         result.exit_observation = exit_callback_count == 1 &&
             exit_event.occurrence == exit_observation.occurrence &&
@@ -500,28 +545,31 @@ int run_root(
             k_managed_child_fail_native_observer_after_registration,
         sintra::detail::test_hooks::
             k_managed_child_fail_native_observer_after_registration,
+        sintra::detail::test_hooks::k_managed_child_fail_native_observer_before_wait,
         sintra::detail::test_hooks::k_managed_child_fail_native_observer_wait};
-    Case_result results[5];
-    for (unsigned i = 0; i != 5; ++i) {
+    Case_result results[6];
+    for (unsigned i = 0; i != 6; ++i) {
         results[i] = run_case(
             binary_path,
             shared_directory,
             i,
             failure_stages[i],
-            i == 4,
+            i == 5,
             i == 2,
             i == 0,
             i == 1,
-            i == 3);
+            i == 3,
+            i == 4);
         if (!results[i].passed() ||
-            (i == 4 && !results[i].first_finalize_incomplete))
+            (i == 5 && !results[i].first_finalize_incomplete))
         {
             std::fprintf(
                 stderr,
                 "NATIVE_OBSERVER_EXCEPTION_INVALID case=%u setup=%d "
                 "injected=%d typed=%d fallback=%d finalize=%d release=%d "
                 "exit=%d close=%d survivor_absent=%d registration=%d "
-                "failure_order=%d observation=%d callback_reentry=%d\n",
+                "failure_order=%d observation=%d callback_reentry=%d "
+                "native_race=%d no_release_failure=%d\n",
                 i,
                 results[i].setup ? 1 : 0,
                 results[i].failure_injected ? 1 : 0,
@@ -535,7 +583,9 @@ int run_root(
                 results[i].registration_ordered ? 1 : 0,
                 results[i].failure_ordered ? 1 : 0,
                 results[i].exit_observation ? 1 : 0,
-                results[i].callback_reentry ? 1 : 0);
+                results[i].callback_reentry ? 1 : 0,
+                results[i].native_race_ordered ? 1 : 0,
+                results[i].no_spurious_release_failure ? 1 : 0);
             return 2;
         }
     }
@@ -547,7 +597,7 @@ int run_root(
         return 2;
     }
     std::printf(
-        "NATIVE_OBSERVER_EXCEPTION_GREEN cases=5 typed=1 fallback=1 "
+        "NATIVE_OBSERVER_EXCEPTION_GREEN cases=6 typed=1 fallback=1 "
         "terminate_retry=1 finalize_retry=1 close_once=1 survivor_absent=1\n");
     return 0;
 #endif

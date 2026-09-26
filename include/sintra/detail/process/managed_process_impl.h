@@ -338,6 +338,8 @@ inline constexpr const char* k_managed_child_native_exit_before_publication =
     "managed_child_native_exit_before_publication";
 inline constexpr const char* k_managed_child_windows_fallback_handle_closed =
     "managed_child_windows_fallback_handle_closed";
+inline constexpr const char* k_managed_child_windows_fallback_before_wait =
+    "managed_child_windows_fallback_before_wait";
 inline constexpr const char* k_managed_child_fail_admission_mapping =
     "managed_child_admission_mapping";
 inline constexpr const char* k_managed_child_fail_release_worker =
@@ -4250,13 +4252,10 @@ using application_result = std::variant<
 } // namespace managed_child_windows_fallback_result
 
 inline managed_child_windows_fallback_result::execution_result
-execute_managed_child_windows_fallback(
-    const managed_child_release_action::poll_windows_fallback& target)
+execute_managed_child_windows_fallback(HANDLE process_handle)
 {
     using namespace managed_child_windows_fallback_result;
 
-    // Borrowed authority: selection retains ownership in the exact occurrence.
-    const auto process_handle = reinterpret_cast<HANDLE>(target.process_handle);
     const auto wait_result = WaitForSingleObject(process_handle, 20);
     if (wait_result == WAIT_TIMEOUT) {
         return timed_out{};
@@ -4284,17 +4283,23 @@ apply_managed_child_windows_fallback_locked(
 {
     using namespace managed_child_windows_fallback_result;
 
+    auto* exact = custody.find_occurrence_locked(
+        target.process_instance_id, target.occurrence);
+    if (!exact) {
+        return transition_failed{};
+    }
+    if (exact->native.exited()) {
+        // A concurrent exact observer or native action already published exit;
+        // let the planner advance rather than report a stale poll failure.
+        return retry{};
+    }
     if (std::holds_alternative<timed_out>(result)) {
         return retry{};
     }
     if (const auto failure = std::get_if<wait_failed>(&result)) {
         return *failure;
     }
-
-    auto* exact = custody.find_occurrence_locked(
-        target.process_instance_id, target.occurrence);
-    if (!exact ||
-        !exact->native.fallback_wait_available() ||
+    if (!exact->native.fallback_wait_available() ||
         exact->native.process_handle() != target.process_handle)
     {
         return transition_failed{};
@@ -4525,6 +4530,27 @@ inline void Managed_process::execute_child_custody_release_attempt(
             continue;
         }
 
+#ifdef _WIN32
+        // Claim a stable wait handle before another exact native action can
+        // take and close the original after this release worker unlocks.
+        std::unique_ptr<void, decltype(&CloseHandle)> fallback_poll_handle(
+            nullptr, &CloseHandle);
+        if (auto fallback = std::get_if<poll_windows_fallback>(&action)) {
+            HANDLE duplicate = nullptr;
+            if (!DuplicateHandle(
+                    GetCurrentProcess(),
+                    reinterpret_cast<HANDLE>(fallback->process_handle),
+                    GetCurrentProcess(), &duplicate, 0, FALSE,
+                    DUPLICATE_SAME_ACCESS))
+            {
+                const auto error = GetLastError();
+                throw std::system_error(
+                    static_cast<int>(error), std::system_category(),
+                    "DuplicateHandle");
+            }
+            fallback_poll_handle.reset(duplicate);
+        }
+#endif
         lock.unlock();
 
         if (auto cleanup = std::get_if<apply_cleanup>(&action)) {
@@ -4621,9 +4647,13 @@ inline void Managed_process::execute_child_custody_release_attempt(
         // A retained fallback handle must not hide a later cleanup upgrade.
         // Poll briefly in this owned worker, then re-check the release mode;
         // public deadline callers continue to wait only on custody->changed.
+        detail::managed_child_cleanup_for_test(
+            detail::test_hooks::k_managed_child_windows_fallback_before_wait,
+            fallback_target->process_instance_id,
+            fallback_target->occurrence);
         const auto fallback_execution =
             detail::execute_managed_child_windows_fallback(
-                *fallback_target);
+                fallback_poll_handle.get());
         auto fallback_application = detail::
             managed_child_windows_fallback_result::application_result{
                 detail::managed_child_windows_fallback_result::retry{}};
