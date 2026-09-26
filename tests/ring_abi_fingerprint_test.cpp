@@ -27,9 +27,9 @@ constexpr std::string_view k_failure_prefix = "ring_abi_fingerprint_test: ";
 void test_message_prefix_ring_abi()
 {
     sintra::test::require_true(
-        sintra::detail::k_sintra_ring_abi_version == 8,
+        sintra::detail::k_sintra_ring_abi_version == 9,
         k_failure_prefix,
-        "managed-child startup protocol requires ring ABI version 8");
+        "reader-slot wakeup ownership requires ring ABI version 9");
     sintra::test::require_true(
         sintra::detail::k_ring_lifecycle_anchor_abi_version == 3,
         k_failure_prefix,
@@ -114,8 +114,16 @@ void test_attach_rejects_mismatched_fingerprint()
         (void)reader;
     }
 
-    // Corrupt the fingerprint and confirm a fresh attach throws.
-    constexpr std::uint64_t k_wrong_fingerprint = 0xdeadbeefcafef00dull;
+    // A control from the previous wakeup-pool protocol must be rejected even
+    // when its size happens to match this build on a supported platform.
+    constexpr std::uint64_t k_wrong_fingerprint = sintra::detail::fnv1a_64({
+        8,
+        static_cast<uint64_t>(sintra::num_process_index_bits),
+        static_cast<uint64_t>(sintra::max_process_index),
+        static_cast<uint64_t>(sintra::max_message_length),
+        static_cast<uint64_t>(sintra::assumed_cache_line_size),
+        static_cast<uint64_t>(sintra::num_reserved_service_instances),
+    });
     poke_fingerprint(control_file, k_wrong_fingerprint);
 
     bool threw_typed   = false;

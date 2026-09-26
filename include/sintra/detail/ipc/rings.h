@@ -193,6 +193,8 @@ namespace detail {
 namespace test_hooks {
 using Ring_guard_callback = void (*)(const char*, const std::atomic<uint64_t>*, uint8_t);
 inline std::atomic<Ring_guard_callback> s_ring_guard_operation{nullptr};
+using Ring_wait_callback = void (*)(int);
+inline std::atomic<Ring_wait_callback> s_ring_wait_prepared{nullptr};
 }
 #endif
 
@@ -1224,36 +1226,38 @@ public:
     sintra_ring_semaphore(const sintra_ring_semaphore&) = delete;
     sintra_ring_semaphore& operator=(const sintra_ring_semaphore&) = delete;
 
-    ~sintra_ring_semaphore() { destroy(); }
-
     // Wakes all readers in an ordered fashion (used by writer after publishing).
     void post_ordered()
     {
-        ensure_initialized().post_ordered();
+        m_impl.post_ordered();
     }
 
     // Wakes a single reader in an unordered fashion (used by local unblocks).
     void post_unordered()
     {
-        ensure_initialized().post_unordered();
+        m_impl.post_unordered();
     }
 
     // Wait returns true if the wakeup was unordered and no ordered post happened since.
     bool wait()
     {
-        return ensure_initialized().wait();
+        return m_impl.wait();
     }
 
     wait_result wait_for(std::chrono::nanoseconds timeout)
     {
-        return ensure_initialized().wait_for(timeout);
+        return m_impl.wait_for(timeout);
+    }
+
+    // Caller excludes posters and owns the reader slot. No live wait may remain.
+    void reset_quiescent() noexcept
+    {
+        m_impl.reset_quiescent();
     }
 
     void release_local_handle() noexcept
     {
-        if (is_initialized()) {
-            access().release_local_handle();
-        }
+        m_impl.release_local_handle();
     }
 
 private:
@@ -1296,66 +1300,22 @@ private:
             return unordered.exchange(false) ? wait_result::unordered : wait_result::ordered;
         }
 
+        void reset_quiescent() noexcept
+        {
+            if (posted.test()) {
+                while (detail::interprocess_semaphore::try_wait()) {}
+            }
+            posted.clear();
+            unordered = false;
+        }
+
         std::atomic_flag   posted = ATOMIC_FLAG_INIT;
         std::atomic<bool>  unordered{false};
     };
 
-    static constexpr uint8_t   state_uninitialized = 0;
-    static constexpr uint8_t   state_initializing  = 1;
-    static constexpr uint8_t   state_initialized   = 2;
-
-    bool is_initialized() const noexcept
-    {
-        return m_state == state_initialized;
-    }
-
-    impl& access() noexcept
-    {
-        return *std::launder(reinterpret_cast<impl*>(&m_storage));
-    }
-
-    const impl& access() const noexcept
-    {
-        return *std::launder(reinterpret_cast<const impl*>(&m_storage));
-    }
-
-    impl& ensure_initialized()
-    {
-        for (;;) {
-            const uint8_t current = m_state.load(std::memory_order_acquire);
-            if (current == state_initialized) {
-                return access();
-            }
-            if (current == state_uninitialized) {
-                uint8_t expected = state_uninitialized;
-                if (m_state.compare_exchange_strong(
-                        expected, state_initializing, std::memory_order_acq_rel))
-                {
-                    try {
-                        new (&m_storage) impl();
-                        m_state.store(state_initialized, std::memory_order_release);
-                        return access();
-                    }
-                    catch (...) {
-                        m_state.store(state_uninitialized, std::memory_order_release);
-                        throw;
-                    }
-                }
-            }
-            std::this_thread::yield();
-        }
-    }
-
-    void destroy() noexcept
-    {
-        if (is_initialized()) {
-            access().~impl();
-            m_state = state_uninitialized;
-        }
-    }
-
-    alignas(impl) std::byte m_storage[sizeof(impl)];
-    std::atomic<uint8_t> m_state{state_uninitialized};
+    // Constructed before the control file is published. A reader dying during
+    // its first wait cannot strand a process-shared lazy-initialization gate.
+    impl m_impl;
 };
 
  //////////////////////////////////////////////////////////////////////////
@@ -1894,7 +1854,7 @@ struct Ring:
 
     /**
      * A simple fixed-capacity stack of indices. Eliminates duplicate
-     * push/pop/contains logic for ready_stack, sleeping_stack, unordered_stack, etc.
+     * push/pop/contains logic for free reader slots and sleeping registrations.
      * This lives in shared memory (control file), so we avoid std::vector or other
      * heap-backed containers that are not trivially relocation-safe across processes.
      */
@@ -2081,6 +2041,7 @@ struct Ring:
                 auto& slot = reading_sequences[i].data;
 
                 if (slot.status() == READER_STATE_INACTIVE) {
+                    clear_reader_wakeup(i);
                     clear_slot_guard(i, Slot_read_access_release::unpaired);
                     continue;
                 }
@@ -2091,6 +2052,7 @@ struct Ring:
                 bool dead = owner_unknown || !is_process_alive(pid);
 
                 if (dead) {
+                    clear_reader_wakeup(i);
                     const bool release_read_access = slot.status() == READER_STATE_ACTIVE;
                     clear_slot_guard(
                         i,
@@ -2231,38 +2193,37 @@ struct Ring:
 
         // The following synchronization structures may only be accessed between lock()/unlock().
 
-        // An array (pool) of semaphores to synchronize reader wakeups. The writer posts these
-        // on publish; readers may also be unblocked locally in an "unordered" fashion.
+        // Each lifetime reader slot owns the semaphore at the same index.
+        // Reclaiming that slot also reclaims its pending wakeup registration.
         sintra_ring_semaphore                dirty_semaphores[max_process_index];
 
-        // A stack of indices into dirty_semaphores[] that are free/ready for use.
-        // Initially all semaphores are ready.
-        Index_stack<max_process_index>       ready_stack;
-
-        // A stack of indices allocated to readers that are blocking / about to block /
-        // or were blocking and not yet redistributed.
+        // Reader slots that are blocking or about to block, awaiting a post.
         Index_stack<max_process_index>       sleeping_stack;
-
-        // A stack of indices that were posted "out of order" (e.g., after a local unblock).
-        // Unordered posts leave the index in sleeping_stack but flag the semaphore to avoid
-        // re-posting; the next ordered post (e.g., on publish) drains unordered items back
-        // to ready_stack. This keeps the wakeup path simple while preventing double-posts.
-        Index_stack<max_process_index>       unordered_stack;
 
         void flush_wakeups()
         {
             sleeping_stack.drain([&]( int idx) { dirty_semaphores[idx].post_ordered(); });
-            unordered_stack.drain([&](int idx) { ready_stack.push(idx); });
         }
 
-        // Spinlock guarding the ready/sleeping/unordered stacks.
+        // Caller owns the slot (or has confirmed its owner died), and no live
+        // waiter remains. Slot transfer takes rs_stack_spinlock before this lock.
+        void clear_reader_wakeup(int index)
+        {
+            spinlock::locker lock(m_spinlock);
+            clear_reader_wakeup_unlocked(index);
+        }
+
+        void clear_reader_wakeup_unlocked(int index)
+        {
+            sleeping_stack.remove_value(index);
+            dirty_semaphores[index].reset_quiescent();
+        }
+
+        // Guards wakeup registration, posting and quiescent token cleanup.
         spinlock                             m_spinlock;
 
         Control()
         {
-            // Initialize ready_stack with all indices (full), others empty
-            for (int i = 0; i < max_process_index; i++) { ready_stack.push(i); }
-
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
             for (int i = 0; i < max_process_index; i++) { free_rs_stack.push(i); }
 
@@ -2539,6 +2500,7 @@ struct Ring_R : Ring<T, true>
                     // Mark our slot as ACTIVE while the spinlock is still held so the
                     // scavenger cannot reclaim it before we publish the ownership.
                     auto& slot = c.reading_sequences[m_rs_index].data;
+                    c.clear_reader_wakeup(m_rs_index);
                     c.clear_slot_guard(
                         m_rs_index,
                         Ring<T, true>::Control::Slot_read_access_release::unpaired);
@@ -2576,6 +2538,7 @@ struct Ring_R : Ring<T, true>
             // Mark slot as inactive and clear ownership while the freelist is locked,
             // so scavenger cannot race a half-updated slot.
             auto& slot = c.reading_sequences[m_rs_index].data;
+            c.clear_reader_wakeup(m_rs_index);
             const bool release_read_access = slot.status() == Ring<T, true>::READER_STATE_ACTIVE;
             c.clear_slot_guard(
                 m_rs_index,
@@ -3008,19 +2971,15 @@ struct Ring_R : Ring<T, true>
                         c.m_spinlock.unlock();
                         return Range<T>{};
                     }
-                    int sleepy = c.ready_stack.pop_or(-1);
-                    if (sleepy >= 0) {
-                        m_sleepy_index = sleepy;
-                        c.sleeping_stack.push(sleepy);
-                    }
+                    m_sleepy_index = m_rs_index;
+                    c.sleeping_stack.push(m_rs_index);
                 }
                 const auto unblock_sequence_after = c.global_unblock_sequence.load();
                 if (unblock_sequence_after != m_seen_unblock_sequence) {
                     m_seen_unblock_sequence = unblock_sequence_after;
                     const int sleepy = m_sleepy_index;
                     if (sleepy >= 0) {
-                        c.sleeping_stack.remove_value(sleepy);
-                        c.ready_stack.push(sleepy);
+                        c.clear_reader_wakeup_unlocked(sleepy);
                         m_sleepy_index = -1;
                     }
                     c.m_spinlock.unlock();
@@ -3033,48 +2992,41 @@ struct Ring_R : Ring<T, true>
 
                 int sleepy_index = m_sleepy_index;
                 if (sleepy_index >= 0) {
-                    while (true) {
-                        if (m_stopping) {
-                            spinlock::locker lock(c.m_spinlock);
-                            if (m_sleepy_index >= 0) {
-                                c.dirty_semaphores[sleepy_index].post_unordered();
-                            }
-                            return Range<T>{};
-                        }
+                    struct Wakeup_cleanup
+                    {
+                        typename Ring<T, true>::Control& control;
+                        std::atomic<int>& index;
 
-                        auto wait_status = c.dirty_semaphores[sleepy_index].wait_for(blocking_wait_watchdog);
-                        if (wait_status == sintra_ring_semaphore::wait_result::timeout) {
-                            spinlock::locker lock(c.m_spinlock);
-                            const int current = m_sleepy_index;
+                        ~Wakeup_cleanup()
+                        {
+                            spinlock::locker lock(control.m_spinlock);
+                            const int current = index.exchange(-1);
                             if (current >= 0) {
-                                c.sleeping_stack.remove_value(current);
-                                c.ready_stack.push(current);
-                                m_sleepy_index = -1;
+                                control.clear_reader_wakeup_unlocked(current);
                             }
-                            stay_in_blocking_phase = true;
-                            blocking_wait_timed_out = true;
-                            break;
                         }
+                    } cleanup{c, m_sleepy_index};
 
-                        if (wait_status == sintra_ring_semaphore::wait_result::unordered) {
-                            spinlock::locker lock(c.m_spinlock);
-                            c.unordered_stack.push(sleepy_index);
-                        }
-                        else {
-                            spinlock::locker lock(c.m_spinlock);
-                            c.ready_stack.push(sleepy_index);
-                        }
-                        m_sleepy_index = -1;
-
-                        if (m_stopping) {
-                            return Range<T>{};
-                        }
-                        break;
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+                    if (auto callback = detail::test_hooks::s_ring_wait_prepared.load(
+                            std::memory_order_acquire))
+                    {
+                        callback(sleepy_index);
                     }
-                }
-                else {
-                    stay_in_blocking_phase = true;
-                    blocking_wait_timed_out = true;
+#endif
+                    if (m_stopping) {
+                        return Range<T>{};
+                    }
+
+                    const auto wait_status =
+                        c.dirty_semaphores[sleepy_index].wait_for(blocking_wait_watchdog);
+                    if (m_stopping) {
+                        return Range<T>{};
+                    }
+                    if (wait_status == sintra_ring_semaphore::wait_result::timeout) {
+                        stay_in_blocking_phase = true;
+                        blocking_wait_timed_out = true;
+                    }
                 }
             }
 

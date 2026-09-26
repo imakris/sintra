@@ -477,6 +477,9 @@ only. Every joining process must present exactly the coordinator's startup ABI t
 That token contains compiler, standard-library, platform, and architecture identities
 plus the Sintra ring ABI version. A token mismatch, including between MSVC and MinGW
 builds, is rejected before that joining process opens its request/reply message rings.
+Ring ABI 9 binds each wakeup semaphore to its reader slot so stopped or dead readers
+cannot exhaust wakeup capacity. Rebuild every swarm participant together when updating
+from ring ABI 8; the persistent lifecycle-anchor ABI remains 3.
 A matching token is required, but it does not guarantee that raw C++ object
 representations are interoperable; explicit ids provide no such guarantee either. The
 ids must remain unique and consistent across every process in the swarm.
