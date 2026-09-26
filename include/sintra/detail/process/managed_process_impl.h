@@ -2632,7 +2632,18 @@ void install_signal_handler()
         detail::thread_fault_action().store(
             &report_and_die_from_thread_fault, std::memory_order_release);
 
+#ifndef SIG_GET
+#error "Windows signal installation requires a read-only SIG_GET query."
+#endif
         for (auto& slot : slot_table) {
+            if (slot.sig == SIGINT || slot.sig == SIGTERM) {
+                // An ignored request is not a process death. Query without
+                // changing the CRT disposition before installing our handler.
+                const auto current = std::signal(slot.sig, SIG_GET);
+                if (current == SIG_IGN || current == SIG_ERR) {
+                    continue;
+                }
+            }
             auto previous = std::signal(slot.sig, s_signal_handler);
             if (previous != SIG_ERR) {
                 slot.has_previous = previous != s_signal_handler;
@@ -2658,6 +2669,16 @@ void install_signal_handler()
         ensure_signal_dispatcher();
 
         for (auto& slot : slot_table) {
+            if (slot.sig == SIGINT || slot.sig == SIGTERM) {
+                struct sigaction current {};
+                // SIG_IGN can be inherited across exec. Preserve it without
+                // a temporary interval in which Sintra reports a false death.
+                if (sigaction(slot.sig, nullptr, &current) != 0 ||
+                    current.sa_handler == SIG_IGN)
+                {
+                    continue;
+                }
+            }
             struct sigaction sa {};
             sigemptyset(&sa.sa_mask);
             sa.sa_sigaction = s_signal_handler;
