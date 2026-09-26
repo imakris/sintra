@@ -46,6 +46,7 @@ handled_exception_survival_contract_test                 1
 handler_lifetime_test                                    5
 id_types_locality_test                                   5
 init_error_spawn_failure_test                            1
+instance_name_cache_test                                 1
 interprocess_file_mapping_test                          10
 interprocess_mutex_test                                 30
 interprocess_semaphore_test                             10

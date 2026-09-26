@@ -2778,13 +2778,17 @@ sintra::type_id_type get_type_id(const T&) {return get_type_id<T>();}
 template <typename>
 sintra::instance_id_type get_instance_id(std::string&& assigned_name)
 {
-    return detail::cached_resolve(
-        s_mproc->m_instance_id_of_assigned_name,
+    if (s_coord) {
+        auto names = s_mproc->m_instance_id_of_assigned_name.scoped();
+        const auto entry = names.get().find(assigned_name);
+        return entry == names.get().end() ? invalid_instance_id : entry->second;
+    }
+
+    return s_mproc->m_instance_name_cache.resolve(
         assigned_name,
         [](const std::string& name) {
             return Coordinator::rpc_resolve_instance(s_coord_id, name);
-        },
-        invalid_instance_id);
+        });
 }
 
 inline
@@ -3459,6 +3463,9 @@ void Managed_process::init(int argc, const char* const* argv)
 
     auto published_handler = [this](const Coordinator::instance_published& msg)
     {
+        if (!s_coord) {
+            m_instance_name_cache.invalidate_name(msg.assigned_name);
+        }
         Tn_type tn = {msg.type_id, msg.assigned_name};
 
         while (true) {
@@ -3488,21 +3495,8 @@ void Managed_process::init(int argc, const char* const* argv)
     {
         auto iid         = msg.instance_id;
         auto process_iid = process_of(iid);
+        m_instance_name_cache.invalidate_instance(msg.assigned_name, iid);
         if (iid == process_iid) {
-
-            // the unpublished transceiver was a process, thus we should
-            // remove all transceiver records who are known to live in it.
-
-            auto name_map = m_instance_id_of_assigned_name.scoped();
-            for (auto it = name_map.begin(); it != name_map.end();) {
-                if (process_of(it->second) == iid) {
-                    it = name_map.erase(it);
-                }
-                else {
-                    ++it;
-                }
-            }
-
             s_mproc->unblock_rpc(iid);
         }
 

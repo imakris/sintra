@@ -55,6 +55,13 @@ Contract:
 - `invalid_instance_id` is `0`. It is the default for default-constructed
   `Resolvable_instance_id` values and the value returned by name resolution
   helpers when a name is not currently published.
+- `get_instance_id(name)` caches successful remote name lookups. Publication
+  and retirement notifications invalidate those snapshots asynchronously;
+  loss detected on the coordinator request stream clears them. A lookup
+  overtaken by an observed invalidation resolves once more through the
+  coordinator and leaves that retry uncached. Coordinator-local lookups read
+  the publication registry directly. Use `Resolvable_instance_id(name)` for
+  an authoritative lookup on every call.
 - `any_local` matches any transceiver in the local process other than the
   local Managed_process itself.
 - `any_remote` matches any transceiver in any other process.

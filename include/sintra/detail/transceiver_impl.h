@@ -311,9 +311,9 @@ bool Transceiver::assign_name(const string& name)
         m_published = true;
 
         if (!s_coord) {
-            // A publication callback may already have resolved this name
-            // before the publication RPC's reply reaches this thread.
-            s_mproc->m_instance_id_of_assigned_name.set_value(name, m_instance_id);
+            // Retirement can overtake the publication reply. Do not seed a
+            // cached snapshot from that reply after invalidation has run.
+            s_mproc->m_instance_name_cache.invalidate_name(name);
             m_cache_name = name;
         }
         return true;
@@ -419,8 +419,7 @@ void Transceiver::destroy()
         // if the coordinator is local, it would be deleted already in the unpublish call
         if (!s_coord) {
             if (!m_cache_name.empty()) {
-                auto scoped_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-                scoped_map.get().erase(m_cache_name);
+                s_mproc->m_instance_name_cache.invalidate_instance(m_cache_name, m_instance_id);
                 m_cache_name.clear();
             }
         }

@@ -526,6 +526,12 @@ Process_message_reader::Process_message_reader(
         m_process_instance_id,
         occurrence);
 
+    if (m_process_instance_id == process_of(s_coord_id) && !s_coord) {
+        m_in_req_c->set_eviction_handler([owner = s_mproc]() {
+            owner->m_instance_name_cache.clear();
+        });
+    }
+
     constexpr unsigned k_startup_pending   = 0;
     constexpr unsigned k_startup_committed = 1;
     constexpr unsigned k_startup_cancelled = 2;

@@ -16,6 +16,7 @@
 #include <cstring>
 #include <limits>
 #include <format>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -874,6 +875,13 @@ struct Message_ring_R: Ring_R<char>
         return m_message_reading_sequence.load();
     }
 
+    // Install before starting the reader thread. Loss must be reported here,
+    // even when fetch_message subsequently waits for the next published frame.
+    void set_eviction_handler(std::function<void()> handler)
+    {
+        m_eviction_handler = std::move(handler);
+    }
+
 public:
     const uint64_t m_id;
 
@@ -926,6 +934,9 @@ private:
             return;
         }
         const auto skipped_from = m_message_reading_sequence.exchange(resumed_sequence);
+        if (m_eviction_handler) {
+            m_eviction_handler();
+        }
         Log_stream(log_level::warning)
             << "Sintra message reader evicted on " << m_channel << " ring for peer " << m_id
             << "; discarded unread sequence interval [" << skipped_from << ", "
@@ -940,6 +951,7 @@ private:
     std::unique_ptr<frame_storage_t> m_frame = std::make_unique<frame_storage_t>();
     std::atomic<sequence_counter_type> m_message_reading_sequence{0};
     const std::string m_channel;
+    std::function<void()> m_eviction_handler;
 };
 
 

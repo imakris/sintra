@@ -15,6 +15,7 @@
 #include "../transceiver.h"
 #include "../messaging/call_function_with_message_args.h"
 #include "native_process_family.h"
+#include "instance_name_cache.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1556,6 +1557,8 @@ struct Managed_process: Derived_transceiver<Managed_process>
         string,
         instance_id_type
     >                                   m_instance_id_of_assigned_name;
+
+    detail::Instance_name_cache         m_instance_name_cache;
 
     spinlocked_umap<
         instance_id_type,

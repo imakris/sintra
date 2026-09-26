@@ -100,6 +100,14 @@ bool run_test()
     sintra::test::Temp_ring_dir directory("message_reader_owned_frame");
     sintra::Message_ring_W writer(directory.str(), "req", 1);
     sintra::Message_ring_R reader(directory.str(), "req", 1);
+    sintra::detail::Instance_name_cache names;
+    constexpr auto old_instance = sintra::compose_instance(4, 11);
+    names.resolve("discarded-publication", [](const std::string&) { return old_instance; });
+    std::atomic<bool> loss_reported{false};
+    reader.set_eviction_handler([&]() {
+        names.clear();
+        loss_reported = true;
+    });
     reader.start_reading();
     const std::vector<aligned_value_t> values = {{{17, 19}}, {{23, 29}}};
     const std::string original = "frame retained through dispatch";
@@ -150,12 +158,18 @@ bool run_test()
         fetch_finished = true;
     });
     const auto deadline = std::chrono::steady_clock::now() + 3s;
-    while (reader.get_message_reading_sequence() != resume_sequence && !fetch_finished &&
+    while (!loss_reported && !fetch_finished &&
         std::chrono::steady_clock::now() < deadline)
     {
         std::this_thread::yield();
     }
-    const bool resumed = reader.get_message_reading_sequence() == resume_sequence;
+    const bool resumed = loss_reported &&
+        reader.get_message_reading_sequence() == resume_sequence;
+    ok &= sintra::test::assert_true(resumed && !fetch_finished &&
+        names.resolve("discarded-publication", [](const std::string&) {
+            return sintra::invalid_instance_id;
+        }) == sintra::invalid_instance_id,
+        k_prefix, "loss must clear cached names before fetch waits for new traffic");
     if (resumed) {
         write_message(writer, 4, "after resynchronization", values);
     }
