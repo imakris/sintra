@@ -15,6 +15,7 @@
 #include "test_environment.h"
 
 #include <atomic>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <csignal>
@@ -38,8 +39,13 @@
 #include <system_error>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 #include <cwchar>
+
+#if defined(__APPLE__) && defined(__MACH__) && !defined(SINTRA_BACKEND_DARWIN)
+    #error "macOS semaphore tests must exercise the native os_sync backend."
+#endif
 
 #if defined(_WIN32)
 #include <process.h>
@@ -177,6 +183,9 @@ void test_basic_semantics()
     const auto timeout_start = std::chrono::steady_clock::now();
     const bool timed_out     = sem.timed_wait(timeout_start + std::chrono::milliseconds(80));
     REQUIRE_FALSE(timed_out);
+#if defined(__APPLE__) && defined(__MACH__)
+    REQUIRE_LT(std::chrono::steady_clock::now() - timeout_start, std::chrono::seconds(2));
+#endif
 
     std::atomic<bool> signal_wait_entered{false};
     std::atomic<bool> signal_wait_completed{false};
@@ -197,6 +206,110 @@ void test_basic_semantics()
 
     REQUIRE_FALSE(sem.try_wait());
 }
+
+#if defined(__APPLE__) && defined(__MACH__)
+void test_native_wait_on_address()
+{
+    constexpr auto wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
+    constexpr auto wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
+    using clock = std::chrono::steady_clock;
+    auto wait_until = [&](void* address, clock::time_point deadline) {
+        for (;;) {
+            const auto now = clock::now();
+            const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                deadline - now).count();
+            errno = 0;
+            const int result = os_sync_wait_on_address_with_timeout(address, 0, 4,
+                wait_flags, OS_CLOCK_MACH_ABSOLUTE_TIME,
+                static_cast<uint64_t>(std::max<int64_t>(remaining, 1)));
+            const int error = errno;
+            if (result >= 0 || error != EINTR) {
+                return std::pair{result, error};
+            }
+        }
+    };
+    auto wait_once = [&](void* address) {
+        const auto started = clock::now();
+        const auto [result, error] = wait_until(address, started + std::chrono::milliseconds(20));
+        REQUIRE_EQ(-1, result);
+        REQUIRE_EQ(ETIMEDOUT, error);
+        REQUIRE_GE(clock::now() - started, std::chrono::milliseconds(10));
+    };
+
+    std::atomic<uint32_t> local_word{0};
+    wait_once(&local_word);
+
+    std::atomic<bool> entered{false};
+    std::atomic<bool> local_done{false};
+    std::pair<int, int> local_outcome{-1, 0};
+    std::thread local_waiter([&]() {
+        entered.store(true, std::memory_order_release);
+        local_outcome = wait_until(&local_word, clock::now() + std::chrono::seconds(2));
+        local_done.store(true, std::memory_order_release);
+    });
+    while (!entered.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    bool local_woke = false;
+    const auto local_deadline = clock::now() + std::chrono::seconds(1);
+    while (!local_done.load(std::memory_order_acquire) && clock::now() < local_deadline) {
+        if (os_sync_wake_by_address_any(&local_word, 4, wake_flags) == 0) {
+            local_woke = true;
+        }
+        else if (errno != ENOENT) {
+            break;
+        }
+        std::this_thread::yield();
+    }
+    local_waiter.join();
+    REQUIRE_TRUE(local_woke);
+    REQUIRE_GE(local_outcome.first, 0);
+
+    void* mapping = ::mmap(nullptr, sizeof(std::atomic<uint32_t>),
+        PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (mapping == MAP_FAILED) {
+        throw std::system_error(errno, std::generic_category(), "mmap");
+    }
+    struct Mapping_guard {
+        void* address;
+        std::size_t size;
+        ~Mapping_guard() { ::munmap(address, size); }
+    } mapping_guard{mapping, sizeof(std::atomic<uint32_t>)};
+    auto* shared_word = new (mapping) std::atomic<uint32_t>(0);
+    wait_once(shared_word);
+    const pid_t child = ::fork();
+    if (child == -1) {
+        throw std::system_error(errno, std::generic_category(), "fork");
+    }
+    if (child == 0) {
+        const auto outcome = wait_until(shared_word, clock::now() + std::chrono::seconds(2));
+        std::_Exit(outcome.first >= 0 ? 0 : 2);
+    }
+    bool process_woke = false;
+    const auto process_deadline = clock::now() + std::chrono::seconds(1);
+    int status = 0;
+    pid_t waited = 0;
+    while (waited == 0 && clock::now() < process_deadline) {
+        if (os_sync_wake_by_address_any(shared_word, 4, wake_flags) == 0) {
+            process_woke = true;
+        }
+        else if (errno != ENOENT) {
+            break;
+        }
+        do { waited = ::waitpid(child, &status, WNOHANG); }
+        while (waited == -1 && errno == EINTR);
+        std::this_thread::yield();
+    }
+    if (waited == 0) {
+        do { waited = ::waitpid(child, &status, 0); }
+        while (waited == -1 && errno == EINTR);
+    }
+    REQUIRE_TRUE(process_woke);
+    REQUIRE_EQ(child, waited);
+    REQUIRE_TRUE(WIFEXITED(status));
+    REQUIRE_EQ(0, WEXITSTATUS(status));
+}
+#endif
 
 void test_timeout_and_overflow_edges()
 {
@@ -730,6 +843,9 @@ int main(int argc, char* argv[])
 
     const std::vector<Test_case> tests = {
         {"basic_semantics", test_basic_semantics, false},
+#if defined(__APPLE__) && defined(__MACH__)
+        {"native_wait_on_address", test_native_wait_on_address, false},
+#endif
         {"timeout_and_overflow_edges", test_timeout_and_overflow_edges, false},
         {"release_local_handle_idempotent", test_release_local_handle_idempotent, false},
         {"threaded_producer_consumer", test_threaded_producer_consumer, true},
