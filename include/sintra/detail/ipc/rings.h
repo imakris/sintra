@@ -3419,6 +3419,22 @@ private:
     std::atomic<bool>                      m_evicted_since_last_wait{false};
 
 protected:
+    // Only short memory accesses belong inside this gate. In particular, do
+    // not wait, allocate, or invoke application callbacks while excluding eviction.
+    template <typename F>
+    bool with_guarded_read(F&& read)
+    {
+        spinlock::locker lock(c.rs_stack_spinlock);
+        const auto state = c.reading_sequences[m_rs_index].data.load_state();
+        if (!m_reading || state.status() != Ring<T, true>::READER_STATE_ACTIVE ||
+            !state.guard_present())
+        {
+            return false;
+        }
+        read();
+        return true;
+    }
+
     std::atomic<bool>                      m_reading                = false;
     std::atomic<bool>                      m_reading_lock           = false;
 

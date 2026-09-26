@@ -83,6 +83,7 @@ managed_child_spawn_admission_contract_test               1
 managed_child_stale_unpublish_contract_test               1
 managed_process_publish_test                             1
 message_args_traits_test                                 5
+message_reader_owned_frame_test                          1
 parent_child_targeted_rpc_test                          10
 ping_pong_multi_test                                   100
 ping_pong_test                                          50

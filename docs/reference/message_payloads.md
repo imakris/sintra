@@ -109,7 +109,7 @@ Contract:
 - Variable-buffer-compatible containers must expose `size()`, `begin()`, and
   `end()`, be constructible from an iterator range, and have a trivially
   copyable element type.
-- `variable_buffer` only lives inside ring buffers. Application code generally
+- `variable_buffer` lives inside a complete serialized message frame. Application code generally
   interacts with `typed_variable_buffer<T>` or one of the declared aliases such
   as `message_string`.
 - `typed_variable_buffer<T>::operator T()` copies the trailing bytes of
@@ -118,8 +118,8 @@ Contract:
 - The data referenced by a variable-buffer field is stored inline at the
   end of the message, immediately after the body. Lifetime is bounded by
   the surrounding message; once the handler returns or the
-  [`sintra::receive`](receive.md) scope ends, the data may be reused by
-  the ring writer.
+  [`sintra::receive`](receive.md) scope ends, the reader may reuse its
+  dispatch frame storage.
 - Copy variable-buffer fields out before any subsequent message
   processing if they must outlive the current handler or `receive`
   scope. Conversion to `T` (for example `std::string s = msg.text;`) is
@@ -137,7 +137,9 @@ Contract:
 Threading and lifecycle:
 
 - Construction happens on the sending thread, in place inside the request
-  ring. Reader threads observe the message after the writer publishes it.
+  ring. After publication, a reader copies the complete frame, including its
+  trailing data, into aligned reader-owned storage before dispatch. Producer
+  progress or reader eviction cannot change the frame during its handler.
 - Variable-buffer fields share their lifetime with the enclosing message
   buffer; do not retain raw pointers from `data_address()` past the
   handler scope.

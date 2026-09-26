@@ -84,10 +84,10 @@ Contract:
 Threading and lifecycle:
 
 - Messages are constructed in-place inside the request ring of the
-  sending process. Slot handlers receive them by reference on a Sintra
-  reader thread.
+  sending process. A Sintra reader thread copies each complete frame into
+  reader-owned storage and passes it by reference to slot handlers.
 - Variable-buffer fields (`message_string`, `typed_variable_buffer<T>`)
-  reference ring memory. Copy them out before the handler returns or the
+  reference that frame's trailing data. Copy them out before the handler returns or the
   receive scope ends if they must outlive that point.
 
 Failures:

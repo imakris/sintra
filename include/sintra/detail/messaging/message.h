@@ -8,11 +8,15 @@
 #include "../utility.h"
 #include "../messaging/message_args.h"
 
+#include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <format>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -42,7 +46,7 @@ constexpr int      message_ring_size = 0x200000;
   //       \//       \//       \//       \//       \//       \//       \//
 
 
-// This type only lives inside ring buffers.
+// This descriptor lives inside a complete serialized message frame.
 struct variable_buffer
 {
     // this is set in the constructor of the derived type
@@ -465,7 +469,7 @@ struct corrupted_message_exception : public std::runtime_error
 template <typename T>
 sintra::type_id_type get_type_id();
 
-// This type only lives inside ring buffers.
+// Messages are constructed in the ring and copied as complete frames for dispatch.
 
 template <
     typename T,
@@ -559,8 +563,8 @@ struct Message: public Message_prefix, public T
 
 // Mark sintra::Message payloads as explicitly allowed non-trivial ring payloads.
 // They are constructed in-place inside the ring, but their layout and lifetime
-// are controlled by the messaging layer and do not own heap memory beyond the
-// ring mapping itself.
+// are controlled by the messaging layer and do not own memory outside their
+// complete serialized frame.
 template <typename T, typename RT, type_id_type ID, typename EXPORTER>
 struct ring_payload_traits<Message<T, RT, ID, EXPORTER>>
 {
@@ -784,115 +788,158 @@ struct Message_ring_R: Ring_R<char>
 {
     Message_ring_R(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0):
         Ring_R(directory, get_base_filename(prefix, id, occurrence), message_ring_size),
-        m_id(id)
+        m_id(id),
+        m_channel(prefix)
     {}
 
+    Range<char> start_reading(size_t num_trailing_elements = 0)
+    {
+        auto range = Ring_R::start_reading(num_trailing_elements);
+        m_message_reading_sequence = reading_sequence();
+        return range;
+    }
 
     void done_reading()
     {
         Ring_R::done_reading();
         m_range = decltype(m_range)();
+        m_message_reading_sequence = reading_sequence();
     }
 
-    // Returns a pointer to the buffer of the message
-    // If there is no message to read, it blocks.
+    // The returned complete frame is owned by this reader until the next fetch.
+    // If there is no message to read, this blocks without holding the copy gate.
     Message_prefix* fetch_message()
     {
-        // if all the messages in the reading buffer have been read
-        if (m_range.begin == m_range.end) {
-            // if this is not an uninitialized state
-            if (m_reading) {
-                // finalize the reading
-                done_reading_new_data();
-            }
-            else {
-                // initialize for all subsequent reads
-                start_reading();
-            }
+        if (!m_reading) {
+            start_reading();
+        }
 
-            // start with a new reading buffer. this will block until there is something to read.
-            while (true) {
+        while (true) {
+            if (m_range.begin == m_range.end) {
+                done_reading_new_data();
+                report_eviction(reading_sequence());
+
                 auto range = wait_for_new_data();
+                const auto available = range.begin ? size_t(range.end - range.begin) : 0;
+                report_eviction(reading_sequence() - available);
                 if (!range.begin) {
-                    if (consume_eviction_notification()) {
-                        continue;
-                    }
                     if (is_stopping()) {
                         return nullptr;
                     }
                     continue;
                 }
                 m_range = range;
-                break;
             }
+
+            bool copied = false;
+            const char* frame_error = nullptr;
+            {
+                bool expected = false;
+                detail::Spin_backoff backoff;
+                while (!m_reading_lock.compare_exchange_strong(expected, true)) {
+                    expected = false;
+                    backoff.spin();
+                }
+                struct Read_unlock
+                {
+                    std::atomic<bool>& m_lock;
+                    ~Read_unlock() { m_lock = false; }
+                } unlock{m_reading_lock};
+
+                if (!m_reading) {
+                    return nullptr;
+                }
+
+                copied = with_guarded_read([&]() {
+                    frame_error = copy_next_frame();
+                });
+            }
+            if (frame_error) {
+                throw corrupted_message_exception(frame_error);
+            }
+            if (copied) {
+                return reinterpret_cast<Message_prefix*>(m_frame->bytes.data());
+            }
+
+            // An eviction invalidates the unread mapped range, even when a
+            // previous frame from that batch remains valid in owned storage.
+            m_range = {};
+            handle_eviction_if_needed();
+            report_eviction(reading_sequence());
         }
-
-        bool f = false;
-        detail::Spin_backoff backoff;
-        while (!m_reading_lock.compare_exchange_strong(f, true)) {
-            f = false;
-            backoff.spin();
-        }
-
-        //m_reading_lock
-        if (!m_reading) {
-            m_reading_lock = false;
-            return nullptr;
-        }
-
-        auto fail = [this](const char* reason) -> Message_prefix*
-        {
-            m_reading_lock = false;
-            throw corrupted_message_exception(reason);
-        };
-
-        if (m_range.end < m_range.begin) {
-            return fail("Sintra message ring contains an invalid readable range.");
-        }
-
-        const auto available_bytes = static_cast<size_t>(m_range.end - m_range.begin);
-        if (available_bytes < sizeof(Message_prefix)) {
-            return fail("Sintra message ring contains a truncated message prefix.");
-        }
-
-        Message_prefix* ret = reinterpret_cast<Message_prefix*>(m_range.begin);
-        if (ret->magic != message_magic) {
-            return fail("Sintra message ring contains an invalid message magic.");
-        }
-
-        const uint32_t bytes_to_next = ret->bytes_to_next_message;
-        if (bytes_to_next < sizeof(Message_prefix)) {
-            return fail("Sintra message ring contains an invalid message length.");
-        }
-
-        if ((bytes_to_next % detail::message_frame_alignment) != 0) {
-            return fail("Sintra message ring contains a misaligned message frame length.");
-        }
-
-        if (bytes_to_next >= detail::message_frame_size_limit) {
-            return fail("Sintra message ring contains a message larger than the maximum frame size.");
-        }
-
-        if (bytes_to_next > available_bytes) {
-            return fail("Sintra message ring contains a message that exceeds the readable range.");
-        }
-
-        m_range.begin += bytes_to_next;
-
-        m_reading_lock = false;
-        return ret;
     }
 
     sequence_counter_type get_message_reading_sequence() const
     {
-        return reading_sequence() - (m_range.end - m_range.begin);
+        return m_message_reading_sequence.load();
     }
 
 public:
     const uint64_t m_id;
 
 protected:
-    Range<char>    m_range;
+    Range<char> m_range;
+
+private:
+    const char* copy_next_frame()
+    {
+        if (m_range.end < m_range.begin) {
+            return "Sintra message ring contains an invalid readable range.";
+        }
+
+        const auto available_bytes = static_cast<size_t>(m_range.end - m_range.begin);
+        if (available_bytes < sizeof(Message_prefix)) {
+            return "Sintra message ring contains a truncated message prefix.";
+        }
+
+        const auto* prefix = reinterpret_cast<const Message_prefix*>(m_range.begin);
+        if (prefix->magic != message_magic) {
+            return "Sintra message ring contains an invalid message magic.";
+        }
+
+        const uint32_t bytes_to_next = prefix->bytes_to_next_message;
+        if (bytes_to_next < sizeof(Message_prefix)) {
+            return "Sintra message ring contains an invalid message length.";
+        }
+
+        if ((bytes_to_next % detail::message_frame_alignment) != 0) {
+            return "Sintra message ring contains a misaligned message frame length.";
+        }
+
+        if (bytes_to_next >= detail::message_frame_size_limit) {
+            return "Sintra message ring contains a message larger than the maximum frame size.";
+        }
+
+        if (bytes_to_next > available_bytes) {
+            return "Sintra message ring contains a message that exceeds the readable range.";
+        }
+
+        std::memcpy(m_frame->bytes.data(), m_range.begin, bytes_to_next);
+        m_range.begin += bytes_to_next;
+        m_message_reading_sequence = reading_sequence() - (m_range.end - m_range.begin);
+        return nullptr;
+    }
+
+    void report_eviction(sequence_counter_type resumed_sequence)
+    {
+        if (!consume_eviction_notification()) {
+            return;
+        }
+        const auto skipped_from = m_message_reading_sequence.exchange(resumed_sequence);
+        Log_stream(log_level::warning)
+            << "Sintra message reader evicted on " << m_channel << " ring for peer " << m_id
+            << "; discarded unread sequence interval [" << skipped_from << ", "
+            << resumed_sequence << "). Resuming at the published head; traffic was lost.\n";
+    }
+
+    struct alignas(detail::message_frame_alignment) frame_storage_t
+    {
+        std::array<char, detail::message_frame_size_limit> bytes;
+    };
+
+    std::unique_ptr<frame_storage_t> m_frame = std::make_unique<frame_storage_t>();
+    std::atomic<sequence_counter_type> m_message_reading_sequence{0};
+    const std::string m_channel;
 };
 
 

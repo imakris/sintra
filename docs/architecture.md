@@ -86,7 +86,17 @@ Ring_W<T> : Ring<T, false>   // Writer API
 3. Reader calls `done_reading()`: Decrements octile guard
 4. Writer blocks when entering a guarded octile
 
-**Eviction** (when enabled): If a reader lags by more than one full ring behind the writer, the writer can forcefully evict it, clearing its guard and marking its slot as EVICTED.
+**Eviction** (when enabled): The writer can evict a reader that lags by more than
+one full ring or keeps its next octile blocked beyond the writer's spin budget.
+Eviction clears the reader's guard and marks its slot as EVICTED.
+
+Message readers validate and copy one complete frame into aligned reader-owned
+storage while briefly excluding eviction. No ring lock is held during dispatch,
+relay, or post-handler work, and the admitted frame remains valid until the next
+fetch. If eviction invalidates an unread batch, the reader discards that batch,
+warns about the skipped sequence interval, and resumes at the published head.
+This preserves bounded writer progress but permits traffic loss; it does not
+guarantee completion of RPCs whose requests or replies were lost to eviction.
 
 #### Ring Helper Utilities
 
