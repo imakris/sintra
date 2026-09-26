@@ -40,7 +40,8 @@ void emit_stale_run_directory(
     std::uint32_t                  index)
 {
     auto dir = base / ("stale_run_" + std::to_string(index));
-    std::filesystem::create_directories(dir);
+    sintra::test::require_true(sintra::detail::create_private_directory(dir),
+        "ring_cleanup_stress: ", "create private stale run directory");
 
     sintra::run_marker_record_t record{};
     record.pid                  = 100000u + index; // Very unlikely to collide with a real PID
@@ -84,8 +85,9 @@ int main(int argc, char* argv[])
 
     configure_temp_directory(temp_root);
 
-    const auto sintra_base = temp_root / "sintra";
-    std::filesystem::create_directories(sintra_base);
+    const auto sintra_base = sintra::detail::private_swarm_root();
+    sintra::test::require_true(sintra::detail::create_private_directory(sintra_base),
+        "ring_cleanup_stress: ", "create private swarm root");
 
     constexpr std::uint32_t k_initial_stale_runs = 48;
     for (std::uint32_t i = 0; i < k_initial_stale_runs; ++i) {

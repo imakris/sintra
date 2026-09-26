@@ -35,27 +35,32 @@ enum map_mode_t
 
 using map_options_t = int;
 
+enum class file_link_policy_t { follow, reject };
+
 class file_mapping
 {
 public:
     using size_type = std::uint64_t;
 
-    file_mapping(const char* filename, map_mode_t mode)
+    file_mapping(const char* filename, map_mode_t mode,
+        file_link_policy_t links = file_link_policy_t::follow)
     {
         if (!filename) {
             throw std::system_error(std::make_error_code(std::errc::invalid_argument),
                 "file_mapping: null filename");
         }
-        open_impl(std::filesystem::path(filename), mode);
+        open_impl(std::filesystem::path(filename), mode, links);
     }
 
-    file_mapping(const std::string& filename, map_mode_t mode)
-        : file_mapping(std::filesystem::path(filename), mode)
+    file_mapping(const std::string& filename, map_mode_t mode,
+        file_link_policy_t links = file_link_policy_t::follow)
+        : file_mapping(std::filesystem::path(filename), mode, links)
     {}
 
-    file_mapping(const std::filesystem::path& filename, map_mode_t mode)
+    file_mapping(const std::filesystem::path& filename, map_mode_t mode,
+        file_link_policy_t links = file_link_policy_t::follow)
     {
-        open_impl(filename, mode);
+        open_impl(filename, mode, links);
     }
 
     file_mapping(file_mapping&& other) noexcept
@@ -145,7 +150,7 @@ public:
 #endif
 
 private:
-    void open_impl(const std::filesystem::path& filename, map_mode_t mode)
+    void open_impl(const std::filesystem::path& filename, map_mode_t mode, file_link_policy_t links)
     {
         close_impl();
 
@@ -158,11 +163,24 @@ private:
         auto wide = filename.wstring();
         DWORD desired_access = (mode == read_write) ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
         DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        const DWORD attributes = FILE_ATTRIBUTE_NORMAL |
+            (links == file_link_policy_t::reject ? FILE_FLAG_OPEN_REPARSE_POINT : 0);
         HANDLE file = ::CreateFileW(wide.c_str(), desired_access, share_mode, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            OPEN_EXISTING, attributes, nullptr);
         if (file == INVALID_HANDLE_VALUE) {
             throw std::system_error(::GetLastError(), std::system_category(),
                 "CreateFileW failed");
+        }
+
+        if (links == file_link_policy_t::reject) {
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (!GetFileInformationByHandle(file, &info) ||
+                (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            {
+                ::CloseHandle(file);
+                throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                    "file_mapping: reparse point rejected");
+            }
         }
 
         LARGE_INTEGER size{};
@@ -181,6 +199,9 @@ private:
 #else
         int flags = (mode == read_write) ? O_RDWR : O_RDONLY;
 #endif
+        if (links == file_link_policy_t::reject) {
+            flags |= O_NOFOLLOW;
+        }
         const auto* native = filename.c_str();
         int fd;
         do {

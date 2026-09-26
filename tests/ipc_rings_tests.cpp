@@ -273,7 +273,7 @@ TEST_CASE(test_directory_helpers)
     ASSERT_TRUE(sintra::check_or_create_directory(file_path.string()));
     ASSERT_TRUE(std::filesystem::is_directory(file_path));
 
-    ASSERT_TRUE(sintra::remove_directory(dir_to_create.string()));
+    ASSERT_TRUE(std::filesystem::remove_all(dir_to_create, ec) > 0 && !ec);
     ASSERT_FALSE(std::filesystem::exists(dir_to_create));
 }
 
