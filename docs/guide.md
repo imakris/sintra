@@ -1090,7 +1090,7 @@ threading rules.
 | --- | --- | --- |
 | Slot or RPC handler | Protect shared state with mutexes/atomics; emit messages deliberately. | Assume handlers are serialized with application threads. |
 | Slot or RPC handler | Use slots, RPC continuations, or control-thread receives for blocking waits. | Call `receive<T>()` from the handler. |
-| Local RPC dispatch reader | Submit async RPCs and consume results after returning. | Block on a pending same-process transported RPC; it throws `std::logic_error`. |
+| Local RPC dispatch reader | Consume previously dispatched async results, or use a finite deadline. | Submit a synchronous same-process transported RPC; it throws `std::logic_error` before submission. |
 | Slot or RPC handler | Use fences only when handler-context exclusions are OK. | Assume the current handler was fenced. |
 | Slot or RPC handler | Keep shutdown decisions on a control thread. | Call `leave()` from handler or post-handler callbacks. |
 | Async RPC caller | Use `get_until` for bounded result retrieval; drop the handle to abandon caller-side interest. | Treat deadline expiry as remote cancellation. |
@@ -1111,10 +1111,12 @@ same-process non-strict targets; use `SINTRA_RPC_STRICT` when a local async call
 must use transport.
 
 A synchronous same-process transported call from the coordinator-ring request
-reader throws `std::logic_error` before submitting the request. Waiting on a
-pending async result from that reader also throws; the reader must return to
-dispatch the request. Direct non-strict calls, completed results, and handlers
-on other coordinator peer readers retain their normal behavior.
+reader throws `std::logic_error` before submitting the request. An async handle
+may already have dispatched and need only independent reply delivery, so its
+wait does not apply that guard. Callers must avoid indefinite waits when the
+request still needs their reader to dispatch; consume the result after returning
+or use `get_until(deadline)`. Direct non-strict calls, completed results, and
+handlers on other coordinator peer readers retain their normal behavior.
 
 `Rpc_handle<T>` is move-only. Destroying a pending handle abandons caller-side
 interest but does not cancel remote execution.

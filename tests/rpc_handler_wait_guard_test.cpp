@@ -1,17 +1,52 @@
-#include <sintra/sintra.h>
-
-#include "test_utils.h"
-
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+// Test-only access to hold a real registered reply before its delivery.
+#define private public
+#include <sintra/sintra.h>
+#undef private
+
+#include "test_utils.h"
 
 namespace {
 
 constexpr int k_reply = 17;
 constexpr const char* k_coordinator_name = "rpc_wait_guard_coordinator";
+
+std::mutex s_reply_mutex;
+std::condition_variable s_reply_condition;
+bool s_invoked = false;
+bool s_finish_invocation = false;
+bool s_reply_held = false;
+bool s_release_reply = false;
+thread_local bool s_wait_for_earlier = false;
+
+void release_earlier_reply()
+{
+    if (s_wait_for_earlier) {
+        std::lock_guard<std::mutex> lock(s_reply_mutex);
+        // The wait hook holds the handle mutex. The independent reply reader
+        // can proceed now, but can deliver only after get() actually waits.
+        s_release_reply = true;
+        s_reply_condition.notify_all();
+    }
+}
 
 class Guard_service : public sintra::Derived_transceiver<Guard_service>
 {
@@ -26,6 +61,64 @@ public:
     SINTRA_RPC_STRICT(echo)
     SINTRA_RPC(direct_echo)
 
+    int held_echo()
+    {
+        std::unique_lock<std::mutex> lock(s_reply_mutex);
+        s_invoked = true;
+        s_reply_condition.notify_all();
+        if (!s_reply_condition.wait_for(lock, std::chrono::seconds(5), [] { return s_finish_invocation; })) {
+            throw std::runtime_error("Earlier invocation was not released");
+        }
+        return k_reply;
+    }
+
+    SINTRA_RPC_STRICT(held_echo)
+
+    void start_earlier()
+    {
+        m_pending.emplace(rpc_async_held_echo(instance_id()));
+    }
+
+    SINTRA_RPC_STRICT(start_earlier)
+
+    void prepare_earlier()
+    {
+        rpc_async_start_earlier(instance_id()).get_until(
+            std::chrono::steady_clock::now() + std::chrono::seconds(3));
+        {
+            std::unique_lock<std::mutex> lock(s_reply_mutex);
+            if (!s_reply_condition.wait_for(lock, std::chrono::seconds(5), [] { return s_invoked; })) {
+                throw std::runtime_error("Earlier invocation did not dispatch");
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(sintra::s_mproc->m_return_handlers_mutex);
+            for (auto& entry : sintra::s_mproc->m_active_return_handlers) {
+                auto& handler = entry.second;
+                if (handler.instance_id != instance_id()) {
+                    continue;
+                }
+                auto deliver = handler.return_handler;
+                handler.return_handler = [deliver](const sintra::Message_prefix& message) {
+                    std::unique_lock<std::mutex> lock(s_reply_mutex);
+                    s_reply_held = true;
+                    s_reply_condition.notify_all();
+                    if (!s_reply_condition.wait_for(lock, std::chrono::seconds(5), [] { return s_release_reply; })) {
+                        std::fprintf(stderr, "Earlier reply was not released\n");
+                    }
+                    lock.unlock();
+                    deliver(message);
+                };
+            }
+        }
+        std::unique_lock<std::mutex> lock(s_reply_mutex);
+        s_finish_invocation = true;
+        s_reply_condition.notify_all();
+        if (!s_reply_condition.wait_for(lock, std::chrono::seconds(5), [] { return s_reply_held; })) {
+            throw std::runtime_error("Earlier reply did not reach its reply reader");
+        }
+    }
+
     void prepare_completed()
     {
         m_completed.emplace(rpc_async_echo(instance_id()));
@@ -39,24 +132,31 @@ public:
             case 0:
             case 6:
                 return rpc_echo(instance_id());
-            case 1:
-                return rpc_async_echo(instance_id()).get();
-            case 2:
-                return rpc_async_echo(instance_id()).get_until(
-                    std::chrono::steady_clock::now() + std::chrono::seconds(3));
+            case 2: {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+                try {
+                    (void)rpc_async_echo(instance_id()).get_until(deadline);
+                }
+                catch (const sintra::rpc_timeout&) {
+                    return std::chrono::steady_clock::now() >= deadline ? k_reply : 0;
+                }
+                return 0;
+            }
             case 3:
                 return rpc_direct_echo(instance_id());
             case 4:
                 return m_completed->get();
-            case 5:
-                m_pending.emplace(rpc_async_echo(instance_id()));
+            case 8:
+                s_wait_for_earlier = true;
                 try {
-                    (void)m_pending->get();
+                    const int value = m_pending->get();
+                    s_wait_for_earlier = false;
+                    return value;
                 }
-                catch (const std::logic_error&) {
-                    return k_reply;
+                catch (...) {
+                    s_wait_for_earlier = false;
+                    throw;
                 }
-                return 0;
             case 7:
                 try {
                     (void)rpc_async_echo(instance_id()).get_until(std::chrono::steady_clock::now());
@@ -73,12 +173,6 @@ public:
         return 0;
     }
 
-    bool finish_pending()
-    {
-        return m_pending->get_until(
-            std::chrono::steady_clock::now() + std::chrono::seconds(3)) == k_reply;
-    }
-
     SINTRA_RPC_STRICT(exercise)
 
 private:
@@ -90,24 +184,31 @@ private:
 bool check_local_reader(Guard_service& service)
 {
     service.prepare_completed();
-    for (int mode = 0; mode != 6; ++mode) {
+    bool passed = true;
+    for (int mode : {0, 2, 3, 4, 7, 8}) {
         try {
+            if (mode == 8) {
+                service.prepare_earlier();
+                sintra::detail::test_hooks::s_rpc_wait_pending.store(release_earlier_reply);
+            }
             const auto previous_calls = service.echo_calls();
             const int actual = Guard_service::rpc_async_exercise(service.instance_id(), mode).get_until(
                 std::chrono::steady_clock::now() + std::chrono::seconds(2));
-            const int expected = mode < 3 ? 1 : k_reply;
+            sintra::detail::test_hooks::s_rpc_wait_pending.store(nullptr);
+            const int expected = mode == 0 ? 1 : k_reply;
             if (actual != expected) {
                 std::fprintf(stderr, "RPC wait guard mode %d returned %d, expected %d\n",
                     mode, actual, expected);
-                return false;
+                passed = false;
             }
-            if (mode == 0) {
-                // A later request proves the rejected synchronous call did
-                // not leave a transported invocation queued ahead of it.
+            if (mode == 0 || mode == 2 || mode == 7) {
+                // A later request proves synchronous rejection precedes submission,
+                // while an async timeout leaves its transported invocation queued.
                 (void)Guard_service::rpc_async_echo(service.instance_id()).get_until(
                     std::chrono::steady_clock::now() + std::chrono::seconds(3));
-                if (service.echo_calls() != previous_calls + 1) {
-                    std::fprintf(stderr, "Rejected synchronous RPC was still submitted\n");
+                const unsigned expected_calls = previous_calls + (mode == 0 ? 1 : 2);
+                if (service.echo_calls() != expected_calls) {
+                    std::fprintf(stderr, "RPC wait mode %d changed request submission/execution\n", mode);
                     return false;
                 }
             }
@@ -120,9 +221,8 @@ bool check_local_reader(Guard_service& service)
             return false;
         }
     }
-    return service.finish_pending() &&
-        Guard_service::rpc_async_exercise(service.instance_id(), 7).get_until(
-            std::chrono::steady_clock::now() + std::chrono::seconds(3)) == k_reply;
+    sintra::detail::test_hooks::s_rpc_wait_pending.store(nullptr);
+    return passed;
 }
 
 int client()

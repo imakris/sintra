@@ -1044,9 +1044,13 @@ void Rpc_handle<RT>::wait() const
     }
 
     unique_lock<mutex> lock(m_state->control.keep_waiting_mutex);
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (m_state->control.keep_waiting) {
-        detail::check_rpc_wait_context(m_state->control.remote_instance);
+        if (auto callback = detail::test_hooks::s_rpc_wait_pending.load(std::memory_order_acquire)) {
+            callback();
+        }
     }
+#endif
     m_state->control.keep_waiting_condition.wait(lock, [&] { return !m_state->control.keep_waiting; });
     lock.unlock();
 
@@ -1071,9 +1075,6 @@ detail::Rpc_wait_status Rpc_handle<RT>::wait_until(
         return Rpc_wait_status::completed;
     }
 
-    if (Clock::now() < deadline) {
-        detail::check_rpc_wait_context(m_state->control.remote_instance);
-    }
     if (m_state->control.keep_waiting_condition.wait_until(
             lock, deadline, [&] { return !m_state->control.keep_waiting; }))
     {

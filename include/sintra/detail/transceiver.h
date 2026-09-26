@@ -938,6 +938,10 @@ inline constexpr const char* k_stage_rpc_response_before_fallback =
     "rpc_response/before_fallback";
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
+// Runs under the pending state mutex, before wait releases it for reply delivery.
+using Rpc_wait_callback = void (*)();
+inline std::atomic<Rpc_wait_callback> s_rpc_wait_pending{nullptr};
+
 using Rpc_get_until_stage_callback = void (*)(const char* stage);
 inline std::atomic<Rpc_get_until_stage_callback> s_rpc_get_until_stage{nullptr};
 

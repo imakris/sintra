@@ -55,10 +55,6 @@ registration that lets the local reader thread resolve the call.
   caller-side result.
 - `std::runtime_error` — when `get()` is called on an abandoned handle
   or on a handle that holds no state.
-- `std::logic_error` — when a pending same-process RPC would block the
-  coordinator-ring request reader needed to dispatch it. The guard preserves
-  the handle; submission itself does not block, and its result can be consumed
-  after the handler returns.
 
 ## Use when
 
@@ -82,11 +78,13 @@ registration that lets the local reader thread resolve the call.
 
 ## Threading and lifecycle
 
-- Methods are safe to call from the thread that owns the handle. Blocking a
-  pending same-process result from its dispatch reader throws rather than
-  deadlocking. Completed results and polling with an expired deadline do not
-  block. A coordinator reader serving another process's request ring may wait
-  while the coordinator's own request reader dispatches the local call.
+- Methods are safe to call from the thread that owns the handle. A handler may
+  consume a previously dispatched same-process RPC while its reply arrives on
+  the independent reply reader. The caller must avoid an indefinite `get()`
+  when completion still needs the calling request reader, for example an async
+  local request submitted by that handler. Use `get_until(deadline)` to bound
+  such a wait, or consume the result after the handler returns. The runtime
+  does not infer dispatch status from a pending handle.
 - A pending handle keeps an internal return-handler entry alive until it
   reaches a terminal state. `get_until(deadline)` timeout and the destructor
   release that entry promptly.
