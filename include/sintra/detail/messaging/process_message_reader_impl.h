@@ -985,6 +985,11 @@ void Process_message_reader::request_reader_function()
                             << "; rejecting the request. "
                             << diagnostic_summary() << "\n";
 
+                        if (m->function_instance_id == invalid_instance_id) {
+                            publish_request_progress(m_in_req_c->get_message_reading_sequence());
+                            continue;
+                        }
+
                         const std::string reason     = "RPC function is not available.";
                         auto*             placed_msg =
                             s_mproc->m_out_rep_c->write<Transceiver::exception>(
