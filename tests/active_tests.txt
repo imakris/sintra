@@ -109,6 +109,7 @@ ring_lifecycle_anchor_race_process_test                 10
 ring_lifecycle_attachment_recovery_process_test         10
 rpc_append_test                                        100
 rpc_async_lifecycle_test                                10
+rpc_handler_wait_guard_test                              1
 rpc_bounded_result_test                                  3
 rpc_destruction_race_test                                3
 rpc_self_destruction_guard_test                          3

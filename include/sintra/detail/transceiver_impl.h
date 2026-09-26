@@ -1026,6 +1026,22 @@ Rpc_handle<RT>& Rpc_handle<RT>::operator=(Rpc_handle&& other) noexcept
     return *this;
 }
 
+namespace detail {
+
+inline void check_rpc_wait_context(instance_id_type target)
+{
+    // Local transported requests arrive on the coordinator ring. Its reader
+    // cannot dispatch them while waiting; other coordinator peer readers can.
+    if (is_local_instance(target) && s_tl_current_request_reader &&
+        s_tl_current_request_reader->get_process_instance_id() == process_of(s_coord_id))
+    {
+        throw std::logic_error(
+            "A same-process transported RPC cannot block its own request reader.");
+    }
+}
+
+} // namespace detail
+
 template<typename RT>
 void Rpc_handle<RT>::wait() const
 {
@@ -1034,6 +1050,9 @@ void Rpc_handle<RT>::wait() const
     }
 
     unique_lock<mutex> lock(m_state->control.keep_waiting_mutex);
+    if (m_state->control.keep_waiting) {
+        detail::check_rpc_wait_context(m_state->control.remote_instance);
+    }
     m_state->control.keep_waiting_condition.wait(lock, [&] { return !m_state->control.keep_waiting; });
     lock.unlock();
 
@@ -1058,6 +1077,9 @@ detail::Rpc_wait_status Rpc_handle<RT>::wait_until(
         return Rpc_wait_status::completed;
     }
 
+    if (Clock::now() < deadline) {
+        detail::check_rpc_wait_context(m_state->control.remote_instance);
+    }
     if (m_state->control.keep_waiting_condition.wait_until(
             lock, deadline, [&] { return !m_state->control.keep_waiting; }))
     {
@@ -1507,6 +1529,7 @@ Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
         return;
     }
 
+    detail::check_rpc_wait_context(instance_id);
     auto handle = rpc_async_impl<RPCTC, MESSAGE_T, Args...>(
         instance_id,
         std::forward<Args>(args)...);
