@@ -283,18 +283,28 @@ void test_native_wait_on_address()
     }
     if (child == 0) {
         const auto outcome = wait_until(shared_word, clock::now() + std::chrono::seconds(2));
+        if (outcome.first < 0) {
+            std::fprintf(stderr, "native shared child wait failed: errno=%d\n", outcome.second);
+            std::fflush(stderr);
+        }
         std::_Exit(outcome.first >= 0 ? 0 : 2);
     }
     bool process_woke = false;
+    int last_wake_error = 0;
+    unsigned wake_attempts = 0;
     const auto process_deadline = clock::now() + std::chrono::seconds(1);
     int status = 0;
     pid_t waited = 0;
     while (waited == 0 && clock::now() < process_deadline) {
+        ++wake_attempts;
         if (os_sync_wake_by_address_any(shared_word, 4, wake_flags) == 0) {
             process_woke = true;
         }
-        else if (errno != ENOENT) {
-            break;
+        else {
+            last_wake_error = errno;
+            if (last_wake_error != ENOENT) {
+                break;
+            }
         }
         do { waited = ::waitpid(child, &status, WNOHANG); }
         while (waited == -1 && errno == EINTR);
@@ -303,6 +313,12 @@ void test_native_wait_on_address()
     if (waited == 0) {
         do { waited = ::waitpid(child, &status, 0); }
         while (waited == -1 && errno == EINTR);
+    }
+    if (!process_woke) {
+        std::fprintf(stderr,
+            "native shared wake failed: attempts=%u last_errno=%d waited=%ld status=%d exit=%d\n",
+            wake_attempts, last_wake_error, static_cast<long>(waited), status,
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
     }
     REQUIRE_TRUE(process_woke);
     REQUIRE_EQ(child, waited);
