@@ -874,8 +874,33 @@ private:
 template<typename Derived_T>
 struct Derived_transceiver<Derived_T, void>: Transceiver, Derived_transceiver<Derived_T, empty_struct_t>
 {
-    using Transceiver::Transceiver;
     using Transceiver_type = Derived_T;
+
+    template <typename = void>
+    Derived_transceiver(const string& name = "", uint64_t id = 0)
+
+    :
+        Transceiver(static_cast<void*>(nullptr))
+    {
+        // The CRTP resolver initializers have run before a named constructor
+        // publishes. The user's most-derived members still initialize later.
+        construct(name, id);
+    }
+
+    template <typename = void>
+    Derived_transceiver(const char* name, uint64_t id = 0)
+
+    :
+        Derived_transceiver(string(name ? name : ""), id)
+    {}
+
+protected:
+    // Managed_process supplies its identity after the runtime exists.
+    Derived_transceiver(void* bootstrap)
+
+    :
+        Transceiver(bootstrap)
+    {}
 
 private:
 

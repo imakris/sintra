@@ -130,6 +130,7 @@ spinlock_recovery_test                                   1
 teardown_targeted_rpc_exception_test                     5
 tls_post_handler_test                                   20
 tn_type_hash_test                                       10
+typed_publication_test                                  1
 transceiver_ctor_test                                   10
 utility_test                                             1
 variable_buffer_alignment_test                           5
