@@ -350,7 +350,11 @@ These are **not selected by default** in `active_tests.txt`:
    python3 run_tests.py --build-dir ../build --config Debug
    ```
 
-Manual tests are only built when `SINTRA_BUILD_MANUAL_TESTS=ON`.
+Manual tests are only built when `SINTRA_BUILD_MANUAL_TESTS=ON`. The runner
+discovers their binaries under `tests/manual/`, including configuration
+subdirectories in multi-configuration builds. Windows CI builds these targets
+in Debug and Release; the crash-capture diagnostics are not selected for normal
+test runs.
 
 ## Test Runner Options
 

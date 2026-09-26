@@ -73,7 +73,7 @@ jobs:
         id: flags
         shell: bash
         run: |
-          CT="-DSINTRA_BUILD_TESTS=ON"
+          CT="-DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_MANUAL_TESTS=ON"
           CE="-DSINTRA_BUILD_EXAMPLES=OFF"
           CS="-DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON"
           if [ "${{ steps.changed.outputs.examples }}" = "true" ]; then

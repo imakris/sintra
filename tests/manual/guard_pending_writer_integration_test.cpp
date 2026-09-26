@@ -3,10 +3,8 @@
 // This test exercises the writer loop under timing/scheduling assumptions,
 // so it was moved from unit tests to avoid flaky CI failures.
 
-// Include test utilities FIRST to ensure all standard library headers are
-// included with proper access specifiers before the private/protected hack.
+// Include standard library headers before changing access specifiers below.
 #include <test_environment.h>
-#include <test_ring_utils.h>
 
 #include <atomic>
 #include <chrono>
@@ -24,6 +22,8 @@
 #include "sintra/rings.h"
 #undef private
 #undef protected
+
+#include <test_ring_utils.h>
 
 namespace {
 

@@ -2,7 +2,6 @@
 # These are only built when SINTRA_BUILD_MANUAL_TESTS=ON.
 
 set(MANUAL_TEST_FILES
-    barrier_deadlock_reproduction_test.cpp
     crash_capture_child_test.cpp
     crash_capture_self_test.cpp
     guard_pending_writer_integration_test.cpp

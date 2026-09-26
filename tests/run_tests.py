@@ -432,7 +432,8 @@ class TestRunner:
         # Multi-config builds place the same unsuffixed test target under each
         # configuration directory. Single-config builds use a flat tests/ dir.
         test_dirs_with_config = [
-            (config_name, build_dir / 'tests' / config_name.capitalize())
+            (config_name, test_root / config_name.capitalize())
+            for test_root in (build_dir / 'tests', build_dir / 'tests' / 'manual')
             for config_name in self.configurations
         ]
         existing_config_dirs = [
@@ -443,7 +444,8 @@ class TestRunner:
         if existing_config_dirs:
             self.test_dirs = existing_config_dirs
         else:
-            self.test_dirs = [(None, build_dir / 'tests')]
+            self.test_dirs = [(None, build_dir / 'tests'),
+                              (None, build_dir / 'tests' / 'manual')]
 
         self._debugger.prepare()
 
