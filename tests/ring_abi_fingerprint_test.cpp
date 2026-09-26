@@ -110,9 +110,10 @@ void test_attach_rejects_mismatched_fingerprint()
         (void)reader;
     }
 
-    // Controls from the previous shared-copy-lock protocol (ABI 9) and from the
-    // first ABI-10 layout, whose reader slots lacked namespace identities, must
-    // be rejected even when their size happens to match this build.
+    // Controls from the previous shared-copy-lock protocol (ABI 9), from the
+    // first ABI-10 layout, whose reader slots lacked namespace identities, and
+    // from ABI-10 revision 2, whose Windows writers rebuild ownership_mutex from
+    // writer_pid, must be rejected even when their size happens to match.
     const auto previous_fingerprint = [](std::uint64_t abi_version) {
         return sintra::detail::fnv1a_64({
             abi_version,
@@ -123,11 +124,28 @@ void test_attach_rejects_mismatched_fingerprint()
             static_cast<uint64_t>(sintra::num_reserved_service_instances),
         });
     };
-    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 2,
+    const auto revision_fingerprint = [](std::uint64_t revision) {
+        return sintra::detail::fnv1a_64({
+            sintra::detail::k_sintra_ring_abi_version,
+            revision,
+            static_cast<uint64_t>(sintra::num_process_index_bits),
+            static_cast<uint64_t>(sintra::max_process_index),
+            static_cast<uint64_t>(sintra::max_message_length),
+            static_cast<uint64_t>(sintra::assumed_cache_line_size),
+            static_cast<uint64_t>(sintra::num_reserved_service_instances),
+        });
+    };
+    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 3,
         k_failure_prefix,
-        "reader-slot namespace identities require ABI-10 layout revision 2");
+        "sole mutex writer recovery requires ABI-10 layout revision 3");
+    sintra::test::require_true(
+        revision_fingerprint(3) == sintra::detail::k_ring_abi_fingerprint,
+        k_failure_prefix,
+        "the revision fixture must reproduce this build's fingerprint");
 
-    for (const std::uint64_t wrong_fingerprint : {previous_fingerprint(9), previous_fingerprint(10)}) {
+    for (const std::uint64_t wrong_fingerprint :
+            {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(2)})
+    {
         sintra::test::require_true(wrong_fingerprint != sintra::detail::k_ring_abi_fingerprint,
             k_failure_prefix,
             "an earlier control layout must not share this build's fingerprint");

@@ -505,8 +505,12 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // Layout revision within the unreleased ring ABI version. Revision 2 of ABI 10
 // adds Linux namespace identities to reader slots and records FreeBSD start
 // stamps as uptime at fork; the first ABI-10 layout was fingerprinted without
-// this input, so each rejects the other's mappings.
-inline constexpr uint64_t k_ring_abi_layout_revision = 2;
+// this input, so each rejects the other's mappings. Revision 3 removes
+// writer_pid and leaves ownership_mutex as the only writer-recovery authority.
+// Revision-2 writers on Windows rebuild that mutex from writer_pid, which can
+// destroy a live revision-3 writer's ownership, so the two must not share a
+// control mapping.
+inline constexpr uint64_t k_ring_abi_layout_revision = 3;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_sintra_ring_abi_version,
@@ -2259,9 +2263,8 @@ struct Ring:
             }
         }
 
-        // Used to avoid accidentally having multiple writers on the same ring
-        // across processes. Only one writer may hold this at a time.
-        std::atomic<uint32_t>                writer_pid{0};
+        // Only one writer may hold this across processes. Its own dead-owner
+        // recovery is the only way a crashed writer's ownership is reclaimed.
         detail::interprocess_mutex           ownership_mutex;
 
         // The following synchronization structures may only be accessed between lock()/unlock().
@@ -2299,8 +2302,6 @@ struct Ring:
         {
             for (int i = 0; i < max_process_index; i++) { reading_sequences[i].data.v = invalid_sequence; }
             for (int i = 0; i < max_process_index; i++) { free_rs_stack.push(i); }
-
-            writer_pid = 0;
 
             // See the 'Note' in N4713 32.5 [Lock-free property], Par. 4.
             // The program is only valid if the conditions below are true.
@@ -3439,8 +3440,6 @@ struct Ring_W : Ring<T, false>
         Ring<T, false>::Ring(directory, data_filename, num_elements),
         c(*this->m_control)
     {
-        ensure_writer_mutex_consistency();
-
         // Single writer across processes
         if (!c.ownership_mutex.try_lock()) {
             throw ring_acquisition_failure_exception();
@@ -3454,8 +3453,7 @@ struct Ring_W : Ring<T, false>
             this->m_num_elements);
         cancel_requests();
         c.writer_closed.store(0, std::memory_order_release);
-        c.writer_pid = get_current_pid();
-        m_owner_pid  = c.writer_pid;
+        m_owner_pid  = get_current_pid();
         m_owner_tid  = get_current_tid();
     }
 
@@ -3485,7 +3483,6 @@ struct Ring_W : Ring<T, false>
         c.writer_closed.store(1, std::memory_order_release);
         unblock_global();
         c.ownership_mutex.unlock();
-        c.writer_pid = 0;
     }
 
     /**
@@ -3905,70 +3902,6 @@ private:
                 entry.data.word.fetch_and(~State::request_mask);
             }
         }
-    }
-
-    void ensure_writer_mutex_consistency()
-    {
-#ifdef _WIN32
-        constexpr uint32_t recovery_flag = 0x80000000u;
-        constexpr uint32_t recovery_pid_mask = recovery_flag - 1;
-        static_assert(recovery_flag != 0, "Recovery flag must reserve a representable bit");
-        const uint32_t self_pid = get_current_pid();
-
-        // Reuse the high bit of writer_pid to encode recovery ownership without
-        // changing the shared-memory layout. Windows PIDs are strictly less than
-        // 2^31, so masking with recovery_pid_mask preserves the real PID value.
-        auto encode_recovery_value = [&](uint32_t pid) {
-            return recovery_flag | (pid & recovery_pid_mask);
-        };
-
-        auto extract_recovering_pid = [&](uint32_t value) -> uint32_t {
-            if ((value & recovery_flag) == 0) {
-                return 0;
-            }
-            return value & recovery_pid_mask;
-        };
-
-        auto finalize_recovery = [&]() {
-            c.ownership_mutex.~interprocess_mutex();
-            new (&c.ownership_mutex) detail::interprocess_mutex();
-            c.writer_pid = 0;
-        };
-
-        for (;;) {
-            uint32_t observed = c.writer_pid;
-            if (observed == 0)              { return; }
-            if (is_process_alive(observed)) { return; }
-            if ((observed & recovery_flag) != 0) {
-                uint32_t recovering_pid = extract_recovering_pid(observed);
-                if (recovering_pid == self_pid) {
-                    finalize_recovery();
-                    return;
-                }
-
-                if (recovering_pid != 0 && is_process_alive(recovering_pid)) {
-                    std::this_thread::yield();
-                    continue;
-                }
-
-                uint32_t expected = observed;
-                if (!c.writer_pid.compare_exchange_strong(expected, encode_recovery_value(self_pid))) {
-                    continue;
-                }
-
-                finalize_recovery();
-                return;
-            }
-
-            uint32_t expected_writer = observed;
-            if (c.writer_pid.compare_exchange_strong(expected_writer, encode_recovery_value(self_pid))) {
-                finalize_recovery();
-                return;
-            }
-        }
-#else
-        (void)c;
-#endif
     }
 
     /**

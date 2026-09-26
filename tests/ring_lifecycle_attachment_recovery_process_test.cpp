@@ -414,11 +414,66 @@ bool run_killed_sole_writer_second_generation_case(const std::string& binary_pat
     return check_final_files(temp.path, data_file, control_file, lifecycle_file) && ok;
 }
 
+bool run_writer_recovery_with_retained_reader_case(const std::string& binary_path)
+{
+    sintra::test::Temp_ring_dir temp("ring_writer_recovery_retained_reader");
+    const auto ring_elements =
+        sintra::test::pick_ring_elements<std::uint32_t>(256);
+    sintra::Ring_R<std::uint32_t> reader(
+        temp.path.string(), k_ring_name, ring_elements, 1);
+    sintra::test::Exact_child writer(std::chrono::seconds(5));
+    if (!launch_child(binary_path, temp.path, "writer", writer)) {
+        std::fprintf(stderr, "%sfailed to launch writer child: %s\n",
+            k_failure_prefix, writer.error().c_str());
+        return false;
+    }
+    if (!sintra::test::wait_for_file(
+            marker_path(temp.path, "writer_attached"),
+            std::chrono::seconds(10),
+            std::chrono::milliseconds(5)))
+    {
+        std::fprintf(stderr, "%swriter child did not attach\n", k_failure_prefix);
+        return false;
+    }
+
+    bool rejected = false;
+    try {
+        sintra::Ring_W<std::uint32_t> contender(
+            temp.path.string(), k_ring_name, ring_elements);
+    }
+    catch (const sintra::ring_acquisition_failure_exception&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        std::fprintf(stderr, "%slive writer did not exclude contender\n", k_failure_prefix);
+        return false;
+    }
+    if (!terminate_expected(writer, "writer")) {
+        return false;
+    }
+
+    // This reader keeps the original Control mapping alive, so replacement
+    // must recover its abandoned mutex rather than create a fresh control file.
+    sintra::Ring_W<std::uint32_t> replacement(
+        temp.path.string(), k_ring_name, ring_elements);
+    constexpr std::uint32_t value = 0x13579bdu;
+    replacement.write_commit(value);
+    const auto snapshot = reader.start_reading(1);
+    const bool received = snapshot.end - snapshot.begin == 1 && *snapshot.begin == value;
+    reader.done_reading();
+    if (!received) {
+        std::fprintf(stderr, "%sreplacement writer did not publish to retained reader\n",
+            k_failure_prefix);
+    }
+    return received;
+}
+
 int run_parent(const std::string& binary_path)
 {
     bool ok = true;
     ok = run_killed_reader_with_live_writer_case(binary_path) && ok;
     ok = run_killed_sole_writer_second_generation_case(binary_path) && ok;
+    ok = run_writer_recovery_with_retained_reader_case(binary_path) && ok;
     return ok ? 0 : 1;
 }
 
