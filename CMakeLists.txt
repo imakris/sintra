@@ -39,6 +39,7 @@ if(APPLE AND (NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TA
 endif()
 
 find_package(Threads REQUIRED)
+include(GNUInstallDirs)
 
 option(SINTRA_RELEASE_WITH_DEBUG_SYMBOLS "Emit debug symbols when building Release configuration" ON)
 option(SINTRA_ENABLE_COVERAGE "Build with coverage instrumentation" OFF)
@@ -77,7 +78,7 @@ add_library(sintra::sintra ALIAS sintra)
 # find_package(sintra).
 target_include_directories(sintra INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_compile_features(sintra INTERFACE cxx_std_20)
 target_link_libraries(sintra INTERFACE Threads::Threads)
@@ -211,7 +212,6 @@ endif()
 option(SINTRA_INSTALL "Generate install rules for sintra" ${SINTRA_INSTALL_DEFAULT})
 
 if(SINTRA_INSTALL)
-    include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
 
     set(SINTRA_INSTALL_TARGETS sintra)
@@ -265,6 +265,8 @@ if(SINTRA_BUILD_TESTS AND SINTRA_INSTALL)
             "-DSINTRA_PACKAGE_TEST_GENERATOR=${CMAKE_GENERATOR}"
             "-DSINTRA_PACKAGE_TEST_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
             "-DSINTRA_PACKAGE_TEST_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+            "-DSINTRA_PACKAGE_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+            "-DSINTRA_PACKAGE_TEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
             "-DSINTRA_PACKAGE_TEST_CONFIG=$<CONFIG>"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/package_version_policy_test.cmake"
     )

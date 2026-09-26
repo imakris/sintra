@@ -356,6 +356,18 @@ subdirectories in multi-configuration builds. Windows CI builds these targets
 in Debug and Release; the crash-capture diagnostics are not selected for normal
 test runs.
 
+The installed-package contract has a separate CTest gate. It installs headers
+and package metadata, builds exact-version and versionless consumers, and
+checks that abbreviated and adjacent versions are rejected:
+
+```bash
+ctest --test-dir build -C Release -L package --output-on-failure --no-tests=error
+```
+
+Windows and Linux CI run this gate. Windows also uses a custom
+`CMAKE_INSTALL_INCLUDEDIR` to check that exported include paths match the
+installed headers.
+
 ## Test Runner Options
 
 ### Full Option List

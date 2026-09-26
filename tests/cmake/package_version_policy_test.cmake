@@ -71,7 +71,17 @@ function(sintra_configure_consumer case_name requested_version expect_found)
         -G "${SINTRA_PACKAGE_TEST_GENERATOR}"
         "-DSINTRA_PACKAGE_PREFIX=${sintra_install_prefix}"
         "-DSINTRA_REQUESTED_VERSION=${requested_version}"
-        "-DSINTRA_EXPECT_FOUND=${expect_found}")
+        "-DSINTRA_EXPECT_FOUND=${expect_found}"
+        "-DCMAKE_BUILD_TYPE=${SINTRA_PACKAGE_TEST_CONFIG}"
+        "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded")
+
+    foreach(tool MAKE_PROGRAM CXX_COMPILER)
+        if(DEFINED SINTRA_PACKAGE_TEST_${tool} AND
+           NOT "${SINTRA_PACKAGE_TEST_${tool}}" STREQUAL "")
+            list(APPEND configure_command
+                "-DCMAKE_${tool}=${SINTRA_PACKAGE_TEST_${tool}}")
+        endif()
+    endforeach()
 
     if(DEFINED SINTRA_PACKAGE_TEST_GENERATOR_PLATFORM AND
        NOT "${SINTRA_PACKAGE_TEST_GENERATOR_PLATFORM}" STREQUAL "")
@@ -99,7 +109,7 @@ function(sintra_configure_consumer case_name requested_version expect_found)
 
     if(expect_found)
         set(build_command
-            "${CMAKE_COMMAND}" --build "${case_binary_dir}")
+            "${CMAKE_COMMAND}" --build "${case_binary_dir}" --parallel 1)
         if(DEFINED SINTRA_PACKAGE_TEST_CONFIG AND
            NOT "${SINTRA_PACKAGE_TEST_CONFIG}" STREQUAL "")
             list(APPEND build_command
