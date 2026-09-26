@@ -1081,6 +1081,122 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     ASSERT_EQ(uint64_t(0), read_access & guard_mask);
 }
 
+class Guard_release_observer
+{
+public:
+    explicit Guard_release_observer(
+        sintra::Ring_R<uint32_t>& reader,
+        const std::atomic<uint64_t>* read_access = nullptr)
+        : m_reader(reader), m_read_access(read_access ? read_access : &reader.c.read_access)
+    {
+        s_current = this;
+        sintra::detail::test_hooks::s_ring_guard_operation = &observe;
+    }
+
+    ~Guard_release_observer()
+    {
+        sintra::detail::test_hooks::s_ring_guard_operation = nullptr;
+        s_current = nullptr;
+    }
+
+    bool m_retry_acquisition = false;
+    unsigned m_release_count = 0;
+    bool m_all_releases_owned = true;
+
+private:
+    static void observe(
+        const char* stage,
+        const std::atomic<uint64_t>* read_access,
+        uint8_t octile)
+    {
+        auto& observer = *s_current;
+        if (read_access != observer.m_read_access) {
+            return;
+        }
+        auto& reader = observer.m_reader;
+        if (std::string_view(stage) == "acquired") {
+            if (observer.m_retry_acquisition) {
+                observer.m_retry_acquisition = false;
+                reader.c.leading_sequence.fetch_add(reader.m_num_elements / 8);
+            }
+            return;
+        }
+
+        ++observer.m_release_count;
+        const auto state = reader.c.reading_sequences[reader.m_rs_index].data.load_state();
+        const bool visible_owner = state.status() == sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE &&
+            ((state.guard_present() && state.guard_octile() == octile) ||
+             (state.guard_pending() && state.pending_octile() == octile));
+        const bool reclamation_excluded = reader.c.rs_stack_spinlock.m_locked.test();
+        observer.m_all_releases_owned &= visible_owner || reclamation_excluded;
+    }
+
+    sintra::Ring_R<uint32_t>& m_reader;
+    const std::atomic<uint64_t>* m_read_access;
+    inline static Guard_release_observer* s_current = nullptr;
+};
+
+TEST_CASE(test_snapshot_release_keeps_count_owned)
+{
+    Temp_ring_dir tmp("snapshot_release_ownership");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements, ring_elements / 2);
+    reader.start_reading();
+    Guard_release_observer observer(reader);
+    reader.done_reading();
+    ASSERT_EQ(observer.m_release_count, 1u);
+    ASSERT_TRUE(observer.m_all_releases_owned);
+    ASSERT_EQ(reader.c.read_access.load(), uint64_t(0));
+    ASSERT_FALSE(reader.c.reading_sequences[reader.m_rs_index].data.load_state().guard_pending());
+}
+
+TEST_CASE(test_snapshot_retry_keeps_count_owned)
+{
+    Temp_ring_dir tmp("snapshot_retry_ownership");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements, ring_elements / 2);
+    Guard_release_observer observer(reader);
+    observer.m_retry_acquisition = true;
+    reader.start_reading(0);
+    ASSERT_EQ(observer.m_release_count, 1u);
+    ASSERT_TRUE(observer.m_all_releases_owned);
+    reader.done_reading();
+    ASSERT_EQ(reader.c.read_access.load(), uint64_t(0));
+}
+
+TEST_CASE(test_eviction_release_excludes_orphan_reclamation)
+{
+    Temp_ring_dir tmp("eviction_release_ownership");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements, ring_elements / 2);
+    reader.start_reading();
+    Guard_release_observer observer(reader, &writer.c.read_access);
+    writer.advance_writer_octile_if_needed(reader.m_trailing_octile * ring_elements / 8);
+    ASSERT_EQ(observer.m_release_count, 1u);
+    ASSERT_TRUE(observer.m_all_releases_owned);
+    ASSERT_EQ(reader.c.read_access.load(), uint64_t(0));
+}
+
+#ifdef NDEBUG
+TEST_CASE(test_release_preserves_neighboring_octile_count)
+{
+    Temp_ring_dir tmp("release_neighboring_count");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements);
+    const uint8_t released_octile = 3;
+    const uint64_t neighboring_count = sintra::octile_mask(released_octile + 1);
+    reader.c.read_access = neighboring_count;
+
+    // Recovery may already have removed an orphaned contribution. A late
+    // release must report the mismatch without changing another octile.
+    SINTRA_READ_ACCESS_FETCH_SUB(reader.c, released_octile, sintra::octile_mask(released_octile));
+    ASSERT_EQ(reader.c.read_access.load(), neighboring_count);
+    ASSERT_EQ(reader.c.guard_accounting_mismatch_count.load(), uint64_t(1));
+    reader.c.read_access = 0;
+}
+#endif
+
 TEST_CASE(test_reader_state_word_layout)
 {
     using Reader_state_union = sintra::Ring<uint32_t, true>::Reader_state_union;

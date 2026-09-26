@@ -188,6 +188,31 @@ namespace fs  = std::filesystem;
 
 using sequence_counter_type = uint64_t;
 
+namespace detail {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+namespace test_hooks {
+using Ring_guard_callback = void (*)(const char*, const std::atomic<uint64_t>*, uint8_t);
+inline std::atomic<Ring_guard_callback> s_ring_guard_operation{nullptr};
+}
+#endif
+
+inline void ring_guard_operation_for_test(
+    const char* stage,
+    const std::atomic<uint64_t>* read_access,
+    uint8_t octile)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_ring_guard_operation.load(std::memory_order_acquire)) {
+        callback(stage, read_access, octile);
+    }
+#else
+    (void)stage;
+    (void)read_access;
+    (void)octile;
+#endif
+}
+}
+
 #ifndef NDEBUG
 inline void debug_read_access_fetch_sub(
     std::atomic<uint64_t>& read_access,
@@ -228,17 +253,21 @@ inline void debug_read_access_fetch_sub(
 
 #ifndef NDEBUG
 #define SINTRA_READ_ACCESS_FETCH_SUB(control, octile, mask) \
-    debug_read_access_fetch_sub(                            \
+    (::sintra::detail::ring_guard_operation_for_test(       \
+        "release", &(control).read_access, uint8_t(octile)), \
+    ::sintra::debug_read_access_fetch_sub(                  \
         (control).read_access,                              \
         (control).guard_accounting_mismatch_count,          \
         static_cast<uint8_t>(octile),                       \
         (mask),                                             \
         __FILE__,                                           \
         __LINE__,                                           \
-        __func__)
+        __func__))
 #else
 #define SINTRA_READ_ACCESS_FETCH_SUB(control, octile, mask) \
-    (control).read_access.fetch_sub((mask))
+    (::sintra::detail::ring_guard_operation_for_test(       \
+        "release", &(control).read_access, uint8_t(octile)), \
+    (control).release_read_access_count(uint8_t(octile)))
 #endif
 
 // Payload traits for in-place ring writes.
@@ -2034,7 +2063,8 @@ struct Ring:
         cache_line_sized_t                   reading_sequences[max_process_index];
 
         // --- Reader Sequence Stack Management ------------------------------------
-        // Protects free_rs_stack during slot acquisition/release.
+        // Protects slot acquisition/release and guardless count reclamation.
+        // Eviction holds this lock until its paired decrement is complete.
         spinlock                             rs_stack_spinlock;
 
         // Freelist of reader-slot indices into reading_sequences[].
@@ -2674,6 +2704,7 @@ struct Ring_R : Ring<T, true>
                 }
             }
 
+            detail::ring_guard_operation_for_test("acquired", &c.read_access, trailing_octile);
             auto confirmed_leading_sequence = c.leading_sequence.load();
             auto confirmed_range_first_sequence = std::max<int64_t>(
                 0,
@@ -2710,7 +2741,8 @@ struct Ring_R : Ring<T, true>
                     if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
                         return std::nullopt;
                     }
-                    return current.with_guard(current.guard_octile(), false).clear_pending();
+                    return current.with_guard(current.guard_octile(), false)
+                                  .with_pending(current.guard_octile());
                 },
                 guard_cleared);
 
@@ -2733,6 +2765,7 @@ struct Ring_R : Ring<T, true>
                     SINTRA_READ_ACCESS_FETCH_SUB(c, guarded_octile, prev_mask);
                 }
             }
+            slot.clear_pending();
         }
 
         m_reading_lock = false;
@@ -2777,7 +2810,11 @@ struct Ring_R : Ring<T, true>
                     if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
                         return std::nullopt;
                     }
-                    return current.with_guard(current.guard_octile(), false).clear_pending();
+                    if (current.guard_present()) {
+                        return current.with_guard(current.guard_octile(), false)
+                                      .with_pending(current.guard_octile());
+                    }
+                    return current;
                 },
                 guard_cleared);
 
@@ -2785,6 +2822,7 @@ struct Ring_R : Ring<T, true>
                 const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(previous_state);
                 const uint64_t released_mask = octile_mask(released_octile);
                 SINTRA_READ_ACCESS_FETCH_SUB(c, released_octile, released_mask);
+                slot.clear_pending();
             }
             else
             if (!guard_cleared) {
@@ -3323,6 +3361,9 @@ public:
             return false;
         }
 
+        // A guardless count can still belong to an eviction or slot cleanup.
+        // Those paired releases use the same lock until their decrement ends.
+        spinlock::locker release_lock(c.rs_stack_spinlock);
         c.guard_rollback_attempt_count.fetch_add(1, std::memory_order_relaxed);
 
         uint64_t access_snapshot = c.read_access.load();
@@ -3623,12 +3664,15 @@ struct Ring_W : Ring<T, false>
                     continue;
                 }
 
+                spinlock::locker release_lock(c.rs_stack_spinlock);
                 bool guard_evicted = false;
                 const uint8_t previous_state = c.reading_sequences[i].data.fetch_update_guard_token_if(
                     [&](typename Ring<T, false>::Reader_state_union current)
                         -> std::optional<typename Ring<T, false>::Reader_state_union>
                     {
-                        if (!current.guard_present()) {
+                        if (current.status() != Ring<T, false>::READER_STATE_ACTIVE ||
+                            !current.guard_present() || current.guard_pending())
+                        {
                             return std::nullopt;
                         }
                         auto cleared = current.with_guard(current.guard_octile(), false).clear_pending();
@@ -3684,6 +3728,9 @@ struct Ring_W : Ring<T, false>
             if (!has_blocking_reader) {
                 c.scavenge_orphans();
 
+                // Serialize guardless-count recovery with slot teardown and
+                // eviction, which can own a decrement without a visible guard.
+                spinlock::locker release_lock(c.rs_stack_spinlock);
                 uint64_t access_snapshot = c.read_access.load();
                 if (blocked_start   == std::chrono::steady_clock::time_point{} ||
                     access_snapshot != last_access_snapshot)
