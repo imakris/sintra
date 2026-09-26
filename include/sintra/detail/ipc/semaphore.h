@@ -15,10 +15,10 @@ OVERVIEW
 - Single monotonic deadline timeline (ns). No fairness guarantee.
 
 SUPPORTED OS
-- Linux (futex), macOS 14.4+ (<os/sync_wait_on_address.h>), Windows 8+ (named kernel semaphore).
+- Linux (futex), macOS 15+ (<os/os_sync_wait_on_address.h>), Windows 8+ (named kernel semaphore).
 - Polling backend: automatic fallback on unsupported platforms.
 - Platform notes:
-  * macOS: wake-all is used; may over-wake. If Apple adds wake-one/wake-N, prefer bounded waking.
+  * macOS: a single post wakes one waiter; multi-post wakes all and may over-wake.
   * POSIX wait(): implemented via a very large relative wait on a monotonic clock; effectively "infinite".
   * Windows try_wait(): returns false when no token is available and does not set errno; timed waits set errno=ETIMEDOUT.
   * Polling backend: Atomic counter in shared memory with 1ms sleep between checks (std::this_thread::sleep_for).
@@ -62,7 +62,7 @@ USAGE CONTRACT (shared memory requirements)
 
 API DESIGN
 - This API mirrors the sibling `interprocess_mutex` style: steady-clock deadlines, bool-returning timed waits, and errno for error/timeout discrimination.
-- Intended for Linux (futex), macOS 14.4+ (wait-on-address), Windows 8+.
+- Intended for Linux (futex), macOS 15+ (wait-on-address), Windows 8+.
 
 CAVEATS
 - Overflow: post(n) where (current + n) > max sets errno=EOVERFLOW and does not wake.
@@ -96,10 +96,13 @@ CAVEATS
 #else
   #include <time.h>
   // Single selection ladder for sub-platform specifics
-  #if defined(__APPLE__) && defined(__MACH__) && defined(__has_include) && __has_include(<os/sync_wait_on_address.h>)
+  #if defined(__APPLE__) && defined(__MACH__)
+    #if !__has_include(<os/os_sync_wait_on_address.h>)
+      #error "Sintra requires the macOS SDK's <os/os_sync_wait_on_address.h>."
+    #endif
     #define SINTRA_BACKEND_DARWIN 1
     #include <os/clock.h>
-    #include <os/sync_wait_on_address.h>
+    #include <os/os_sync_wait_on_address.h>
   #elif defined(__linux__)
     #define SINTRA_BACKEND_LINUX 1
     #include <sys/syscall.h>
@@ -588,20 +591,20 @@ static inline int posix_wait_equal_until(
     uint64_t   deadline) noexcept
 {
 #if SINTRA_BACKEND_DARWIN
-    const uint32_t flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
+    const auto flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     for (;;) {
         const uint64_t now = monotonic_now_ns();
         if (now >= deadline) {
             errno = ETIMEDOUT;
             return -1;
         }
-        int rc = os_sync_wait_on_address_with_deadline(
+        int rc = os_sync_wait_on_address_with_timeout(
             (void*)addr,
             (uint64_t)expected,
             4,
             flags,
-            OS_CLOCK_MONOTONIC,
-            deadline);
+            OS_CLOCK_MACH_ABSOLUTE_TIME,
+            deadline - now);
         // Darwin returns the number of outstanding waiters on success, so rc can be > 0.
         if (rc >= 0)            { return  0; }
         if (errno == ETIMEDOUT) { return -1; }
