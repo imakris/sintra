@@ -109,6 +109,9 @@ struct spinlock
                 }
 
                 const auto owner = m_owner_pid.load(std::memory_order_acquire);
+                if (owner == self_pid) {
+                    report_live_owner_stall(owner);
+                }
                 if (owner != 0 && owner != self_pid && is_process_alive(owner)) {
                     if (detail::is_debug_pause_active()) {
                         Log_stream(log_level::warning)
@@ -122,7 +125,7 @@ struct spinlock
                     report_live_owner_stall(owner);
                 }
 
-                // Owner unknown or became self - forcefully release and continue trying.
+                // Owner unknown or exited - forcefully release and continue trying.
                 force_unlock();
                 live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
             }

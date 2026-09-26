@@ -189,10 +189,20 @@ int main(int argc, char* argv[])
             return 2;
         }
 #endif
+        const bool same_process = std::string_view(argv[2]) == "self";
         const uint32_t owner_pid = static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10));
         const std::filesystem::path marker_path(argv[3]);
         const std::string_view      marker_token(argv[4]);
         sintra::spinlock stall_lock;
+        if (same_process) {
+            sintra::spinlock::locker held_lock(stall_lock);
+            if (!publish_ready_marker(marker_path, marker_token)) {
+                return 2;
+            }
+            std::thread contender([&] { stall_lock.lock(); });
+            contender.join();
+            return 1;
+        }
         auto& stall_layout = access_layout(stall_lock);
         stall_layout.m_locked.clear(std::memory_order_release);
         stall_layout.m_locked.test_and_set(std::memory_order_acquire);
@@ -277,117 +287,118 @@ int main(int argc, char* argv[])
             "case 2 exact-child cleanup failed: " + sleep_cleanup_diagnostic);
     }
 
-    // Case 3: live owner with debug pause inactive should abort (report_live_owner_stall).
-    const auto marker_directory = sintra::test::unique_scratch_directory(
-        "spinlock_recovery_stall");
-    const auto marker_nonce = sintra::monotonic_now_ns();
-    const auto marker_path = marker_directory /
-        ("stall-ready-" + std::to_string(self_pid) + '-' +
-            std::to_string(marker_nonce) + ".marker");
-    const std::string marker_token =
-        "spinlock-stall-ready:" + std::to_string(self_pid) + ':' +
-        std::to_string(marker_nonce);
-    const std::string owner_arg = std::to_string(self_pid);
-    const std::string marker_arg = marker_path.string();
-    const std::vector<const char*> stall_args = {
-        argv[0],
-        "--spinlock-stall-child",
-        owner_arg.c_str(),
-        marker_arg.c_str(),
-        marker_token.c_str(),
-        nullptr
-    };
-    Exact_child stall_child(k_child_cleanup_timeout);
-    if (!stall_child.spawn(argv[0], stall_args.data())) {
-        fail_after_settling_child(
-            stall_child,
-            "case 3 failed to spawn exact stall child: " + stall_child.error());
-    }
-
-    const auto marker_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-    while (true) {
-        std::string marker_diagnostic;
-        auto marker_state = probe_ready_marker(marker_path, marker_token, marker_diagnostic);
-        if (marker_state == Marker_state::valid) {
-            break;
-        }
-        if (marker_state == Marker_state::invalid || marker_state == Marker_state::error) {
+    // Live foreign and same-process owners must fail closed on a stalled lock.
+    for (const std::string owner_arg : {std::to_string(self_pid), std::string("self")}) {
+        const auto marker_directory = sintra::test::unique_scratch_directory(
+            "spinlock_recovery_stall");
+        const auto marker_nonce = sintra::monotonic_now_ns();
+        const auto marker_path = marker_directory /
+            ("stall-ready-" + std::to_string(self_pid) + '-' +
+                std::to_string(marker_nonce) + ".marker");
+        const std::string marker_token =
+            "spinlock-stall-ready:" + std::to_string(self_pid) + ':' +
+            std::to_string(marker_nonce);
+        const std::string marker_arg = marker_path.string();
+        const std::vector<const char*> stall_args = {
+            argv[0],
+            "--spinlock-stall-child",
+            owner_arg.c_str(),
+            marker_arg.c_str(),
+            marker_token.c_str(),
+            nullptr
+        };
+        Exact_child stall_child(k_child_cleanup_timeout);
+        if (!stall_child.spawn(argv[0], stall_args.data())) {
             fail_after_settling_child(
                 stall_child,
-                "case 3 readiness-marker failure: " + marker_diagnostic);
+                "case 3 failed to spawn exact stall child: " + stall_child.error());
         }
 
-        const auto child_state = stall_child.poll();
-        if (child_state == Exact_child_state::exited) {
-            marker_state = probe_ready_marker(marker_path, marker_token, marker_diagnostic);
+        const auto marker_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (true) {
+            std::string marker_diagnostic;
+            auto marker_state = probe_ready_marker(marker_path, marker_token, marker_diagnostic);
             if (marker_state == Marker_state::valid) {
                 break;
             }
-            fail_after_settling_child(
-                stall_child,
-                "case 3 child exited before publishing its readiness marker: " +
-                    stall_child.describe_status());
-        }
-        if (child_state == Exact_child_state::error) {
-            fail_after_settling_child(
-                stall_child,
-                "case 3 exact-child observation failed before readiness: " +
-                    stall_child.error());
-        }
-        if (std::chrono::steady_clock::now() >= marker_deadline) {
-            fail_after_settling_child(
-                stall_child,
-                "case 3 child did not publish its readiness marker within 15 seconds");
-        }
-        std::this_thread::sleep_for(k_child_poll_interval);
-    }
-
-    constexpr int stall_timeout_default_ms = 10000;
-    int stall_timeout_ms = sintra::test::read_env_int(
-        "SINTRA_SPINLOCK_STALL_TIMEOUT_MS",
-        stall_timeout_default_ms);
-    if (stall_timeout_ms <= 0) {
-        stall_timeout_ms = stall_timeout_default_ms;
-    }
-    const auto stall_deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(stall_timeout_ms);
-    while (true) {
-        const auto child_state = stall_child.poll();
-        if (child_state == Exact_child_state::exited) {
-            if (!exited_as_expected_abort(stall_child)) {
-                const auto observed = stall_child.describe_status();
+            if (marker_state == Marker_state::invalid || marker_state == Marker_state::error) {
                 fail_after_settling_child(
                     stall_child,
-                    "case 3 stall child terminated with unexpected status: " + observed);
+                    "case 3 readiness-marker failure: " + marker_diagnostic);
             }
-            std::string settle_diagnostic;
-            if (!stall_child.settle_observed_exit(settle_diagnostic)) {
+
+            const auto child_state = stall_child.poll();
+            if (child_state == Exact_child_state::exited) {
+                marker_state = probe_ready_marker(marker_path, marker_token, marker_diagnostic);
+                if (marker_state == Marker_state::valid) {
+                    break;
+                }
                 fail_after_settling_child(
                     stall_child,
-                    "case 3 could not settle the expected exact child exit: " +
-                        settle_diagnostic);
+                    "case 3 child exited before publishing its readiness marker: " +
+                        stall_child.describe_status());
             }
-            break;
+            if (child_state == Exact_child_state::error) {
+                fail_after_settling_child(
+                    stall_child,
+                    "case 3 exact-child observation failed before readiness: " +
+                        stall_child.error());
+            }
+            if (std::chrono::steady_clock::now() >= marker_deadline) {
+                fail_after_settling_child(
+                    stall_child,
+                    "case 3 child did not publish its readiness marker within 15 seconds");
+            }
+            std::this_thread::sleep_for(k_child_poll_interval);
         }
-        if (child_state == Exact_child_state::error) {
-            fail_after_settling_child(
-                stall_child,
-                "case 3 exact-child observation failed after readiness: " +
-                    stall_child.error());
-        }
-        if (std::chrono::steady_clock::now() >= stall_deadline) {
-            fail_after_settling_child(
-                stall_child,
-                "case 3 ready stall child did not terminate within " +
-                    std::to_string(stall_timeout_ms) + " ms");
-        }
-        std::this_thread::sleep_for(k_child_poll_interval);
-    }
 
-    std::error_code cleanup_error;
-    std::filesystem::remove(marker_path, cleanup_error);
-    cleanup_error.clear();
-    std::filesystem::remove(marker_directory, cleanup_error);
+        constexpr int stall_timeout_default_ms = 10000;
+        int stall_timeout_ms = sintra::test::read_env_int(
+            "SINTRA_SPINLOCK_STALL_TIMEOUT_MS",
+            stall_timeout_default_ms);
+        if (stall_timeout_ms <= 0) {
+            stall_timeout_ms = stall_timeout_default_ms;
+        }
+        const auto stall_deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(stall_timeout_ms);
+        while (true) {
+            const auto child_state = stall_child.poll();
+            if (child_state == Exact_child_state::exited) {
+                if (!exited_as_expected_abort(stall_child)) {
+                    const auto observed = stall_child.describe_status();
+                    fail_after_settling_child(
+                        stall_child,
+                        "case 3 stall child terminated with unexpected status: " + observed);
+                }
+                std::string settle_diagnostic;
+                if (!stall_child.settle_observed_exit(settle_diagnostic)) {
+                    fail_after_settling_child(
+                        stall_child,
+                        "case 3 could not settle the expected exact child exit: " +
+                            settle_diagnostic);
+                }
+                break;
+            }
+            if (child_state == Exact_child_state::error) {
+                fail_after_settling_child(
+                    stall_child,
+                    "case 3 exact-child observation failed after readiness: " +
+                        stall_child.error());
+            }
+            if (std::chrono::steady_clock::now() >= stall_deadline) {
+                fail_after_settling_child(
+                    stall_child,
+                    "case 3 ready stall child did not terminate within " +
+                        std::to_string(stall_timeout_ms) + " ms");
+            }
+            std::this_thread::sleep_for(k_child_poll_interval);
+        }
+
+        std::error_code cleanup_error;
+        std::filesystem::remove(marker_path, cleanup_error);
+        cleanup_error.clear();
+        std::filesystem::remove(marker_directory, cleanup_error);
+    }
 
     return 0;
 }

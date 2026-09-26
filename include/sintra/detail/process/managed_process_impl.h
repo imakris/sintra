@@ -2753,7 +2753,7 @@ sintra::type_id_type get_type_id()
                 }
             }
             else {
-                s_mproc->m_type_name_of_explicit_id.set_value(explicit_id, type_name);
+                scoped_map.get().emplace(explicit_id, type_name);
             }
         }
         return make_type_id(explicit_id);
