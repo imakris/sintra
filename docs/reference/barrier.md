@@ -81,7 +81,8 @@ a delivery or processing fence according to the selected
   `processing_fence_t` for that stronger guarantee.
 - A `processing_fence_t` barrier called from a request-reader handler or
   post-handler is reentrancy-aware: it skips the currently executing
-  request reader and may run queued post-handlers while waiting. It does
+  request reader. It does not run queued post-handler tasks while waiting;
+  tasks deferred by the current handler still run after it returns. It does
   not wait for the current handler/post-handler, or for messages queued
   behind it on that same request-reader stream. Use a control thread when
   the fence must include that work.

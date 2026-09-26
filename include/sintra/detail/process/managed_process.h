@@ -609,6 +609,9 @@ enum class Managed_child_post_spawn_stage
 
 namespace test_hooks {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Delivery_fence_wait_callback = void (*)() noexcept;
+inline std::atomic<Delivery_fence_wait_callback> s_delivery_fence_wait{nullptr};
+
 using Managed_child_post_spawn_callback = void (*)(
     Managed_child_post_spawn_stage,
     instance_id_type,

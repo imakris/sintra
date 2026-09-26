@@ -88,6 +88,7 @@ managed_process_publish_test                             1
 message_args_traits_test                                 5
 message_reader_owned_frame_test                          1
 parent_child_targeted_rpc_test                          10
+post_handler_fence_order_test                            1
 ping_pong_multi_test                                   100
 ping_pong_test                                          50
 processing_fence_test                                  100

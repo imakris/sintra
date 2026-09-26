@@ -1597,13 +1597,10 @@ inline bool Coordinator::unpublish_transceiver_exact(
 
     if (iid == process_iid) {
         if (!pending_completions.empty() && s_mproc) {
-            s_mproc->run_after_current_handler([
-                    this,
-                    pending = std::move(pending_completions)
-                ]() mutable
-                {
-                    emit_pending_barrier_completions(pending);
-                });
+            // All publication and registry locks have been released. Publish
+            // internal barrier replies before lifecycle callbacks can wait on
+            // their progress; public post-handler tasks remain deferred.
+            emit_pending_barrier_completions(pending_completions);
         }
 
         if (s_mproc) {

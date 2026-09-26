@@ -71,7 +71,8 @@ Each mode causes `sintra::barrier` to return the same shape:
   reader is not needed for peers to reach the barrier.
 - When called from a request-reader handler or post-handler,
   `processing_fence_t` is reentrancy-aware: it skips the currently
-  executing request reader and may run queued post-handlers while waiting.
+  executing request reader. It leaves queued post-handler tasks deferred;
+  entering a fence does not end the current handler's lifetime.
   It does not wait for the current handler/post-handler, or for messages
   queued behind it on that same request-reader stream.
 - A fence entered from a request-reader thread also skips the stream of

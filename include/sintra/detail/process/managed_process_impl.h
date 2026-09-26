@@ -7106,28 +7106,17 @@ void Managed_process::wait_for_delivery_fence()
     }
 
     while (!all_targets_satisfied()) {
-        if (tl_post_handler_function_ready()) {
-            auto post_handler = std::move(*tl_post_handler_function);
-            tl_post_handler_function_clear();
-
-            lk.unlock();
-            Post_handler_guard post_guard;
-            try {
-                post_handler();
-            }
-            catch (...) {
-                lk.lock();
-                throw;
-            }
-            lk.lock();
-
-            continue;
+        // A fence does not finish the current handler. Its deferred tasks may
+        // destroy that handler's receiver, so leave them for dispatch after
+        // the handler returns. Internal barrier replies are
+        // published separately and do not need this public task slot drained.
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (auto callback = detail::test_hooks::s_delivery_fence_wait.load(
+                std::memory_order_acquire))
+        {
+            callback();
         }
-
-        // Spurious wake-ups are possible here, so re-evaluate the delivery
-        // targets on each iteration rather than relying on the condition's
-        // predicate form. This keeps the post-handler draining path symmetric
-        // with the non-request thread case.
+#endif
         m_delivery_condition.wait(lk);
     }
 }

@@ -417,7 +417,11 @@ When a process drains while a barrier is in-flight:
 3. Emit completions to remaining waiters
 ```
 
-Completions are emitted via `run_after_current_handler` to avoid re-entrancy.
+Internal barrier completions are emitted as reply messages after registry and
+publication locks have been released, before lifecycle callbacks can wait for
+that progress. They do not invoke application handlers synchronously. Public
+`run_after_current_handler` tasks remain deferred until dispatch returns, even
+when the handler enters a fence.
 
 ---
 

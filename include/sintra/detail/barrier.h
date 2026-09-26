@@ -192,9 +192,8 @@ inline void wait_for_processing_quiescence()
         return;
     }
 
-    // Waiting directly on the delivery fence keeps request-thread state intact and
-    // allows the Managed_process to service any queued post-handlers without
-    // paying the cost of an additional helper thread.
+    // Keep the current handler on its request thread. The fence excludes that
+    // reader's own stream and leaves its deferred tasks for normal dispatch exit.
     s_mproc->wait_for_delivery_fence();
 }
 
