@@ -1539,15 +1539,18 @@ inline bool Coordinator::unpublish_transceiver_exact(
                 ready_notifications.end());
         }
 
-        // remove all name lookup entries resolving to the unpublished process
-        auto name_map = s_mproc->m_instance_id_of_assigned_name.scoped();
-        for (auto name_it = name_map.begin(); name_it != name_map.end();)
+        // Keep name lookups available while the remaining process cleanup waits
+        // on barriers. Registry publication remains serialized by publish_lock.
         {
-            if (process_of(name_it->second) == process_iid) {
-                name_it = name_map.erase(name_it);
-            }
-            else {
-                ++name_it;
+            auto name_map = s_mproc->m_instance_id_of_assigned_name.scoped();
+            for (auto name_it = name_map.begin(); name_it != name_map.end();)
+            {
+                if (process_of(name_it->second) == process_iid) {
+                    name_it = name_map.erase(name_it);
+                }
+                else {
+                    ++name_it;
+                }
             }
         }
 
