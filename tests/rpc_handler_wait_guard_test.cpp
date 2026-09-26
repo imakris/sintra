@@ -22,6 +22,10 @@ public:
     int direct_echo() { return k_reply; }
     unsigned echo_calls() const { return m_echo_calls.load(); }
 
+    // Define deduced-return RPC helpers before the methods that call them.
+    SINTRA_RPC_STRICT(echo)
+    SINTRA_RPC(direct_echo)
+
     void prepare_completed()
     {
         m_completed.emplace(rpc_async_echo(instance_id()));
@@ -75,8 +79,6 @@ public:
             std::chrono::steady_clock::now() + std::chrono::seconds(3)) == k_reply;
     }
 
-    SINTRA_RPC_STRICT(echo)
-    SINTRA_RPC(direct_echo)
     SINTRA_RPC_STRICT(exercise)
 
 private:
