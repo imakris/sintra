@@ -57,6 +57,9 @@ leave_lifecycle_test                                     5
 lifecycle_guardrails_test                                5
 lifecycle_handler_test                                  20
 lifeline_basic_test                                      5
+lifecycle_header_only_test                               1
+lifecycle_compiled_test                                  1
+lifeline_ownership_test                                  1
 locality_messaging_test                                  1
 log_stream_move_test                                    10
 managed_child_adverse_cleanup_contract_test              1

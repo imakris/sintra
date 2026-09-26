@@ -576,9 +576,8 @@ inline void managed_child_transport_retirement_for_test(
 
 } // namespace detail
 
-// Protects access to s_mproc during signal dispatch to prevent use-after-free.
-// On POSIX: The signal dispatch thread takes a shared lock when accessing s_mproc.
-// On Windows: The CRT signal handler thread takes a shared lock when accessing s_mproc.
+// Protects access to s_mproc during signal dispatch and lifeline shutdown.
+// The dispatcher and lifeline watcher take a shared lock when accessing s_mproc.
 // The Managed_process destructor takes an exclusive lock before clearing s_mproc.
 inline shared_mutex dispatch_shutdown_mutex_instance;
 
@@ -588,7 +587,9 @@ inline std::once_flag& signal_handler_once_flag()
     return flag;
 }
 
-namespace {
+// These inline helpers and their state must have one identity across translation
+// units in both header-only and separately compiled programs.
+inline namespace process_lifetime_detail {
 
     inline std::atomic<unsigned int>& pending_signal_mask()
     {
@@ -620,9 +621,9 @@ namespace {
     };
 
 #ifdef SIGTRAP
-    constexpr std::size_t k_signal_slot_count = 7;
+    inline constexpr std::size_t k_signal_slot_count = 7;
 #else
-    constexpr std::size_t k_signal_slot_count = 6;
+    inline constexpr std::size_t k_signal_slot_count = 6;
 #endif
 
     inline std::array<signal_slot_t, k_signal_slot_count>& signal_slots()
@@ -932,9 +933,9 @@ namespace {
     };
 
 #ifdef SIGTRAP
-    constexpr std::size_t k_signal_slot_count = 8;
+    inline constexpr std::size_t k_signal_slot_count = 8;
 #else
-    constexpr std::size_t k_signal_slot_count = 7;
+    inline constexpr std::size_t k_signal_slot_count = 7;
 #endif
 
     inline std::array<signal_slot_t, k_signal_slot_count>& signal_slots()
@@ -1198,16 +1199,16 @@ namespace {
     }
 
     // Argument names for lifeline configuration (internal, fixed)
-    constexpr const char* k_lifeline_handle_arg    = "--lifeline_handle";
-    constexpr const char* k_lifeline_exit_code_arg = "--lifeline_exit_code";
-    constexpr const char* k_lifeline_timeout_arg   = "--lifeline_timeout_ms";
-    constexpr const char* k_lifeline_disable_arg   = "--lifeline_disable";
+    inline constexpr const char* k_lifeline_handle_arg    = "--lifeline_handle";
+    inline constexpr const char* k_lifeline_exit_code_arg = "--lifeline_exit_code";
+    inline constexpr const char* k_lifeline_timeout_arg   = "--lifeline_timeout_ms";
+    inline constexpr const char* k_lifeline_disable_arg   = "--lifeline_disable";
 
     // Storage for parsed lifeline values (set during init, read by start_lifeline_watcher)
-    static inline std::string s_lifeline_handle_value;
-    static inline int  s_lifeline_exit_code  = 99;
-    static inline int  s_lifeline_timeout_ms = 100;
-    static inline bool s_lifeline_disabled   = false;
+    inline std::string s_lifeline_handle_value;
+    inline int  s_lifeline_exit_code  = 99;
+    inline int  s_lifeline_timeout_ms = 100;
+    inline bool s_lifeline_disabled   = false;
 
     inline void log_lifeline_message(detail::log_level level, const std::string& message)
     {
@@ -1252,6 +1253,7 @@ namespace {
         // behind lifecycle locks.
         schedule_lifeline_hard_exit(timeout_ms, exit_code);
 
+        Dispatch_shared_lock dispatch_lock(dispatch_shutdown_mutex_instance);
         if (s_mproc) {
             s_mproc->m_must_stop.store(true, std::memory_order_release);
             s_mproc->stop();
@@ -1387,7 +1389,7 @@ namespace {
 
         SECURITY_ATTRIBUTES sa {};
         sa.nLength = sizeof(sa);
-        sa.bInheritHandle = TRUE;
+        sa.bInheritHandle = FALSE;
         if (!CreatePipe(&read_handle, &write_handle, &sa, 0)) {
             if (error_out) {
                 *error_out = static_cast<int>(GetLastError());
@@ -1395,7 +1397,7 @@ namespace {
             return false;
         }
 
-        if (!SetHandleInformation(write_handle, HANDLE_FLAG_INHERIT, 0)) {
+        if (!SetHandleInformation(read_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
             if (error_out) {
                 *error_out = static_cast<int>(GetLastError());
             }
@@ -1437,7 +1439,7 @@ namespace {
         return true;
     }
 #endif
-}
+} // namespace process_lifetime_detail
 
 #if defined(_WIN32) && defined(SINTRA_ENABLE_TEST_HOOKS)
 namespace detail { namespace test_hooks {
@@ -2418,7 +2420,7 @@ inline void detail::Managed_child_launch_attempt::rollback() noexcept
 
 #ifdef _WIN32
 inline
-static void s_signal_handler(int sig)
+void s_signal_handler(int sig)
 {
     // Windows signal handler using dispatcher pattern (matching POSIX architecture).
     // This ensures potentially-blocking operations (emit_remote, mutex acquisition)
@@ -2518,7 +2520,7 @@ static void s_signal_handler(int sig)
 }
 #else
 inline
-static void s_signal_handler(int sig, siginfo_t* info, void* ctx)
+void s_signal_handler(int sig, siginfo_t* info, void* ctx)
 {
     auto& slot_table = signal_slots();
 

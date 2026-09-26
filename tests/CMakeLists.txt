@@ -112,7 +112,16 @@ foreach(FULL_TEST_PATH IN LISTS TEST_FILES)
     set(TARGET_NAME sintra_${TEST_NAME})
 
     add_executable(${TARGET_NAME} ${TEST_FILE})
-    target_link_libraries(${TARGET_NAME} PRIVATE sintra_for_tests)
+    if(TEST_NAME STREQUAL "lifecycle_header_only_test" OR
+       TEST_NAME STREQUAL "lifeline_ownership_test")
+        target_link_libraries(${TARGET_NAME} PRIVATE sintra sintra_test_config)
+    else()
+        target_link_libraries(${TARGET_NAME} PRIVATE sintra_for_tests)
+    endif()
+    if(TEST_NAME STREQUAL "lifecycle_header_only_test" OR
+       TEST_NAME STREQUAL "lifecycle_compiled_test")
+        target_sources(${TARGET_NAME} PRIVATE support/lifecycle_state_peer.cpp)
+    endif()
 
     if(APPLE)
         if(NOT DEFINED SINTRA_DSYMUTIL_EXECUTABLE)
