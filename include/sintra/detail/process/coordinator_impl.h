@@ -463,14 +463,6 @@ Coordinator::~Coordinator()
         m_external_process_invitation_cleanup_thread.join();
     }
 
-    {
-        std::lock_guard<mutex> lock(m_recovery_threads_mutex);
-        for (auto& thread : m_recovery_threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
     s_coord     = nullptr;
     s_coord_id  = 0;
 }
@@ -2349,8 +2341,7 @@ void Coordinator::recover_if_required(
     };
 
     if (!runner) {
-        std::lock_guard<mutex> lock(m_recovery_threads_mutex);
-        m_recovery_threads.emplace_back(detail::Exception_boundary{"recovery_runner"}.wrap(
+        s_mproc->start_owned_lifecycle_worker(detail::Exception_boundary{"recovery_runner"}.wrap(
             [spawn_now]() mutable { spawn_now(); }));
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
         recovery_decision.mark_scheduled();
@@ -2361,11 +2352,8 @@ void Coordinator::recover_if_required(
     Recovery_control control;
     control.should_cancel = should_cancel;
     control.spawn = spawn_now;
-    {
-        std::lock_guard<mutex> lock(m_recovery_threads_mutex);
-        m_recovery_threads.emplace_back(detail::Exception_boundary{"recovery_runner"}.wrap(
-            [info, runner, control]() mutable { runner(info, control); }));
-    }
+    s_mproc->start_owned_lifecycle_worker(detail::Exception_boundary{"recovery_runner"}.wrap(
+        [info, runner, control]() mutable { runner(info, control); }));
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     recovery_decision.mark_scheduled();
 #endif

@@ -319,7 +319,7 @@ m_external_process_invitations_mutex
 m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m -> atomics
 ```
 Threads may skip hierarchy levels. `m_type_resolution_mutex`,
-`m_lifecycle_mutex`, `m_recovery_threads_mutex`, and
+`m_lifecycle_mutex`, and
 `m_draining_state_mutex` are leaf locks; no coordinator lock may be acquired
 while one of them is held.
 

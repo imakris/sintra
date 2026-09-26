@@ -542,8 +542,7 @@ public:
     //   m_groups_mutex -> Process_group::m_call_mutex -> Barrier::m
     // The remaining coordinator mutexes are leaves; no other coordinator
     // mutex may be acquired while holding one of them:
-    //   m_type_resolution_mutex, m_lifecycle_mutex,
-    //   m_recovery_threads_mutex, m_draining_state_mutex
+    //   m_type_resolution_mutex, m_lifecycle_mutex, m_draining_state_mutex
     mutex                                          m_type_resolution_mutex;
     detail::Coordinator_publication_notifications_mutex
                                                    m_publication_notifications_mutex;
@@ -586,8 +585,6 @@ public:
     Recovery_policy                                m_recovery_policy;
     Recovery_runner                                m_recovery_runner;
     Lifecycle_handler                              m_lifecycle_handler;
-    std::mutex                                     m_recovery_threads_mutex;
-    std::vector<std::thread>                       m_recovery_threads;
     std::atomic<bool>                              m_shutdown{false};
 
     detail::Coordinator_external_process_invitations_mutex

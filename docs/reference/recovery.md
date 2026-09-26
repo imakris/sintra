@@ -95,7 +95,7 @@ custody, not a process-instance-id generation counter.
   the recovery for that event. If the policy throws, Sintra logs the exception
   and retains the default-allow decision, so recovery proceeds.
 - The default runner, when none is configured, schedules the spawn on a
-  coordinator-owned recovery thread. A custom runner runs on its own recovery
+  dedicated recovery thread. A custom runner runs on its own recovery
   thread and decides when to call `Recovery_control::spawn()`. Calling
   `spawn()` more than once is ignored. If a custom runner throws, Sintra logs
   the exception and neither retries the runner nor falls back to the default
@@ -133,11 +133,15 @@ custody, not a process-instance-id generation counter.
 - The recovery policy is invoked on the coordinator thread that handles the
   crash event. Keep the work cheap and side-effect-free; defer expensive
   logic to the runner.
-- The runner runs on a dedicated coordinator-owned thread for the duration
+- The runner runs on a dedicated recovery thread for the duration
   of one recovery decision. It must be thread-safe relative to other
   coordinator state it touches.
-- Default recovery uses the same coordinator-owned recovery-thread mechanism,
+- Default recovery uses the same recovery-thread mechanism,
   even though it calls `spawn()` immediately on that thread.
+- The local managed process owns these workers alongside its other lifecycle
+  work. Completed workers are joined and released when later lifecycle work is
+  admitted; active runners stay owned. Shutdown signals cancellation and joins
+  the remaining workers before destroying the coordinator.
 - A custody that did not call `enable_recovery()` is not respawned even when a
   policy or runner is configured.
 

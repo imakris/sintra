@@ -2864,6 +2864,8 @@ Managed_process::~Managed_process()
 #endif
     // Join the owned observers and cleanup workers before destroying the
     // runtime they report into. This join has no independent time bound.
+    // Recovery runners have also received cancellation and must finish before
+    // the Coordinator captured by their controls is destroyed below.
     join_owned_lifecycle_workers();
     drain_child_exit_dispatcher();
 
@@ -3841,20 +3843,30 @@ inline void Managed_process::start_owned_lifecycle_worker(
     instance_id_type failure_process_instance_id,
     uint32_t failure_occurrence)
 {
+    // Join finished workers outside the ownership lock, so no thread's exit
+    // path can wait for an admission that is waiting for it.
+    std::vector<std::thread> finished;
+    {
+        std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+        for (auto it = m_owned_lifecycle_workers.begin(); it != m_owned_lifecycle_workers.end();) {
+            if (it->complete->load(std::memory_order_acquire)) {
+                finished.push_back(std::move(it->thread));
+                it = m_owned_lifecycle_workers.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+    }
+    for (auto& thread : finished) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
     std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
     if (!m_owned_lifecycle_worker_admission_open) {
         throw std::runtime_error("Sintra lifecycle worker admission is closed.");
-    }
-    for (auto it = m_owned_lifecycle_workers.begin(); it != m_owned_lifecycle_workers.end();) {
-        if (it->complete->load(std::memory_order_acquire)) {
-            if (it->thread.joinable()) {
-                it->thread.join();
-            }
-            it = m_owned_lifecycle_workers.erase(it);
-        }
-        else {
-            ++it;
-        }
     }
     auto complete = std::make_shared<std::atomic<bool>>(false);
     auto guarded = detail::Exception_boundary{"owned_lifecycle_worker"}.wrap(
@@ -3874,9 +3886,22 @@ inline void Managed_process::start_owned_lifecycle_worker(
         }
         owned.thread = std::thread(
             [guarded = std::move(guarded), complete]() mutable {
-                Instantiator completion_guard(std::function<void()>([complete]() {
-                    complete->store(true, std::memory_order_release);
-                }));
+                // Completion comes from this thread's exit cleanup. Constructed
+                // first, this thread_local is destroyed after the callable's
+                // captures and after every thread_local the worker constructs,
+                // so a reaped thread runs no more user code.
+                struct Exit_signal
+                {
+                    std::shared_ptr<std::atomic<bool>> complete;
+                    ~Exit_signal()
+                    {
+                        if (complete) {
+                            complete->store(true, std::memory_order_release);
+                        }
+                    }
+                };
+                thread_local Exit_signal exit_signal;
+                exit_signal.complete = std::move(complete);
                 guarded();
             });
     }
