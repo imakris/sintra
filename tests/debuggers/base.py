@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Iterable, Optional, Tuple, TYPE_CHECKING
 
@@ -55,6 +56,7 @@ class DebuggerStrategy(ABC):
         invocation: "TestInvocation",
         start_time: float,
         pid: int,
+        working_dir: Path,
     ) -> Tuple[str, str]:
         """Capture stacks from a post-mortem artifact for the process."""
 
@@ -78,5 +80,6 @@ class NullDebuggerStrategy(DebuggerStrategy):
         invocation: "TestInvocation",
         start_time: float,
         pid: int,
+        working_dir: Path,
     ) -> Tuple[str, str]:
         return "", "post-mortem stack capture unavailable on this platform"

@@ -75,14 +75,6 @@ class PosixPlatformSupport(PlatformSupport):
 
         return page_size_bytes * (free_pages + inactive_pages + speculative_pages)
 
-    def core_dump_directories(self, base: Set[Path]) -> Set[Path]:
-        if sys.platform == "darwin":
-            base.add(Path("/cores"))
-            base.add(Path.home() / "Library" / "Logs" / "DiagnosticReports")
-        else:
-            base.add(Path("/var/lib/systemd/coredump"))
-        return base
-
     def kill_process_tree(self, pid: int) -> None:
         import signal
 

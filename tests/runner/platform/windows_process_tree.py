@@ -3,6 +3,7 @@
 import ctypes
 from ctypes import wintypes
 import threading
+import time
 
 
 class _Process_entry(ctypes.Structure):
@@ -83,6 +84,9 @@ class _Process_api:
         if self.running(handle) and not self.kernel.TerminateProcess(handle, 1):
             raise ctypes.WinError(ctypes.get_last_error())
 
+    def wait(self, handle, milliseconds):
+        self.kernel.WaitForSingleObject(handle, milliseconds)
+
     def close(self, handle):
         self.kernel.CloseHandle(handle)
 
@@ -147,9 +151,15 @@ class Windows_process_tree:
     def terminate(self, *, include_root=True):
         with self._lock:
             self.refresh()
-            for pid, handle in reversed(list(self._handles.items())):
-                if include_root or pid != self._root_pid:
-                    self._api.terminate(handle)
+            handles = [handle for pid, handle in reversed(list(self._handles.items()))
+                       if include_root or pid != self._root_pid]
+            for handle in handles:
+                self._api.terminate(handle)
+            # TerminateProcess is asynchronous. Wait on the retained occurrences
+            # before callers remove working directories or inspect survivors.
+            deadline = time.monotonic() + 2.0
+            for handle in handles:
+                self._api.wait(handle, max(0, int((deadline - time.monotonic()) * 1000)))
 
     def close(self):
         with self._lock:

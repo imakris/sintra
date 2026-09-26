@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -39,11 +38,6 @@ class PlatformSupport:
         """Return available physical memory in bytes, if detectable."""
 
         return None
-
-    def core_dump_directories(self, base: Set[Path]) -> Set[Path]:
-        """Return candidate directories for core dumps."""
-
-        return base
 
     def kill_process_tree(self, pid: int) -> None:
         """Terminate ``pid`` and its children."""

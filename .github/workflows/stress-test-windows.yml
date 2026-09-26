@@ -165,6 +165,40 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Ensure native Windows debugger
+        if: inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        shell: pwsh
+        run: |
+          function Find-NativeDebugger {
+            foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+              $candidate = Join-Path $root 'Windows Kits/10/Debuggers/x64/cdb.exe'
+              if (Test-Path -LiteralPath $candidate) { return $candidate }
+            }
+          }
+          $debugger = Find-NativeDebugger
+          if (-not $debugger) {
+            # Official Windows SDK installer; install only Debugging Tools.
+            # https://learn.microsoft.com/windows/apps/windows-sdk/downloads
+            $installer = Join-Path $env:RUNNER_TEMP 'winsdksetup.exe'
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2376217' -OutFile $installer
+            $signature = Get-AuthenticodeSignature -FilePath $installer
+            if ($signature.Status -ne 'Valid' -or
+                $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') {
+              throw 'Windows SDK installer signature is not valid for Microsoft Corporation'
+            }
+            $installation = Start-Process -FilePath $installer -ArgumentList @(
+              '/features', 'OptionId.WindowsDesktopDebuggers', '/quiet', '/norestart'
+            ) -Wait -PassThru -WindowStyle Hidden
+            if ($installation.ExitCode -notin @(0, 3010, 1641)) {
+              throw "Windows debugger installation failed: $($installation.ExitCode)"
+            }
+            $debugger = Find-NativeDebugger
+          }
+          if (-not $debugger) { throw 'Native x64 CDB is required for Windows test diagnostics' }
+          & $debugger -version
+          if ($LASTEXITCODE -ne 0) { throw "CDB could not run: $LASTEXITCODE" }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path $debugger)
+
       - name: Run stress tests with run_tests.py
         if: inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: pwsh

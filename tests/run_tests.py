@@ -348,7 +348,7 @@ class TestInvocation:
     args: Tuple[str, ...] = ()
 
     def command(self) -> List[str]:
-        return [str(self.path), *self.args]
+        return [str(self.path.resolve()), *self.args]
 
 class TestRunner:
     """Manages test execution with timeout and repetition"""
@@ -620,19 +620,6 @@ class TestRunner:
                 f"{invocation.name}: {exc}{Color.RESET}"
             )
 
-    def _core_dump_search_directories(self, invocation: TestInvocation) -> List[Path]:
-        """Return directories that may contain core dumps for ``invocation``."""
-
-        candidates: Set[Path] = {
-            invocation.path.parent.resolve(),
-            Path.cwd().resolve(),
-            self.build_dir.resolve(),
-            self._scratch_base,
-        }
-
-        enriched = self.platform.core_dump_directories(candidates)
-        return [path for path in enriched if path]
-
     @staticmethod
     def _is_core_dump_file(path: Path) -> bool:
         """Return True if ``path`` appears to be a core dump file."""
@@ -643,72 +630,24 @@ class TestRunner:
             or name.startswith("core.")
             or name.startswith("core-")
             or name.endswith(".core")
+            or name.endswith(".dmp")
         )
 
-    @staticmethod
-    def _normalize_core_path(path: Path) -> Path:
-        """Return a canonical representation for core dump paths."""
-
+    def _find_core_dumps(self, scratch_dir: Path) -> List[Tuple[Path, int]]:
+        """Find regular dumps owned by this fresh invocation directory."""
+        dumps = []
         try:
-            return path.resolve()
+            entries = list(scratch_dir.iterdir())
         except OSError:
-            return path
-
-    def _snapshot_core_dumps(self, invocation: TestInvocation) -> Set[Path]:
-        """Capture the set of core dump files before launching a test."""
-
-        snapshot: Set[Path] = set()
-        for directory in self._core_dump_search_directories(invocation):
+            return dumps
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_file() or not self._is_core_dump_file(entry):
+                continue
             try:
-                entries = list(directory.iterdir())
+                dumps.append((entry, entry.stat().st_size))
             except OSError:
                 continue
-
-            for entry in entries:
-                if not entry.is_file():
-                    continue
-                if not self._is_core_dump_file(entry):
-                    continue
-                snapshot.add(self._normalize_core_path(entry))
-
-        return snapshot
-
-    def _find_new_core_dumps(
-        self,
-        scratch_dir: Path,
-        snapshot: Set[Path],
-        start_time: float,
-    ) -> List[Tuple[Path, float, int]]:
-        """Return newly created core dumps after a test run."""
-
-        new_dumps: List[Tuple[Path, float, int]] = []
-        for directory in (scratch_dir,):
-            try:
-                entries = list(directory.iterdir())
-            except OSError:
-                continue
-
-            for entry in entries:
-                if not entry.is_file():
-                    continue
-                if not self._is_core_dump_file(entry):
-                    continue
-
-                normalized = self._normalize_core_path(entry)
-                if normalized in snapshot:
-                    continue
-
-                try:
-                    stat_info = entry.stat()
-                except OSError:
-                    continue
-
-                if stat_info.st_mtime + 0.001 < start_time:
-                    continue
-
-                new_dumps.append((normalized, stat_info.st_mtime, stat_info.st_size))
-
-        return new_dumps
+        return dumps
 
     def _record_core_cleanup(self, level: str, message: str, freed_bytes: int = 0) -> None:
         """Record a core cleanup message to be emitted later."""
@@ -721,18 +660,16 @@ class TestRunner:
     def _cleanup_new_core_dumps(
         self,
         invocation: TestInvocation,
-        snapshot: Set[Path],
-        start_time: float,
         result_success: Optional[bool],
         scratch_dir: Path,
-    ) -> None:
-        """Remove only core dumps in this invocation's private scratch directory."""
+    ) -> bool:
+        """Remove private-directory dumps; return whether any must be retained."""
 
-        new_dumps = self._find_new_core_dumps(scratch_dir, snapshot, start_time)
+        new_dumps = self._find_core_dumps(scratch_dir)
         if not new_dumps:
-            return
+            return False
 
-        total_size = sum(size for _, _, size in new_dumps if size is not None)
+        total_size = sum(size for _, size in new_dumps)
 
         message_prefix = f"Core dumps ({invocation.name})"
         if result_success:
@@ -746,16 +683,14 @@ class TestRunner:
             )
             level = "warning" if result_success else "info"
             self._record_core_cleanup(level, message)
-            return
+            return True
 
         removed: List[str] = []
         freed_bytes = 0
         errors: List[str] = []
 
-        for path, _, size in new_dumps:
+        for path, size in new_dumps:
             try:
-                if size is None:
-                    size = 0
                 path.unlink()
                 removed.append(path.name)
                 freed_bytes += size
@@ -782,6 +717,7 @@ class TestRunner:
 
         for error in errors:
             self._record_core_cleanup("warning", error)
+        return bool(errors)
 
     def cleanup(self) -> None:
         """Remove the root scratch directory for this runner."""
@@ -793,7 +729,12 @@ class TestRunner:
             )
             return
 
-        self._cleanup_scratch_directory(self._scratch_base)
+        # Invocation cleanup already removed disposable directories. Never
+        # recursively remove directories retained for cores or failure evidence.
+        try:
+            self._scratch_base.rmdir()
+        except OSError:
+            pass
 
     def consume_core_cleanup_reports(self) -> Tuple[int, List[Tuple[str, str]]]:
         """Return accumulated core cleanup messages and reset the state."""
@@ -1070,7 +1011,6 @@ class TestRunner:
         process = None
         windows_tree = None
         cleanup_scratch_dir = True
-        core_snapshot = self._snapshot_core_dumps(invocation)
         start_time = time.time()
         result_success: Optional[bool] = None
         evidence_stdout = ""
@@ -1109,7 +1049,7 @@ class TestRunner:
                 'stderr': subprocess.PIPE,
                 'text': True,
                 'bufsize': 1,
-                'cwd': invocation.path.parent,
+                'cwd': scratch_dir,
             }
 
             self.platform.configure_popen(popen_kwargs)
@@ -1125,6 +1065,7 @@ class TestRunner:
             failure_event = threading.Event()
             hang_detected = False
             hang_notes: List[str] = []
+            leftover_notes: List[str] = []
             capture_lock = threading.Lock()
             capture_pause_total = 0.0
             capture_active_start: Optional[float] = None
@@ -1326,6 +1267,8 @@ class TestRunner:
                         thread.join(timeout=join_timeout)
 
                     if thread.is_alive():
+                        hang_detected = True
+                        hang_notes.append(f"log reader stalled after test exit ({descriptor})")
                         cleanup_outcome = terminate_process_group_members(
                             f"log reader stall ({descriptor}) for {invocation.name}"
                         )
@@ -1826,8 +1769,7 @@ class TestRunner:
 
                 cleanup_outcome = terminate_process_group_members(f"{invocation.name} exit")
                 if cleanup_outcome.found_children:
-                    hang_detected = True
-                    hang_notes.append(cleanup_outcome.note)
+                    leftover_notes.append(cleanup_outcome.note)
 
                 if windows_tree is not None:
                     descendants = windows_tree.live_descendants()
@@ -1836,8 +1778,7 @@ class TestRunner:
                         time.sleep(0.05)
                         descendants = windows_tree.live_descendants()
                     if descendants:
-                        hang_detected = True
-                        hang_notes.append(f"owned descendants after exit: {descendants}")
+                        leftover_notes.append(f"owned descendants after exit: {descendants}")
                         for pid in descendants:
                             try:
                                 stacks, error = self._capture_process_stacks(pid, None)
@@ -1848,6 +1789,9 @@ class TestRunner:
                             except Exception as exc:
                                 print(f"Warning: Cannot capture owned descendant pid={pid}: {exc}")
                         windows_tree.terminate(include_root=False)
+                        if windows_tree.live_descendants():
+                            cleanup_scratch_dir = False
+                            leftover_notes.append("owned descendants remain after termination")
 
                 duration = time.time() - start_time
 
@@ -1856,14 +1800,10 @@ class TestRunner:
                 stdout = ''.join(stdout_lines)
                 stderr = ''.join(stderr_lines)
 
-                success = (process.returncode == 0) and not hang_detected
+                success = (process.returncode == 0) and not hang_detected and not leftover_notes
                 error_msg = stderr
                 probe_missing_crash = False
                 result_kind = "pass"
-
-                if hang_detected:
-                    hang_summary = "; ".join(hang_notes) if hang_notes else "detected lingering/descendant processes"
-                    error_msg = f"[HANG DETECTED] {hang_summary}\n{error_msg}"
 
                 if _is_stack_capture_test(invocation.name) and process.returncode == 0 and not hang_detected:
                     probe_missing_crash = True
@@ -1890,6 +1830,9 @@ class TestRunner:
                     elif process.returncode < 0 or process.returncode > 128:
                         # Unix signal (negative) or Windows crash code (large positive like 0xC0000005)
                         error_msg = f"CRASH: Process terminated abnormally (exit code {process.returncode})\n{stderr}"
+                    elif process.returncode == 0:
+                        # The harness failure is described by its own diagnostic below.
+                        error_msg = stderr
                     elif duration < 0.1:
                         # Exited almost immediately - likely crash or early abort
                         error_msg = f"EARLY EXIT: Process exited with code {process.returncode} after {duration:.3f}s (possible crash)\n{stderr}"
@@ -1927,7 +1870,15 @@ class TestRunner:
                             (
                                 postmortem_stack_traces,
                                 postmortem_stack_error,
-                            ) = self._capture_core_dump_stack(invocation, start_time, process.pid)
+                            ) = self._capture_core_dump_stack(invocation, start_time, process.pid, scratch_dir)
+
+                if leftover_notes:
+                    error_msg = (
+                        f"[LEFTOVER DESCENDANTS] Parent exited with exit code {process.returncode}; "
+                        f"{'; '.join(leftover_notes)}\n{error_msg}"
+                    )
+                if hang_detected:
+                    error_msg = f"[HANG DETECTED] {'; '.join(hang_notes)}\n{error_msg}"
 
                 if live_stack_traces:
                     error_msg = f"{error_msg}\n\n=== Captured stack traces ===\n{live_stack_traces}"
@@ -1962,6 +1913,8 @@ class TestRunner:
                 evidence_duration = duration
                 if hang_detected:
                     evidence_result_kind = "hang"
+                elif leftover_notes:
+                    evidence_result_kind = "leftover_descendants"
                 elif not success:
                     evidence_result_kind = (
                         "nonzero_exit" if process.returncode != 0 else "harness_failure"
@@ -2106,9 +2059,10 @@ class TestRunner:
                     stderr=evidence_stderr,
                 )
 
+            if self._cleanup_new_core_dumps(invocation, result_success, scratch_dir):
+                cleanup_scratch_dir = False
             if cleanup_scratch_dir:
                 self._cleanup_scratch_directory(scratch_dir)
-            self._cleanup_new_core_dumps(invocation, core_snapshot, start_time, result_success, scratch_dir)
 
     def _kill_process_tree(self, pid: int):
         """Kill a process and all its children"""
@@ -2224,8 +2178,9 @@ class TestRunner:
         invocation: TestInvocation,
         start_time: float,
         pid: int,
+        working_dir: Path,
     ) -> Tuple[str, str]:
-        return self._debugger.capture_core_dump_stack(invocation, start_time, pid)
+        return self._debugger.capture_core_dump_stack(invocation, start_time, pid, working_dir)
 
     def _collect_process_group_pids(self, pgid: int) -> List[int]:
         """Return all process IDs belonging to the provided process group."""

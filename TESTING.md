@@ -390,19 +390,40 @@ Options:
 ### Process isolation and Windows diagnostics
 
 Concurrent runners own separate scratch directories and clean up only their
-own test processes. Windows cleanup retains process handles and checks parent
-lifetimes; it does not use executable names to select processes. A detached
+own test processes. Each invocation runs with its private scratch directory as
+its working directory and an absolute executable path. Relative core-file
+locations therefore belong to that invocation. Windows cleanup retains process
+handles and checks parent lifetimes; it does not use executable names to select processes. A detached
 descendant whose intermediate parents all exit before observation cannot be
-identified safely. An inherited pipe that remains open is reported as a hang.
+identified safely. An inherited pipe that stalls a log reader is reported as a
+hang. A parent that exits while owned descendants remain fails with a separate
+`LEFTOVER DESCENDANTS` diagnostic that retains the parent's exit code; surviving
+owned descendants are terminated.
 
 The Windows runner looks for `cdb`, `ntsd`, or `windbg` on `PATH`, in installed
-Windows Kits, and in an existing Sintra debugger cache. It does not download or
+Windows Kits, and in an existing Sintra debugger cache. `PATH` is an explicit
+operator override; otherwise native x64 tools across all known installations
+take precedence over other architectures. The runner does not download or
 install an SDK, change JIT-debugger settings, or enable Windows Error Reporting.
+Windows CI provisions and verifies native CDB as an explicit test-job prerequisite.
 Install Windows Debugging Tools separately when stack capture is needed. Live
 stack capture and minidump fallback remain available with an installed debugger.
+Captured Windows stacks require actual debugger frame records; banners,
+attachment failures, and empty dumps do not count as captured stacks.
 Post-mortem capture reads existing WER destinations and requires a dump name
-identifying the failed process. Automatic core-file deletion is restricted to
-the invocation's private scratch directory; shared-location dumps are preserved.
+identifying the failed process. Installing a debugger does not enable automatic
+crash dumps. For a process that exits before live attachment, configure
+[WER LocalDumps](https://learn.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps)
+separately before running tests, or launch the failing test under the debugger.
+WER LocalDumps is disabled by default and its setup requires administrator
+privileges; the runner reports this prerequisite without changing the registry.
+
+Automatic core-file deletion is restricted to the invocation's private working
+directory and runs after stack capture, before scratch removal.
+`SINTRA_PRESERVE_CORES=1` retains those dumps through final runner cleanup.
+Dumps routed by system policy to shared locations (such as `/cores` or a WER
+folder) are preserved and need operator-managed retention. Private working
+directories do not override an absolute or service-managed system dump path.
 
 Run the Python harness checks from the repository root:
 

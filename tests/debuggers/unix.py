@@ -325,12 +325,13 @@ class UnixDebuggerStrategy(DebuggerStrategy):
         invocation: "TestInvocation",
         start_time: float,
         pid: int,
+        working_dir: Path,
     ) -> Tuple[str, str]:
         debugger_name, debugger_command, debugger_error = self._resolve_unix_debugger()
         if not debugger_command:
             return "", debugger_error
 
-        candidate_dirs = {invocation.path.parent, Path.cwd()}
+        candidate_dirs = {working_dir}
 
         if sys.platform == "darwin":
             darwin_core_dirs = [Path("/cores"), Path.home() / "Library" / "Logs" / "DiagnosticReports"]
@@ -361,7 +362,11 @@ class UnixDebuggerStrategy(DebuggerStrategy):
 
                     name_lower = entry.name.lower()
                     exe_name = invocation.path.name.lower()
-                    if exe_name not in name_lower and invocation.path.stem.lower() not in name_lower:
+                    private_core = directory == working_dir and (
+                        name_lower == "core" or name_lower.startswith(("core.", "core-"))
+                        or name_lower.endswith(".core")
+                    )
+                    if not private_core and exe_name not in name_lower and invocation.path.stem.lower() not in name_lower:
                         continue
 
                     try:

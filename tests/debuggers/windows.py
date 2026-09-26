@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .base import DebuggerStrategy
 
@@ -36,6 +36,13 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 f"{self._color.YELLOW}Warning: {error}. Stack capture may be unavailable.{self._color.RESET}"
             )
 
+    def ensure_crash_dumps(self) -> Optional[str]:
+        return (
+            "Windows post-mortem dumps require operator-configured WER LocalDumps; "
+            "the runner does not enable dump collection. An installed debugger alone "
+            "only supports capture while the process is still alive"
+        )
+
     def capture_process_stacks(
         self,
         pid: int,
@@ -48,8 +55,9 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         invocation: "TestInvocation",
         start_time: float,
         pid: int,
+        working_dir: Path,
     ) -> Tuple[str, str]:
-        return self._capture_windows_crash_dump(invocation, start_time, pid)
+        return self._capture_windows_crash_dump(invocation, start_time, pid, working_dir)
 
     # Discovery never installs tools or changes machine configuration.
     def _locate_windows_debugger(self, executable: str) -> Tuple[Optional[str], str]:
@@ -67,11 +75,9 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             roots.append(self._get_windows_debugger_cache_dir() /
                          "winsdk_debuggers" / "Windows Kits" / "10" / "Debuggers")
             names = [executable] if executable.endswith(".exe") else [executable + ".exe"]
-            for root in roots:
-                located = self._find_debugger_executable(root, names)
-                if located:
-                    path = str(located)
-                    break
+            located = self._find_debugger_executable(roots, names)
+            if located:
+                path = str(located)
 
         result = (path, "" if path else
                   f"{executable} unavailable; install Windows Debugging Tools or add it to PATH")
@@ -116,16 +122,17 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
     def _find_debugger_executable(
         self,
-        debugger_root: Path,
+        debugger_roots: List[Path],
         executable_names: List[str],
     ) -> Optional[Path]:
+        # Prefer native x64 tools across every installation before accepting
+        # a fallback from one root (which may contain only an x86 debugger).
         candidate_dirs = [
-            debugger_root / "x64",
-            debugger_root / "amd64",
-            debugger_root / "dbg" / "amd64",
-            debugger_root / "bin" / "x64",
-            debugger_root,
+            root / relative
+            for root in debugger_roots
+            for relative in ("x64", "amd64", "dbg/amd64", "bin/x64")
         ]
+        candidate_dirs.extend(debugger_roots)
 
         for directory in candidate_dirs:
             try:
@@ -142,13 +149,14 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 except OSError:
                     continue
 
-        for name in executable_names:
-            try:
-                matches = list(debugger_root.rglob(name))
-            except OSError:
-                matches = []
-            if matches:
-                return matches[0]
+        for root in debugger_roots:
+            for name in executable_names:
+                try:
+                    matches = list(root.rglob(name))
+                except OSError:
+                    matches = []
+                if matches:
+                    return matches[0]
 
         return None
 
@@ -193,13 +201,14 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
         invocation: "TestInvocation",
         start_time: float,
         pid: int,
+        working_dir: Path,
     ) -> Tuple[str, str]:
         debugger_name, debugger_path, debugger_error = self._resolve_windows_debugger()
         if not debugger_path:
             return "", debugger_error
 
         candidate_dirs = self._configured_dump_directories(invocation.path.name)
-        candidate_dirs.extend([invocation.path.parent, Path.cwd()])
+        candidate_dirs.append(working_dir)
 
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
@@ -245,96 +254,55 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 candidate_dumps.append((stat_info.st_mtime, entry))
 
         if not candidate_dumps:
-            return "", "no recent crash dump found"
+            return "", (
+                "no recent dump identifying the failed process was found; configure WER "
+                "LocalDumps before running tests, or launch the failing test under an "
+                "installed Windows debugger. Live minidumps cannot capture an exited process"
+            )
 
         candidate_dumps.sort(key=lambda item: item[0], reverse=True)
 
-        stack_outputs: List[str] = []
         capture_errors: List[str] = []
-        fallback_outputs: List[Tuple[str, str, int, str]] = []
-
         sym_cmd = self._symbol_path_command()
-
         for _, dump_path in candidate_dumps:
+            command = [debugger_path]
+            if debugger_name == "windbg":
+                command.append("-Q")
+            command.extend(["-z", str(dump_path), "-c", f"{sym_cmd}; ~* kP; qd"])
             try:
-                command = [debugger_path]
-                if debugger_name == "windbg":
-                    command.append("-Q")
-                # Use kP to show stack with parameters (function arguments)
-                command.extend(["-z", str(dump_path), "-c", f"{sym_cmd}; ~* kP; qd"])
-
                 result = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=120,
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=120,
                 )
             except (subprocess.SubprocessError, OSError) as exc:
                 capture_errors.append(f"{dump_path}: {debugger_name} failed ({exc})")
                 continue
+            trace, error = self._read_stack_result(result)
+            if trace:
+                return f"{dump_path}\n{trace}", ""
+            capture_errors.append(f"{dump_path}: {error}")
+        return "", "; ".join(capture_errors)
 
-            stdout = result.stdout.strip()
-            stderr = result.stderr.strip()
-
-            output = stdout
-            output_from_stderr = False
-            if not output and stderr:
-                output = stderr
-                output_from_stderr = True
-
-            normalized_code = self._normalize_windows_returncode(result.returncode)
-            exit_ok = normalized_code in self._WINDOWS_DEBUGGER_SUCCESS_CODES
-
-            if exit_ok:
-                if output:
-                    note = ""
-                    if normalized_code != 0:
-                        note = (
-                            f"\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)};"
-                            " treated as success]"
-                        )
-                    stack_outputs.append(f"{dump_path}\n{output}{note}")
-                continue
-
-            if output:
-                if not output_from_stderr:
-                    fallback_outputs.append((str(dump_path), output, normalized_code, stderr))
-                else:
-                    capture_errors.append(
-                        self._format_windows_debugger_failure(
-                            debugger_name,
-                            str(dump_path),
-                            normalized_code,
-                            stderr,
-                        )
-                    )
-            else:
-                capture_errors.append(
-                    self._format_windows_debugger_failure(
-                        debugger_name,
-                        str(dump_path),
-                        normalized_code,
-                        stderr,
-                    )
-                )
-
-        if stack_outputs:
-            return "\n\n".join(stack_outputs), ""
-
-        if fallback_outputs:
-            annotated = []
-            for label, output, normalized_code, stderr in fallback_outputs:
-                detail = f"; stderr: {stderr}" if stderr else ""
-                annotated.append(
-                    f"{label}\n{output}\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)}; output may be incomplete{detail}]"
-                )
-            return "\n\n".join(annotated), "; ".join(capture_errors) if capture_errors else ""
-
-        if capture_errors:
-            return "", "; ".join(capture_errors)
-
-        return "", "no stack data captured"
+    @classmethod
+    def _read_stack_result(cls, result) -> Tuple[str, str]:
+        """Accept debugger output only when it contains actual kP frame records."""
+        output = result.stdout.strip()
+        detail = "\n".join(part for part in (output, result.stderr.strip()) if part)
+        code = cls._normalize_windows_returncode(result.returncode)
+        fatal_messages = (
+            "unable to examine process id", "could not open dump file",
+            "debuggee initialization failed",
+        )
+        failed = any(message in detail.lower() for message in fatal_messages)
+        # kP prints stack pointer, return address, then call site. Frame numbers
+        # are optional; accept both x86 addresses and backtick-separated x64.
+        address = r"[0-9a-fA-F]{8,16}(?:`[0-9a-fA-F]{8})?"
+        frame = rf"(?m)^\s*(?:[0-9a-fA-F]{{2}}\s+)?{address}\s+{address}\s+\S+"
+        header = re.search(r"(?m)^\s*(?:Child-SP|ChildEBP)\s+RetAddr[^\n]*Call Site\s*$", output)
+        has_frames = header is not None and re.search(frame, output[header.end():]) is not None
+        if not failed and code in cls._WINDOWS_DEBUGGER_SUCCESS_CODES and has_frames:
+            return output, ""
+        return "", f"debugger produced no usable stack (exit {cls._format_windows_returncode(code)}): {detail}"
 
     def _capture_process_stacks_windows(self, pid: int) -> Tuple[str, str]:
         debugger_name, debugger_path, debugger_error = self._resolve_windows_debugger()
@@ -359,126 +327,33 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
 
         stack_outputs: List[str] = []
         capture_errors: List[str] = []
-        fallback_outputs: List[Tuple[str, str, int, str]] = []
-
-        analyzed_pids: Set[int] = set()
-
         for target_pid in sorted(set(target_pids)):
-            if target_pid in analyzed_pids:
-                continue
-            analyzed_pids.add(target_pid)
+            command = [debugger_path]
+            if debugger_name == "windbg":
+                command.append("-Q")
+            command.extend(["-pv", "-p", str(target_pid), "-c", f"{sym_cmd}; ~* kP; qd"])
             try:
-                command = [debugger_path]
-                if debugger_name == "windbg":
-                    command.append("-Q")
-                # Use kP to show stack with parameters (function arguments)
-                # Note: Full local variable display would require iterating frames with dv
-                command.extend(["-pv", "-p", str(target_pid), "-c", f"{sym_cmd}; ~* kP; qd"])
-
                 result = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=60,
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=60,
                 )
-            except FileNotFoundError:
-                fallback_error = debugger_error or f"{debugger_name} not available"
-                return "", fallback_error
             except (subprocess.SubprocessError, OSError) as exc:
                 capture_errors.append(f"PID {target_pid}: {debugger_name} failed ({exc})")
                 continue
-
-            stdout = result.stdout.strip()
-            stderr = result.stderr.strip()
-
-            output = stdout
-            output_from_stderr = False
-            if not output and stderr:
-                output = stderr
-                output_from_stderr = True
-
-            normalized_code = self._normalize_windows_returncode(result.returncode)
-            exit_ok = normalized_code in self._WINDOWS_DEBUGGER_SUCCESS_CODES
-
-            if exit_ok:
-                if output:
-                    note = ""
-                    if normalized_code != 0:
-                        note = (
-                            f"\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)};"
-                            " treated as success]"
-                        )
-                    stack_outputs.append(f"PID {target_pid}\n{output}{note}")
+            trace, error = self._read_stack_result(result)
+            if trace:
+                stack_outputs.append(f"PID {target_pid}\n{trace}")
                 continue
-
-            fallback_needed = False
-            if not exit_ok:
-                fallback_needed = self._should_use_minidump_fallback(
-                    output,
-                    stderr,
-                    normalized_code,
-                )
-
-            if fallback_needed:
-                dump_output, dump_error = self._capture_stack_via_minidump(
-                    debugger_name,
-                    debugger_path,
-                    target_pid,
-                )
-                if dump_output:
-                    fallback_outputs.append(
-                        (f"PID {target_pid} (minidump)", dump_output, 0, "dump analysis")
-                    )
-                else:
-                    capture_errors.append(
-                        dump_error
-                        or self._format_windows_debugger_failure(
-                            debugger_name,
-                            f"PID {target_pid}",
-                            normalized_code,
-                            stderr,
-                        )
-                    )
-            else:
-                if output:
-                    if not output_from_stderr:
-                        fallback_outputs.append((f"PID {target_pid}", output, normalized_code, stderr))
-                    else:
-                        capture_errors.append(
-                            self._format_windows_debugger_failure(
-                                debugger_name,
-                                f"PID {target_pid}",
-                                normalized_code,
-                                stderr,
-                            )
-                        )
-                else:
-                    capture_errors.append(
-                        self._format_windows_debugger_failure(
-                            debugger_name,
-                            f"PID {target_pid}",
-                            normalized_code,
-                            stderr,
-                        )
-                    )
-
-        if stack_outputs:
-            return "\n\n".join(stack_outputs), ""
-
-        if fallback_outputs:
-            annotated = []
-            for label, output, normalized_code, stderr in fallback_outputs:
-                detail = f"; stderr: {stderr}" if stderr else ""
-                annotated.append(
-                    f"{label}\n{output}\n\n[Debugger exited with code {self._format_windows_returncode(normalized_code)}; output may be incomplete{detail}]"
-                )
-            return "\n\n".join(annotated), "; ".join(capture_errors) if capture_errors else ""
-
-        if capture_errors:
-            return "", "; ".join(capture_errors)
-
-        return "", "no stack data captured"
+            capture_errors.append(f"PID {target_pid}: {error}")
+            if self._should_use_minidump_fallback(
+                result.stdout, result.stderr, self._normalize_windows_returncode(result.returncode)
+            ):
+                trace, error = self._capture_stack_via_minidump(debugger_name, debugger_path, target_pid)
+                if trace:
+                    stack_outputs.append(f"PID {target_pid} (minidump)\n{trace}")
+                elif error:
+                    capture_errors.append(f"PID {target_pid}: {error}")
+        return "\n\n".join(stack_outputs), "; ".join(capture_errors)
 
     def _capture_stack_via_minidump(
         self,
@@ -519,12 +394,7 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
                 except OSError:
                     pass
 
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
-        output = stdout or stderr
-        if not output:
-            return "", "minidump analysis produced no output"
-        return output, None
+        return self._read_stack_result(result)
 
     def _create_minidump(self, pid: int) -> Tuple[Optional[str], Optional[str]]:
         """Generate a minidump for the given PID using comsvcs.dll."""
@@ -571,6 +441,9 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
             detail = result.stderr.strip() or result.stdout.strip()
             return None, f"minidump command exited with {result.returncode}: {detail}"
 
+        if not Path(tmp_path).stat().st_size:
+            os.remove(tmp_path)
+            return None, "minidump command produced an empty dump"
         return tmp_path, None
 
     @staticmethod
@@ -600,19 +473,6 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
     @staticmethod
     def _format_windows_returncode(returncode: int) -> str:
         return f"0x{returncode:08X}"
-
-    @classmethod
-    def _format_windows_debugger_failure(
-        cls,
-        debugger_name: str,
-        target: str,
-        returncode: int,
-        stderr: str,
-    ) -> str:
-        detail = f": {stderr.strip()}" if stderr else ""
-        return (
-            f"{target}: {debugger_name} exited with code {cls._format_windows_returncode(returncode)}{detail}"
-        )
 
     def _collect_windows_process_tree_pids(self, pid: int) -> List[int]:
         powershell_path = shutil.which("powershell")
