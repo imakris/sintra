@@ -51,8 +51,6 @@ namespace sintra {
 
 using std::unique_lock;
 
-extern thread_local bool tl_is_req_thread;
-
 #ifndef _WIN32
 namespace detail {
 namespace test_hooks {

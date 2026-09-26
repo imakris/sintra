@@ -31,8 +31,6 @@ using std::thread;
 void install_signal_handler();
 
 
-SINTRA_DETAIL_DECL thread_local bool tl_is_req_thread = false;
-
 SINTRA_DETAIL_DECL const char* Process_message_reader::reader_state_name(State state)
 {
     switch (state) {

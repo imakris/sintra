@@ -55,11 +55,6 @@ using std::is_same_v;
 using std::string;
 using std::unique_lock;
 
-// Defined in messaging/process_message_reader_impl.h, which includes this header
-// before it reaches that definition.
-extern thread_local bool tl_is_req_thread;
-
-
 template <typename/* = void*/>
 Transceiver::Transceiver(const string& name/* = ""*/, uint64_t instance_id/* = 0*/)
 {

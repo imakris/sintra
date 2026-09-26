@@ -137,6 +137,7 @@ struct Process_message_reader;
 inline thread_local Message_prefix*  s_tl_current_message     = nullptr;
 inline thread_local instance_id_type s_tl_common_function_iid = invalid_instance_id;
 
+inline thread_local bool tl_is_req_thread = false;
 inline thread_local Process_message_reader* s_tl_current_request_reader = nullptr;
 
 // True while the calling thread is the request reader of some peer's ring, and
