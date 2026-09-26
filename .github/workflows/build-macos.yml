@@ -30,6 +30,7 @@ on:
 jobs:
   build:
     name: macOS Build
+    if: github.ref != 'refs/heads/audit/si04-native-diagnostic-20260926'
     runs-on: macos-15
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -149,3 +150,53 @@ jobs:
       pr_number: ${{ github.event.pull_request.number || '' }}
       base_sha: ${{ github.event.pull_request.base.sha || '' }}
       force_tests: ${{ github.event_name == 'workflow_dispatch' }}
+
+  semaphore-validation:
+    name: macOS semaphore only
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/audit/si04-native-diagnostic-20260926'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout validation branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Ensure Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+
+      - name: Select only the semaphore test and configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'interprocess_semaphore_test 1\n' > tests/active_tests.txt
+          cmake -G 'Ninja Multi-Config' -S . -B build-si04 \
+            -DSINTRA_BUILD_TESTS=ON \
+            -DSINTRA_BUILD_ACTIVE_TESTS_ONLY=ON \
+            -DSINTRA_BUILD_EXAMPLES=OFF \
+            -DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON
+
+      - name: Build only semaphore target in Debug and Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-si04 --config Debug --target sintra_interprocess_semaphore_test --parallel 2
+          cmake --build build-si04 --config Release --target sintra_interprocess_semaphore_test --parallel 2
+
+      - name: Require one initial pass in each configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tests
+          python3 run_tests.py --timeout 30 --build-dir ../build-si04 \
+            --config Debug,Release --iteration-multiplier 1 --verbose
+
+      - name: Require 100 more passes in each configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'interprocess_semaphore_test 100\n' > tests/active_tests.txt
+          cd tests
+          python3 run_tests.py --timeout 30 --build-dir ../build-si04 \
+            --config Debug,Release --iteration-multiplier 1 --verbose
