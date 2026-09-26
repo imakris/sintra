@@ -3515,8 +3515,8 @@ void Managed_process::init(int argc, const char* const* argv)
         }
     };
 
+    activate(published_handler, Typed_instance_id<Coordinator>(s_coord_id));
     if (!s_coord) {
-        activate(published_handler,   Typed_instance_id<Coordinator>(s_coord_id));
         activate(unpublished_handler, Typed_instance_id<Coordinator>(s_coord_id));
     }
 
@@ -6645,13 +6645,14 @@ std::string Managed_process::obtain_swarm_directory()
 template <typename T>
 function<void()> Managed_process::call_on_availability(Named_instance<T> transceiver, function<void()> f)
 {
-    lock_guard<mutex> lock(m_availability_mutex);
+    unique_lock<mutex> lock(m_availability_mutex);
 
     std::string transceiver_name = transceiver;
     auto iid = Typed_instance_id<T>(get_instance_id(std::string(transceiver_name)));
 
     //if the transceiver is available, call f and skip the queue
     if (iid.id != invalid_instance_id) {
+        lock.unlock();
         f();
 
         // it's done - there is nothing to disable, thus returning an empty function.

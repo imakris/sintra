@@ -7,7 +7,9 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -462,6 +464,154 @@ void run_deactivate_all_slots_invokes_stable_deactivator_copies()
     }
 }
 
+void dispatch_named_event(Handler_lifetime_bus& sender)
+{
+    Handler_lifetime_bus::Event_message message(k_event_value);
+    message.sender_instance_id   = sender.instance_id();
+    message.receiver_instance_id = sintra::any_local_or_remote;
+    sintra::dispatch_event_handlers(message, {sender.instance_id()});
+}
+
+void run_named_deactivation(bool deferred)
+{
+    const std::string name = deferred ? "named-deferred" : "named-immediate";
+    Handler_lifetime_bus sender;
+    sintra::Transceiver receiver;
+    int entries = 0;
+    if (!deferred) {
+        sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
+            "could not publish immediate named sender");
+    }
+    auto deactivate = receiver.activate(
+        [&](const Handler_lifetime_bus::Event_message&) { ++entries; },
+        Handler_lifetime_bus::named_instance(name));
+    if (deferred) {
+        sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
+            "could not publish deferred named sender");
+    }
+    sintra::test::require_true(wait_until([&] {
+        dispatch_named_event(sender);
+        return entries != 0;
+    }, std::chrono::seconds(2)), k_failure_prefix,
+        "named handler never activated");
+
+    deactivate();
+    const int entries_before = entries;
+    dispatch_named_event(sender);
+    sintra::test::require_true(entries == entries_before, k_failure_prefix,
+        deferred ? "deferred named handler ran after deactivation"
+                 : "immediate named handler ran after deactivation");
+    deactivate();
+    receiver.deactivate_all();
+}
+
+void run_named_receiver_destruction(bool deferred)
+{
+    const std::string name = deferred ? "destroy-deferred" : "destroy-immediate";
+    Handler_lifetime_bus sender;
+    auto receiver = std::make_unique<sintra::Transceiver>();
+    int entries = 0;
+    if (!deferred) {
+        sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
+            "could not publish named sender before receiver destruction");
+    }
+    auto deactivate = receiver->activate(
+        [&](const Handler_lifetime_bus::Event_message&) { ++entries; },
+        Handler_lifetime_bus::named_instance(name));
+    if (deferred) {
+        sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
+            "could not publish deferred sender before receiver destruction");
+    }
+    sintra::test::require_true(wait_until([&] {
+        dispatch_named_event(sender);
+        return entries != 0;
+    }, std::chrono::seconds(2)), k_failure_prefix,
+        "named handler never activated before receiver destruction");
+
+    receiver.reset();
+    const int entries_before = entries;
+    dispatch_named_event(sender);
+    sintra::test::require_true(entries == entries_before, k_failure_prefix,
+        "named handler survived receiver destruction");
+    deactivate();
+    deactivate();
+}
+
+void run_named_cancellation_before_publication(bool destroy_pending)
+{
+    const std::string name = destroy_pending ? "named-destroy-pending" : "named-cancelled";
+    Handler_lifetime_bus sender;
+    auto receiver = std::make_unique<sintra::Transceiver>();
+    int entries = 0;
+    auto deactivate = receiver->activate(
+        [&](const Handler_lifetime_bus::Event_message&) { ++entries; },
+        Handler_lifetime_bus::named_instance(name));
+    if (!destroy_pending) {
+        deactivate();
+        deactivate();
+    }
+    receiver.reset();
+
+    // A queued second subscription confirms that publication has been processed.
+    sintra::Transceiver observer;
+    int observed = 0;
+    auto stop_observer = observer.activate(
+        [&](const Handler_lifetime_bus::Event_message&) { ++observed; },
+        Handler_lifetime_bus::named_instance(name));
+    sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
+        "could not publish cancelled named sender");
+    sintra::test::require_true(wait_until([&] {
+        dispatch_named_event(sender);
+        return observed != 0;
+    }, std::chrono::seconds(2)), k_failure_prefix,
+        "publication observer did not activate");
+    stop_observer();
+    sintra::test::require_true(entries == 0, k_failure_prefix,
+        "cancelled named handler activated after publication");
+    deactivate();
+}
+
+void run_inline_availability_callback_reentry()
+{
+    Handler_lifetime_bus sender;
+    const std::string name = "availability-reentry";
+    sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
+        "could not publish availability sender");
+    int entries = 0;
+    auto cancel = sintra::s_mproc->call_on_availability(
+        Handler_lifetime_bus::named_instance(name), [&] {
+            ++entries;
+            sintra::s_mproc->call_on_availability(
+                Handler_lifetime_bus::named_instance(name), [&] { ++entries; });
+        });
+    cancel();
+    sintra::test::require_true(entries == 2, k_failure_prefix,
+        "inline availability callback could not reenter availability registration");
+}
+
+int run_managed_named_receiver()
+{
+    {
+        Handler_lifetime_bus sender;
+        const std::string name = "resolved-before-publish-reply";
+        // Model resolution by a publication callback winning the race to cache
+        // the same instance before assign_name handles its successful reply.
+        sintra::s_mproc->m_instance_id_of_assigned_name.set_value(name, sender.instance_id());
+        sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
+            "publication rejected an already cached matching instance");
+        sintra::test::require_true(
+            sintra::get_instance_id(std::string(name)) == sender.instance_id(),
+            k_failure_prefix, "publication changed its already resolved instance ID");
+    }
+    run_named_deactivation(true);
+    run_named_receiver_destruction(true);
+    run_named_cancellation_before_publication(false);
+    run_named_cancellation_before_publication(true);
+    sintra::test::Shared_directory shared("SINTRA_TEST_SHARED_DIR", "named_managed_receiver");
+    sintra::test::write_lines(shared.path() / "result.txt", {"ok"});
+    return 0;
+}
+
 void arm_static_cleanup_guard_with_live_slots()
 {
     constexpr int k_slot_count = 32;
@@ -494,6 +644,17 @@ void run_no_shutdown_cleanup_guard_child_process(char* binary_path)
 
 int main(int argc, char* argv[])
 {
+    if (sintra::test::has_argv_flag(argc, argv, "--named-managed-only")) {
+        return sintra::test::run_multi_process_test(
+            argc, argv, "SINTRA_TEST_SHARED_DIR", "named_managed_receiver",
+            {sintra::Process_descriptor(
+                sintra::Entry_descriptor(run_managed_named_receiver), {"--named-managed-only"})},
+            [](const std::filesystem::path& directory) {
+                const auto result = sintra::test::read_lines(directory / "result.txt");
+                return sintra::test::assert_true(result == std::vector<std::string>{"ok"},
+                    k_failure_prefix, "managed named receiver did not finish") ? 0 : 1;
+            });
+    }
     if (sintra::test::has_argv_flag(argc, argv, k_no_shutdown_child_arg)) {
         try {
             const char* child_argv[] = {argv[0]};
@@ -513,15 +674,42 @@ int main(int argc, char* argv[])
         sintra::init(argc, const_cast<const char* const*>(argv));
         initialized = true;
 
+        if (sintra::test::has_argv_flag(argc, argv, "--named-immediate-only")) {
+            run_named_deactivation(false);
+            sintra::shutdown();
+            return 0;
+        }
+        if (sintra::test::has_argv_flag(argc, argv, "--named-deferred-only")) {
+            run_named_deactivation(true);
+            sintra::shutdown();
+            return 0;
+        }
+        if (sintra::test::has_argv_flag(argc, argv, "--availability-reentry-only")) {
+            run_inline_availability_callback_reentry();
+            sintra::shutdown();
+            return 0;
+        }
+
         run_deactivating_handler_skips_later_copied_slot();
         run_external_deactivation_waits_for_active_invocation();
         run_self_deactivation_suppresses_queued_same_slot_dispatch();
+        run_named_deactivation(false);
+        run_named_deactivation(true);
+        run_named_receiver_destruction(false);
+        run_named_receiver_destruction(true);
+        run_named_cancellation_before_publication(false);
+        run_named_cancellation_before_publication(true);
+        run_inline_availability_callback_reentry();
         run_deactivate_all_slots_invokes_stable_deactivator_copies();
 
         sintra::shutdown();
         initialized = false;
 
         run_no_shutdown_cleanup_guard_child_process(argv[0]);
+        const std::string named_command =
+            quote_command_arg(argv[0]) + " --named-managed-only";
+        sintra::test::require_true(std::system(named_command.c_str()) == 0,
+            k_failure_prefix, "managed named receiver child failed");
     }
     catch (const std::exception& ex) {
         if (initialized) {

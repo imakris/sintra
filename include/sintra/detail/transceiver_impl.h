@@ -316,10 +316,9 @@ bool Transceiver::assign_name(const string& name)
         m_published = true;
 
         if (!s_coord) {
-            auto cache_entry = make_pair(name, m_instance_id);
-            auto scoped_map  = s_mproc->m_instance_id_of_assigned_name.scoped();
-            auto rvp         = scoped_map.get().insert(cache_entry);
-            assert(rvp.second == true);
+            // A publication callback may already have resolved this name
+            // before the publication RPC's reply reaches this thread.
+            s_mproc->m_instance_id_of_assigned_name.set_value(name, m_instance_id);
             m_cache_name = name;
         }
         return true;
@@ -503,7 +502,7 @@ Transceiver::activate_impl(
         slot_state
     ] () {
         auto state = slot_state;
-        state->active.store(false, std::memory_order_release);
+        state->active.store(false, std::memory_order_seq_cst);
 
         const bool claimed_deactivation =
             !state->deactivation_claimed.exchange(true, std::memory_order_acq_rel);
@@ -533,7 +532,9 @@ Transceiver::activate_impl(
         // self-deactivating handler accounts for its own stack frame; same-slot
         // dispatch is serialized, so there is no second active invocation to
         // mask here.
-        while (state->invocations.load(std::memory_order_acquire) > allowed_invocations) {
+        // Together with dispatch's increment and final active check, the SC
+        // order prevents both sides from observing the pre-admission state.
+        while (state->invocations.load(std::memory_order_seq_cst) > allowed_invocations) {
             std::this_thread::yield();
         }
     };
@@ -626,48 +627,82 @@ Transceiver::activate(
     const SLOT_T&              rcv_slot,
     Named_instance<SENDER_T>   sender)
 {
-    lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex); //obtain activation lock
+    struct Named_activation_state
+    {
+        mutex               m_mutex;
+        bool                m_cancelled = false;
+        handler_deactivator m_handler_deactivator;
+        function<void()>    m_cancel_availability;
+    };
+    auto state = std::make_shared<Named_activation_state>();
 
-    // make an entry in the deactivators list first - it must be captured below
-    m_deactivators.emplace_back();
-    auto it = std::prev(m_deactivators.end());
-
-    // make a lambda that will perform the activation, and will also replace
-    // the deactivator with the one returned by activate_impl
-    auto wrapped_activation = [&, rcv_slot, sender, it]() mutable {
-
+    decltype(m_deactivators)::iterator it;
+    handler_deactivator deactivate;
+    {
         lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+        it = m_deactivators.emplace(m_deactivators.end());
+        deactivate = [this, state, it]() {
+            handler_deactivator stop_handler;
+            function<void()> cancel_availability;
+            {
+                lock_guard<mutex> lock(state->m_mutex);
+                stop_handler = state->m_handler_deactivator;
+                if (!state->m_cancelled) {
+                    state->m_cancelled = true;
+                    cancel_availability = std::move(state->m_cancel_availability);
+                    if (!stop_handler) {
+                        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+                        m_deactivators.erase(it);
+                    }
+                }
+            }
+            if (cancel_availability) {
+                cancel_availability();
+            }
+            // Never hold the transition lock while waiting for an invocation:
+            // that invocation may itself call this copied deactivator.
+            if (stop_handler) {
+                stop_handler();
+            }
+        };
+        *it = deactivate;
+    }
 
-        auto iid = Typed_instance_id<SENDER_T>(get_instance_id(std::move(sender) ));
-        
-        // the enclosing lambda is guaranteed to have been triggered by a publish event
-        // which means that the transceiver exists
-        assert (iid.id != invalid_instance_id);
-
-        // activate and replace the old deactivator with the one returned by activate_impl
-        // note the last argument, which specifies a place in the deactivation list, which
-        // prevents allocating a new one.
-        activate(rcv_slot, iid, &it);
-
-        // a function with the same effect as coa_abort (below) is called
-        // immediately after this lambda, by its caller
+    auto wrapped_activation = [this, state, rcv_slot, sender, it, deactivate]() mutable {
+        lock_guard<mutex> lock(state->m_mutex);
+        // A publication callback may already have left the availability queue
+        // when cancellation destroys the receiver. Check before touching it.
+        if (state->m_cancelled) {
+            return;
+        }
+        auto iid = Typed_instance_id<SENDER_T>(get_instance_id(std::move(sender)));
+        assert(iid.id != invalid_instance_id);
+        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
+        state->m_handler_deactivator = activate(rcv_slot, iid, &it);
+        // Keep the list entry and every returned copy on the same shared state.
+        *it = deactivate;
     };
 
-    // Let the activation happen when a transceiver with matching name and type becomes available.
-    auto coa_abort = s_mproc->call_on_availability(sender, wrapped_activation);
-
-    // Until the actual activation happens, this lambda will serve as a temporary deactivator.
-    // It only aborts the call on availability by calling its aborter, and also removes
-    // itself from the deactivator list
-    *it = [this, coa_abort, it]() {
-
-        lock_guard<recursive_mutex> sl(s_mproc->m_handlers_mutex);
-
-        coa_abort(); // this will also remove the coa request from the corresponding list
-        m_deactivators.erase(it);
-    };
-
-    return m_deactivators.back();
+    function<void()> cancel_availability;
+    try {
+        cancel_availability = s_mproc->call_on_availability(sender, wrapped_activation);
+    }
+    catch (...) {
+        deactivate();
+        throw;
+    }
+    bool cancelled;
+    {
+        lock_guard<mutex> lock(state->m_mutex);
+        cancelled = state->m_cancelled;
+        if (!cancelled) {
+            state->m_cancel_availability = std::move(cancel_availability);
+        }
+    }
+    if (cancelled) {
+        cancel_availability();
+    }
+    return deactivate;
 }
 
 

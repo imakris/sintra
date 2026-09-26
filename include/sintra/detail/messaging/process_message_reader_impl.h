@@ -375,7 +375,7 @@ public:
         m_previous_handler_state(tl_current_handler_slot_state),
         m_previous_in_handler_dispatch(tl_in_handler_dispatch)
     {
-        m_state->invocations.fetch_add(1, std::memory_order_acq_rel);
+        m_state->invocations.fetch_add(1, std::memory_order_seq_cst);
         tl_current_handler_slot_state             = m_state.get();
         tl_in_handler_dispatch                    = true;
     }
@@ -458,7 +458,9 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
             }
 
             detail::Handler_slot_invocation_scope invocation(slot);
-            if (slot->active.load(std::memory_order_acquire)) {
+            // Admission and deactivation share one SC order: either this
+            // invocation is counted by the deactivator or it observes inactive.
+            if (slot->active.load(std::memory_order_seq_cst)) {
                 slot->handler(message);
             }
         }
