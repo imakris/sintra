@@ -1526,9 +1526,9 @@ struct Managed_process: Derived_transceiver<Managed_process>
     bool branch(vector<Process_descriptor>& branch_vector);
     void go();
 
-    // Pauses the process. Once called, reader threads will continue running,
-    // but in a mode where only messages originating from the coordinator are
-    // processed.
+    // Pauses the process while reader threads remain in service mode. Message
+    // admission depends on kind, sender/receiver, and coordinator locality;
+    // see Reader_service_dispatch_policy.
     void pause();
 
     // Stops the readers and causes their threads to exit.

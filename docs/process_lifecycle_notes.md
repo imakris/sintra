@@ -34,4 +34,5 @@ The public contracts, threading rules, failure behavior, and examples are in:
 - [`sintra::create_external_process_invitation`](reference/external_process_invitation.md)
 
 Lifeline ownership, collective shutdown, and unilateral departure are separate
-from these callbacks; see [Barriers and shutdown semantics](barriers_and_shutdown.md).
+from these callbacks. See [Architecture: lifeline ownership](architecture.md#lifeline-ownership)
+and [Barriers and shutdown semantics](barriers_and_shutdown.md).

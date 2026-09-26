@@ -546,8 +546,8 @@ The library includes a comprehensive test suite covering publish/subscribe, RPC,
 barriers, and crash recovery. Test runs are selected by `tests/active_tests.txt`.
 
 ```bash
-cmake -B build -DSINTRA_BUILD_TESTS=ON
-cmake --build build
+cmake -S . -B build -DSINTRA_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 cd tests && python3 run_tests.py --build-dir ../build --config Release
 ```
 

@@ -2862,9 +2862,8 @@ Managed_process::~Managed_process()
         Dispatch_unique_lock dispatch_lock(dispatch_shutdown_mutex_instance);
     }
 #endif
-    // finalize_impl() only reaches destruction after every retained custody
-    // record is terminal, so the owned observers/cleanup workers are bounded
-    // joins here and cannot outlive the runtime they report into.
+    // Join the owned observers and cleanup workers before destroying the
+    // runtime they report into. This join has no independent time bound.
     join_owned_lifecycle_workers();
     drain_child_exit_dispatcher();
 
@@ -3358,15 +3357,9 @@ void Managed_process::init(int argc, const char* const* argv)
         ).count();
         coordinator_is_local = true;
 
-        // NOTE: s_branch_index remains uninitialized here for the coordinator.
-        // This is safe because:
-        // 1. The coordinator does not have a branch entry (no entry function index)
-        // 2. s_branch_index is only used in the non-coordinator path of init() at
-        //    lines 1149-1159, which requires branch_index_arg to be provided
-        // 3. For the coordinator, s_branch_index is explicitly set to 0 in branch()
-        //    (line 1570) before any subsequent use
-        // 4. Non-coordinator processes always receive --branch_index, which sets
-        //    s_branch_index at line 1047 before it's used
+        // The coordinator has no branch entry. Its branch index remains at the
+        // -1 sentinel until branch() sets it to 0; spawned branches parse
+        // --branch_index before using it to select their entry function.
     }
     else {
         if (coordinator_id_arg.empty() || (branch_index_arg.empty() && instance_id_arg.empty()) ) {
@@ -6255,10 +6248,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             s_coord->m_transceiver_registry[s.piid];
         }
 
-        // create the readers. The next line will start the reader threads,
-        // which might take some time. At this stage, we do not have to wait
-        // until they are ready for messages.
-
+        // The process reader was prepared before spawn. Its initialization
+        // reservation now belongs to the retained launch state.
         launch_attempt.transfer_initialization_reservation();
     }
     else {

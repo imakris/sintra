@@ -18,8 +18,8 @@ This document describes how to build and run tests for the Sintra library.
 
 ```bash
 # 1. Configure and build test binaries
-cmake -B build -DSINTRA_BUILD_TESTS=ON
-cmake --build build
+cmake -S . -B build -DSINTRA_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 
 # 2. Run tests
 cd tests
@@ -42,6 +42,7 @@ test_name iterations
 - `iterations`: Number of times to run the test (must be ≥ 1)
 - Lines starting with `#` are treated as comments and ignored
 - Empty lines are ignored
+- Keep comments on separate lines; the Python runner does not accept inline comments
 
 ### Example
 
@@ -64,7 +65,9 @@ recovery_test 30
 Build and run selection are separate:
 
 **CMake (Build Phase)**
-- Builds the available test binaries
+- Builds all available test binaries by default
+- With `SINTRA_BUILD_ACTIVE_TESTS_ONLY=ON`, filters top-level test targets using
+  its own, more permissive parser for `active_tests.txt`; reconfigure after edits
 - Builds manual tests only when `SINTRA_BUILD_MANUAL_TESTS=ON`
 
 **run_tests.py (Run Phase)**
@@ -73,7 +76,7 @@ Build and run selection are separate:
 - Runs each test for the specified number of iterations
 
 This split means:
-- CMake does not duplicate the `active_tests.txt` parser
+- The Python runner's two-field roster syntax is the portable format for both phases
 - Commented tests are not run
 - Iteration counts are versioned with the code
 - Easy to focus on specific tests during debugging
@@ -100,17 +103,19 @@ Edit `tests/active_tests.txt` and comment out tests you don't need:
 # Comment out all tests except the one you're working on
 # barrier_complex_choreography_test 1
 # barrier_flush_test 20
-ping_pong_test 5    # Only this will be run
+ping_pong_test 5
 # ...rest commented out...
 ```
 
-The runner will skip commented-out tests. CMake still builds available test binaries.
+The runner will skip commented-out tests. The default CMake configuration still
+builds all available test binaries; use an explicit `--target sintra_ping_pong_test`
+when you only want to build that target.
 
 ### Build with Debug Symbols in Release Mode
 
 ```bash
-cmake -B build -DSINTRA_BUILD_TESTS=ON -DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON
-cmake --build build
+cmake -S . -B build -DSINTRA_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release -DSINTRA_RELEASE_WITH_DEBUG_SYMBOLS=ON
+cmake --build build --config Release
 ```
 
 This enables debugging of optimized code.
@@ -138,10 +143,10 @@ shutdown point" pattern should prefer
 That helper runs the coordinator action, then calls `sintra::shutdown()` in
 every process.
 
-Keep using `run_multi_process_test(...)` when a test needs a more specific
-final protocol before teardown, such as an explicit final rendezvous inside the
-test logic or an abnormal-exit path that cannot participate in symmetric
-shutdown.
+`run_multi_process_test(...)` is a convenience alias for the same collective
+shutdown helper. Use `run_multi_process_test_raw(...)` for crash or other
+abnormal-exit paths that cannot participate in symmetric shutdown; it uses
+`finalize_impl()` instead.
 
 ### Change Iteration Counts
 
@@ -149,7 +154,7 @@ Edit the iteration counts directly in `active_tests.txt`:
 
 ```bash
 # To run ping_pong_test more times, edit tests/active_tests.txt:
-ping_pong_test 5000   # Increase from default
+ping_pong_test 5000
 
 # Then run tests
 python3 run_tests.py --build-dir ../build --config Release
@@ -194,20 +199,21 @@ python3 run_tests.py --verbose --build-dir ../build --config Release
    problematic_test 1
    ```
 
-2. **Rebuild** (only builds the one test):
+2. **Configure Debug and build the selected target** (from the repository root):
    ```bash
-   cmake --build build
+   cmake -S . -B build-debug -DSINTRA_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+   cmake --build build-debug --config Debug --target sintra_problematic_test
    ```
 
 3. **Run with verbose output**:
    ```bash
    cd tests
-   python3 run_tests.py --verbose --config Debug --build-dir ../build
+   python3 run_tests.py --verbose --config Debug --build-dir ../build-debug
    ```
 
 4. **Run under debugger** (if needed):
    ```bash
-   gdb ../build/tests/Debug/sintra_problematic_test
+   gdb ../build-debug/tests/sintra_problematic_test
    ```
 
 5. **Restore all tests** when done - Uncomment tests in `active_tests.txt`
@@ -340,14 +346,14 @@ These are **not selected by default** in `active_tests.txt`:
 
 2. **Configure with manual tests enabled, then rebuild**:
    ```bash
-   cmake -B build -DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_MANUAL_TESTS=ON
-   cmake --build build
+   cmake -S . -B build-manual -DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_MANUAL_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+   cmake --build build-manual --config Debug
    ```
 
 3. **Run**:
    ```bash
    cd tests
-   python3 run_tests.py --build-dir ../build --config Debug
+   python3 run_tests.py --build-dir ../build-manual --config Debug
    ```
 
 Manual tests are only built when `SINTRA_BUILD_MANUAL_TESTS=ON`. The runner
@@ -382,6 +388,9 @@ Options:
   --verbose             Show detailed output for each test run
   --preserve-stalled-processes
                         Keep stalled processes for debugging instead of killing them
+  --time-budget SECONDS
+                        Stop after this total runtime; exit 0 requires every
+                        selected test to pass at least once without failures
   --iteration-multiplier VALUE
                         Scale active_tests.txt repetition counts; every active
                         test still runs at least once
@@ -578,4 +587,5 @@ If you're used to the old test selection flags, here's the mapping:
 | `--test-dir manual` | Configure with `-DSINTRA_BUILD_MANUAL_TESTS=ON`, then uncomment `manual/*` tests |
 | `-DBUILD_MANUAL_TESTS=ON` | `-DSINTRA_BUILD_MANUAL_TESTS=ON` |
 
-The runner selection lives in one file; CMake just builds binaries.
+The runner selection lives in one file. CMake builds every test by default or
+uses its optional active-target filter at configure time.

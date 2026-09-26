@@ -526,13 +526,6 @@ public:
     // stop waiting for it, but internal shutdown barriers still count it.
     sequence_counter_type begin_collective_shutdown(instance_id_type process_iid);
 
-    // Blocks until all processes identified by process_group_id have called the function.
-    // num_absences may be used by a caller to specify that it is aware that other callers will
-    // not make it to the barrier, thus prevent a deadlock.
-    // NOTE: If more than one callers are aware of the absence of some other caller, only one
-    // of them may notify of its absence.
-    // Returns the leading sequence of the coordinator process' request ring.
-
     void print(const string& str);
 
     // Coordinator lock ordering (outermost first). A thread may skip levels,
