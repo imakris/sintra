@@ -213,9 +213,15 @@ void test_native_wait_on_address()
     constexpr auto wait_flags = OS_SYNC_WAIT_ON_ADDRESS_SHARED;
     constexpr auto wake_flags = OS_SYNC_WAKE_BY_ADDRESS_SHARED;
     using clock = std::chrono::steady_clock;
-    auto wait_until = [&](void* address, clock::time_point deadline) {
+    auto wait_until = [&](std::atomic<uint32_t>* address, clock::time_point deadline) {
+        int last_retry_error = 0;
         for (;;) {
             const auto now = clock::now();
+            if (now >= deadline) {
+                // Only an ETIMEDOUT returned by the native wait satisfies the
+                // timeout probe; retry exhaustion is not native timeout proof.
+                return std::pair{-1, last_retry_error};
+            }
             const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 deadline - now).count();
             errno = 0;
@@ -223,12 +229,19 @@ void test_native_wait_on_address()
                 wait_flags, OS_CLOCK_MACH_ABSOLUTE_TIME,
                 static_cast<uint64_t>(std::max<int64_t>(remaining, 1)));
             const int error = errno;
-            if (result >= 0 || error != EINTR) {
+            if (result >= 0 ||
+                (error != EINTR && error != EFAULT && error != ENOMEM)) {
                 return std::pair{result, error};
             }
+            // Apple documents EINTR and potentially transient EFAULT/ENOMEM as
+            // early returns. Re-read the wait word before retrying.
+            if (address->load(std::memory_order_acquire) != 0) {
+                return std::pair{0, 0};
+            }
+            last_retry_error = error;
         }
     };
-    auto wait_once = [&](void* address) {
+    auto wait_once = [&](std::atomic<uint32_t>* address) {
         const auto started = clock::now();
         const auto [result, error] = wait_until(address, started + std::chrono::milliseconds(20));
         REQUIRE_EQ(-1, result);
