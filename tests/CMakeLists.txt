@@ -11,7 +11,6 @@ if(MSVC)
         /FS
         /bigobj
         $<$<CONFIG:Debug>:/UNDEBUG>
-        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/O1>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:/Z7>
         $<$<CONFIG:Release>:/DNDEBUG>
     )
@@ -23,7 +22,6 @@ else()
     target_compile_options(sintra_test_config INTERFACE
         $<$<CONFIG:Debug>:-O0>
         $<$<CONFIG:Debug>:-UNDEBUG>
-        $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-O0>
         $<$<AND:$<CONFIG:Release>,$<BOOL:${SINTRA_RELEASE_WITH_DEBUG_SYMBOLS}>>:-g>
         $<$<CONFIG:Release>:-DNDEBUG>
     )
