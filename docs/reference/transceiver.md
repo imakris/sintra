@@ -67,12 +67,20 @@ Contract:
   registered through this transceiver in reverse order. It does not
   unpublish the transceiver and does not free the underlying object.
 - The constructor accepting a `name` calls `assign_name(name)` after
-  identity setup. Pass an empty name to skip publication.
+  identity and CRTP type setup. Constructor publication uses the deriving
+  transceiver's type, including `SINTRA_TYPE_ID`. Pass an empty name to skip
+  publication.
 
 Threading and lifecycle:
 
 - Slot handlers run on Sintra reader threads. Application code must
   synchronise external state explicitly.
+- Named construction publishes while the CRTP base is being initialized,
+  before the user's most-derived members and constructor body finish.
+  Availability establishes the advertised identity and type; it does not
+  establish completed construction or readiness to call exported methods.
+  For stateful services, finish construction and state setup before calling
+  `assign_name`, as in the example below.
 - `destroy()` is safe to call when the runtime is still alive. During raw
   teardown the destructor short-circuits if the messaging layer has
   already stopped, since RPC would otherwise deadlock.
@@ -105,23 +113,29 @@ Example source:
 - [example/sintra/sintra_example_2_rpc_append.cpp](../../example/sintra/sintra_example_2_rpc_append.cpp)
 - [example/sintra/sintra_example_6_unicast_send_to.cpp](../../example/sintra/sintra_example_6_unicast_send_to.cpp)
 
-Reduced example (from `sintra_example_2_rpc_append.cpp`):
+Example with state initialized before publication:
 
 ```cpp
 #include <sintra/sintra.h>
 
 struct Remotely_accessible : sintra::Derived_transceiver<Remotely_accessible>
 {
-    std::string append(const std::string& s, int v) { return std::to_string(v) + ": " + s; }
+    std::string m_prefix = "result";
+    std::string append(const std::string& s, int v)
+    {
+        return m_prefix + ": " + std::to_string(v) + ": " + s;
+    }
     SINTRA_RPC(append)
 };
 
 int process_1()
 {
     Remotely_accessible ra;
+    ra.m_prefix = "worker result";
     ra.assign_name("instance name");
     sintra::barrier("1st barrier");
     sintra::barrier("2nd barrier");
+    ra.destroy();
     return 0;
 }
 ```

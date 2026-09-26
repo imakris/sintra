@@ -72,6 +72,10 @@ Contract:
 - `named_instance(name)` returns a `sintra::Named_instance<T>` that can be
   passed where typed instance lookup is expected (for example as a slot
   filter that resolves the sender by name).
+- Inherited named constructors publish using `Derived_T`'s type id,
+  including an explicit `SINTRA_TYPE_ID`. Publication still occurs during
+  base construction. Construct stateful transceivers without a name and call
+  `assign_name` after initialization when peers need a ready-to-call service.
 
 Threading and lifecycle:
 
