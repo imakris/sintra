@@ -138,7 +138,9 @@ SINTRA_DETAIL_DECL void append_message_ring_summary(
         return;
     }
 
-    const auto reading_sequence = ring->get_message_reading_sequence();
+    // Diagnostics can run on a control thread while a handler owns m_range.
+    // Use the last completed position published atomically by that reader.
+    const auto reading_sequence = progress_available ? published_sequence : invalid_sequence;
     const auto leading_sequence = ring->get_leading_sequence();
     const auto ring_diagnostics = ring->get_diagnostics();
 
@@ -653,12 +655,9 @@ void Process_message_reader::stop_nowait()
     m_ready_condition.notify_all();
 
     if (auto progress = m_delivery_progress) {
-        const auto req_seq = m_in_req_c ? m_in_req_c->get_message_reading_sequence() : invalid_sequence;
-        progress->request_sequence = req_seq;
+        // Keep the last positions published by the owning reader threads.
+        // Their in-flight ranges remain private until final progress publication.
         progress->request_stopped  = true;
-
-        const auto rep_seq = m_in_rep_c ? m_in_rep_c->get_message_reading_sequence() : invalid_sequence;
-        progress->reply_sequence   = rep_seq;
         progress->reply_stopped    = true;
 
         if (s_mproc) {
@@ -666,7 +665,8 @@ void Process_message_reader::stop_nowait()
         }
     }
 
-    m_in_req_c->done_reading();
+    // The reader releases its guard in end_reading_session(), after any
+    // in-flight handler has finished using the mapped message storage.
     m_in_req_c->request_stop();
 
     // if there are outstanding RPC calls waiting for reply, they should be
@@ -675,7 +675,6 @@ void Process_message_reader::stop_nowait()
 
 
     if (!tl_is_req_thread || tl_in_post_handler()) {
-        m_in_rep_c->done_reading();
         m_in_rep_c->request_stop();
     }
     else {
@@ -696,7 +695,6 @@ void Process_message_reader::stop_nowait()
                 if (!rep_ring) {
                     return;
                 }
-                rep_ring->done_reading();
                 rep_ring->request_stop();
             };
         }
@@ -709,7 +707,6 @@ void Process_message_reader::stop_nowait()
                 if (!rep_ring) {
                     return;
                 }
-                rep_ring->done_reading();
                 rep_ring->request_stop();
             };
         }
@@ -751,9 +748,7 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
     }
 
     if (!no_readers()) {
-        m_in_req_c->done_reading();
         m_in_req_c->request_stop();
-        m_in_rep_c->done_reading();
         m_in_rep_c->request_stop();
         wait_for_readers();
         if (!no_readers()) {
