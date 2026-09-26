@@ -1611,24 +1611,39 @@ Transceiver::export_rpc_impl()
     auto*      self        = static_cast<typename RPCTC::o_type*>(this);
     const auto instance_id = m_instance_id;
 
-    get_instance_to_object_map<RPCTC>().set_value(instance_id, self);
-
     const auto message_type_id = MT::id();
-
-    // Handler registration is refreshed on each export because dynamic message
-    // ids are scoped to the active coordinator runtime.
     using RPCTC_o_type = typename RPCTC::o_type;
-    get_rpc_handler_map().set_value(
-        message_type_id,
-        &RPCTC_o_type::template rpc_handler<RPCTC, MT>);
+    const auto handler = &RPCTC_o_type::template rpc_handler<RPCTC, MT>;
 
-    return [instance_id]() {
+    // Prepare cleanup before publishing the object: constructing std::function
+    // may throw, just like message ID resolution and handler registration.
+    function<void()> deactivate = [instance_id]() {
         // Note: do NOT call ensure_rpc_shutdown() here - the transceiver may already
         // be destroyed by the time this cleanup lambda is invoked during finalize().
         // RPC shutdown is handled by the transceiver's destructor (via destroy()).
         auto scoped_map = get_instance_to_object_map<RPCTC>().scoped();
         scoped_map.get().erase(instance_id);
     };
+
+    {
+        auto handlers = get_rpc_handler_map().scoped();
+        auto [entry, inserted] = handlers.get().try_emplace(message_type_id, handler);
+        if constexpr (RPCTC::id != invalid_type_id) {
+            if (!inserted && entry->second != handler) {
+                throw runtime_error(
+                    "Explicit RPC id collision: id=" +
+                    std::to_string(static_cast<unsigned long long>(message_type_id)));
+            }
+        }
+        else {
+            // Dynamic message IDs belong to the active coordinator runtime;
+            // their process-lifetime registry entries must be refreshed.
+            entry->second = handler;
+        }
+    }
+
+    get_instance_to_object_map<RPCTC>().set_value(instance_id, self);
+    return deactivate;
 }
 
 
