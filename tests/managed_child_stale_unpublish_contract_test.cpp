@@ -109,15 +109,10 @@ public:
                 std::string(k_replacement_process_name));
         }
 
-        sintra::instance_id_type resolved = sintra::invalid_instance_id;
-        {
-            auto names = sintra::s_mproc->m_instance_id_of_assigned_name.scoped();
-            const auto found = names.get().find(
-                std::string(k_replacement_process_name));
-            if (found != names.get().end()) {
-                resolved = found->second;
-            }
-        }
+        // Observe only the remote snapshot; a miss must not call the coordinator.
+        const auto resolved = sintra::s_mproc->m_instance_name_cache.resolve(
+            std::string(k_replacement_process_name),
+            [](const std::string&) { return sintra::invalid_instance_id; });
 
         std::lock_guard<std::mutex> lock(m_mutex);
         return
