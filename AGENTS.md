@@ -12,8 +12,10 @@ These rules are the ones most often violated:
 - **Only what was lost may fail.** An eviction or death must never fail an RPC,
   fence or barrier that had no message in the lost range.
 - **Exactly one copy out of the ring.** A double copy is a defect.
-- **The coordinator is the kernel.** Its stalls and bugs are not defended
-  against; code hosted in it runs in kernel mode.
+- **The coordinator is trusted infrastructure** (a kernel analogy only: Sintra
+  is a user-space library and the coordinator has no privileges). Its stalls
+  and bugs are not defended against; application code hosted in the
+  coordinator process shares its fate.
 - **Keep owner requirements, verified facts (`file:line`) and your own
   proposals visibly separate.** Adopt a design only after independent
   reviewers report no blockers.

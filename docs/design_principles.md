@@ -29,13 +29,22 @@ copy happens. A second copy is a defect, not a trade-off.
 On references into the ring, the owner "tends to lean more towards enforcing
 better 'by value' semantics than allowing references into the ring".
 
-**3. The coordinator is the kernel.**
+**3. The coordinator is trusted infrastructure (the owner's kernel analogy).**
+Sintra is a user-space library and the coordinator has no special privileges.
+The analogy is about trust and shared fate, not privilege: the coordinator
+plays the role a kernel plays in an operating system.
+
 - The coordinator's own code, relay and the Coordinator service, is trusted.
-- Application code hosted in the coordinator process runs in kernel mode. If
-  it misbehaves, the swarm suffers, and the fix belongs in the application.
+  If it stalls, that is a Sintra bug to fix, not a condition to defend
+  against.
+- Application code hosted in the coordinator process shares the
+  coordinator's fate, the way a driver loaded into a kernel shares the
+  kernel's. If it misbehaves, the whole swarm suffers, and the fix belongs in
+  the application.
 - A stalled or paused coordinator stalls the swarm.
 - Sintra does not route around any of this.
 
+The owner's analogy:
 > "If you put a crap driver to run with kernel privileges, well ok, then your system will suffer. If your kernel is crap, then your system will malfunction. There is no way around it."
 
 **4. Sintra does not defend against its own bugs.**
@@ -56,8 +65,8 @@ propagation is rejected.
 Readers are other processes and can die at any instruction.
 > "There is no guarantee it's not going to crash right when it reads."
 
-- Death is established from a kernel-backed process identity: a process handle,
-  a pidfd, or PID plus start time.
+- Death is established from an operating-system process identity: a process
+  handle, a pidfd, or PID plus start time.
 - A timer is never proof of death.
 - Signal and crash handlers are best effort and are never relied on:
   `SIGKILL` and `TerminateProcess` run no handler.
