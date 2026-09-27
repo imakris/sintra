@@ -815,6 +815,7 @@ struct Message_ring_R: Ring_R<char>
             start_reading();
         }
 
+        detail::Spin_backoff copy_backoff;
         while (true) {
             if (m_range.begin == m_range.end) {
                 done_reading_new_data();
@@ -832,7 +833,7 @@ struct Message_ring_R: Ring_R<char>
                 m_range = range;
             }
 
-            bool copied = false;
+            Copy_admission admission = Copy_admission::STOPPED;
             const char* frame_error = nullptr;
             {
                 bool expected = false;
@@ -851,15 +852,25 @@ struct Message_ring_R: Ring_R<char>
                     return nullptr;
                 }
 
-                copied = with_guarded_read([&]() {
+                admission = with_copying_mark([&]() {
                     frame_error = copy_next_frame();
                 });
             }
             if (frame_error) {
                 throw corrupted_message_exception(frame_error);
             }
-            if (copied) {
+            if (admission == Copy_admission::COPIED) {
                 return reinterpret_cast<Message_prefix*>(m_frame->bytes.data());
+            }
+
+            if (admission == Copy_admission::STOPPED) {
+                return nullptr;
+            }
+            if (admission == Copy_admission::RETRY) {
+                // REQUEST is writer arbitration, not loss. Drop the local
+                // lock between attempts so production stop can release us.
+                copy_backoff.spin();
+                continue;
             }
 
             // An eviction invalidates the unread mapped range, even when a
@@ -922,6 +933,7 @@ private:
             return "Sintra message ring contains a message that exceeds the readable range.";
         }
 
+        copy_operation_for_test("copy_validated");
         std::memcpy(m_frame->bytes.data(), m_range.begin, bytes_to_next);
         m_range.begin += bytes_to_next;
         m_message_reading_sequence = reading_sequence() - (m_range.end - m_range.begin);

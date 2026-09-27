@@ -66,7 +66,8 @@
  *
  * READER EVICTION (WHEN ENABLED)
  * ------------------------------
- *  * If SINTRA_ENABLE_SLOW_READER_EVICTION is defined, the writer can evict
+ *  * SINTRA_ENABLE_SLOW_READER_EVICTION defaults to 1. Define it as 0 to disable
+ *    live eviction; dead-reader reclamation remains enabled. The writer can evict
  *    a reader that is blocking its progress.
  *  * A reader is considered "slow" if it holds a guard and its last-read
  *    sequence is more than one full ring buffer's length behind the writer.
@@ -160,7 +161,7 @@
 
 // Enables the writer to forcefully evict readers that are too slow.
 #ifndef SINTRA_ENABLE_SLOW_READER_EVICTION
-#define SINTRA_ENABLE_SLOW_READER_EVICTION
+#define SINTRA_ENABLE_SLOW_READER_EVICTION 1
 #endif
 
 // If eviction is enabled, this is the approximate stall budget (in microseconds)
@@ -1615,7 +1616,9 @@ struct Ring:
         static constexpr uint8_t k_no_pending_octile = 0xff;
 
         static constexpr uint32_t octile_mask         = 0x000000ffu;
-        static constexpr uint32_t guard_present_mask  = 0x0000ff00u;
+        static constexpr uint32_t guard_present_mask  = 0x00000100u;
+        static constexpr uint32_t copying_mask        = 0x00000200u;
+        static constexpr uint32_t request_mask        = 0x00000400u;
         static constexpr uint32_t status_mask         = 0x00ff0000u;
         static constexpr uint32_t pending_octile_mask = 0xff000000u;
 
@@ -1652,6 +1655,14 @@ struct Ring:
         constexpr bool guard_present() const noexcept
         {
             return ((word & guard_present_mask) >> 8) != 0;
+        }
+
+        constexpr bool copying() const noexcept { return (word & copying_mask) != 0; }
+        constexpr bool request_pending() const noexcept { return (word & request_mask) != 0; }
+
+        constexpr bool guard_transition_allowed() const noexcept
+        {
+            return !copying() && !request_pending() && !guard_pending();
         }
 
         constexpr uint8_t guard_octile() const noexcept
@@ -1843,6 +1854,7 @@ struct Ring:
         {
             std::atomic<sequence_counter_type> v;
             std::atomic<uint32_t> owner_pid{0};
+            std::atomic<uint64_t> owner_start_stamp{0};
         };
 
         Payload data;
@@ -2043,15 +2055,19 @@ struct Ring:
                 if (slot.status() == READER_STATE_INACTIVE) {
                     clear_reader_wakeup(i);
                     clear_slot_guard(i, Slot_read_access_release::unpaired);
+                    slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
+                    slot.owner_pid = 0;
+                    slot.owner_start_stamp = 0;
+                    if (!free_rs_stack.contains(i)) {
+                        free_rs_stack.push(i);
+                        freed = true;
+                    }
                     continue;
                 }
 
                 const uint32_t pid = slot.owner_pid.load();
-
-                bool owner_unknown = (pid == 0);
-                bool dead = owner_unknown || !is_process_alive(pid);
-
-                if (dead) {
+                const auto identity = probe_process_identity(pid, slot.owner_start_stamp.load());
+                if (identity.status == Process_identity_status::DEAD) {
                     clear_reader_wakeup(i);
                     const bool release_read_access = slot.status() == READER_STATE_ACTIVE;
                     clear_slot_guard(
@@ -2060,7 +2076,9 @@ struct Ring:
                             ? Slot_read_access_release::paired
                             : Slot_read_access_release::unpaired);
                     slot.set_status(READER_STATE_INACTIVE);
+                    slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
                     slot.owner_pid = 0;
+                    slot.owner_start_stamp = 0;
 
                     if (!free_rs_stack.contains(i)) {
                         free_rs_stack.push(i);
@@ -2172,8 +2190,10 @@ struct Ring:
                     ++count;
                 }
                 if (state.guard_pending() && state.pending_octile() == target_octile) {
-                    const uint32_t pid = reading_sequences[i].data.owner_pid.load();
-                    if (pid != 0 && is_process_alive(pid)) {
+                    const auto& slot = reading_sequences[i].data;
+                    const auto identity = probe_process_identity(
+                        slot.owner_pid.load(), slot.owner_start_stamp.load());
+                    if (identity.status != Process_identity_status::DEAD) {
                         ++count;
                     }
                 }
@@ -2475,6 +2495,41 @@ template <typename T>
 struct Ring_R : Ring<T, true>
 {
     using Reader_state_union = typename Ring<T, true>::Reader_state_union;
+    class Local_read_lock
+    {
+    public:
+        explicit Local_read_lock(std::atomic<bool>& lock)
+        :
+            m_lock(lock)
+        {
+            acquire();
+        }
+
+        ~Local_read_lock() { m_lock = false; }
+
+        void retry()
+        {
+            m_lock = false;
+            m_backoff.spin();
+            acquire();
+        }
+
+    private:
+        void acquire()
+        {
+            bool expected = false;
+            while (!m_lock.compare_exchange_strong(expected, true)) {
+                expected = false;
+                m_backoff.spin();
+            }
+        }
+
+        std::atomic<bool>& m_lock;
+        detail::Spin_backoff m_backoff;
+    };
+
+    enum class Guard_admission { ACQUIRED, EVICTED, STOPPED };
+
     // =========================================================================
     // MODIFIED CONSTRUCTOR: Acquires a reader slot for the object's lifetime.
     // =========================================================================
@@ -2491,6 +2546,11 @@ struct Ring_R : Ring<T, true>
         assert(num_elements % 8 == 0);
         assert(max_trailing_elements <= 3 * num_elements / 4);
 
+        const auto start_stamp = current_process_start_stamp();
+        if (!start_stamp || *start_stamp == 0) {
+            throw ring_acquisition_failure_exception();
+        }
+
         // Acquire a reader slot from the freelist. This happens ONCE per Ring_R object.
         bool scavenged = false;
         while (true) {
@@ -2498,6 +2558,8 @@ struct Ring_R : Ring<T, true>
                 spinlock::locker lock(c.rs_stack_spinlock);
                 if (!c.free_rs_stack.empty()) {
                     m_rs_index = c.free_rs_stack.pop_or(-1);
+                    detail::ring_guard_operation_for_test(
+                        "slot_acquired", &c.read_access, uint8_t(m_rs_index));
 
                     // Mark our slot as ACTIVE while the spinlock is still held so the
                     // scavenger cannot reclaim it before we publish the ownership.
@@ -2507,6 +2569,8 @@ struct Ring_R : Ring<T, true>
                         m_rs_index,
                         Ring<T, true>::Control::Slot_read_access_release::unpaired);
                     slot.owner_pid = get_current_pid();
+                    slot.owner_start_stamp = *start_stamp;
+                    slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
                     slot.set_status(Ring<T, true>::READER_STATE_ACTIVE);
 
                     break;
@@ -2527,6 +2591,7 @@ struct Ring_R : Ring<T, true>
     // =========================================================================
     ~Ring_R()
     {
+        request_stop();
         // Ensure any active read guard is released.
         if (m_reading) {
             done_reading();
@@ -2548,6 +2613,8 @@ struct Ring_R : Ring<T, true>
                     ? Ring<T, true>::Control::Slot_read_access_release::paired
                     : Ring<T, true>::Control::Slot_read_access_release::unpaired);
             slot.owner_pid = 0;
+            slot.owner_start_stamp = 0;
+            slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
             slot.set_status(Ring<T, true>::READER_STATE_INACTIVE);
 
             // Push only if not already in the freelist (defensive: avoid duplicates).
@@ -2569,25 +2636,14 @@ struct Ring_R : Ring<T, true>
      */
     Range<T> start_reading(size_t num_trailing_elements)
     {
-        bool f = false;
-        detail::Spin_backoff backoff;
-        while (!m_reading_lock.compare_exchange_strong(f, true)) {
-            f = false;
-            backoff.spin();
-        }
-
+        Local_read_lock read_lock(m_reading_lock);
         if (m_reading) {
-            m_reading_lock = false;
             throw std::logic_error(
                 "Sintra Ring: Cannot call start_reading() again before calling done_reading().");
         }
-
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        if (c.reading_sequences[m_rs_index].data.status() == Ring<T, true>::READER_STATE_EVICTED) {
-            m_reading_lock = false;
-            throw ring_reader_evicted_exception();
+        if (m_stopping) {
+            return {};
         }
-#endif
         m_reading = true;
 
         // NOTE: Readers may only snapshot up to m_max_trailing_elements (typically 3/4 of the ring).
@@ -2603,73 +2659,17 @@ struct Ring_R : Ring<T, true>
         while (true) {
             auto leading_sequence = c.leading_sequence.load();
 
-            auto range_first_sequence = std::max<int64_t>(
-                0,
-                int64_t(leading_sequence) - int64_t(num_trailing_elements));
-
             // The guard retains one trailing window relative to the head;
             // range_first_sequence already subtracts the requested snapshot.
             uint8_t trailing_octile = trailing_octile_of(leading_sequence);
-            uint64_t guard_mask     = octile_mask(trailing_octile);
 
-            auto& slot = c.reading_sequences[m_rs_index].data;
-            bool pending_set = false;
-            slot.fetch_update_state_if(
-                [&](Reader_state_union current) -> std::optional<Reader_state_union>
-                {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
-                        return std::nullopt;
-                    }
-                    return current.with_pending(trailing_octile);
-                },
-                pending_set);
-
-            if (!pending_set) {
+            const auto admission = acquire_guard(read_lock, trailing_octile, true, false);
+            if (admission != Guard_admission::ACQUIRED) {
                 m_reading = false;
-                m_reading_lock = false;
-                throw ring_reader_evicted_exception();
-            }
-
-            c.read_access.fetch_add(guard_mask);
-
-            bool guard_attached = false;
-            const uint8_t previous_state = slot.fetch_update_guard_token_if(
-                [&](Reader_state_union current)
-                    -> std::optional<Reader_state_union>
-                {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
-                        return std::nullopt;
-                    }
-
-                    // A guard attached outside a snapshot, by wait_for_new_data(),
-                    // keeps its octile pending until its count is released below,
-                    // as a guard move in done_reading_new_data() does.
-                    const Reader_state_union attached = current.with_guard(trailing_octile, true);
-                    return current.guard_present()
-                        ? attached.with_pending(current.guard_octile())
-                        : attached.clear_pending();
-                },
-                guard_attached);
-
-            if (!guard_attached) {
-                SINTRA_READ_ACCESS_FETCH_SUB(c, trailing_octile, guard_mask);
-                slot.clear_pending();
-                m_reading = false;
-                m_reading_lock = false;
-                throw ring_reader_evicted_exception();
-            }
-            else {
-                if (Ring<T, true>::encoded_guard_present(previous_state)) {
-                    const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
-                    if (previous_octile != trailing_octile) {
-                        const uint64_t prev_mask = octile_mask(previous_octile);
-                        SINTRA_READ_ACCESS_FETCH_SUB(c, previous_octile, prev_mask);
-                    }
-                    else {
-                        SINTRA_READ_ACCESS_FETCH_SUB(c, trailing_octile, guard_mask);
-                    }
-                    slot.clear_pending();
+                if (admission == Guard_admission::EVICTED) {
+                    throw ring_reader_evicted_exception();
                 }
+                return {};
             }
 
             detail::ring_guard_operation_for_test("acquired", &c.read_access, trailing_octile);
@@ -2683,7 +2683,6 @@ struct Ring_R : Ring<T, true>
             if (confirmed_trailing_octile == trailing_octile) {
                 if (c.reading_sequences[m_rs_index].data.status() == Ring<T, true>::READER_STATE_EVICTED) {
                     m_reading = false;
-                    m_reading_lock = false;
                     throw ring_reader_evicted_exception();
                 }
 
@@ -2696,43 +2695,19 @@ struct Ring_R : Ring<T, true>
                 break;
             }
 
-            // Trailing guard requirement changed between reads; drop and retry.
-            bool guard_cleared = false;
-            const uint8_t guard_snapshot = slot.fetch_update_guard_token_if(
-                [&](Reader_state_union current)
-                    -> std::optional<Reader_state_union>
+            // Confirm the head after publication: an attachment that lost a
+            // writer lap cannot authorize bytes from the earlier range.
+            if (!release_guard(read_lock, true)) {
+                m_reading = false;
+                if (c.reading_sequences[m_rs_index].data.status() ==
+                    Ring<T, true>::READER_STATE_EVICTED)
                 {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
-                        return std::nullopt;
-                    }
-                    return current.with_guard(current.guard_octile(), false)
-                                  .with_pending(current.guard_octile());
-                },
-                guard_cleared);
-
-            if (!guard_cleared) {
-                // Writer eviction cleared our guard and will decrement
-                // read_access.  Do NOT decrement here: doing so would
-                // double-release the octile counter, causing underflow.
-                slot.clear_pending();
-                m_reading      = false;
-                m_reading_lock = false;
-                throw ring_reader_evicted_exception();
-            }
-
-            // We cleared the guard ourselves; release our own contribution.
-            SINTRA_READ_ACCESS_FETCH_SUB(c, trailing_octile, guard_mask);
-            if (Ring<T, true>::encoded_guard_present(guard_snapshot)) {
-                const uint8_t guarded_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
-                if (guarded_octile != trailing_octile) {
-                    const uint64_t prev_mask = octile_mask(guarded_octile);
-                    SINTRA_READ_ACCESS_FETCH_SUB(c, guarded_octile, prev_mask);
+                    throw ring_reader_evicted_exception();
                 }
+                return {};
             }
-            slot.clear_pending();
         }
 
-        m_reading_lock = false;
         return ret;
     }
 
@@ -2747,77 +2722,36 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading()
     {
-        // Fast path: if no snapshot is active, there is nothing to release.  This
-        // happens frequently when shutdown unblocks a reader that is idle in
-        // wait_for_new_data().  In that case we simply propagate the stop signal
-        // without touching the local lock, avoiding spurious atomic operations
-        // against partially torn down objects during crash recovery.
+        Local_read_lock read_lock(m_reading_lock);
         if (!m_reading) {
             request_stop();
-            return;
         }
 
-        bool expected = false;
-        detail::Spin_backoff backoff;
-        while (!m_reading_lock.compare_exchange_strong(expected, true)) {
-            expected = false;
-            backoff.spin();
-        }
-
-        if (m_reading) {
-            auto& slot = c.reading_sequences[m_rs_index].data;
-            bool   guard_cleared       = false;
-            const uint8_t previous_state = slot.fetch_update_guard_token_if(
-                [&](Reader_state_union current)
-                    -> std::optional<Reader_state_union>
+        // Snapshot release is reusable. Permanent admission stop belongs to
+        // request_stop(), including the production session shutdown path.
+        spinlock::locker release_lock(c.rs_stack_spinlock);
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        assert(!slot.load_state().copying());
+        bool released = false;
+        const auto previous = slot.fetch_update_state_if(
+            [](Reader_state_union current) -> std::optional<Reader_state_union>
+            {
+                if (current.status() != Ring<T, true>::READER_STATE_ACTIVE ||
+                    !current.guard_present())
                 {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
-                        return std::nullopt;
-                    }
-                    if (current.guard_present()) {
-                        return current.with_guard(current.guard_octile(), false)
-                                      .with_pending(current.guard_octile());
-                    }
-                    return current;
-                },
-                guard_cleared);
-
-            if (guard_cleared && Ring<T, true>::encoded_guard_present(previous_state)) {
-                const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(previous_state);
-                const uint64_t released_mask = octile_mask(released_octile);
-                SINTRA_READ_ACCESS_FETCH_SUB(c, released_octile, released_mask);
-                slot.clear_pending();
-            }
-            else
-            if (!guard_cleared) {
-                // Writer eviction cleared our guard and will decrement
-                // read_access.  Do NOT call try_rollback here: the writer's
-                // decrement may still be in flight, and rolling back would
-                // double-decrement the octile counter, causing underflow.
-                // The writer-side stale-guard clearing provides a fallback
-                // if the count becomes orphaned for any reason.
-                slot.clear_pending();
-                // With strong CAS, failing to clear guard means we were evicted
-                m_evicted_since_last_wait = true;
-            }
-            else {
-                const bool had_guard = Ring<T, true>::encoded_guard_present(previous_state);
-                if (!had_guard) {
-                    // guard_cleared succeeded but no guard was present in the
-                    // previous state.  No eviction is in progress (our CAS
-                    // succeeded), so rollback is safe.
-                    try_rollback_unpaired_read_access(
-                        static_cast<uint8_t>(m_trailing_octile));
+                    return std::nullopt;
                 }
-            }
-            m_reading = false;
+                return current.with_guard(current.guard_octile(), false)
+                              .with_pending(current.guard_octile());
+            },
+            released);
+        if (released) {
+            const auto octile = previous.guard_octile();
+            SINTRA_READ_ACCESS_FETCH_SUB(c, octile, octile_mask(octile));
         }
-        else {
-            // done_reading() called without active snapshot => shutdown signal
-            request_stop();
-        }
-
-        m_reading_lock = false;
+        slot.clear_pending();
+        slot.word.fetch_and(~Reader_state_union::request_mask);
+        m_reading = false;
     }
 
     sequence_counter_type reading_sequence()     const { return m_reading_sequence->load(); }
@@ -2835,7 +2769,9 @@ struct Ring_R : Ring<T, true>
         constexpr auto blocking_wait_watchdog = std::chrono::milliseconds(50);
 
         auto produce_range = [&]() -> Range<T> {
-            if (handle_eviction_if_needed()) {
+            Local_read_lock read_lock(m_reading_lock);
+            const bool require_reading = m_reading;
+            if (handle_eviction(read_lock, require_reading) || !read_can_continue(require_reading)) {
                 return {};
             }
 
@@ -3047,264 +2983,205 @@ struct Ring_R : Ring<T, true>
      */
     void done_reading_new_data()
     {
-        // CRITICAL: We must not return until guard is successfully updated OR we confirm
-        // eviction was handled. Returning with stale guard can cause permanent deadlock.
-        while (true) {
-            // The eviction handler can advance m_reading_sequence and reattach the guard
-            // to a new octile. Recompute the trailing position afterwards so we migrate
-            // toward the post-eviction state rather than the stale pre-eviction value.
-            if (handle_eviction_if_needed()) {
-                continue;  // Eviction handled, retry from top
-            }
-
-            const uint8_t new_trailing_octile = trailing_octile_of(m_reading_sequence->load());
-
-            if (new_trailing_octile == m_trailing_octile) {
-                return;  // Nothing to do
-            }
-
-            const uint64_t new_mask     = octile_mask(new_trailing_octile);
-
-            auto& slot = c.reading_sequences[m_rs_index].data;
-            bool pending_set = false;
-            slot.fetch_update_state_if(
-                [&](Reader_state_union current) -> std::optional<Reader_state_union>
-                {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
-                        return std::nullopt;
-                    }
-                    return current.with_pending(static_cast<uint8_t>(new_trailing_octile));
-                },
-                pending_set);
-
-            if (!pending_set) {
-                handle_eviction_if_needed();
+        Local_read_lock read_lock(m_reading_lock);
+        const bool require_reading = m_reading;
+        while (!m_stopping && (!require_reading || m_reading)) {
+            if (handle_eviction(read_lock, require_reading)) {
                 continue;
             }
-
-            c.read_access.fetch_add(new_mask);
-
-            bool guard_updated = false;
-            const uint8_t previous_state = slot.fetch_update_guard_token_if(
-                [&](Reader_state_union current)
-                    -> std::optional<Reader_state_union>
-                {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
-                        return std::nullopt;
-                    }
-                    if (!current.guard_present()) {
-                        return std::nullopt;
-                    }
-
-                    // Keep the previous octile in pending until we release its
-                    // read_access count below. This closes a race where the
-                    // writer's stale-guard cleanup could observe the old octile
-                    // as guardless and clear it before we decrement it.
-                    return current.with_guard(static_cast<uint8_t>(new_trailing_octile), true)
-                                  .with_pending(current.guard_octile());
-                },
-                guard_updated);
-
-            if (!guard_updated) {
-                SINTRA_READ_ACCESS_FETCH_SUB(c, new_trailing_octile, new_mask);
-                slot.clear_pending();
-
-                // Check why CAS failed to determine retry strategy. The guard accessor returns an
-                // encoded byte, so inspect the decoded fields directly instead of interpreting it
-                // as a Reader_state_union (which would zero the guard-present bit).
-                const bool guard_present = Ring<T, true>::encoded_guard_present(previous_state);
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-                const bool was_evicted =
-                    c.reading_sequences[m_rs_index].data.status() == Ring<T, true>::READER_STATE_EVICTED;
-#else
-                const bool was_evicted = false;
-#endif
-
-                if (was_evicted || !guard_present) {
-                    handle_eviction_if_needed();
-                    continue;  // Retry after handling eviction
-                }
-
-                // Spurious CAS failure or concurrent modification - yield and retry
-                std::this_thread::yield();
-                continue;
+            const auto new_octile = trailing_octile_of(m_reading_sequence->load());
+            if (new_octile == m_trailing_octile) {
+                return;
             }
-
-            // Success - clean up old guard octile
-            const uint8_t previous_octile = Ring<T, true>::encoded_guard_octile(previous_state);
-            if (previous_octile != new_trailing_octile) {
-                const uint64_t prev_mask = octile_mask(previous_octile);
-                SINTRA_READ_ACCESS_FETCH_SUB(c, previous_octile, prev_mask);
+            const auto admission = acquire_guard(read_lock, new_octile, require_reading, false);
+            if (admission == Guard_admission::STOPPED) {
+                return;
             }
-            else {
-                SINTRA_READ_ACCESS_FETCH_SUB(c, new_trailing_octile, new_mask);
+            if (admission == Guard_admission::ACQUIRED) {
+                m_trailing_octile = new_octile;
+                return;
             }
-
-            slot.clear_pending();
-            m_trailing_octile = static_cast<uint8_t>(new_trailing_octile);
-            return;
         }
     }
 
     bool handle_eviction_if_needed()
     {
-        auto& slot = c.reading_sequences[m_rs_index].data;
-        const uint8_t guard_snapshot = slot.guard_token();
-        if ((guard_snapshot & 0x08) != 0) {
-            return false;
-        }
-
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        if (slot.status() == Ring<T, false>::READER_STATE_EVICTED) {
-            // Reader was evicted by writer for being too slow.
-            // The writer clears the guard and decrements read_access during
-            // eviction.  Do NOT call try_rollback here: the writer's decrement
-            // may still be in flight, and rolling back would double-decrement
-            // the octile counter, causing underflow.
-            //
-            // Skip all missed data and jump to writer's current position.
-            // This is the only safe recovery strategy since old data has been overwritten.
-            resume_at_leading_sequence();
-            m_evicted_since_last_wait = true;
-            return true;
-        }
-#endif
-
-        // Not evicted, but guard is not present.  Try to rollback any orphaned
-        // read_access count before reattaching.  This is safe because no writer
-        // eviction decrement is in flight for our slot.
-        try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
-
-        m_trailing_octile = trailing_octile_of(m_reading_sequence->load());
-
-        reattach_after_eviction();
-        return false;
+        Local_read_lock read_lock(m_reading_lock);
+        return handle_eviction(read_lock, m_reading);
     }
 
     void reattach_after_eviction()
     {
-        const uint64_t mask = octile_mask(static_cast<uint8_t>(m_trailing_octile));
-
-        while (true) {
-            auto& slot = c.reading_sequences[m_rs_index].data;
-            bool pending_set = false;
-            const Reader_state_union pending_previous = slot.fetch_update_state_if(
-                [&](Reader_state_union current)
-                    -> std::optional<Reader_state_union>
-                {
-                    const uint8_t status = current.status();
-                    if (status != Ring<T, true>::READER_STATE_ACTIVE &&
-                        status != Ring<T, true>::READER_STATE_EVICTED)
-                    {
-                        return std::nullopt;
-                    }
-                    if (current.guard_present()) {
-                        return std::nullopt;
-                    }
-                    return current.with_status(Ring<T, true>::READER_STATE_ACTIVE)
-                                  .with_pending(static_cast<uint8_t>(m_trailing_octile));
-                },
-                pending_set);
-
-            if (!pending_set) {
-                if (pending_previous.guard_present() &&
-                    pending_previous.guard_octile() == static_cast<uint8_t>(m_trailing_octile))
-                {
-                    return;
-                }
-                std::this_thread::yield();
-                continue;
-            }
-
-            detail::ring_guard_operation_for_test(
-                "pending", &c.read_access, static_cast<uint8_t>(m_trailing_octile));
-            c.read_access.fetch_add(mask);
-
-            bool guard_updated = false;
-            const uint8_t previous_state = slot.fetch_update_guard_token_if(
-                [&](Reader_state_union current)
-                    -> std::optional<Reader_state_union>
-                {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
-                        return std::nullopt;
-                    }
-                    if (current.guard_present()) {
-                        return std::nullopt;
-                    }
-
-                    return current.with_guard(static_cast<uint8_t>(m_trailing_octile), true)
-                                  .clear_pending();
-                },
-                guard_updated);
-
-            if (guard_updated) {
-                // Guard successfully attached via CAS.  Do NOT re-read the slot
-                // to verify: between our successful CAS and a re-read, the writer
-                // could evict us (clearing the guard and decrementing read_access).
-                // A second decrement here would underflow the octile counter.
-                return;
-            }
-
-            SINTRA_READ_ACCESS_FETCH_SUB(c, m_trailing_octile, mask);
-            slot.clear_pending();
-
-            // Check if someone else already attached the correct guard.
-            if (Ring<T, true>::encoded_guard_present(previous_state) &&
-                Ring<T, true>::encoded_guard_octile(previous_state) == static_cast<uint8_t>(m_trailing_octile))
-            {
-                return;
-            }
-
-            std::this_thread::yield();
-        }
+        Local_read_lock read_lock(m_reading_lock);
+        acquire_guard(read_lock, uint8_t(m_trailing_octile), m_reading, true);
     }
 
 private:
-    // The resumed guard stops the writer only when the writer next enters its
-    // octile. A writer that entered it after the head was loaded, but before
-    // the guard was published, passes the guard for a whole lap and can reuse
-    // the resumed range meanwhile. As in start_reading(), resume at a head
-    // loaded after the guard was published, and only while that head still
-    // requires the guarded octile.
-    void resume_at_leading_sequence()
+    bool read_can_continue(bool require_reading) const
     {
-        while (true) {
-            const sequence_counter_type leading_sequence = c.leading_sequence;
-            m_reading_sequence->store(leading_sequence);
-            m_last_consumed_sequence = leading_sequence;
-            m_trailing_octile = trailing_octile_of(leading_sequence);
+        return !m_stopping && (!require_reading || m_reading);
+    }
 
-            reattach_after_eviction();
-
-            const sequence_counter_type confirmed_leading_sequence = c.leading_sequence;
-            if (trailing_octile_of(confirmed_leading_sequence) == m_trailing_octile) {
-                m_reading_sequence->store(confirmed_leading_sequence);
-                m_last_consumed_sequence = confirmed_leading_sequence;
-                return;
+    Guard_admission acquire_guard(
+        Local_read_lock& read_lock,
+        uint8_t octile,
+        bool require_reading,
+        bool allow_evicted)
+    {
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        while (read_can_continue(require_reading)) {
+            bool pending_set = false;
+            const auto previous = slot.fetch_update_state_if(
+                [&](Reader_state_union current) -> std::optional<Reader_state_union>
+                {
+                    if (!current.guard_transition_allowed()) {
+                        return std::nullopt;
+                    }
+                    const auto status = current.status();
+                    if (status != Ring<T, true>::READER_STATE_ACTIVE &&
+                        !(allow_evicted && status == Ring<T, true>::READER_STATE_EVICTED))
+                    {
+                        return std::nullopt;
+                    }
+                    return current.with_status(Ring<T, true>::READER_STATE_ACTIVE)
+                                  .with_pending(octile);
+                },
+                pending_set);
+            if (!pending_set) {
+                if (previous.status() == Ring<T, true>::READER_STATE_INACTIVE) {
+                    return Guard_admission::STOPPED;
+                }
+                if (!allow_evicted && previous.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                    return Guard_admission::EVICTED;
+                }
+                if (previous.request_pending()) {
+                    detail::ring_guard_operation_for_test("guard_denied", &c.read_access, octile);
+                }
+                read_lock.retry();
+                continue;
             }
 
-            // The octile stays pending until its count is released. If the
-            // writer evicted this reader meanwhile, the writer releases it.
-            auto& slot = c.reading_sequences[m_rs_index].data;
-            bool guard_cleared = false;
-            const uint8_t guard_snapshot = slot.fetch_update_guard_token_if(
-                [&](Reader_state_union current)
-                    -> std::optional<Reader_state_union>
+            detail::ring_guard_operation_for_test("pending", &c.read_access, octile);
+            c.read_access.fetch_add(octile_mask(octile));
+            // REQUEST may arrive after pending publication. Finish the paired
+            // transaction; the writer cannot evict until pending is clear.
+            Reader_state_union::cas_update(slot.word, [&](Reader_state_union current) {
+                const auto attached = current.with_guard(octile, true);
+                return previous.guard_present()
+                    ? attached.with_pending(previous.guard_octile())
+                    : attached.clear_pending();
+            });
+            if (previous.guard_present()) {
+                const auto previous_octile = previous.guard_octile();
+                SINTRA_READ_ACCESS_FETCH_SUB(c, previous_octile, octile_mask(previous_octile));
+                slot.clear_pending();
+            }
+            return Guard_admission::ACQUIRED;
+        }
+        return Guard_admission::STOPPED;
+    }
+
+    bool release_guard(Local_read_lock& read_lock, bool require_reading)
+    {
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        while (read_can_continue(require_reading)) {
+            bool released = false;
+            const auto previous = slot.fetch_update_state_if(
+                [](Reader_state_union current) -> std::optional<Reader_state_union>
                 {
-                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
+                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE ||
+                        !current.guard_present() || !current.guard_transition_allowed())
+                    {
                         return std::nullopt;
                     }
                     return current.with_guard(current.guard_octile(), false)
                                   .with_pending(current.guard_octile());
                 },
-                guard_cleared);
-
-            if (guard_cleared) {
-                const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
-                SINTRA_READ_ACCESS_FETCH_SUB(c, released_octile, octile_mask(released_octile));
+                released);
+            if (released) {
+                const auto octile = previous.guard_octile();
+                SINTRA_READ_ACCESS_FETCH_SUB(c, octile, octile_mask(octile));
                 slot.clear_pending();
+                return true;
+            }
+            if (previous.status() != Ring<T, true>::READER_STATE_ACTIVE ||
+                !previous.guard_present())
+            {
+                return false;
+            }
+            if (previous.request_pending()) {
+                detail::ring_guard_operation_for_test(
+                    "guard_denied", &c.read_access, previous.guard_octile());
+            }
+            read_lock.retry();
+        }
+        return false;
+    }
+
+    bool handle_eviction(Local_read_lock& read_lock, bool require_reading)
+    {
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        auto state = slot.load_state();
+        if (state.guard_present() || !read_can_continue(require_reading)) {
+            return false;
+        }
+        if (state.status() == Ring<T, true>::READER_STATE_EVICTED) {
+            if (resume_at_leading_sequence(read_lock, require_reading)) {
+                m_evicted_since_last_wait = true;
+            }
+            return true;
+        }
+        if (state.status() == Ring<T, true>::READER_STATE_INACTIVE) {
+            return false;
+        }
+        // A request can still own the writer's paired release. Do not run
+        // guardless recovery or alter the range until it has been resolved.
+        while (state.request_pending()) {
+            read_lock.retry();
+            if (!read_can_continue(require_reading)) {
+                return false;
+            }
+            state = slot.load_state();
+            if (state.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                return handle_eviction(read_lock, require_reading);
             }
         }
+        try_rollback_unpaired_read_access(uint8_t(m_trailing_octile));
+        m_trailing_octile = trailing_octile_of(m_reading_sequence->load());
+        acquire_guard(read_lock, uint8_t(m_trailing_octile), require_reading, true);
+        return false;
+    }
+
+    // Recovery confirms the head after guard publication, just like snapshot
+    // admission. The direct reattach helper intentionally preserves its range.
+    bool resume_at_leading_sequence(Local_read_lock& read_lock, bool require_reading)
+    {
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        while (read_can_continue(require_reading)) {
+            if (!slot.load_state().guard_transition_allowed()) {
+                detail::ring_guard_operation_for_test(
+                    "recovery_denied", &c.read_access, uint8_t(m_trailing_octile));
+                read_lock.retry();
+                continue;
+            }
+            const sequence_counter_type leading_sequence = c.leading_sequence;
+            m_reading_sequence->store(leading_sequence);
+            m_last_consumed_sequence = leading_sequence;
+            m_trailing_octile = trailing_octile_of(leading_sequence);
+            if (acquire_guard(read_lock, uint8_t(m_trailing_octile), require_reading, true) !=
+                Guard_admission::ACQUIRED)
+            {
+                return false;
+            }
+            const sequence_counter_type confirmed_leading_sequence = c.leading_sequence;
+            if (trailing_octile_of(confirmed_leading_sequence) == m_trailing_octile) {
+                m_reading_sequence->store(confirmed_leading_sequence);
+                m_last_consumed_sequence = confirmed_leading_sequence;
+                return true;
+            }
+            release_guard(read_lock, require_reading);
+        }
+        return false;
     }
 
     // The octile guarded for a reader at this sequence: the one holding the
@@ -3414,20 +3291,50 @@ private:
     std::atomic<bool>                      m_evicted_since_last_wait{false};
 
 protected:
-    // Only short memory accesses belong inside this gate. In particular, do
-    // not wait, allocate, or invoke application callbacks while excluding eviction.
-    template <typename F>
-    bool with_guarded_read(F&& read)
+    enum class Copy_admission { COPIED, RETRY, EVICTED, STOPPED };
+
+    void copy_operation_for_test(const char* stage)
     {
-        spinlock::locker lock(c.rs_stack_spinlock);
-        const auto state = c.reading_sequences[m_rs_index].data.load_state();
-        if (!m_reading || state.status() != Ring<T, true>::READER_STATE_ACTIVE ||
-            !state.guard_present())
-        {
-            return false;
+        detail::ring_guard_operation_for_test(stage, &c.read_access, uint8_t(m_trailing_octile));
+    }
+
+    // The caller owns m_reading_lock. Only validation and the one owned copy
+    // belong inside this gate; its clear orders those reads before eviction.
+    template <typename F>
+    Copy_admission with_copying_mark(F&& read)
+    {
+        if (!m_reading || m_stopping) {
+            return Copy_admission::STOPPED;
         }
+        auto& slot = c.reading_sequences[m_rs_index].data;
+        auto state = slot.load_state();
+        while (true) {
+            if (state.status() == Ring<T, true>::READER_STATE_EVICTED) {
+                return Copy_admission::EVICTED;
+            }
+            if (state.status() != Ring<T, true>::READER_STATE_ACTIVE) {
+                return Copy_admission::STOPPED;
+            }
+            if (!state.guard_present() || !state.guard_transition_allowed()) {
+                if (state.request_pending()) {
+                    copy_operation_for_test("copy_denied");
+                }
+                return Copy_admission::RETRY;
+            }
+            const auto desired = state.word | Reader_state_union::copying_mask;
+            if (slot.word.compare_exchange_strong(state.word, desired)) {
+                break;
+            }
+        }
+        struct Copy_clear
+        {
+            std::atomic<uint32_t>& word;
+            ~Copy_clear() { word.fetch_and(~Reader_state_union::copying_mask); }
+        } clear{slot.word};
+        copy_operation_for_test("copy_enter");
         read();
-        return true;
+        copy_operation_for_test("copy_exit");
+        return Copy_admission::COPIED;
     }
 
     std::atomic<bool>                      m_reading                = false;
@@ -3494,6 +3401,7 @@ struct Ring_W : Ring<T, false>
         m_octile = octile_of_index(
             mod_u64(m_pending_new_sequence, this->m_num_elements),
             this->m_num_elements);
+        cancel_requests();
         c.writer_closed.store(0, std::memory_order_release);
         c.writer_pid = get_current_pid();
         m_owner_pid  = c.writer_pid;
@@ -3520,6 +3428,8 @@ struct Ring_W : Ring<T, false>
             }
         }
 
+        // Resolve arbitration before closure so readers can release their guards.
+        cancel_requests();
         // Signal readers that no more data will arrive, then wake them.
         c.writer_closed.store(1, std::memory_order_release);
         unblock_global();
@@ -3658,61 +3568,144 @@ struct Ring_W : Ring<T, false>
         }
 #endif
 
-        auto range_mask = (uint64_t(0xff) << (8 * new_octile));
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
-        auto run_eviction_pass = [&]() {
-            sequence_counter_type eviction_threshold =
-                (m_pending_new_sequence > sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
-                    ? (m_pending_new_sequence - sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements)
-                    : 0;
+        using State = typename Ring<T, false>::Reader_state_union;
+        const auto range_mask = uint64_t(0xff) << (8 * new_octile);
+        if ((c.read_access & range_mask) == 0) {
+            m_octile = new_octile;
+            return;
+        }
+        bool requests_published = false;
+        struct Request_cleanup
+        {
+            Ring_W& writer;
+            bool& published;
+            ~Request_cleanup()
+            {
+                if (published) {
+                    writer.cancel_requests();
+                }
+            }
+        } request_cleanup{*this, requests_published};
+        std::array<unsigned, max_process_index> unknown_attempts{};
+        std::array<uint32_t, max_process_index> observed_pids{};
+        std::array<uint64_t, max_process_index> observed_stamps{};
 
+        auto blocks_on_identity = [&](State state) {
+            if (state.status() != Ring<T, false>::READER_STATE_ACTIVE) {
+                return false;
+            }
+            const bool guarded = state.guard_present() && state.guard_octile() == new_octile;
+            const bool pending = state.guard_pending() && state.pending_octile() == new_octile;
+#if SINTRA_ENABLE_SLOW_READER_EVICTION
+            return pending || (guarded && (state.copying() || state.guard_pending()));
+#else
+            return pending || guarded;
+#endif
+        };
+
+        auto run_reclamation_pass = [&]() {
+            // Dead copying owners must be observed while their published guard
+            // still blocks, independently of the live-eviction configuration.
+            c.scavenge_orphans();
+#if SINTRA_ENABLE_SLOW_READER_EVICTION
+            const sequence_counter_type lag_limit =
+                sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements;
+            const auto threshold = m_pending_new_sequence > lag_limit
+                ? m_pending_new_sequence - lag_limit : 0;
+#endif
             for (int i = 0; i < max_process_index; ++i) {
-                if (c.reading_sequences[i].data.status() != Ring<T, false>::READER_STATE_ACTIVE) {
-                    continue;
+                auto& slot = c.reading_sequences[i].data;
+#if SINTRA_ENABLE_SLOW_READER_EVICTION
+                auto eligible = [&](State state) {
+                    return state.status() == Ring<T, false>::READER_STATE_ACTIVE &&
+                        state.guard_present() &&
+                        (slot.v.load() < threshold || state.guard_octile() == new_octile);
+                };
+                bool published_now = false;
+#endif
+                {
+                    spinlock::locker release_lock(c.rs_stack_spinlock);
+                    auto state = slot.load_state();
+                    if (blocks_on_identity(state)) {
+                        const auto pid   = slot.owner_pid.load();
+                        const auto stamp = slot.owner_start_stamp.load();
+                        if (observed_pids[i] != pid || observed_stamps[i] != stamp) {
+                            observed_pids[i] = pid;
+                            observed_stamps[i] = stamp;
+                            unknown_attempts[i] = 0;
+                        }
+                        const auto identity = probe_process_identity(pid, stamp);
+                        if (identity.status == Process_identity_status::UNKNOWN) {
+                            // An unrelated UNKNOWN never fails this operation.
+                            // Recheck the obstruction after each native probe.
+                            if (++unknown_attempts[i] >= 3 &&
+                                (c.read_access & range_mask) != 0 &&
+                                blocks_on_identity(slot.load_state()))
+                            {
+                                throw std::system_error(identity.error,
+                                    "Sintra cannot observe a blocking reader's process identity");
+                            }
+                        }
+                        else {
+                            unknown_attempts[i] = 0;
+                        }
+                    }
+                    else {
+                        unknown_attempts[i] = 0;
+                    }
+#if SINTRA_ENABLE_SLOW_READER_EVICTION
+                    state = slot.load_state();
+                    if (!eligible(state)) {
+                        if (state.request_pending()) {
+                            slot.word.fetch_and(~State::request_mask);
+                        }
+                        continue;
+                    }
+                    if (!state.request_pending()) {
+                        // Unconditional arbitration cannot lose to an unlimited
+                        // succession of reader copy-set/copy-clear operations.
+                        const State previous(slot.word.fetch_or(State::request_mask));
+                        requests_published = true;
+                        published_now = !previous.request_pending();
+                    }
+#endif
                 }
-
-                sequence_counter_type reader_seq = c.reading_sequences[i].data.v;
-                uint8_t guard_snapshot           = c.reading_sequences[i].data.guard_token();
-                bool    reader_has_guard         = (guard_snapshot & 0x08) != 0;
-                uint8_t reader_octile            = guard_snapshot & 0x07;
-                bool blocking_current_octile     = reader_has_guard && (reader_octile == new_octile);
-
-                if (reader_seq >= eviction_threshold && !blocking_current_octile) {
-                    continue;
+#if SINTRA_ENABLE_SLOW_READER_EVICTION
+                if (published_now) {
+                    detail::ring_guard_operation_for_test("request_published", &c.read_access, new_octile);
                 }
-
+                // Release the lifetime lock at publication, then re-read the
+                // slot: a pre-REQUEST transaction may have completed meanwhile.
                 spinlock::locker release_lock(c.rs_stack_spinlock);
-                bool guard_evicted = false;
-                const uint8_t previous_state = c.reading_sequences[i].data.fetch_update_guard_token_if(
-                    [&](typename Ring<T, false>::Reader_state_union current)
-                        -> std::optional<typename Ring<T, false>::Reader_state_union>
+                bool evicted = false;
+                const auto previous = slot.fetch_update_state_if(
+                    [&](State current) -> std::optional<State>
                     {
-                        if (current.status() != Ring<T, false>::READER_STATE_ACTIVE ||
-                            !current.guard_present() || current.guard_pending())
+                        if (!eligible(current) || !current.request_pending() ||
+                            current.copying() || current.guard_pending())
                         {
                             return std::nullopt;
                         }
-                        auto cleared = current.with_guard(current.guard_octile(), false).clear_pending();
-                        return cleared.with_status(Ring<T, false>::READER_STATE_EVICTED);
+                        return current.with_guard(current.guard_octile(), false)
+                                      .with_status(Ring<T, false>::READER_STATE_EVICTED);
                     },
-                    guard_evicted);
-
-                if (!guard_evicted) {
-                    continue;
+                    evicted);
+                if (evicted) {
+                    const auto octile = previous.guard_octile();
+                    SINTRA_READ_ACCESS_FETCH_SUB(c, octile, octile_mask(octile));
+                    c.reader_eviction_count++;
+                    c.last_evicted_reader_index    = uint32_t(i);
+                    c.last_evicted_reader_sequence = slot.v.load();
+                    c.last_evicted_writer_sequence = m_pending_new_sequence;
+                    c.last_evicted_reader_octile   = octile;
+                    slot.word.fetch_and(~State::request_mask);
                 }
-
-                const size_t evicted_reader_octile = Ring<T, false>::encoded_guard_octile(previous_state);
-
-                const uint64_t evict_mask = octile_mask(static_cast<uint8_t>(evicted_reader_octile));
-                SINTRA_READ_ACCESS_FETCH_SUB(c, evicted_reader_octile, evict_mask);
-                c.reader_eviction_count++;
-                c.last_evicted_reader_index    = static_cast<uint32_t>(i);
-                c.last_evicted_reader_sequence = reader_seq;
-                c.last_evicted_writer_sequence = m_pending_new_sequence;
-                c.last_evicted_reader_octile   = static_cast<uint32_t>(evicted_reader_octile);
+                else
+                if (!eligible(slot.load_state())) {
+                    slot.word.fetch_and(~State::request_mask);
+                }
+#endif
             }
-
-            c.scavenge_orphans();
         };
 
 #if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
@@ -3723,7 +3716,6 @@ struct Ring_W : Ring<T, false>
         const auto eviction_budget = std::chrono::microseconds{SINTRA_EVICTION_SPIN_BUDGET_US};
         auto eviction_deadline = eviction_clock::time_point{};
         bool eviction_deadline_armed = false;
-#endif
 #endif
 
         constexpr auto k_stale_guard_delay =
@@ -3812,26 +3804,23 @@ struct Ring_W : Ring<T, false>
                 if (!(c.read_access & range_mask)) {
                     break;
                 }
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 #if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
                 spin_count = 0;
 #else
                 eviction_deadline_armed = false;
 #endif
-#endif
                 continue;
             }
 
-#ifdef SINTRA_ENABLE_SLOW_READER_EVICTION
 #if defined(SINTRA_EVICTION_SPIN_THRESHOLD) && SINTRA_EVICTION_SPIN_THRESHOLD > 0
             if (++spin_count > spin_loop_budget) {
-                run_eviction_pass();
+                run_reclamation_pass();
                 spin_count = 0;
             }
 #else
             auto now = eviction_clock::now();
             if (eviction_budget.count() == 0) {
-                run_eviction_pass();
+                run_reclamation_pass();
             }
             else
             if (!eviction_deadline_armed) {
@@ -3840,10 +3829,9 @@ struct Ring_W : Ring<T, false>
             }
             else
             if (now >= eviction_deadline) {
-                run_eviction_pass();
+                run_reclamation_pass();
                 eviction_deadline = now + eviction_budget;
             }
-#endif
 #endif
         }
 
@@ -3851,6 +3839,17 @@ struct Ring_W : Ring<T, false>
     }
 
 private:
+    void cancel_requests()
+    {
+        using State = typename Ring<T, false>::Reader_state_union;
+        spinlock::locker lock(c.rs_stack_spinlock);
+        for (auto& entry : c.reading_sequences) {
+            if (entry.data.load_state().request_pending()) {
+                entry.data.word.fetch_and(~State::request_mask);
+            }
+        }
+    }
+
     void ensure_writer_mutex_consistency()
     {
 #ifdef _WIN32
@@ -3929,20 +3928,45 @@ private:
         if (num_elements_to_write > this->m_num_elements / 8) {
             throw std::invalid_argument("Ring write size exceeds single-octile capacity (ring_size/8).");
         }
-
-        // Enforce exclusive writer (cheap fast-path loop)
-        // Use thread-local index (trivial type) for reliable atomic operations across all platforms
-        const uint32_t my_thread_idx = thread_index();
-        while (m_writing_thread_index != my_thread_idx) {
-            uint32_t expected = 0;
-            m_writing_thread_index.compare_exchange_strong(expected, my_thread_idx);
+        const auto current_thread = thread_index();
+        uint32_t expected = 0;
+        detail::Spin_backoff backoff;
+        bool acquired = false;
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        bool waiting_reported = false;
+#endif
+        while (!(acquired = m_writing_thread_index.compare_exchange_strong(expected, current_thread))) {
+            if (expected == current_thread) {
+                break;
+            }
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+            if (!waiting_reported) {
+                detail::ring_guard_operation_for_test("writer_waiting", &c.read_access, 0);
+                waiting_reported = true;
+            }
+#endif
+            expected = 0;
+            backoff.spin();
         }
-
-        const size_t index = mod_u64(m_pending_new_sequence, this->m_num_elements);
-        m_pending_new_sequence += num_elements_to_write;
-
-        const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
-        advance_writer_octile_if_needed(head);
+        const auto saved_sequence = m_pending_new_sequence;
+        const auto saved_octile   = m_octile;
+        const size_t index = mod_u64(saved_sequence, this->m_num_elements);
+        try {
+            m_pending_new_sequence += num_elements_to_write;
+            const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
+            advance_writer_octile_if_needed(head);
+        }
+        catch (...) {
+            // Restore while still owning the writer. An earlier unpublished
+            // reservation and its pointer remain owned by this same thread.
+            cancel_requests();
+            m_pending_new_sequence = saved_sequence;
+            m_octile = saved_octile;
+            if (acquired) {
+                m_writing_thread_index = 0;
+            }
+            throw;
+        }
         return this->m_data + index;
     }
 

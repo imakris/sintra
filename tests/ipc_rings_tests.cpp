@@ -1171,6 +1171,7 @@ void install_dead_reader(Writer_ring::Control& control, uint32_t dead_pid, uint3
     ASSERT_GE(index, 0);
     auto& slot = control.reading_sequences[index].data;
     slot.owner_pid = dead_pid;
+    slot.owner_start_stamp = 1;
     slot.word = state_word;
 }
 
@@ -1512,7 +1513,8 @@ void check_reattach_confirms_writer_position(size_t trailing_octiles, size_t lap
         write_octile();
     }
     ASSERT_GT(writer.get_leading_sequence(), first + ring_elements);
-    ASSERT_FALSE(reader.with_guarded_read([] {}));
+    ASSERT_TRUE(reader.with_copying_mark([] {}) ==
+        sintra::Ring_R<uint32_t>::Copy_admission::EVICTED);
 }
 
 // Message readers keep no trailing window, so the writer re-enters their
@@ -1536,6 +1538,34 @@ TEST_CASE(test_reattach_after_writer_laps_into_trailing_window_guard)
 }
 
 #ifdef NDEBUG
+TEST_CASE(test_oversized_write_keeps_unpublished_reservation)
+{
+    Temp_ring_dir tmp("oversized_write");
+    const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+    sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+    const uint32_t first = 17;
+    auto* pending = writer.write(&first, 1);
+    const auto sequence = writer.m_pending_new_sequence;
+    const auto octile = writer.m_octile;
+    const auto owner = writer.m_writing_thread_index.load();
+    std::vector<uint32_t> oversized(ring_elements / 8 + 1, 99);
+    bool rejected = false;
+    try {
+        writer.write(oversized.data(), oversized.size());
+    }
+    catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    ASSERT_TRUE(rejected);
+    ASSERT_EQ(sequence, writer.m_pending_new_sequence);
+    ASSERT_EQ(octile, writer.m_octile);
+    ASSERT_EQ(owner, writer.m_writing_thread_index.load());
+    ASSERT_EQ(uint32_t(17), *pending);
+    *pending = 23;
+    ASSERT_EQ(sequence, writer.done_writing());
+    ASSERT_EQ(uint32_t(23), *pending);
+}
+
 TEST_CASE(test_release_preserves_neighboring_octile_count)
 {
     Temp_ring_dir tmp("release_neighboring_count");

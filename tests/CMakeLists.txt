@@ -113,10 +113,14 @@ foreach(FULL_TEST_PATH IN LISTS TEST_FILES)
 
     add_executable(${TARGET_NAME} ${TEST_FILE})
     if(TEST_NAME STREQUAL "lifecycle_header_only_test" OR
-       TEST_NAME STREQUAL "lifeline_ownership_test")
+       TEST_NAME STREQUAL "lifeline_ownership_test" OR
+       TEST_NAME STREQUAL "copying_mark_no_eviction_test")
         target_link_libraries(${TARGET_NAME} PRIVATE sintra sintra_test_config)
     else()
         target_link_libraries(${TARGET_NAME} PRIVATE sintra_for_tests)
+    endif()
+    if(TEST_NAME STREQUAL "copying_mark_no_eviction_test")
+        target_compile_definitions(${TARGET_NAME} PRIVATE SINTRA_ENABLE_SLOW_READER_EVICTION=0)
     endif()
     if(TEST_NAME STREQUAL "lifecycle_header_only_test" OR
        TEST_NAME STREQUAL "lifecycle_compiled_test")

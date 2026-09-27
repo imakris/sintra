@@ -27,6 +27,11 @@ complex_choreography_stress_test                         60
 complex_choreography_test                                60
 console_test                                             1
 coordinator_lock_order_test                              5
+copying_mark_test                                        1
+copying_mark_admission_test                              1
+copying_mark_no_eviction_test                            1
+copying_mark_lifecycle_test                              1
+copying_mark_teardown_test                               1
 defensive_paths_test                                     1
 delivery_fence_reader_deadlock_test                      3
 drain_wake_coordination_test                             5
@@ -96,6 +101,7 @@ processing_fence_test                                  100
 process_reader_constructor_rollback_test                 5
 process_reader_service_dispatch_policy_test              1
 process_reader_stop_ownership_test                       1
+process_identity_test                                   1
 receive_test                                            20
 reader_thread_fault_contract_test                        1
 recovery_policy_test                                     1

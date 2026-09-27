@@ -27,9 +27,9 @@ constexpr std::string_view k_failure_prefix = "ring_abi_fingerprint_test: ";
 void test_message_prefix_ring_abi()
 {
     sintra::test::require_true(
-        sintra::detail::k_sintra_ring_abi_version == 9,
+        sintra::detail::k_sintra_ring_abi_version == 10,
         k_failure_prefix,
-        "reader-slot wakeup ownership requires ring ABI version 9");
+        "reader copying marks and process identity require ring ABI version 10");
     sintra::test::require_true(
         sintra::detail::k_ring_lifecycle_anchor_abi_version == 3,
         k_failure_prefix,
@@ -114,10 +114,10 @@ void test_attach_rejects_mismatched_fingerprint()
         (void)reader;
     }
 
-    // A control from the previous wakeup-pool protocol must be rejected even
+    // A control from the previous shared-copy-lock protocol must be rejected even
     // when its size happens to match this build on a supported platform.
     constexpr std::uint64_t k_wrong_fingerprint = sintra::detail::fnv1a_64({
-        8,
+        9,
         static_cast<uint64_t>(sintra::num_process_index_bits),
         static_cast<uint64_t>(sintra::max_process_index),
         static_cast<uint64_t>(sintra::max_message_length),

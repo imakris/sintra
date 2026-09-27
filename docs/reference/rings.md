@@ -262,7 +262,12 @@ Contract:
   mismatches). Read with `get_diagnostics()` on either the writer or
   any reader.
 - A reader that falls too far behind may be evicted by the writer when
-  `SINTRA_ENABLE_SLOW_READER_EVICTION` is defined (the default). Any
+  `SINTRA_ENABLE_SLOW_READER_EVICTION` is `1` (the default). Compile with
+  `-DSINTRA_ENABLE_SLOW_READER_EVICTION=0` to disable live-reader eviction.
+  Both configurations periodically reclaim readers whose exact process
+  identity is proven dead, including published blocking guards. An unresolved
+  identity that prevents safe writer progress reports a bounded native error;
+  unrelated identity observation failures do not fail a write. Any
   subsequent `start_reading` or `make_snapshot` throws
   `ring_reader_evicted_exception`; `try_snapshot_e` returns
   `Ring_R_snapshot_error::evicted`. The reader must be reconstructed.
