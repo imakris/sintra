@@ -96,16 +96,15 @@ struct spinlock
 
             const auto now = std::chrono::steady_clock::now();
             if (now >= next_liveness_check) {
-                if (try_recover_dead_owner(self_pid)) {
-                    continue;
+                if (try_take_over_dead_owner(self_pid)) {
+                    return;
                 }
                 next_liveness_check = now + k_owner_liveness_poll;
             }
 
             if (now >= live_owner_deadline) {
-                if (try_recover_dead_owner(self_pid)) {
-                    live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
-                    continue;
+                if (try_take_over_dead_owner(self_pid)) {
+                    return;
                 }
 
                 const auto owner = m_owner_pid.load(std::memory_order_acquire);
@@ -117,16 +116,22 @@ struct spinlock
                         Log_stream(log_level::warning)
                             << "[sintra][spinlock] Owner PID " << owner
                             << " is paused under debug control; "
-                            << "forcibly releasing spinlock to allow shutdown to proceed.\n";
-                        force_unlock();
+                            << "taking over the spinlock to allow shutdown to proceed.\n";
+                        if (take_over_owner(owner, self_pid)) {
+                            return;
+                        }
                         live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
                         continue;
                     }
                     report_live_owner_stall(owner);
                 }
 
-                // Owner unknown or exited - forcefully release and continue trying.
-                force_unlock();
+                // A dead owner is recovered only by takeover. A zero owner has no
+                // identity to take over from: the holder is between the flag and pid
+                // updates of lock() or unlock(), or died there.
+                if (owner == 0) {
+                    force_unlock();
+                }
                 live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
             }
         }
@@ -144,7 +149,7 @@ private:
     static constexpr auto      k_owner_liveness_poll = std::chrono::milliseconds(5);
     static constexpr auto      k_live_owner_timeout  = std::chrono::milliseconds(2000);
 
-    bool try_recover_dead_owner(uint32_t self_pid)
+    bool try_take_over_dead_owner(uint32_t self_pid)
     {
         const auto owner = m_owner_pid.load(std::memory_order_acquire);
         if (owner == 0 || owner == self_pid) {
@@ -156,7 +161,26 @@ private:
         }
 
         log_recovery(owner);
-        force_unlock();
+        return take_over_owner(owner, self_pid);
+    }
+
+    // Recovery inherits the lock instead of releasing it. Every contender that
+    // saw the same owner may act on that stale observation after another one
+    // has already recovered the lock, so a release would clear the recovered
+    // holder's ownership. The flag stays set, and the compare-exchange admits
+    // exactly one contender per observed owner; the others keep waiting.
+    bool take_over_owner(uint32_t observed_owner, uint32_t self_pid)
+    {
+        if (!m_owner_pid.compare_exchange_strong(
+                observed_owner,
+                self_pid,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+            return false;
+        }
+
+        m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
         return true;
     }
 
@@ -168,7 +192,7 @@ private:
             << " disappeared while holding a shared spinlock (last progress "
             << static_cast<unsigned long long>(
                 monotonic_now_ns() > last_ns ? (monotonic_now_ns() - last_ns) : 0)
-            << " ns ago). Forcibly releasing lock.\n";
+            << " ns ago). Attempting to take over the lock.\n";
     }
 
     [[noreturn]] void report_live_owner_stall(uint32_t owner) const

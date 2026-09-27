@@ -1,6 +1,7 @@
 #include <sintra/detail/ipc/spinlock.h>
 #include <sintra/detail/ipc/process_utils.h>
 #include <sintra/detail/debug_pause.h>
+#include <sintra/detail/logging.h>
 #include <sintra/detail/time_utils.h>
 #include <sintra/detail/utility.h>
 
@@ -15,6 +16,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -164,6 +166,66 @@ Marker_state probe_ready_marker(
     return Marker_state::valid;
 }
 
+// Two contenders observe the same dead owner. The recovery warning is logged
+// after the late contender's observation and before it acts on it, so this
+// callback lets the racing contender recover the lock inside that window.
+struct Stale_recovery_race
+{
+    sintra::spinlock*  lock = nullptr;
+    std::string        dead_owner_warning;
+    std::atomic<int>   dead_owner_warnings{0};
+    std::atomic<bool>  racing_contender_acquired{false};
+    std::atomic<bool>  racing_contender_holds{false};
+    std::atomic<bool>  late_contender_acquired{false};
+    bool               recovered_inside_window = false;
+    std::thread        racing_contender;
+};
+
+// Both contenders share a pid, so a lock still held by the racing contender
+// when the late contender's 2 s stall deadline expires aborts the test. These
+// bounds keep the whole race well inside that deadline.
+constexpr auto k_racing_contender_hold    = std::chrono::milliseconds(200);
+constexpr auto k_racing_contender_timeout = std::chrono::seconds(1);
+
+void run_racing_contender(Stale_recovery_race& race)
+{
+    race.lock->lock();
+    race.racing_contender_holds = true;
+    race.racing_contender_acquired = true;
+
+    // The late contender can acquire only after this release unless it
+    // breaks exclusion, so bound the hold instead of waiting for it.
+    const auto release_deadline = std::chrono::steady_clock::now() + k_racing_contender_hold;
+    while (!race.late_contender_acquired && std::chrono::steady_clock::now() < release_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    race.racing_contender_holds = false;
+    race.lock->unlock();
+}
+
+void recover_inside_late_contender_window(
+    sintra::log_level level,
+    const char*       message,
+    void*             user_data)
+{
+    auto& race = *static_cast<Stale_recovery_race*>(user_data);
+    if (std::string_view(message).find(race.dead_owner_warning) == std::string_view::npos) {
+        sintra::detail::default_log_callback(level, message, nullptr);
+        return;
+    }
+    if (race.dead_owner_warnings.fetch_add(1) != 0) {
+        return;
+    }
+
+    race.racing_contender = std::thread(run_racing_contender, std::ref(race));
+    const auto acquire_deadline = std::chrono::steady_clock::now() + k_racing_contender_timeout;
+    while (!race.racing_contender_acquired && std::chrono::steady_clock::now() < acquire_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    race.recovered_inside_window = race.racing_contender_acquired;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -235,7 +297,33 @@ int main(int argc, char* argv[])
     lock.lock();
     lock.unlock();
 
-    // Case 2: live owner with debug pause active should force unlock.
+    // Contenders that observe the same dead owner must not both acquire.
+    layout.m_locked.clear(std::memory_order_release);
+    layout.m_locked.test_and_set(std::memory_order_acquire);
+    layout.m_owner_pid.store(dead_pid, std::memory_order_release);
+    layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+
+    Stale_recovery_race race;
+    race.lock = &lock;
+    race.dead_owner_warning = "Owner PID " + std::to_string(dead_pid) + " disappeared";
+    sintra::set_log_callback(&recover_inside_late_contender_window, &race);
+    lock.lock();
+    const bool exclusion_broken = race.racing_contender_holds.load();
+    race.late_contender_acquired = true;
+    lock.unlock();
+    if (race.racing_contender.joinable()) {
+        race.racing_contender.join();
+    }
+    sintra::set_log_callback(nullptr);
+
+    sintra::test::require_true(race.recovered_inside_window, k_failure_prefix,
+        "the racing contender did not recover the dead owner's lock while the late "
+        "contender was between observing the owner and acting on it");
+    sintra::test::require_true(!exclusion_broken, k_failure_prefix,
+        "a contender acting on a stale dead-owner observation acquired the spinlock "
+        "while the contender that recovered it first still held it");
+
+    // Case 2: live owner with debug pause active should be taken over.
     const std::string sleep_arg = "30000";
     const std::vector<const char*> sleep_args = {
         argv[0],
@@ -274,7 +362,7 @@ int main(int argc, char* argv[])
     if (post_recovery_child_state != Exact_child_state::running) {
         fail_after_settling_child(
             sleep_child,
-            "case 2 did not force-unlock while the exact owner remained live: " +
+            "case 2 did not take over the lock while the exact owner remained live: " +
                 (post_recovery_child_state == Exact_child_state::exited
                     ? sleep_child.describe_status()
                     : sleep_child.error()));
