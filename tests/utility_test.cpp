@@ -23,6 +23,10 @@
 #include <unistd.h>
 #endif
 
+#if defined(__linux__)
+#include <pthread.h>
+#endif
+
 namespace {
 
 constexpr std::string_view k_failure_prefix = "utility_test: ";
@@ -480,6 +484,112 @@ void test_process_utility_helpers()
         "cleanup_stale_swarm_directories should remove malformed marker directories");
 }
 
+#if defined(__linux__)
+char linux_leader_state(pid_t pid)
+{
+    std::ifstream stat_file("/proc/" + std::to_string(pid) + "/stat");
+    std::string   stat_line;
+    std::getline(stat_file, stat_line);
+
+    const auto closing_paren = stat_line.rfind(')');
+    if (closing_paren == std::string::npos || closing_paren + 2 >= stat_line.size()) {
+        return '\0';
+    }
+    return stat_line[closing_paren + 2];
+}
+
+// A process lives while any of its threads runs. A thread-group leader that
+// exits first stays a zombie until the other threads exit, so its state alone
+// does not show that the process has exited.
+void test_process_alive_after_main_thread_exit()
+{
+    int release_pipe[2];
+    sintra::test::require_true(::pipe(release_pipe) == 0, k_failure_prefix,
+        "pipe should succeed for the main-thread exit liveness check");
+
+    const pid_t child_pid = ::fork();
+    sintra::test::require_true(child_pid >= 0, k_failure_prefix,
+        "fork should succeed for the main-thread exit liveness check");
+
+    if (child_pid == 0) {
+        ::close(release_pipe[1]);
+        const int release_fd = release_pipe[0];
+        std::thread([release_fd]() {
+            char released = 0;
+            while (::read(release_fd, &released, 1) < 0 && errno == EINTR) {}
+            ::_exit(0);
+        }).detach();
+        ::pthread_exit(nullptr);
+    }
+    ::close(release_pipe[0]);
+
+    // Closing the pipe ends the remaining child thread, which exits the process.
+    struct Child_process
+    {
+        pid_t m_pid;
+        int   m_release_fd;
+
+        void release()
+        {
+            if (m_release_fd >= 0) {
+                ::close(m_release_fd);
+                m_release_fd = -1;
+            }
+        }
+
+        int reap()
+        {
+            release();
+            int   status = 0;
+            pid_t waited = 0;
+            do {
+                waited = ::waitpid(m_pid, &status, 0);
+            }
+            while (waited < 0 && errno == EINTR);
+            m_pid = -1;
+            return waited < 0 ? -1 : status;
+        }
+
+        ~Child_process()
+        {
+            if (m_pid > 0) {
+                reap();
+            }
+        }
+    } child{child_pid, release_pipe[1]};
+
+    bool leader_exited = false;
+    for (int attempt = 0; attempt < 2000 && !leader_exited; ++attempt) {
+        leader_exited = linux_leader_state(child_pid) == 'Z';
+        if (!leader_exited) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    sintra::test::require_true(leader_exited, k_failure_prefix,
+        "the child's main thread should exit while its other thread runs");
+    sintra::test::require_true(
+        sintra::is_process_alive(static_cast<std::uint32_t>(child_pid)),
+        k_failure_prefix,
+        "a process whose main thread exited should stay alive while another thread runs");
+
+    child.release();
+    bool process_reported_dead = false;
+    for (int attempt = 0; attempt < 2000 && !process_reported_dead; ++attempt) {
+        process_reported_dead = !sintra::is_process_alive(static_cast<std::uint32_t>(child_pid));
+        if (!process_reported_dead) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    const int child_status = child.reap();
+    sintra::test::require_true(process_reported_dead, k_failure_prefix,
+        "a process should be reported dead once its last thread exits");
+    sintra::test::require_true(
+        WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0,
+        k_failure_prefix,
+        "the main-thread exit child should exit normally");
+}
+#endif
+
 } // namespace
 
 int main()
@@ -499,6 +609,9 @@ int main()
 #endif
         test_spinlocked_umap_scoped_erase();
         test_process_utility_helpers();
+#if defined(__linux__)
+        test_process_alive_after_main_thread_exit();
+#endif
     }
     catch (const std::exception& ex) {
         std::fprintf(stderr, "utility_test failed: %s\n", ex.what());

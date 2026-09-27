@@ -175,7 +175,27 @@ inline bool is_process_alive(uint32_t pid)
     }
 
     char state = stat_line[state_pos];
-    return state != 'Z' && state != 'X';
+    if (state != 'Z' && state != 'X') {
+        return true;
+    }
+
+    // The state is the thread-group leader's. A leader that exits before the
+    // other threads stays a zombie until they have exited too, and num_threads
+    // (field 20) keeps counting it until the process is reaped. The process
+    // has therefore exited only when the leader is the one thread left.
+    std::istringstream fields(stat_line.substr(state_pos + 1));
+    std::string skipped_field;
+    for (int field = 4; field < 20; ++field) {
+        if (!(fields >> skipped_field)) {
+            return true;
+        }
+    }
+
+    unsigned long num_threads = 0;
+    if (!(fields >> num_threads)) {
+        return true;
+    }
+    return num_threads > 1;
 #endif
 #endif
 }
