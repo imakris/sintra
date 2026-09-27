@@ -204,6 +204,105 @@ void native_errors()
         "UNKNOWN must not be cached as a durable liveness result");
 }
 #else
+#if defined(__linux__)
+int hidden_stat_open(const char*, int, ...)
+{
+    errno = ENOENT;
+    return -1;
+}
+
+int unavailable_pidfd(pid_t)
+{
+    errno = ENOSYS;
+    return -1;
+}
+
+void native_visibility_errors()
+{
+    const auto pid = sintra::get_current_pid();
+    const auto stamp = own_stamp();
+    sintra::detail::process_identity_open_stat = hidden_stat_open;
+    const auto hidden = sintra::probe_process_identity(pid, stamp);
+    sintra::detail::process_identity_pidfd_open = unavailable_pidfd;
+    const auto unavailable = sintra::probe_process_identity(pid, stamp);
+    sintra::detail::process_identity_pidfd_open = sintra::detail::open_process_pidfd;
+    sintra::detail::process_identity_open_stat = ::open;
+    require(hidden.status == Process_identity_status::UNKNOWN &&
+        (hidden.error.value() == ENOENT || hidden.error.value() == ENOSYS),
+        "a hidden proc record cannot establish process death with or without pidfd support");
+    require(unavailable.status == Process_identity_status::UNKNOWN && unavailable.error.value() == ENOSYS,
+        "an unavailable pidfd syscall cannot establish process death");
+}
+#elif defined(__APPLE__)
+int hidden_proc_pidinfo(int, int, uint64_t, void*, int)
+{
+    errno = ESRCH;
+    return 0;
+}
+
+void native_visibility_errors()
+{
+    sintra::detail::process_identity_proc_pidinfo = hidden_proc_pidinfo;
+    const auto result = sintra::probe_process_identity(sintra::get_current_pid(), own_stamp());
+    sintra::detail::process_identity_proc_pidinfo = ::proc_pidinfo;
+    require(result.status == Process_identity_status::UNKNOWN && result.error.value() == ESRCH,
+        "proc_pidinfo ESRCH cannot establish death while kill still sees the PID");
+}
+#elif defined(__FreeBSD__)
+bool empty_process_record = false;
+
+int hidden_process_sysctl(const int*, u_int, void*, size_t* size, const void*, size_t)
+{
+    if (empty_process_record) {
+        *size = 0;
+        return 0;
+    }
+    errno = ESRCH;
+    return -1;
+}
+
+void native_visibility_errors()
+{
+    sintra::detail::process_identity_sysctl = hidden_process_sysctl;
+    const auto pid = sintra::get_current_pid();
+    const auto stamp = own_stamp();
+    const auto hidden = sintra::probe_process_identity(pid, stamp);
+    empty_process_record = true;
+    const auto empty = sintra::probe_process_identity(pid, stamp);
+    empty_process_record = false;
+    sintra::detail::process_identity_sysctl = ::sysctl;
+    require(hidden.status == Process_identity_status::UNKNOWN && hidden.error.value() == ESRCH,
+        "FreeBSD visibility ESRCH cannot establish process death");
+    require(empty.status == Process_identity_status::UNKNOWN && empty.error.value() == EIO,
+        "FreeBSD empty process record cannot establish process death");
+}
+#endif
+
+void require_reaped_identity(pid_t child, uint64_t stamp)
+{
+    const auto observed = sintra::probe_process_identity(child, stamp);
+#if defined(__FreeBSD__)
+    require(observed.status == Process_identity_status::UNKNOWN && observed.error,
+        "FreeBSD cannot distinguish a reaped process from policy concealment");
+#elif defined(__linux__)
+    const int pidfd = sintra::detail::open_process_pidfd(::getpid());
+    const int pidfd_error = errno;
+    if (pidfd >= 0) {
+        ::close(pidfd);
+        require(observed.status == Process_identity_status::DEAD,
+            "pidfd-confirmed absence of a reaped process must be DEAD");
+    }
+    else {
+        require(observed.status == Process_identity_status::UNKNOWN &&
+            observed.error.value() == pidfd_error,
+            "unavailable pidfd cannot establish the absence of a reaped process");
+    }
+#else
+    require(observed.status == Process_identity_status::DEAD,
+        "a reaped process must be DEAD when native absence can be confirmed");
+#endif
+}
+
 void exited_process()
 {
     int release_pipe[2];
@@ -222,8 +321,7 @@ void exited_process()
     int status = 0;
     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
     require(stamp && *stamp != 0, "child incarnation missing");
-    require(sintra::probe_process_identity(child, *stamp).status == Process_identity_status::DEAD,
-        "a reaped process must be DEAD");
+    require_reaped_identity(child, *stamp);
 }
 
 #if defined(__linux__)
@@ -264,8 +362,7 @@ void live_thread_after_leader_exit()
         "test must observe a zombie leader with another running thread");
     require(live.status == Process_identity_status::LIVE,
         "exact-identity probe must retain a zombie leader's live worker threads");
-    require(sintra::probe_process_identity(child, *stamp).status == Process_identity_status::DEAD,
-        "process becomes DEAD once its last thread exits and it is reaped");
+    require_reaped_identity(child, *stamp);
 }
 #endif
 #endif
@@ -303,6 +400,9 @@ int main(int argc, char** argv)
         {"retained_exit_259", retained_exit_259},
         {"native_errors", native_errors},
 #else
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+        {"native_visibility_errors", native_visibility_errors},
+#endif
         {"exited_process", exited_process},
 #if defined(__linux__)
         {"live_thread_after_leader_exit", live_thread_after_leader_exit},

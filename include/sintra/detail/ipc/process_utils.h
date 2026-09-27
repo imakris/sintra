@@ -26,6 +26,10 @@
   #include <sys/types.h>
   #include <unistd.h>
 
+  #if defined(__linux__)
+    #include <sys/syscall.h>
+  #endif
+
   #if defined(__FreeBSD__)
     #include <sys/sysctl.h>
     #include <sys/user.h>
@@ -334,6 +338,12 @@ inline process_identity_probe_hook_t process_identity_probe_hook = nullptr;
 inline decltype(&::OpenProcess) process_identity_open_process = ::OpenProcess;
 inline decltype(&::GetProcessTimes) process_identity_get_process_times = ::GetProcessTimes;
 inline decltype(&::WaitForSingleObject) process_identity_wait_for_single_object = ::WaitForSingleObject;
+#elif defined(__APPLE__)
+inline decltype(&::proc_pidinfo) process_identity_proc_pidinfo = ::proc_pidinfo;
+#elif defined(__FreeBSD__)
+inline decltype(&::sysctl) process_identity_sysctl = ::sysctl;
+#elif defined(__linux__)
+inline decltype(&::open) process_identity_open_stat = ::open;
 #endif
 #endif
 
@@ -343,6 +353,39 @@ inline process_identity_result_t unknown_process_identity(int error)
 }
 
 #if defined(__linux__)
+inline int open_process_pidfd(pid_t pid)
+{
+#ifdef SYS_pidfd_open
+    return static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+#else
+    (void)pid;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline int (*process_identity_pidfd_open)(pid_t) = open_process_pidfd;
+#endif
+
+inline process_identity_result_t probe_linux_process_absence(pid_t pid, int observation_error)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const int fd = process_identity_pidfd_open(pid);
+#else
+    const int fd = open_process_pidfd(pid);
+#endif
+    if (fd >= 0) {
+        ::close(fd);
+        return unknown_process_identity(observation_error);
+    }
+    const int error = errno;
+    if (error == ESRCH) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    return unknown_process_identity(error);
+}
+
 struct linux_process_stat_t
 {
     char state = '\0';
@@ -436,13 +479,17 @@ inline process_identity_result_t probe_process_identity_native(uint32_t pid, uin
     }
 #if defined(__linux__)
     const auto path = std::string("/proc/") + std::to_string(pid) + "/stat";
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const int fd = process_identity_open_stat(path.c_str(), O_RDONLY | O_CLOEXEC);
+#else
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
     if (fd < 0) {
         const int error = errno;
-        // A missing procfs mount is not process death. Only ESRCH from the
-        // kernel establishes absence when the expected record cannot be opened.
-        if (error == ESRCH || (error == ENOENT && ::kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH)) {
-            return {Process_identity_status::DEAD, {}};
+        // procfs can hide a live process. A pidfd lookup establishes absence
+        // independently of procfs visibility and signal permission policy.
+        if (error == ENOENT || error == ESRCH) {
+            return probe_linux_process_absence(static_cast<pid_t>(pid), error);
         }
         return unknown_process_identity(error);
     }
@@ -453,7 +500,7 @@ inline process_identity_result_t probe_process_identity_native(uint32_t pid, uin
     ::close(fd);
     if (size < 0) {
         if (error == ESRCH) {
-            return {Process_identity_status::DEAD, {}};
+            return probe_linux_process_absence(static_cast<pid_t>(pid), error);
         }
         return unknown_process_identity(error);
     }
@@ -474,9 +521,17 @@ inline process_identity_result_t probe_process_identity_native(uint32_t pid, uin
 #elif defined(__APPLE__)
     struct proc_bsdinfo record{};
     errno = 0;
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const int size = process_identity_proc_pidinfo(
+        static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &record, sizeof(record));
+#else
     const int size = ::proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &record, sizeof(record));
+#endif
     if (size <= 0 && errno == ESRCH) {
-        return {Process_identity_status::DEAD, {}};
+        if (::kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH) {
+            return {Process_identity_status::DEAD, {}};
+        }
+        return unknown_process_identity(ESRCH);
     }
     if (size != sizeof(record)) {
         return unknown_process_identity(errno ? errno : EIO);
@@ -494,15 +549,17 @@ inline process_identity_result_t probe_process_identity_native(uint32_t pid, uin
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
     struct kinfo_proc record{};
     size_t size = sizeof(record);
-    if (::sysctl(mib, 4, &record, &size, nullptr, 0) != 0) {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const int result = process_identity_sysctl(mib, 4, &record, &size, nullptr, 0);
+#else
+    const int result = ::sysctl(mib, 4, &record, &size, nullptr, 0);
+#endif
+    if (result != 0) {
         const int error = errno;
-        if (error == ESRCH) {
-            return {Process_identity_status::DEAD, {}};
-        }
         return unknown_process_identity(error);
     }
     if (size == 0) {
-        return {Process_identity_status::DEAD, {}};
+        return unknown_process_identity(EIO);
     }
     if (size != sizeof(record)) {
         return unknown_process_identity(EIO);
