@@ -2609,11 +2609,7 @@ struct Ring_R : Ring<T, true>
 
             // The guard retains one trailing window relative to the head;
             // range_first_sequence already subtracts the requested snapshot.
-            size_t trailing_idx = mod_pos_i64(
-                int64_t(leading_sequence) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
-
-            uint8_t trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
+            uint8_t trailing_octile = trailing_octile_of(leading_sequence);
             uint64_t guard_mask     = octile_mask(trailing_octile);
 
             auto& slot = c.reading_sequences[m_rs_index].data;
@@ -2675,11 +2671,7 @@ struct Ring_R : Ring<T, true>
                 0,
                 int64_t(confirmed_leading_sequence) - int64_t(num_trailing_elements));
 
-            size_t confirmed_trailing_idx = mod_pos_i64(
-                int64_t(confirmed_leading_sequence) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
-            uint8_t confirmed_trailing_octile =
-                octile_of_index(confirmed_trailing_idx, this->m_num_elements);
+            uint8_t confirmed_trailing_octile = trailing_octile_of(confirmed_leading_sequence);
 
             if (confirmed_trailing_octile == trailing_octile) {
                 if (c.reading_sequences[m_rs_index].data.status() == Ring<T, true>::READER_STATE_EVICTED) {
@@ -3058,11 +3050,7 @@ struct Ring_R : Ring<T, true>
                 continue;  // Eviction handled, retry from top
             }
 
-            const size_t t_idx = mod_pos_i64(
-                int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
-
-            const uint8_t new_trailing_octile = octile_of_index(t_idx, this->m_num_elements);
+            const uint8_t new_trailing_octile = trailing_octile_of(m_reading_sequence->load());
 
             if (new_trailing_octile == m_trailing_octile) {
                 return;  // Nothing to do
@@ -3169,18 +3157,7 @@ struct Ring_R : Ring<T, true>
             //
             // Skip all missed data and jump to writer's current position.
             // This is the only safe recovery strategy since old data has been overwritten.
-            sequence_counter_type new_seq = c.leading_sequence;
-            slot.v = new_seq;
-            m_reading_sequence->store(new_seq);
-            m_last_consumed_sequence = new_seq;
-
-            // Recalculate trailing octile to match the new jumped-forward position
-            const size_t trailing_idx = mod_pos_i64(
-                int64_t(new_seq) - int64_t(m_max_trailing_elements),
-                this->m_num_elements);
-            m_trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
-
-            reattach_after_eviction();
+            resume_at_leading_sequence();
             m_evicted_since_last_wait = true;
             return true;
         }
@@ -3191,10 +3168,7 @@ struct Ring_R : Ring<T, true>
         // eviction decrement is in flight for our slot.
         try_rollback_unpaired_read_access(static_cast<uint8_t>(m_trailing_octile));
 
-        const size_t trailing_idx = mod_pos_i64(
-            int64_t(m_reading_sequence->load()) - int64_t(m_max_trailing_elements),
-            this->m_num_elements);
-        m_trailing_octile = octile_of_index(trailing_idx, this->m_num_elements);
+        m_trailing_octile = trailing_octile_of(m_reading_sequence->load());
 
         reattach_after_eviction();
         return false;
@@ -3235,6 +3209,8 @@ struct Ring_R : Ring<T, true>
                 continue;
             }
 
+            detail::ring_guard_operation_for_test(
+                "pending", &c.read_access, static_cast<uint8_t>(m_trailing_octile));
             c.read_access.fetch_add(mask);
 
             bool guard_updated = false;
@@ -3274,6 +3250,64 @@ struct Ring_R : Ring<T, true>
 
             std::this_thread::yield();
         }
+    }
+
+private:
+    // The resumed guard stops the writer only when the writer next enters its
+    // octile. A writer that entered it after the head was loaded, but before
+    // the guard was published, passes the guard for a whole lap and can reuse
+    // the resumed range meanwhile. As in start_reading(), resume at a head
+    // loaded after the guard was published, and only while that head still
+    // requires the guarded octile.
+    void resume_at_leading_sequence()
+    {
+        while (true) {
+            const sequence_counter_type leading_sequence = c.leading_sequence;
+            m_reading_sequence->store(leading_sequence);
+            m_last_consumed_sequence = leading_sequence;
+            m_trailing_octile = trailing_octile_of(leading_sequence);
+
+            reattach_after_eviction();
+
+            const sequence_counter_type confirmed_leading_sequence = c.leading_sequence;
+            if (trailing_octile_of(confirmed_leading_sequence) == m_trailing_octile) {
+                m_reading_sequence->store(confirmed_leading_sequence);
+                m_last_consumed_sequence = confirmed_leading_sequence;
+                return;
+            }
+
+            // The octile stays pending until its count is released. If the
+            // writer evicted this reader meanwhile, the writer releases it.
+            auto& slot = c.reading_sequences[m_rs_index].data;
+            bool guard_cleared = false;
+            const uint8_t guard_snapshot = slot.fetch_update_guard_token_if(
+                [&](Reader_state_union current)
+                    -> std::optional<Reader_state_union>
+                {
+                    if (current.status() != Ring<T, true>::READER_STATE_ACTIVE) {
+                        return std::nullopt;
+                    }
+                    return current.with_guard(current.guard_octile(), false)
+                                  .with_pending(current.guard_octile());
+                },
+                guard_cleared);
+
+            if (guard_cleared) {
+                const uint8_t released_octile = Ring<T, true>::encoded_guard_octile(guard_snapshot);
+                SINTRA_READ_ACCESS_FETCH_SUB(c, released_octile, octile_mask(released_octile));
+                slot.clear_pending();
+            }
+        }
+    }
+
+    // The octile guarded for a reader at this sequence: the one holding the
+    // start of its trailing window.
+    uint8_t trailing_octile_of(sequence_counter_type sequence) const
+    {
+        const size_t trailing_idx = mod_pos_i64(
+            int64_t(sequence) - int64_t(m_max_trailing_elements),
+            this->m_num_elements);
+        return octile_of_index(trailing_idx, this->m_num_elements);
     }
 
 public:

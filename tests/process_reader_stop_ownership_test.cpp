@@ -33,6 +33,9 @@ void observe_guard_ownership(
         }
         return;
     }
+    if (std::string_view(stage) != "release") {
+        return;
+    }
     if (read_access != s_read_access[0].load() && read_access != s_read_access[1].load()) {
         return;
     }

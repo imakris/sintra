@@ -1321,6 +1321,9 @@ private:
             }
             return;
         }
+        if (std::string_view(stage) != "release") {
+            return;
+        }
 
         ++observer.m_release_count;
         const auto state = reader.c.reading_sequences[reader.m_rs_index].data.load_state();
@@ -1376,6 +1379,131 @@ TEST_CASE(test_eviction_release_excludes_orphan_reclamation)
     ASSERT_EQ(observer.m_release_count, 1u);
     ASSERT_TRUE(observer.m_all_releases_owned);
     ASSERT_EQ(reader.c.read_access.load(), uint64_t(0));
+}
+
+// Runs a writer lap while a reattaching reader has published its pending
+// octile but not yet counted it, so the writer enters that octile unblocked.
+class Reattach_lap_injector
+{
+public:
+    Reattach_lap_injector(sintra::Ring_R<uint32_t>& reader, std::function<void()> lap)
+    :
+        m_read_access(&reader.c.read_access),
+        m_lap(std::move(lap))
+    {
+        s_current = this;
+        sintra::detail::test_hooks::s_ring_guard_operation = &observe;
+    }
+
+    ~Reattach_lap_injector()
+    {
+        sintra::detail::test_hooks::s_ring_guard_operation = nullptr;
+        s_current = nullptr;
+    }
+
+    bool m_lapped = false;
+
+private:
+    static void observe(
+        const char* stage,
+        const std::atomic<uint64_t>* read_access,
+        uint8_t /*octile*/)
+    {
+        auto& injector = *s_current;
+        if (read_access != injector.m_read_access || injector.m_lapped ||
+            std::string_view(stage) != "pending")
+        {
+            return;
+        }
+        injector.m_lapped = true;
+        injector.m_lap();
+    }
+
+    const std::atomic<uint64_t>* m_read_access;
+    std::function<void()> m_lap;
+    inline static Reattach_lap_injector* s_current = nullptr;
+};
+
+// An evicted reader resumes at the writer's head, but its guard stops the
+// writer only when the writer next enters the guarded octile. A writer that
+// entered it after the head was loaded and before the guard was published
+// must not be able to reuse the resumed range without evicting the reader.
+void check_reattach_confirms_writer_position(size_t trailing_octiles, size_t lap_octiles)
+{
+    Temp_ring_dir tmp("reattach_writer_lap");
+    const size_t ring_elements   = pick_ring_elements<uint32_t>(64);
+    const size_t octile_elements = ring_elements / 8;
+    sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint32_t> reader(
+        tmp.str(), "ring_data", ring_elements, trailing_octiles * octile_elements);
+    const auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
+
+    // Each element holds its own sequence, so a reused slot is visible.
+    std::vector<uint32_t> octile_payload(octile_elements);
+    auto write_octile = [&]() {
+        std::iota(
+            octile_payload.begin(),
+            octile_payload.end(),
+            uint32_t(writer.get_leading_sequence()));
+        writer.write_commit(octile_payload.data(), octile_payload.size());
+    };
+
+    reader.start_reading();
+    for (int i = 0; i < 16 && slot.status() != Writer_ring::READER_STATE_EVICTED; ++i) {
+        write_octile();
+    }
+    ASSERT_EQ(unsigned(Writer_ring::READER_STATE_EVICTED), unsigned(slot.status()));
+
+    {
+        Reattach_lap_injector injector(reader, [&]() {
+            for (size_t i = 0; i < lap_octiles; ++i) {
+                write_octile();
+            }
+        });
+        const auto resumed = reader.wait_for_new_data();
+        ASSERT_TRUE(injector.m_lapped);
+        ASSERT_TRUE(resumed.begin == resumed.end);
+    }
+    ASSERT_TRUE(reader.consume_eviction_notification());
+    const auto guarded_octile = static_cast<uint8_t>(reader.m_trailing_octile);
+    ASSERT_EQ(sintra::octile_mask(guarded_octile), reader.c.read_access.load());
+
+    write_octile();
+    const auto range      = reader.wait_for_new_data();
+    const auto range_size = size_t(range.end - range.begin);
+    const auto first      = reader.reading_sequence() - range_size;
+    ASSERT_GT(range_size, size_t(0));
+    for (size_t i = 0; i < range_size; ++i) {
+        ASSERT_EQ(uint32_t(first + i), range.begin[i]);
+    }
+
+    // The writer may reuse the range only by evicting the reader, which the
+    // reader's guarded copy observes.
+    for (int i = 0; i < 16 && writer.get_leading_sequence() <= first + ring_elements; ++i) {
+        write_octile();
+    }
+    ASSERT_GT(writer.get_leading_sequence(), first + ring_elements);
+    ASSERT_FALSE(reader.with_guarded_read([] {}));
+}
+
+// Message readers keep no trailing window, so the writer re-enters their
+// guarded octile a full ring after the head, where the head's octile is the
+// guarded one again.
+TEST_CASE(test_reattach_after_writer_laps_into_message_reader_guard)
+{
+    check_reattach_confirms_writer_position(0, 8);
+}
+
+// One octile further, the head requires the next octile instead.
+TEST_CASE(test_reattach_after_writer_laps_past_message_reader_guard)
+{
+    check_reattach_confirms_writer_position(0, 9);
+}
+
+// A trailing window places the guard behind the head, shortening the lap.
+TEST_CASE(test_reattach_after_writer_laps_into_trailing_window_guard)
+{
+    check_reattach_confirms_writer_position(6, 2);
 }
 
 #ifdef NDEBUG
