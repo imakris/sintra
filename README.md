@@ -196,6 +196,8 @@ The Markdown sources remain available for symbol lookup in
 [docs/reference/index.md](docs/reference/index.md), and the narrative guide is
 [docs/guide.md](docs/guide.md). For reverse lookup from compiler errors,
 exceptions, or runtime symptoms, use [docs/diagnostics.md](docs/diagnostics.md).
+Contributors should read [docs/design_principles.md](docs/design_principles.md)
+before changing Sintra's design.
 
 ## Supported platforms and architectures
 

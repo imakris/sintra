@@ -1,5 +1,8 @@
 # Contributing to Sintra
 
+Before proposing designs or changing ring, transport, dispatch, or lifecycle
+code, read [docs/design_principles.md](docs/design_principles.md).
+
 ## Evolving capabilities
 
 Sintra's public API is a product contract. A new capability should begin with
