@@ -1,0 +1,2 @@
+add_executable(sintra_broadcast_benchmark broadcast_benchmark.cpp)
+target_link_libraries(sintra_broadcast_benchmark PRIVATE sintra sintra_dev_flags)
