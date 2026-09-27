@@ -1367,6 +1367,35 @@ TEST_CASE(test_snapshot_retry_keeps_count_owned)
     ASSERT_EQ(reader.c.read_access.load(), uint64_t(0));
 }
 
+// wait_for_new_data() does not require a snapshot, so a reader that streams
+// after done_reading() holds a guard when its next snapshot starts. Moving that
+// guard to the snapshot's octile must keep the previous count owned until it
+// is released.
+TEST_CASE(test_snapshot_replacing_stream_guard_keeps_count_owned)
+{
+    Temp_ring_dir tmp("snapshot_replaces_stream_guard");
+    const size_t ring_elements   = pick_ring_elements<uint32_t>(64);
+    const size_t octile_elements = ring_elements / 8;
+    sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+    sintra::Ring_R<uint32_t> reader(tmp.str(), "ring_data", ring_elements, ring_elements / 2);
+
+    reader.start_reading();
+    reader.done_reading();
+    const std::vector<uint32_t> payload(octile_elements, 17);
+    writer.write_commit(payload.data(), payload.size());
+    const auto streamed = reader.wait_for_new_data();
+    ASSERT_EQ(size_t(streamed.end - streamed.begin), payload.size());
+    const auto stream_octile = static_cast<uint8_t>(reader.m_trailing_octile);
+
+    Guard_release_observer observer(reader);
+    reader.start_reading();
+    ASSERT_NE(stream_octile, static_cast<uint8_t>(reader.m_trailing_octile));
+    ASSERT_EQ(observer.m_release_count, 1u);
+    ASSERT_TRUE(observer.m_all_releases_owned);
+    reader.done_reading();
+    ASSERT_EQ(reader.c.read_access.load(), uint64_t(0));
+}
+
 TEST_CASE(test_eviction_release_excludes_orphan_reclamation)
 {
     Temp_ring_dir tmp("eviction_release_ownership");

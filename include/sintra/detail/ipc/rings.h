@@ -2641,7 +2641,13 @@ struct Ring_R : Ring<T, true>
                         return std::nullopt;
                     }
 
-                    return current.with_guard(trailing_octile, true).clear_pending();
+                    // A guard attached outside a snapshot, by wait_for_new_data(),
+                    // keeps its octile pending until its count is released below,
+                    // as a guard move in done_reading_new_data() does.
+                    const Reader_state_union attached = current.with_guard(trailing_octile, true);
+                    return current.guard_present()
+                        ? attached.with_pending(current.guard_octile())
+                        : attached.clear_pending();
                 },
                 guard_attached);
 
@@ -2662,6 +2668,7 @@ struct Ring_R : Ring<T, true>
                     else {
                         SINTRA_READ_ACCESS_FETCH_SUB(c, trailing_octile, guard_mask);
                     }
+                    slot.clear_pending();
                 }
             }
 
