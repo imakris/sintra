@@ -208,6 +208,23 @@ jobs:
           Set-Location tests
           python run_tests.py --timeout 30 --build-dir ../build --config Debug,Release --time-budget 7200
 
+      - name: Check closed-handle process absence directly
+        if: inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        shell: pwsh
+        run: |
+          foreach ($config in @('Debug', 'Release')) {
+            foreach ($test in @('process_identity_test', 'copying_mark_lifecycle_test')) {
+              $binary = Join-Path $PWD "build/tests/$config/sintra_${test}.exe"
+              if (-not (Test-Path -LiteralPath $binary)) {
+                throw "Expected absence test artifact was not downloaded: $binary"
+              }
+              & $binary --absence-only
+              if ($LASTEXITCODE -ne 0) {
+                throw "$test --absence-only failed in $config with exit code $LASTEXITCODE"
+              }
+            }
+          }
+
       - name: List preserved scratch (failure only)
         if: failure()
         shell: pwsh

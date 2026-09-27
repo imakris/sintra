@@ -2659,8 +2659,8 @@ struct Ring_R : Ring<T, true>
         while (true) {
             auto leading_sequence = c.leading_sequence.load();
 
-            // The guard retains one trailing window relative to the head;
-            // range_first_sequence already subtracts the requested snapshot.
+            // Choose the guard from the observed head, then confirm the head
+            // after publication before calculating the requested snapshot.
             uint8_t trailing_octile = trailing_octile_of(leading_sequence);
 
             const auto admission = acquire_guard(read_lock, trailing_octile, true, false);
@@ -3700,9 +3700,16 @@ struct Ring_W : Ring<T, false>
                     c.last_evicted_reader_octile   = octile;
                     slot.word.fetch_and(~State::request_mask);
                 }
-                else
-                if (!eligible(slot.load_state())) {
-                    slot.word.fetch_and(~State::request_mask);
+                else {
+                    if (eligible(previous) && previous.request_pending() &&
+                        previous.guard_pending())
+                    {
+                        detail::ring_guard_operation_for_test(
+                            "writer_deferred_pending", &c.read_access, new_octile);
+                    }
+                    if (!eligible(slot.load_state())) {
+                        slot.word.fetch_and(~State::request_mask);
+                    }
                 }
 #endif
             }

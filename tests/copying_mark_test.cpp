@@ -392,6 +392,86 @@ void check_pending_completion()
     reader.done_reading();
 }
 
+void check_writer_defers_pending_move()
+{
+    sintra::test::Temp_ring_dir directory("pending_writer");
+    const auto size = sintra::test::pick_ring_elements<uint32_t>(64);
+    Raw_writer writer(directory.str(), "ring", size);
+    Raw_reader reader(directory.str(), "ring", size, 0);
+    reader.start_reading();
+    reader.m_reading_sequence->store(size / 8);
+    reader.done_reading_new_data();
+    auto& slot = reader.c.reading_sequences[reader.m_rs_index].data;
+    require(slot.load_state().guard_octile() == 1 &&
+        reader.c.read_access == sintra::octile_mask(1),
+        "reader must hold the writer's target octile before its next guard move");
+
+    Event pending, release_reader, requested, deferred, release_writer, moved;
+    Hooks hooks([&](std::string_view stage, const auto* access, uint8_t) {
+        if (stage == "pending" && access == &reader.c.read_access) {
+            pending.signal();
+            require(release_reader.wait(), "pending writer reader watchdog");
+        }
+        if (stage == "request_published") {
+            requested.signal();
+        }
+        if (stage == "writer_deferred_pending") {
+            deferred.signal();
+            require(release_writer.wait(), "pending writer deferral watchdog");
+        }
+    });
+    reader.m_reading_sequence->store(size / 4);
+    std::exception_ptr read_error, write_error;
+    std::thread mover([&]() {
+        try { reader.done_reading_new_data(); }
+        catch (...) { read_error = std::current_exception(); }
+        moved.signal();
+    });
+    const bool entered = pending.wait();
+    std::thread producer([&]() {
+        try {
+            const std::vector<uint32_t> payload(size / 8, 42);
+            writer.write_commit(payload.data(), payload.size());
+        }
+        catch (...) { write_error = std::current_exception(); }
+    });
+    const bool writer_requested = requested.wait();
+    const bool writer_deferred = deferred.wait();
+    const auto blocked = slot.load_state();
+    const bool protected_count = blocked.status() == Raw_writer::READER_STATE_ACTIVE &&
+        blocked.guard_present() && blocked.guard_octile() == 1 &&
+        blocked.guard_pending() && blocked.pending_octile() == 2 &&
+        blocked.request_pending() && reader.c.read_access == sintra::octile_mask(1) &&
+        writer.get_diagnostics().reader_eviction_count == 0;
+
+    release_reader.signal();
+    const bool move_completed = moved.wait();
+    mover.join();
+    const auto moved_state = slot.load_state();
+    const bool paired_move = move_completed && !read_error &&
+        moved_state.status() == Raw_writer::READER_STATE_ACTIVE &&
+        moved_state.guard_present() && moved_state.guard_octile() == 2 &&
+        !moved_state.guard_pending() && moved_state.request_pending() &&
+        reader.c.read_access == sintra::octile_mask(2);
+
+    release_writer.signal();
+    producer.join();
+    const auto settled = slot.load_state();
+    require(entered && writer_requested && writer_deferred && protected_count,
+        "real writer must defer eviction while the pre-REQUEST guard move is pending");
+    require(paired_move,
+        "pending move must finish its old decrement and retain REQUEST for the writer");
+    require(!write_error && settled.status() == Raw_writer::READER_STATE_ACTIVE &&
+        settled.guard_present() && settled.guard_octile() == 2 &&
+        !settled.guard_pending() && !settled.request_pending() &&
+        reader.c.read_access == sintra::octile_mask(2) &&
+        writer.get_diagnostics().reader_eviction_count == 0 &&
+        writer.get_leading_sequence() == size / 8,
+        "writer must cancel REQUEST after the completed move removes eligibility");
+    reader.done_reading();
+    require(reader.c.read_access == 0, "reader release must decrement its final count once");
+}
+
 void check_exception_clearing()
 {
     for (const bool malformed : {true, false}) {
@@ -429,6 +509,7 @@ int main()
         check_continuous_copy_arbitration();
         check_guard_admission();
         check_pending_completion();
+        check_writer_defers_pending_move();
         check_exception_clearing();
         std::puts("PASS copying mark exclusion, arbitration, accounting and reusable release");
         return 0;
