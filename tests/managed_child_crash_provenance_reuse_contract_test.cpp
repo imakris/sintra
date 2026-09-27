@@ -384,6 +384,17 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         observation_a.occurrence.custody_identity    != 0                    &&
         observation_a.occurrence.process_instance_id == k_reused_process_iid &&
         observation_a.occurrence.occurrence          == child_a->occurrence;
+    // A retirement worker can retain its stopped reader after custody release.
+    // Keep those mappings alive until B is ready so reuse exercises the same
+    // ring generation instead of relying on prompt predecessor destruction.
+    std::shared_ptr<sintra::Process_message_reader> retained_predecessor;
+    {
+        std::shared_lock lock(sintra::s_mproc->m_readers_mutex);
+        const auto reader = sintra::s_mproc->m_readers.find(k_reused_process_iid);
+        if (reader != sintra::s_mproc->m_readers.end()) {
+            retained_predecessor = reader->second;
+        }
+    }
     const bool a_crash_requested = a_identity_exact && write_complete_file(
         marker(shared_path, k_child_a_crash), "complete=1\n");
     const bool real_relay_fenced = relay_log.wait_for_size(1);
@@ -410,7 +421,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         relays_after_a[0].custody_identity ==
             observation_a.occurrence.custody_identity &&
         relays_after_a[0].occurrence == observation_a.occurrence.occurrence;
-    const bool a_baseline = a_identity_exact && a_crash_requested &&
+    const bool a_baseline = retained_predecessor && a_identity_exact && a_crash_requested &&
         real_relay_fenced && real_relay_body_valid && a_crash_lifecycle &&
         recovery_policy_calls.load(std::memory_order_acquire) == 1 &&
         a_exit_observed && exit_a.exact(observation_a.occurrence) && a_absent &&
@@ -419,6 +430,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     auto custody_b = spawn_child(binary_path, k_child_b_flag);
     const auto child_b = wait_for_identity(
         marker(shared_path, k_child_b_marker));
+    retained_predecessor.reset();
     Managed_child_exit_capture exit_b;
     auto observation_b = custody_b.observe_latest_created_exit(
         [&](const sintra::Managed_child_exit& event) { exit_b.record(event); });

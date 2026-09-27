@@ -3445,6 +3445,12 @@ struct Ring_W : Ring<T, false>
             throw ring_acquisition_failure_exception();
         }
 
+        // Readers can keep this ring generation alive between writers. Resume
+        // its committed head; unpublished predecessor writes are not visible.
+        m_pending_new_sequence = c.leading_sequence.load(std::memory_order_acquire);
+        m_octile = octile_of_index(
+            mod_u64(m_pending_new_sequence, this->m_num_elements),
+            this->m_num_elements);
         c.writer_closed.store(0, std::memory_order_release);
         c.writer_pid = get_current_pid();
         m_owner_pid  = c.writer_pid;

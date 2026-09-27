@@ -734,6 +734,70 @@ TEST_CASE(test_writer_closed_delivers_final_payload_before_stop)
     reader->done_reading();
 }
 
+TEST_CASE(test_replacement_writer_continues_unread_committed_data)
+{
+    Temp_ring_dir tmp("replacement_writer_continuation");
+    const size_t ring_elements = pick_ring_elements<int>(128);
+    const size_t octile_elements = ring_elements / 8;
+    sintra::Ring_R<int> reader(
+        tmp.str(), "ring_data", ring_elements, (ring_elements * 3) / 4);
+    reader.start_reading();
+    std::vector<int> first(octile_elements, 31);
+    {
+        sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+        writer.write_commit(first.data(), first.size());
+        writer.write_commit(32);
+    }
+    sintra::Ring_W<int> replacement(tmp.str(), "ring_data", ring_elements);
+    const auto committed = replacement.write_commit(33);
+    ASSERT_EQ(committed, first.size() + 2);
+    const auto range = reader.wait_for_new_data();
+    ASSERT_EQ(size_t(range.end - range.begin), first.size() + 2);
+    for (size_t index = 0; index < first.size(); ++index) {
+        ASSERT_EQ(range.begin[index], 31);
+    }
+    ASSERT_EQ(range.begin[first.size()], 32);
+    ASSERT_EQ(range.begin[first.size() + 1], 33);
+    reader.done_reading();
+}
+
+TEST_CASE(test_replacement_writer_honors_guard_on_first_wrap)
+{
+    Temp_ring_dir tmp("replacement_writer_wrap");
+    const size_t ring_elements = pick_ring_elements<int>(128);
+    const size_t octile_elements = ring_elements / 8;
+    const size_t trailing_cap = 3 * ring_elements / 4;
+    sintra::Ring_R<int> reader(
+        tmp.str(), "ring_data", ring_elements, trailing_cap);
+    std::vector<int> payload(octile_elements, 51);
+    {
+        sintra::Ring_W<int> writer(tmp.str(), "ring_data", ring_elements);
+        for (size_t chunk = 0; chunk < 6; ++chunk) {
+            writer.write_commit(payload.data(), payload.size());
+        }
+        // This reader protects octile zero while the writer advances within
+        // the final quarter. The replacement's first write wraps into it.
+        reader.start_reading();
+        writer.write_commit(payload.data(), payload.size());
+        writer.write_commit(payload.data(), payload.size() - 1);
+    }
+    sintra::Ring_W<int> replacement(tmp.str(), "ring_data", ring_elements);
+    const int next[] = {52, 53};
+    const auto committed = replacement.write_commit(next, 2);
+    const auto diagnostics = replacement.get_diagnostics();
+    ASSERT_EQ(ring_elements + 1, committed);
+    // Slow-reader eviction is enabled for these tests. Crossing the guarded
+    // octile must evict its reader instead of silently overwriting its window.
+    ASSERT_EQ(uint64_t(1), diagnostics.reader_eviction_count);
+    ASSERT_EQ(uint32_t(0), diagnostics.last_evicted_reader_octile);
+    reader.done_reading();
+    sintra::Ring_R<int> observer(
+        tmp.str(), "ring_data", ring_elements, trailing_cap);
+    auto snapshot = sintra::make_snapshot(observer, 2);
+    ASSERT_EQ(52, snapshot.range().begin[0]);
+    ASSERT_EQ(53, snapshot.range().begin[1]);
+}
+
 TEST_CASE(test_wait_for_new_data)
 {
     Temp_ring_dir tmp("wait_for_new_data");
