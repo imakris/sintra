@@ -2137,23 +2137,25 @@ struct Ring:
             return false;
         }
 
+        // Only a published guard proves that the slot holds a read_access count.
+        // A reader publishes its pending octile before incrementing that count,
+        // and a guard move keeps the previous octile pending until after its
+        // count is released, so a pending count may be absent, held or already
+        // released. Releasing it could consume a live reader's count; leaving it
+        // can only over-count, which the writer reclaims once no reader shows a
+        // guard or a live pending update on that octile.
         void clear_slot_guard(int index, Slot_read_access_release release_mode)
         {
             auto& slot = reading_sequences[index].data;
             const Reader_state_union state = slot.load_state();
             const bool guard_present = state.guard_present();
             const uint8_t guard_octile = state.guard_octile();
-            const bool pending_present = state.guard_pending();
-            const uint8_t pending_octile = state.pending_octile();
 
             slot.exchange_guard_token(0);
             slot.clear_pending();
 
             if (guard_present) {
                 release_slot_read_access_count(guard_octile, release_mode);
-            }
-            if (pending_present) {
-                release_slot_read_access_count(pending_octile, release_mode);
             }
         }
 

@@ -1145,6 +1145,142 @@ TEST_CASE(test_guard_pending_prevents_underflow)
     ASSERT_EQ(uint64_t(0), read_access & guard_mask);
 }
 
+using Writer_ring = sintra::Ring<uint32_t, false>;
+
+unsigned octile_count(const std::atomic<uint64_t>& read_access, uint8_t octile)
+{
+    return static_cast<unsigned>((read_access.load() >> (8 * octile)) & 0xffu);
+}
+
+// Reclaimed slots must look like those of reader processes that exited.
+uint32_t find_dead_pid()
+{
+    for (uint32_t candidate = 500001; candidate < 510000; ++candidate) {
+        if (!sintra::is_process_alive(candidate)) {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+// A crashed reader leaves its slot ACTIVE with whatever state it had published,
+// and no Ring_R object remains to release it.
+void install_dead_reader(Writer_ring::Control& control, uint32_t dead_pid, uint32_t state_word)
+{
+    const int index = control.free_rs_stack.pop_or(-1);
+    ASSERT_GE(index, 0);
+    auto& slot = control.reading_sequences[index].data;
+    slot.owner_pid = dead_pid;
+    slot.word = state_word;
+}
+
+// A reader publishes its pending octile before incrementing that octile's
+// count, and a guard move keeps the previous octile pending until after its
+// count is released. Reclaiming a dead reader's slot therefore must not
+// release a count for its pending octile: the count may belong to a live
+// reader that guards the same octile.
+TEST_CASE(test_dead_reader_cleanup_keeps_live_guard_count)
+{
+    using Reader_state_union = Writer_ring::Reader_state_union;
+    constexpr uint8_t guarded_octile = 3;
+    constexpr uint8_t moved_octile   = 4;
+
+    const uint32_t dead_pid = find_dead_pid();
+    ASSERT_NE(0u, dead_pid);
+
+    for (const bool dead_reader_moved_guard : {false, true}) {
+        Temp_ring_dir tmp("dead_reader_live_guard");
+        const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+        sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+        sintra::Ring_R<uint32_t> live_reader(tmp.str(), "ring_data", ring_elements, ring_elements / 2);
+        auto& control   = writer.c;
+        auto& live_slot = control.reading_sequences[live_reader.m_rs_index].data;
+
+        live_slot.set_guard_token(static_cast<uint8_t>(0x08 | guarded_octile));
+        control.read_access = sintra::octile_mask(guarded_octile);
+
+        // Died after publishing its pending octile but before incrementing it,
+        // or after moving its guard and releasing the previous octile but
+        // before clearing pending. Only the moved guard contributed a count.
+        if (dead_reader_moved_guard) {
+            control.read_access.fetch_add(sintra::octile_mask(moved_octile));
+        }
+        install_dead_reader(
+            control,
+            dead_pid,
+            Reader_state_union::make_word(
+                Writer_ring::READER_STATE_ACTIVE,
+                moved_octile,
+                dead_reader_moved_guard,
+                guarded_octile));
+
+        control.scavenge_orphans();
+
+        ASSERT_EQ(1u, octile_count(control.read_access, guarded_octile));
+        ASSERT_EQ(0u, octile_count(control.read_access, moved_octile));
+
+        // The writer may enter the guarded octile only by evicting the live
+        // reader, which that reader observes, never by overwriting its snapshot.
+        writer.advance_writer_octile_if_needed(guarded_octile * ring_elements / 8);
+        const unsigned live_status = live_slot.status();
+        ASSERT_EQ(unsigned(Writer_ring::READER_STATE_EVICTED), live_status);
+    }
+}
+
+// Cleanup leaves a dead reader's pending contribution counted because it
+// cannot tell whether the increment happened. The writer reclaims such a count
+// once no reader shows a guard or a live pending update on that octile.
+TEST_CASE(test_writer_reclaims_count_left_by_dead_reader)
+{
+    using Reader_state_union = Writer_ring::Reader_state_union;
+
+    const uint32_t dead_pid = find_dead_pid();
+    ASSERT_NE(0u, dead_pid);
+
+    for (const bool dead_reader_moved_guard : {false, true}) {
+        Temp_ring_dir tmp("dead_reader_leaked_count");
+        const size_t ring_elements = pick_ring_elements<uint32_t>(64);
+        sintra::Ring_W<uint32_t> writer(tmp.str(), "ring_data", ring_elements);
+        sintra::Ring_R<uint32_t> live_reader(tmp.str(), "ring_data", ring_elements, ring_elements / 2);
+        auto& control   = writer.c;
+        auto& live_slot = control.reading_sequences[live_reader.m_rs_index].data;
+
+        live_reader.start_reading();
+        const auto guarded_octile = static_cast<uint8_t>(live_reader.m_trailing_octile);
+        const auto moved_octile   = static_cast<uint8_t>((guarded_octile + 1) % 8);
+
+        // Died after incrementing its pending octile but before publishing the
+        // guard, or after moving its guard but before releasing the previous
+        // octile. Both left a count on the pending octile.
+        control.read_access.fetch_add(sintra::octile_mask(guarded_octile));
+        if (dead_reader_moved_guard) {
+            control.read_access.fetch_add(sintra::octile_mask(moved_octile));
+        }
+        install_dead_reader(
+            control,
+            dead_pid,
+            Reader_state_union::make_word(
+                Writer_ring::READER_STATE_ACTIVE,
+                moved_octile,
+                dead_reader_moved_guard,
+                guarded_octile));
+
+        control.scavenge_orphans();
+
+        ASSERT_EQ(2u, octile_count(control.read_access, guarded_octile));
+        ASSERT_EQ(0u, octile_count(control.read_access, moved_octile));
+
+        live_reader.done_reading();
+        ASSERT_EQ(1u, octile_count(control.read_access, guarded_octile));
+        ASSERT_EQ(0u, control.count_guards_for_octile(guarded_octile));
+
+        writer.advance_writer_octile_if_needed(guarded_octile * ring_elements / 8);
+        ASSERT_EQ(0u, octile_count(control.read_access, guarded_octile));
+        const unsigned live_status = live_slot.status();
+        ASSERT_EQ(unsigned(Writer_ring::READER_STATE_ACTIVE), live_status);
+    }
+}
+
 class Guard_release_observer
 {
 public:
