@@ -20,6 +20,7 @@
   #include "../sintra_windows.h"
 #else
   #include <cerrno>
+  #include <fcntl.h>
   #include <signal.h>
   #include <sys/stat.h>
   #include <sys/types.h>
@@ -251,7 +252,7 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
     struct kinfo_proc kip;
     std::memset(&kip, 0, sizeof(kip));
     size_t len = sizeof(kip);
-    if (::sysctl(mib, 4, &kip, &len, nullptr, 0) != 0 || len == 0) {
+    if (::sysctl(mib, 4, &kip, &len, nullptr, 0) != 0 || len != sizeof(kip)) {
         return std::nullopt;
     }
 
@@ -309,6 +310,232 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
 inline std::optional<uint64_t> current_process_start_stamp()
 {
     return query_process_start_stamp(get_current_pid());
+}
+
+enum class Process_identity_status
+{
+    LIVE,
+    DEAD,
+    UNKNOWN
+};
+
+struct process_identity_result_t
+{
+    Process_identity_status status;
+    std::error_code error;
+};
+
+namespace detail {
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using process_identity_probe_hook_t = process_identity_result_t (*)(uint32_t, uint64_t);
+inline process_identity_probe_hook_t process_identity_probe_hook = nullptr;
+#ifdef _WIN32
+inline decltype(&::OpenProcess) process_identity_open_process = ::OpenProcess;
+inline decltype(&::GetProcessTimes) process_identity_get_process_times = ::GetProcessTimes;
+inline decltype(&::WaitForSingleObject) process_identity_wait_for_single_object = ::WaitForSingleObject;
+#endif
+#endif
+
+inline process_identity_result_t unknown_process_identity(int error)
+{
+    return {Process_identity_status::UNKNOWN, std::error_code(error, std::system_category())};
+}
+
+#if defined(__linux__)
+struct linux_process_stat_t
+{
+    char state = '\0';
+    uint64_t num_threads = 0;
+    uint64_t start_stamp = 0;
+};
+
+inline bool parse_linux_process_stat(const std::string& stat_line, linux_process_stat_t& result)
+{
+    // The command name can contain spaces and parentheses. The fields after
+    // its final ')' contain state, thread count and incarnation in one record.
+    const auto closing_paren = stat_line.rfind(')');
+    if (closing_paren == std::string::npos) {
+        return false;
+    }
+
+    std::istringstream fields(stat_line.substr(closing_paren + 1));
+    std::string skipped;
+    if (!(fields >> result.state)) {
+        return false;
+    }
+    for (int field = 4; field < 20; ++field) {
+        if (!(fields >> skipped)) {
+            return false;
+        }
+    }
+    return (fields >> result.num_threads >> skipped >> result.start_stamp) &&
+        result.num_threads != 0 && result.start_stamp != 0;
+}
+#endif
+
+// Observe one native process incarnation. Observation errors never authorize
+// release of memory still protected by its reader slot.
+inline process_identity_result_t probe_process_identity_native(uint32_t pid, uint64_t start_stamp)
+{
+#ifdef _WIN32
+    if (pid == 0 || start_stamp == 0) {
+        return unknown_process_identity(ERROR_INVALID_PARAMETER);
+    }
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    HANDLE process = process_identity_open_process(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+#else
+    HANDLE process = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+#endif
+    if (!process) {
+        const DWORD error = ::GetLastError();
+        if (error == ERROR_INVALID_PARAMETER) {
+            return {Process_identity_status::DEAD, {}};
+        }
+        return unknown_process_identity(error);
+    }
+
+    FILETIME creation{}, exit{}, kernel{}, user{};
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const BOOL queried = process_identity_get_process_times(process, &creation, &exit, &kernel, &user);
+#else
+    const BOOL queried = ::GetProcessTimes(process, &creation, &exit, &kernel, &user);
+#endif
+    if (!queried) {
+        const DWORD error = ::GetLastError();
+        ::CloseHandle(process);
+        return unknown_process_identity(error);
+    }
+
+    ULARGE_INTEGER observed_stamp{};
+    observed_stamp.LowPart = creation.dwLowDateTime;
+    observed_stamp.HighPart = creation.dwHighDateTime;
+    if (observed_stamp.QuadPart != start_stamp) {
+        ::CloseHandle(process);
+        return {Process_identity_status::DEAD, {}};
+    }
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const DWORD wait_result = process_identity_wait_for_single_object(process, 0);
+#else
+    const DWORD wait_result = ::WaitForSingleObject(process, 0);
+#endif
+    const DWORD error = wait_result == WAIT_FAILED ? ::GetLastError() : ERROR_INVALID_DATA;
+    ::CloseHandle(process);
+    if (wait_result == WAIT_OBJECT_0) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    if (wait_result == WAIT_TIMEOUT) {
+        return {Process_identity_status::LIVE, {}};
+    }
+    return unknown_process_identity(error);
+#else
+    if (pid == 0 || pid > static_cast<uint32_t>(INT32_MAX) || start_stamp == 0) {
+        return unknown_process_identity(EINVAL);
+    }
+#if defined(__linux__)
+    const auto path = std::string("/proc/") + std::to_string(pid) + "/stat";
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        const int error = errno;
+        // A missing procfs mount is not process death. Only ESRCH from the
+        // kernel establishes absence when the expected record cannot be opened.
+        if (error == ESRCH || (error == ENOENT && ::kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH)) {
+            return {Process_identity_status::DEAD, {}};
+        }
+        return unknown_process_identity(error);
+    }
+
+    char buffer[4096];
+    const auto size = ::read(fd, buffer, sizeof(buffer));
+    const int error = errno;
+    ::close(fd);
+    if (size < 0) {
+        if (error == ESRCH) {
+            return {Process_identity_status::DEAD, {}};
+        }
+        return unknown_process_identity(error);
+    }
+    if (size == sizeof(buffer)) {
+        return unknown_process_identity(EOVERFLOW);
+    }
+
+    linux_process_stat_t record;
+    if (!parse_linux_process_stat(std::string(buffer, static_cast<size_t>(size)), record)) {
+        return unknown_process_identity(EIO);
+    }
+    if (record.start_stamp != start_stamp ||
+        ((record.state == 'Z' || record.state == 'X') && record.num_threads == 1))
+    {
+        return {Process_identity_status::DEAD, {}};
+    }
+    return {Process_identity_status::LIVE, {}};
+#elif defined(__APPLE__)
+    struct proc_bsdinfo record{};
+    errno = 0;
+    const int size = ::proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &record, sizeof(record));
+    if (size <= 0 && errno == ESRCH) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    if (size != sizeof(record)) {
+        return unknown_process_identity(errno ? errno : EIO);
+    }
+    const uint64_t observed_stamp = static_cast<uint64_t>(record.pbi_start_tvsec) * 1000000000ull +
+        static_cast<uint64_t>(record.pbi_start_tvusec) * 1000ull;
+    if (observed_stamp == 0) {
+        return unknown_process_identity(EIO);
+    }
+    if (observed_stamp != start_stamp || record.pbi_status == k_macos_process_status_zombie) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    return {Process_identity_status::LIVE, {}};
+#elif defined(__FreeBSD__)
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
+    struct kinfo_proc record{};
+    size_t size = sizeof(record);
+    if (::sysctl(mib, 4, &record, &size, nullptr, 0) != 0) {
+        const int error = errno;
+        if (error == ESRCH) {
+            return {Process_identity_status::DEAD, {}};
+        }
+        return unknown_process_identity(error);
+    }
+    if (size == 0) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    if (size != sizeof(record)) {
+        return unknown_process_identity(EIO);
+    }
+    const uint64_t observed_stamp = static_cast<uint64_t>(record.ki_start.tv_sec) * 1000000000ull +
+        static_cast<uint64_t>(record.ki_start.tv_usec) * 1000ull;
+    if (observed_stamp == 0) {
+        return unknown_process_identity(EIO);
+    }
+    if (observed_stamp != start_stamp || record.ki_stat == SZOMB
+#ifdef SDEAD
+        || record.ki_stat == SDEAD
+#endif
+    ) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    return {Process_identity_status::LIVE, {}};
+#else
+    return unknown_process_identity(ENOTSUP);
+#endif
+#endif
+}
+
+} // namespace detail
+
+inline process_identity_result_t probe_process_identity(uint32_t pid, uint64_t start_stamp)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (detail::process_identity_probe_hook) {
+        return detail::process_identity_probe_hook(pid, start_stamp);
+    }
+#endif
+    return detail::probe_process_identity_native(pid, start_stamp);
 }
 
 struct run_marker_record_t
