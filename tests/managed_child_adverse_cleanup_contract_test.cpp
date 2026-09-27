@@ -483,6 +483,9 @@ int run_child(int argc, char* argv[], const fs::path& shared_dir)
         return 2;
     }
 
+    // Setup may outlast the caller's readiness budget on a cold or busy host.
+    // Keep that ordering exercised before the parent starts its timed wait.
+    std::this_thread::sleep_for(2 * k_requested_wait_timeout);
     try {
         sintra::init(argc, argv);
     }
@@ -993,28 +996,12 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
     options.readiness_instance_name = requested_target;
     options.lifetime.enable_lifeline = false;
 
-    std::thread spawn_thread([&]() {
-        {
-            std::lock_guard<std::mutex> lock(call.mutex);
-            call.started_at = std::chrono::steady_clock::now();
-        }
-        try {
-            call.custody = sintra::spawn_swarm_process(options);
-            call.custody.wait_for_readiness_until(
-                call.started_at + k_requested_wait_timeout);
-            call.custody.terminate_until(
-                call.started_at + k_requested_wait_timeout);
-        }
-        catch (...) {
-            call.threw = true;
-        }
-        {
-            std::lock_guard<std::mutex> lock(call.mutex);
-            call.done = true;
-            call.completed_at = std::chrono::steady_clock::now();
-        }
-        call.cv.notify_all();
-    });
+    try {
+        call.custody = sintra::spawn_swarm_process(options);
+    }
+    catch (...) {
+        call.threw = true;
+    }
 
     const bool ledger_file_seen = sintra::test::wait_for_file(
         child_ledger_path(shared.path()),
@@ -1037,6 +1024,31 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
             static_cast<pid_t>(ledger->pid), std::memory_order_release);
     }
 #endif
+
+    // The cleanup seam requires an initialized, published child. OS startup
+    // is fixture setup, not part of either custody wait's absolute deadline.
+    // Even if setup fails, request cleanup so retained custody still converges.
+    std::thread spawn_thread([&]() {
+        {
+            std::lock_guard<std::mutex> lock(call.mutex);
+            call.started_at = std::chrono::steady_clock::now();
+        }
+        try {
+            call.custody.wait_for_readiness_until(
+                call.started_at + k_requested_wait_timeout);
+            call.custody.terminate_until(
+                call.started_at + k_requested_wait_timeout);
+        }
+        catch (...) {
+            call.threw = true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(call.mutex);
+            call.done = true;
+            call.completed_at = std::chrono::steady_clock::now();
+        }
+        call.cv.notify_all();
+    });
 
     const bool cleanup_entered =
         wait_for_cleanup_entry(gate, k_watchdog_timeout);
