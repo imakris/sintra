@@ -128,3 +128,23 @@ Current master still uses the interim protection:
 - **Known CI flakes** (check these before suspecting a change):
   - `managed_child_custody_setup_race_contract_test`
   - `external_process_first_rpc_concurrency_test` on macOS Debug ("ping_failed: timed out waiting to release type resolution")
+
+## Considered and rejected
+
+These ideas were investigated and rejected. They are recorded so that they
+are not proposed again without new evidence. The existing implementation is
+the way it is for a reason. A proposal to change it must first show which
+implicit guarantees it would have to rebuild.
+
+**Replacing the processing barrier's second meeting with markers and acknowledgements** (2026-09-27, rejected).
+Proposed: one meeting, then a coordinator marker that each participant's
+readers acknowledge on reaching it. Gain: same latency, about a quarter fewer
+ring messages, one round trip, not two. Two independent reviews found the
+second meeting implicitly provides what markers must rebuild: ordering of
+messages handlers send during the drain (the second arrival follows them on the
+request ring); the coordinator's fence over traffic relayed mid-barrier; the
+handler-caller exemption, tied to the calling thread; per-generation identity
+(an old marker could satisfy a new one); last-arrival replies that cannot lose
+a remap; departure handling; per-reader stop precision; unchanged wire format
+for other modes. As specified, `post_handler_fence_order_test` would fail. The
+gain did not justify a new protocol; no owner project uses processing barriers.
