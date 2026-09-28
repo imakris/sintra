@@ -19,3 +19,15 @@ These rules are the ones most often violated:
 - **Keep owner requirements, verified facts (`file:line`) and your own
   proposals visibly separate.** Adopt a design only after independent
   reviewers report no blockers.
+
+## CI workflow
+
+Once work is locally committed and the required independent review is clean,
+fast-forward push to master to start CI. Land one change at a time.
+
+After the push, check CI at elapsed 2, 5, 10, 15, 25 and 35 minutes, then at
+1 hour, 1 hour 30 minutes, 2 hours, 2 hours 30 minutes and 3 hours. Do not poll
+between those times. Do not wait for CI to finish: continue useful independent
+work while it runs and handle results when they arrive. Stop checking once all
+workflows have completed. A workflow still running after two hours is not a
+failure by itself.
