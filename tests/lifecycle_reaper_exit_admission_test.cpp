@@ -11,7 +11,6 @@
 
 #if defined(__MINGW32__)
 #include <dbghelp.h>
-#include <wct.h>
 #endif
 
 #if !defined(_WIN32) || defined(__MINGW32__)
@@ -141,11 +140,108 @@ Native_function_range native_function_range(HMODULE module, const char* name)
         Native_function_range{};
 }
 
-// A stack with pthread_mutex_lock below pthread_create resolves the native
-// acquisition. In this winpthreads path pthread_create first calls
-// pop_pthread_mem, which locks mtx_pthr_locked; key cleanup holds that mutex.
+struct Native_wait_path
+{
+    Native_function_range nt_wait;
+    Native_function_range wait_ex;
+    DWORD64 lock_return = 0;
+    DWORD64 pop_return = 0;
+    DWORD64 create_return = 0;
+};
+
+bool direct_call_target(const Native_function_range& function, DWORD64 offset,
+    DWORD64& target)
+{
+    const DWORD64 call = function.begin + offset;
+    if (!function.begin || call + 5 > function.end ||
+        *reinterpret_cast<const unsigned char*>(call) != 0xe8)
+    {
+        return false;
+    }
+    int32_t displacement = 0;
+    std::memcpy(&displacement, reinterpret_cast<const void*>(call + 1),
+        sizeof(displacement));
+    target = call + 5 + displacement;
+    return true;
+}
+
+// These call sites are resolved against the loaded x64 winpthreads image.
+// Unknown layouts fail closed instead of treating any mutex instruction as a wait.
+Native_wait_path native_wait_path(HMODULE module,
+    const Native_function_range& create, const Native_function_range& lock)
+{
+    DWORD64 pop_entry = 0;
+    DWORD64 lock_entry = 0;
+    DWORD64 helper_entry = 0;
+    if (!direct_call_target(create, 0x1a, pop_entry) ||
+        !direct_call_target(lock, 0x94, helper_entry))
+    {
+        return {};
+    }
+    DWORD64 image_base = 0;
+    const auto* pop_unwind = RtlLookupFunctionEntry(pop_entry, &image_base, nullptr);
+    const auto* helper_unwind = RtlLookupFunctionEntry(helper_entry, &image_base,
+        nullptr);
+    if (!pop_unwind || !helper_unwind ||
+        pop_entry != image_base + pop_unwind->BeginAddress ||
+        helper_entry != image_base + helper_unwind->BeginAddress)
+    {
+        return {};
+    }
+    const Native_function_range pop{pop_entry, image_base + pop_unwind->EndAddress};
+    const Native_function_range helper{helper_entry,
+        image_base + helper_unwind->EndAddress};
+    if (!direct_call_target(pop, 0x11, lock_entry) || lock_entry != lock.begin)
+    {
+        return {};
+    }
+
+    // The helper loads its imported WaitForSingleObject pointer into r12,
+    // then calls it at +0x46. Verify both the instruction and imported target.
+    const auto* load = reinterpret_cast<const unsigned char*>(helper.begin + 0x26);
+    const auto* wait_call = reinterpret_cast<const unsigned char*>(helper.begin + 0x46);
+    if (helper.begin + 0x49 > helper.end ||
+        std::memcmp(load, "\x4c\x8b\x25", 3) != 0 ||
+        std::memcmp(wait_call, "\x41\xff\xd4", 3) != 0)
+    {
+        return {};
+    }
+    int32_t import_displacement = 0;
+    std::memcpy(&import_displacement, load + 3, sizeof(import_displacement));
+    const DWORD64 import_slot = helper.begin + 0x2d + import_displacement;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        reinterpret_cast<const unsigned char*>(module) + dos->e_lfanew);
+    const DWORD64 module_begin = reinterpret_cast<DWORD64>(module);
+    if (import_slot < module_begin ||
+        import_slot + sizeof(DWORD64) > module_begin + nt->OptionalHeader.SizeOfImage)
+    {
+        return {};
+    }
+    DWORD64 imported_wait = 0;
+    std::memcpy(&imported_wait, reinterpret_cast<const void*>(import_slot),
+        sizeof(imported_wait));
+    const auto kernel = GetModuleHandleA("KERNEL32.dll");
+    if (!kernel || imported_wait != reinterpret_cast<DWORD64>(
+            GetProcAddress(kernel, "WaitForSingleObject")))
+    {
+        return {};
+    }
+    const auto nt_wait = native_function_range(GetModuleHandleA("ntdll.dll"),
+        "NtWaitForSingleObject");
+    const auto wait_ex = native_function_range(GetModuleHandleA("KernelBase.dll"),
+        "WaitForSingleObjectEx");
+    if (!nt_wait.begin || !wait_ex.begin) {
+        return {};
+    }
+    return {nt_wait, wait_ex, lock.begin + 0x99,
+        pop.begin + 0x16, create.begin + 0x1f};
+}
+
+// Key cleanup holds mtx_pthr_locked. This one suspended stack must show the
+// Windows wait calls, their native mutex caller, pop_pthread_mem and pthread_create.
 bool blocked_in_native_creation_lock(HANDLE thread, HANDLE process,
-    const Native_function_range& create, const Native_function_range& lock,
+    const Native_wait_path& path,
     std::array<DWORD64, 32>& last_stack, unsigned& last_count)
 {
     if (SuspendThread(thread) == DWORD(-1)) {
@@ -174,10 +270,13 @@ bool blocked_in_native_creation_lock(HANDLE thread, HANDLE process,
             }
             last_stack[last_count++] = address;
         }
-        bool saw_lock = false;
-        for (unsigned i = 0; i < last_count; ++i) {
-            saw_lock |= lock.contains(last_stack[i]);
-            if (saw_lock && create.contains(last_stack[i])) {
+        for (unsigned i = 2; i + 2 < last_count; ++i) {
+            if (path.nt_wait.contains(last_stack[i - 2]) &&
+                path.wait_ex.contains(last_stack[i - 1]) &&
+                last_stack[i] == path.lock_return &&
+                last_stack[i + 1] == path.pop_return &&
+                last_stack[i + 2] == path.create_return)
+            {
                 matched = true;
                 break;
             }
@@ -190,79 +289,48 @@ bool blocked_in_native_creation_lock(HANDLE thread, HANDLE process,
 bool native_creation_waits_on_cleanup(DWORD admitting_thread_id,
     DWORD cleanup_thread_id)
 {
-    const HWCT session = OpenThreadWaitChainSession(0, nullptr);
-    if (!check(session != nullptr, "wait-chain session opened")) {
-        return false;
-    }
     const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
         THREAD_QUERY_INFORMATION, FALSE, admitting_thread_id);
     const HANDLE process = GetCurrentProcess();
     const HMODULE winpthreads = GetModuleHandleA("libwinpthread-1.dll");
     const auto create = native_function_range(winpthreads, "pthread_create");
     const auto lock = native_function_range(winpthreads, "pthread_mutex_lock");
-    const bool ready = thread && create.begin && lock.begin &&
+    const auto path = native_wait_path(winpthreads, create, lock);
+    const bool ready = thread && path.nt_wait.begin &&
         SymInitialize(process, nullptr, TRUE);
     if (!check(ready, "native stack inspection initialized")) {
         if (thread) {
             CloseHandle(thread);
         }
-        CloseThreadWaitChainSession(session);
         return false;
     }
     bool observed = false;
     std::array<DWORD64, 32> last_stack{};
     unsigned last_count = 0;
-    DWORD last_error = 0;
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     do {
-        std::array<WAITCHAIN_NODE_INFO, 16> nodes{};
-        DWORD count = static_cast<DWORD>(nodes.size());
-        BOOL cycle = FALSE;
-        if (GetThreadWaitChain(session, 0, 0, admitting_thread_id,
-                &count, nodes.data(), &cycle))
-        {
-            if (count >= 1 && nodes[0].ObjectType == WctThreadType &&
-                nodes[0].ThreadObject.ThreadId == admitting_thread_id &&
-                nodes[0].ObjectStatus == WctStatusBlocked)
-            {
-                observed = blocked_in_native_creation_lock(thread, process,
-                    create, lock, last_stack, last_count);
-            }
-        }
-        else {
-            last_error = GetLastError();
-        }
+        observed = blocked_in_native_creation_lock(thread, process, path,
+            last_stack, last_count);
         if (!observed) {
             std::this_thread::yield();
         }
     } while (!observed && std::chrono::steady_clock::now() < deadline);
     SymCleanup(process);
     CloseHandle(thread);
-    CloseThreadWaitChainSession(session);
     if (!observed) {
-        std::fprintf(stderr, "native stack admitting=%lu cleanup=%lu count=%u error=%lu\n",
-            admitting_thread_id, cleanup_thread_id, last_count, last_error);
+        std::fprintf(stderr, "native stack admitting=%lu cleanup=%lu count=%u\n",
+            admitting_thread_id, cleanup_thread_id, last_count);
         for (unsigned i = 0; i < last_count; ++i) {
             std::fprintf(stderr, "frame %u: %llx\n", i,
                 static_cast<unsigned long long>(last_stack[i]));
         }
     }
     if (observed) {
-        DWORD64 lock_offset = 0;
-        DWORD64 create_offset = 0;
-        for (unsigned i = 0; i < last_count; ++i) {
-            if (lock.contains(last_stack[i])) {
-                lock_offset = last_stack[i] - lock.begin;
-            }
-            if (create.contains(last_stack[i])) {
-                create_offset = last_stack[i] - create.begin;
-            }
-        }
         std::fprintf(stderr,
-            "NATIVE_LOCK_WAIT: admitting=%lu pthread_mutex_lock+%llx -> "
-            "pthread_create+%llx; cleanup=%lu\n",
-            admitting_thread_id, static_cast<unsigned long long>(lock_offset),
-            static_cast<unsigned long long>(create_offset), cleanup_thread_id);
+            "NATIVE_LOCK_WAIT: admitting=%lu NtWaitForSingleObject -> "
+            "WaitForSingleObjectEx -> pthread_mutex_lock+99 -> pop_pthread_mem+16 -> "
+            "pthread_create+1f; cleanup=%lu\n",
+            admitting_thread_id, cleanup_thread_id);
     }
     return check(cleanup_thread_id != 0 && observed,
         "pthread_create waits in pthread_mutex_lock during cleanup");
