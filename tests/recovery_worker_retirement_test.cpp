@@ -25,7 +25,55 @@ namespace fs = std::filesystem;
 constexpr const char* k_child_flag = "--recovery-retirement-child";
 constexpr unsigned k_last_occurrence = 12;
 constexpr unsigned k_throwing_call = 3;
-constexpr unsigned k_exit_admission_call = 4;
+
+thread_local uint64_t g_current_worker_id = 0;
+
+struct Worker_events
+{
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::array<uint64_t, k_last_occurrence + 1> recovery_ids{};
+    std::array<uint64_t, 64> completed_ids{};
+    std::array<uint64_t, 64> joined_ids{};
+    size_t completed_count = 0;
+    size_t joined_count = 0;
+};
+
+std::atomic<Worker_events*> g_worker_events{nullptr};
+
+void on_worker_event(const char* stage, uint64_t worker_id) noexcept
+{
+    if (std::strcmp(stage, "body_started") == 0) {
+        g_current_worker_id = worker_id;
+    }
+    auto* events = g_worker_events.load(std::memory_order_acquire);
+    if (!events) {
+        return;
+    }
+    if (std::strcmp(stage, "body_completed") != 0 &&
+        std::strcmp(stage, "post_join") != 0)
+    {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(events->mutex);
+        if (std::strcmp(stage, "body_completed") == 0) {
+            if (events->completed_count < events->completed_ids.size()) {
+                events->completed_ids[events->completed_count++] = worker_id;
+            }
+        }
+        else if (events->joined_count < events->joined_ids.size()) {
+            events->joined_ids[events->joined_count++] = worker_id;
+        }
+    }
+    events->changed.notify_all();
+}
+
+bool contains_id(const std::array<uint64_t, 64>& ids, size_t count, uint64_t id)
+{
+    return id != 0 && std::find(ids.begin(), ids.begin() + count, id) !=
+        ids.begin() + count;
+}
 
 fs::path marker(const fs::path& directory, const char* prefix, unsigned occurrence)
 {
@@ -88,47 +136,23 @@ int run_child(int argc, char* argv[], const fs::path& directory)
     std::abort();
 }
 
-// Admitting lifecycle work joins every completed worker before it returns.
-void reap_completed_workers()
-{
-    sintra::s_mproc->start_owned_lifecycle_worker([] {});
-}
-
-std::atomic<bool> g_exit_admission_done{false};
-
-// Thread-exit cleanup of a recovery runner that admits lifecycle work, as a
-// destructor that releases a custody does. It starts after the main thread's
-// reaping admission, which must not wait for this thread meanwhile.
-struct Exit_admission
-{
-    bool armed = false;
-
-    ~Exit_admission()
-    {
-        if (!armed) {
-            return;
-        }
-        std::this_thread::sleep_for(100ms);
-        reap_completed_workers();
-        g_exit_admission_done.store(true, std::memory_order_release);
-    }
-};
-
 int run_root(int argc, char* argv[], const fs::path& directory)
 {
     sintra::init(argc, argv);
-    std::mutex mutex;
-    std::condition_variable changed;
-    std::array<bool, k_last_occurrence + 1> exited{};
+    Worker_events events;
+    g_worker_events.store(&events, std::memory_order_release);
+    sintra::detail::test_hooks::s_owned_lifecycle_worker_event.store(
+        &on_worker_event, std::memory_order_release);
     std::atomic<unsigned> calls{0};
     std::atomic<bool> live_started{false};
     std::atomic<bool> live_cancelled{false};
     std::atomic<bool> coordinator_alive{false};
 #ifdef _WIN32
-    std::vector<Runner_thread> completed_runners;
+    std::array<Runner_thread, k_last_occurrence + 1> completed_runners{};
 #endif
 
-    sintra::set_recovery_runner([&](const sintra::Crash_info&, const sintra::Recovery_control& control) {
+    sintra::Recovery_runner custom_runner =
+        [&](const sintra::Crash_info&, const sintra::Recovery_control& control) {
         const auto call = ++calls;
         control.spawn();
         control.spawn();
@@ -142,24 +166,20 @@ int run_root(int argc, char* argv[], const fs::path& directory)
             live_cancelled.store(true, std::memory_order_release);
             return;
         }
-        if (call == k_exit_admission_call) {
-            // Constructed before the exit notification below is registered.
-            thread_local Exit_admission exit_admission;
-            exit_admission.armed = true;
-        }
         if (call <= k_last_occurrence) {
-            std::unique_lock<std::mutex> lock(mutex);
+            std::lock_guard<std::mutex> lock(events.mutex);
+            events.recovery_ids[call] = g_current_worker_id;
 #ifdef _WIN32
-            completed_runners.push_back(
-                {GetCurrentThreadId(), thread_creation_time(GetCurrentThread())});
+            completed_runners[call] =
+                {GetCurrentThreadId(), thread_creation_time(GetCurrentThread())};
 #endif
-            exited[call] = true;
-            std::notify_all_at_thread_exit(changed, std::move(lock));
+            events.changed.notify_all();
         }
         if (call == k_throwing_call) {
             throw std::runtime_error("owned recovery runner fixture");
         }
-    });
+    };
+    sintra::set_recovery_runner(custom_runner);
 
     sintra::Spawn_options options;
     options.binary_path              = sintra::test::get_binary_path(argc, argv);
@@ -173,51 +193,40 @@ int run_root(int argc, char* argv[], const fs::path& directory)
         if (!valid) {
             break;
         }
-        if (occurrence > 1) {
-            std::unique_lock<std::mutex> lock(mutex);
-            valid &= check(changed.wait_for(lock, 10s, [&] { return exited[occurrence]; }),
-                "completed recovery runner reached native thread exit");
+        if (occurrence > 2) {
+            const unsigned custom_call = occurrence - 1;
+            std::unique_lock<std::mutex> lock(events.mutex);
+            valid &= check(events.changed.wait_for(lock, 10s, [&] {
+                const auto id = events.recovery_ids[custom_call];
+                return contains_id(events.joined_ids, events.joined_count, id);
+            }), "finished recovery runner is joined without later admission");
+            const auto id = events.recovery_ids[custom_call];
+            valid &= check(contains_id(events.completed_ids, events.completed_count, id),
+                "body completion precedes post-join publication");
             lock.unlock();
-            // Every runner so far except the deliberately live first one has
-            // exited. The next lifecycle admission must join each of them.
-            reap_completed_workers();
 #ifdef _WIN32
-            // A runner is reaped once its exit cleanup has finished, and the
-            // kernel may drop its last reference to a joined thread shortly
-            // after the join. Keep admitting until then; a retained
-            // std::thread is never released.
-            const auto count_retained = [&] {
-                std::lock_guard<std::mutex> runners_lock(mutex);
-                unsigned count = 0;
-                for (const auto& runner : completed_runners) {
-                    count += runner_thread_retained(runner) ? 1 : 0;
-                }
-                return count;
-            };
-            const auto release_deadline = std::chrono::steady_clock::now() + 2s;
-            unsigned retained = count_retained();
-            while (retained != 0 && std::chrono::steady_clock::now() < release_deadline) {
-                std::this_thread::sleep_for(5ms);
-                reap_completed_workers();
-                retained = count_retained();
-            }
-            if (retained != 0) {
-                std::fprintf(stderr, "occurrence %u: %u of %zu completed runner threads retained\n",
-                    occurrence, retained, completed_runners.size());
-            }
-            valid &= check(retained == 0,
-                "a later admission releases every completed recovery runner thread");
+            valid &= check(!runner_thread_retained(completed_runners[custom_call]),
+                "post-join publication releases the runner kernel object");
 #endif
+        }
+        // Keep custom runner A live while the next crash uses default recovery.
+        // Restore custom routing before that replacement is crashed again.
+        if (occurrence == 1) {
+            sintra::set_recovery_runner({});
+        }
+        else if (occurrence == 2) {
+            valid &= check(live_started.load() && !live_cancelled.load(),
+                "default recovery overlaps the live custom runner");
+            sintra::set_recovery_runner(custom_runner);
         }
         valid &= check(sintra::test::managed_child::write_complete_file(
             marker(directory, "go", occurrence), "go"), "release this owned child occurrence");
     }
 
-    valid &= check(calls.load() == k_last_occurrence, "one runner per recovery occurrence");
+    valid &= check(calls.load() == k_last_occurrence - 1,
+        "custom decisions and one default recovery each occur once");
     valid &= check(live_started.load() && !live_cancelled.load(),
         "admissions preserve the still-live recovery worker");
-    valid &= check(g_exit_admission_done.load(std::memory_order_acquire),
-        "a runner's thread-exit cleanup admits lifecycle work while another admission reaps");
     const auto final_child = sintra::test::managed_child::wait_for_child_identity(
         marker(directory, "ready", k_last_occurrence), 1s, 5ms);
     valid &= check(final_child && sintra::test::managed_child::wait_for_exact_process_absence(
@@ -226,6 +235,9 @@ int run_root(int argc, char* argv[], const fs::path& directory)
     valid &= check(released.release_state == sintra::Managed_child_release_state::complete,
         "owned child cleanup completes");
     valid &= check(sintra::detail::finalize(), "runtime shutdown joins recovery workers");
+    sintra::detail::test_hooks::s_owned_lifecycle_worker_event.store(
+        nullptr, std::memory_order_release);
+    g_worker_events.store(nullptr, std::memory_order_release);
     valid &= check(live_cancelled.load() && coordinator_alive.load(),
         "live worker sees cancellation before coordinator destruction");
     return valid ? 0 : 1;

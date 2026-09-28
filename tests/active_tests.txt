@@ -63,6 +63,8 @@ join_swarm_midflight_test                                40
 leave_coordinator_guardrails_test                        5
 leave_lifecycle_test                                     5
 lifecycle_guardrails_test                                5
+lifecycle_reaper_contract_test                            3
+lifecycle_reaper_exit_admission_test                      3
 lifecycle_handler_test                                  20
 lifeline_basic_test                                      5
 lifecycle_header_only_test                               1
@@ -111,7 +113,7 @@ recovery_policy_test                                     1
 recovery_runner_thread_test                              1
 recovery_test                                           30
 recovery_unpublish_deadlock_test                         1
-recovery_worker_retirement_test                          1
+recovery_worker_retirement_test                         10
 recycled_pid_lock_test                                  10
 rendezvous_barrier_error_paths_test                      5
 ring_abi_fingerprint_test                                5
