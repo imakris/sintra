@@ -156,6 +156,30 @@ public:
 #endif
     }
 
+#ifndef _WIN32
+    // Kills the child and waits until it has exited, leaving it a zombie.
+    void kill_unreaped()
+    {
+        require(::kill(static_cast<pid_t>(m_pid), SIGKILL) == 0, "SIGKILL failed");
+        siginfo_t info{};
+        int result;
+        do {
+            result = ::waitid(P_PID, static_cast<id_t>(m_pid), &info, WEXITED | WNOWAIT);
+        }
+        while (result < 0 && errno == EINTR);
+        require(result == 0 && info.si_pid == static_cast<pid_t>(m_pid), "killed child did not become a zombie");
+    }
+
+    // Whether the child has exited and is still waiting to be reaped.
+    bool unreaped() const
+    {
+        siginfo_t info{};
+        return !m_reaped &&
+            ::waitid(P_PID, static_cast<id_t>(m_pid), &info, WEXITED | WNOWAIT | WNOHANG) == 0 &&
+            info.si_pid == static_cast<pid_t>(m_pid);
+    }
+#endif
+
 private:
     uint32_t m_pid = 0;
 #ifdef _WIN32

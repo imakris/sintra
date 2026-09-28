@@ -7,6 +7,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -34,10 +36,13 @@
 
 #include "test_ring_utils.h"
 #include "test_copying_mark_utils.h"
+#include "test_copying_mark_death.h"
+#include "test_process_identity_fakes.h"
 
 namespace {
 
 namespace cm = sintra::test::copying_mark;
+namespace fakes = sintra::test::identity_fakes;
 using Writer = sintra::Ring_W<uint32_t>;
 using Reader = sintra::Ring_R<uint32_t>;
 using State = Writer::Reader_state_union;
@@ -45,14 +50,10 @@ using State = Writer::Reader_state_union;
 std::string executable;
 std::filesystem::path child_directory;
 const char* child_pause_stage = nullptr;
-std::atomic<bool> request_seen{false};
 std::atomic<bool> writer_waiting{false};
 
 void observe(const char* stage, const std::atomic<uint64_t>*, uint8_t octile)
 {
-    if (std::strcmp(stage, "request_published") == 0) {
-        request_seen = true;
-    }
     if (std::strcmp(stage, "writer_waiting") == 0) {
         writer_waiting = true;
     }
@@ -62,204 +63,13 @@ void observe(const char* stage, const std::atomic<uint64_t>*, uint8_t octile)
     }
 }
 
-struct payload_t
-{
-    uint64_t sequence;
-    sintra::message_string text;
-};
-using Frame = sintra::Message<payload_t, void, 0x72C90A1ull>;
-
-void publish(sintra::Message_ring_W& writer, uint64_t sequence, const std::string& text)
-{
-    writer.write<Frame>(sintra::vb_size<Frame>(sequence, text), sequence, text);
-    writer.done_writing();
-}
-
-unsigned count(uint64_t read_access, uint8_t octile)
-{
-    return static_cast<unsigned>((read_access >> (8 * octile)) & 0xffu);
-}
-
-template <typename Control>
-int find_owner(Control& control, uint32_t pid)
-{
-    for (int index = 0; index < sintra::max_process_index; ++index) {
-        if (control.reading_sequences[index].data.owner_pid == pid) {
-            return index;
-        }
-    }
-    throw std::runtime_error("child did not publish its reader-slot identity");
-}
-
-int run_child(const std::string& mode, const std::string& directory)
+int run_acquisition_child(const std::string& directory)
 {
     child_directory = directory;
     sintra::detail::test_hooks::s_ring_guard_operation = observe;
-    if (mode == "--child-copy") {
-        sintra::Message_ring_R reader(directory, "req", 1);
-        reader.start_reading();
-        cm::signal_file(child_directory / "attached");
-        child_pause_stage = "copy_validated";
-        reader.fetch_message();
-    }
-    else {
-        child_pause_stage = "slot_acquired";
-        Reader reader(directory, "raw", sintra::test::pick_ring_elements<uint32_t>());
-    }
+    child_pause_stage = "slot_acquired";
+    Reader reader(directory, "raw", sintra::test::pick_ring_elements<uint32_t>());
     return 0;
-}
-
-void marked_child_death(bool require_absence)
-{
-    sintra::test::Temp_ring_dir directory("marked_child_death");
-    sintra::Message_ring_W writer(directory.str(), "req", 1);
-    sintra::Message_ring_R neighbor(directory.str(), "req", 1);
-    neighbor.start_reading();
-    cm::Test_child child(executable, {"--child-copy", directory.str()});
-    cm::wait_for_file(directory.path / "attached");
-    const std::string original = "neighbor owned frame survives exact reader reclamation";
-    publish(writer, 1, original);
-    const auto* held = static_cast<Frame*>(neighbor.fetch_message());
-    cm::require(held && std::string(held->text) == original, "neighbor frame was not delivered");
-    cm::wait_for_file(directory.path / "paused");
-    auto& control = writer.c;
-    const int child_index = find_owner(control, child.pid());
-    auto& child_slot = control.reading_sequences[child_index].data;
-    const auto marked = child_slot.load_state();
-    const uint64_t child_stamp = child_slot.owner_start_stamp;
-    cm::require(marked.copying() && marked.guard_present(), "child must die inside a marked real frame copy");
-    cm::require(count(control.read_access, marked.guard_octile()) == 2,
-        "child and neighbor must each own their initial count");
-
-    neighbor.done_reading();
-    const std::string filler(16384, 'p');
-    while (writer.get_leading_sequence() < sintra::message_ring_size / 8) {
-        publish(writer, 2, filler);
-    }
-    neighbor.start_reading();
-    const int neighbor_index = neighbor.m_rs_index;
-    const auto neighbor_state = control.reading_sequences[neighbor_index].data.load_state();
-    cm::require(neighbor_state.guard_octile() != marked.guard_octile(),
-        "neighbor must protect a distinct octile during dead-owner reclamation");
-
-    bool expect_unknown_absence = false;
-#if defined(__FreeBSD__)
-    expect_unknown_absence = true;
-#elif defined(__linux__)
-    const int pidfd = sintra::detail::open_process_pidfd(::getpid());
-    expect_unknown_absence = pidfd < 0;
-    if (pidfd >= 0) {
-        ::close(pidfd);
-    }
-#endif
-#if defined(__FreeBSD__) || defined(__linux__)
-    std::error_code absence_error;
-#endif
-    if (require_absence || expect_unknown_absence) {
-        child.terminate(0);
-        if (require_absence) {
-            child.close();
-        }
-#ifdef _WIN32
-        const bool absent = cm::wait_until([&]() {
-            HANDLE remaining = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, child.pid());
-            const DWORD error = ::GetLastError();
-            if (remaining) {
-                ::CloseHandle(remaining);
-            }
-            return !remaining && error == ERROR_INVALID_PARAMETER;
-        });
-        cm::require(absent,
-            "absence case must run with every parent, duplicate and harness handle closed");
-#endif
-#if defined(__FreeBSD__) || defined(__linux__)
-        if (expect_unknown_absence) {
-            const auto absence = sintra::probe_process_identity(child.pid(), child_stamp);
-            cm::require(absence.status == sintra::Process_identity_status::UNKNOWN && absence.error,
-                "reaped child must have an ambiguous native absence before writer probing");
-            absence_error = absence.error;
-        }
-#endif
-    }
-
-    request_seen = false;
-    sintra::detail::test_hooks::s_ring_guard_operation = observe;
-    std::atomic<bool> writer_finished{false};
-    std::exception_ptr writer_error;
-    auto target = uint64_t(marked.guard_octile()) * (sintra::message_ring_size / 8);
-    if (target <= writer.get_leading_sequence()) {
-        target += sintra::message_ring_size;
-    }
-    std::thread writing([&]() {
-        try {
-            while (writer.get_leading_sequence() < target) {
-                publish(writer, 3, filler);
-            }
-        }
-        catch (...) {
-            writer_error = std::current_exception();
-        }
-        writer_finished = true;
-    });
-    const bool observed_request = require_absence || expect_unknown_absence || cm::wait_until([&]() {
-        return request_seen.load() || writer_finished.load();
-    });
-    if (!require_absence && !expect_unknown_absence) {
-        child.terminate(259);
-    }
-    const bool progressed = cm::wait_until([&]() { return writer_finished.load(); });
-    if (!progressed) {
-        // A watchdog detects a failure; it never authorizes production reuse.
-        neighbor.done_reading();
-        control.scavenge_orphans();
-    }
-    writing.join();
-    sintra::detail::test_hooks::s_ring_guard_operation = nullptr;
-#if defined(__FreeBSD__) || defined(__linux__)
-    if (expect_unknown_absence) {
-        bool unresolved_absence = false;
-        if (writer_error) {
-            try {
-                std::rethrow_exception(writer_error);
-            }
-            catch (const std::system_error& error) {
-                unresolved_absence = error.code() == absence_error;
-            }
-        }
-        cm::require(observed_request && progressed && unresolved_absence,
-            "ambiguous native absence must stop the blocked writer with its native error");
-        cm::require(child_slot.word == marked.word &&
-            child_slot.owner_pid == child.pid() && child_slot.owner_start_stamp == child_stamp &&
-            count(control.read_access, marked.guard_octile()) == 1 &&
-            count(control.read_access, neighbor_state.guard_octile()) == 1,
-            "ambiguous native absence must retain the marked guard, count and owner tuple");
-        cm::require(std::string(held->text) == original && held->sequence == 1 &&
-            control.reader_eviction_count == 0,
-            "ambiguous native absence must preserve the neighbor frame without invented loss");
-        neighbor.done_reading();
-        return;
-    }
-#endif
-    cm::require(observed_request && progressed && !writer_error,
-        "blocked writer must reclaim a killed marked child and finish");
-    cm::require(require_absence || request_seen, "live marked child must force writer request arbitration");
-    cm::require(sintra::probe_process_identity(child.pid(), child_stamp).status ==
-        sintra::Process_identity_status::DEAD, "child incarnation must be proven DEAD");
-    cm::require(child_slot.status() == Writer::READER_STATE_INACTIVE &&
-        !child_slot.load_state().copying() && !child_slot.load_state().request_pending() &&
-        child_slot.owner_pid == 0 && child_slot.owner_start_stamp == 0,
-        "dead copying owner must have its flags and identity reclaimed");
-    cm::require(count(control.read_access, marked.guard_octile()) == 0 &&
-        count(control.read_access, neighbor_state.guard_octile()) == 1 &&
-        control.reading_sequences[neighbor_index].data.load_state().word == neighbor_state.word,
-        "death cleanup must release exactly the child's count and preserve its neighbor");
-    cm::require(std::string(held->text) == original && held->sequence == 1,
-        "neighbor's owned frame must remain intact through writer progress");
-    sintra::Message_ring_R replacement(directory.str(), "req", 1);
-    cm::require(replacement.m_rs_index == child_index,
-        "reclaimed marked-child slot must be reusable");
-    cm::require(control.guard_accounting_mismatch_count == 0, "count accounting must stay balanced");
-    neighbor.done_reading();
 }
 
 void acquisition_death_restores_capacity()
@@ -300,7 +110,7 @@ void fill_to(Writer& writer, uint64_t target)
     }
 }
 
-sintra::process_identity_result_t unknown_identity(uint32_t, uint64_t)
+sintra::process_identity_result_t unknown_identity(const sintra::process_incarnation_t&)
 {
 #ifdef _WIN32
     constexpr int error = ERROR_ACCESS_DENIED;
@@ -310,87 +120,120 @@ sintra::process_identity_result_t unknown_identity(uint32_t, uint64_t)
     return {sintra::Process_identity_status::UNKNOWN, std::error_code(error, std::system_category())};
 }
 
+// A live marked reader whose native observation cannot prove its death. The
+// injection may publish an identity whose process record shows another
+// incarnation, so that only the observation failure protects the reader.
+struct protection_case_t
+{
+    const char* name;
+    int         expected_error;
+    void      (*inject)(sintra::process_incarnation_t& published);
+};
+
 #ifdef _WIN32
-sintra::process_identity_result_t denied_identity(uint32_t, uint64_t)
+sintra::process_identity_result_t denied_identity(const sintra::process_incarnation_t&)
 {
     return {sintra::Process_identity_status::UNKNOWN,
         std::error_code(ERROR_ACCESS_DENIED, std::system_category())};
 }
 
-void set_visibility_denial(bool)
-{
-    sintra::detail::process_identity_probe_hook = denied_identity;
-}
-
-void clear_visibility_denial()
-{
-    sintra::detail::process_identity_probe_hook = nullptr;
-}
+const protection_case_t k_protection_cases[] = {
+    {"access_denied", ERROR_ACCESS_DENIED, [](sintra::process_incarnation_t&) {
+        sintra::detail::process_identity_probe_hook = denied_identity;
+    }},
+};
 #elif defined(__linux__)
-int hidden_stat_open(const char*, int, ...)
+void publish_foreign_record(sintra::process_incarnation_t& published)
 {
-    errno = ENOENT;
-    return -1;
+    published.start_stamp += 1;
+    published.namespaces = {fakes::valid_namespace(0x11), fakes::valid_namespace(0x21)};
 }
 
-int unavailable_pidfd(pid_t)
-{
-    errno = ENOSYS;
-    return -1;
-}
-
-void set_visibility_denial(bool)
-{
-    sintra::detail::process_identity_open_stat = hidden_stat_open;
-    sintra::detail::process_identity_pidfd_open = unavailable_pidfd;
-}
-
-void clear_visibility_denial()
-{
-    sintra::detail::process_identity_open_stat = ::open;
-    sintra::detail::process_identity_pidfd_open = sintra::detail::open_process_pidfd;
-}
+const protection_case_t k_protection_cases[] = {
+    {"hidden_record_live_pidfd", ENOENT, [](sintra::process_incarnation_t&) {
+        fakes::s_hide_process_records = true;
+        fakes::s_pidfd_result = fakes::k_succeed;
+    }},
+    {"hidden_record_live_signal", ENOENT, [](sintra::process_incarnation_t&) {
+        fakes::s_hide_process_records = true;
+        fakes::s_pidfd_result = ENOSYS;
+    }},
+    {"hidden_record_denied_signal", EPERM, [](sintra::process_incarnation_t&) {
+        fakes::s_hide_process_records = true;
+        fakes::s_pidfd_result = ENOSYS;
+        fakes::s_kill_result = EPERM;
+    }},
+    {"foreign_pid_namespace", sintra::detail::k_foreign_process_record_error,
+        [](sintra::process_incarnation_t& published) {
+            publish_foreign_record(published);
+            fakes::s_namespaces = sintra::process_namespaces_t{
+                fakes::valid_namespace(0x12), fakes::valid_namespace(0x21)};
+        }},
+    {"foreign_time_namespace", sintra::detail::k_foreign_process_record_error,
+        [](sintra::process_incarnation_t& published) {
+            publish_foreign_record(published);
+            fakes::s_namespaces = sintra::process_namespaces_t{
+                fakes::valid_namespace(0x11), fakes::valid_namespace(0x22)};
+        }},
+    {"ancestor_procfs_view", sintra::detail::k_foreign_process_record_error,
+        [](sintra::process_incarnation_t& published) {
+            publish_foreign_record(published);
+            fakes::s_namespaces = published.namespaces;
+            fakes::use_status_nstgid("4321\t17");
+        }},
+};
 #elif defined(__APPLE__)
-int hidden_proc_pidinfo(int, int, uint64_t, void*, int)
-{
-    errno = ESRCH;
-    return 0;
-}
-
-void set_visibility_denial(bool)
-{
-    sintra::detail::process_identity_proc_pidinfo = hidden_proc_pidinfo;
-}
-
-void clear_visibility_denial()
-{
-    sintra::detail::process_identity_proc_pidinfo = ::proc_pidinfo;
-}
+const protection_case_t k_protection_cases[] = {
+    {"missing_record_live_signal", ESRCH, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::FAILED;
+    }},
+    {"missing_record_denied_signal", EPERM, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::FAILED;
+        fakes::s_kill_result = EPERM;
+    }},
+    {"record_denied", EPERM, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::FAILED;
+        fakes::s_record_error = EPERM;
+    }},
+    {"malformed_record", EIO, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::SHORT;
+    }},
+};
 #elif defined(__FreeBSD__)
-bool empty_process_record = false;
-
-int hidden_process_sysctl(const int*, u_int, void*, size_t* size, const void*, size_t)
-{
-    if (empty_process_record) {
-        *size = 0;
-        return 0;
-    }
-    errno = ESRCH;
-    return -1;
-}
-
-void set_visibility_denial(bool empty)
-{
-    empty_process_record = empty;
-    sintra::detail::process_identity_sysctl = hidden_process_sysctl;
-}
-
-void clear_visibility_denial()
-{
-    sintra::detail::process_identity_sysctl = ::sysctl;
-    empty_process_record = false;
-}
+const protection_case_t k_protection_cases[] = {
+    {"missing_record_live_signal", ESRCH, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::FAILED;
+    }},
+    {"empty_record_live_signal", ESRCH, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::EMPTY;
+    }},
+    {"missing_record_capability_mode_signal", ECAPMODE, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::FAILED;
+        fakes::s_kill_result = ECAPMODE;
+    }},
+    {"missing_record_denied_signal", EPERM, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::FAILED;
+        fakes::s_kill_result = EPERM;
+    }},
+    {"record_capability_mode", ECAPMODE, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::FAILED;
+        fakes::s_record_error = ECAPMODE;
+    }},
+    {"short_record", EIO, [](sintra::process_incarnation_t&) {
+        fakes::s_record = fakes::Record::SHORT;
+    }},
+};
 #endif
+
+bool same_incarnation(const sintra::process_incarnation_t& a, const sintra::process_incarnation_t& b)
+{
+    const auto same_namespace = [](const sintra::process_namespace_t& x, const sintra::process_namespace_t& y) {
+        return x.state == y.state && x.device == y.device && x.inode == y.inode;
+    };
+    return a.pid == b.pid && a.start_stamp == b.start_stamp &&
+        same_namespace(a.namespaces.pid, b.namespaces.pid) &&
+        same_namespace(a.namespaces.time, b.namespaces.time);
+}
 
 class Held_copy
 {
@@ -428,10 +271,9 @@ private:
     std::thread m_thread;
 };
 
-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
-void visibility_denial_preserves_copy(bool empty_record = false)
+void live_owner_protection(const protection_case_t& protection)
 {
-    sintra::test::Temp_ring_dir directory("visibility_denial");
+    sintra::test::Temp_ring_dir directory("live_owner_protection");
     const size_t elements = sintra::test::pick_ring_elements<uint32_t>();
     Writer writer(directory.str(), "raw", elements);
     Reader reader(directory.str(), "raw", elements);
@@ -442,36 +284,42 @@ void visibility_denial_preserves_copy(bool empty_record = false)
     fill_to(writer, target - 1);
 
     Held_copy copy(reader);
+    const auto own_identity = slot.owner();
+    auto published = own_identity;
     const auto protected_word = slot.word.load();
     const auto protected_count = writer.c.read_access.load();
-    const uint32_t owner_pid = slot.owner_pid.load();
-    const uint64_t owner_stamp = slot.owner_start_stamp.load();
     cm::require(State{protected_word}.copying() && State{protected_word}.guard_present(),
-        "visibility case must hold a real copying mark and its guard");
+        "protection case must hold a real copying mark and its guard");
 
-    set_visibility_denial(empty_record);
-    const auto observed = sintra::probe_process_identity(owner_pid, owner_stamp);
+    sintra::process_identity_result_t observed{};
     bool blocked = false;
-    try {
-        const uint32_t value = 45678;
-        writer.write(&value, 1);
+    {
+        fakes::Scoped_fakes injected;
+        protection.inject(published);
+        slot.publish_owner(published);
+        observed = sintra::probe_process_identity(published);
+        try {
+            const uint32_t value = 45678;
+            writer.write(&value, 1);
+        }
+        catch (const std::system_error& error) {
+            blocked = error.code() == observed.error;
+        }
+        sintra::detail::process_identity_probe_hook = nullptr;
     }
-    catch (const std::system_error& error) {
-        blocked = error.code() == observed.error;
-    }
-    clear_visibility_denial();
 
-    cm::require(observed.status == sintra::Process_identity_status::UNKNOWN && observed.error && blocked,
-        "visibility denial must remain UNKNOWN and stop a blocked writer with its native error");
+    cm::require(observed.status == sintra::Process_identity_status::UNKNOWN &&
+        observed.error.value() == protection.expected_error && blocked,
+        "an unproven death must remain UNKNOWN and stop a blocked writer with its native error");
     cm::require(slot.word == protected_word && writer.c.read_access == protected_count &&
-        slot.owner_pid == owner_pid && slot.owner_start_stamp == owner_stamp,
-        "visibility denial must preserve COPYING, guard, count and exact owner identity");
+        same_incarnation(slot.owner(), published),
+        "an unproven death must preserve COPYING, guard, count and exact owner identity");
     cm::require(writer.c.reader_eviction_count == 0 && !reader.consume_eviction_notification(),
-        "visibility denial must not invent an eviction or lost range");
+        "an unproven death must not invent an eviction or lost range");
+    slot.publish_owner(own_identity);
     copy.release();
     reader.done_reading();
 }
-#endif
 
 void unknown_reservation_rollback(bool inherited)
 {
@@ -501,7 +349,7 @@ void unknown_reservation_rollback(bool inherited)
         writer.write(&rejected_value, 1);
     }
     catch (const std::system_error& error) {
-        failed_natively = error.code() == unknown_identity(0, 0).error;
+        failed_natively = error.code() == unknown_identity({}).error;
     }
     sintra::detail::process_identity_probe_hook = nullptr;
     cm::require(failed_natively, "blocking UNKNOWN must return its bounded native writer error");
@@ -575,7 +423,7 @@ void unrelated_unknown_and_incarnation_mismatch()
     cm::require(control.scavenge_orphans(), "a changed incarnation must reclaim the obsolete slot");
     cm::require(slot.status() == Writer::READER_STATE_INACTIVE &&
         neighbor_slot.word == neighbor_state &&
-        count(control.read_access, neighbor_slot.load_state().guard_octile()) == 1,
+        cm::octile_count(control.read_access, neighbor_slot.load_state().guard_octile()) == 1,
         "incarnation mismatch must reclaim only the old owner and preserve its neighbor");
     reader.m_reading = false;
     neighbor.done_reading();
@@ -587,24 +435,20 @@ int main(int argc, char** argv)
 {
     executable = std::filesystem::absolute(argv[0]).string();
     try {
-        if (argc == 3 && (std::strcmp(argv[1], "--child-copy") == 0 ||
-            std::strcmp(argv[1], "--child-acquire") == 0))
-        {
-            return run_child(argv[1], argv[2]);
+        if (argc == 4 && std::strcmp(argv[1], "--death-child") == 0) {
+            return cm::run_death_child(argv[2], std::atoi(argv[3]));
+        }
+        if (argc == 3 && std::strcmp(argv[1], "--child-acquire") == 0) {
+            return run_acquisition_child(argv[2]);
         }
         if (argc == 2 && std::strcmp(argv[1], "--absence-only") == 0) {
-            marked_child_death(true);
+            cm::marked_reader_death(executable, {.name = "marked_child_absence", .close_handles = true});
             std::puts("PASS marked_child_absence: every handle closed before first writer probe");
             return 0;
         }
-#if defined(__APPLE__)
-        // A zombie can make proc_pidinfo fail while kill still sees the PID.
-        // Reap first so this case exercises confirmed absence and reclamation.
-        marked_child_death(true);
-#else
-        marked_child_death(false);
-#endif
+        cm::marked_reader_death(executable, {.name = "marked_child_death", .timing = cm::Death_timing::WHILE_REQUESTED});
         std::puts("PASS marked_child_death");
+        cm::run_dead_reader_cases(executable);
         acquisition_death_restores_capacity();
         std::puts("PASS acquisition_death_restores_capacity");
         unknown_reservation_rollback(false);
@@ -613,14 +457,10 @@ int main(int argc, char** argv)
         std::puts("PASS inherited_reservation_unknown_rollback");
         unrelated_unknown_and_incarnation_mismatch();
         std::puts("PASS unrelated_unknown_and_incarnation_mismatch");
-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
-        visibility_denial_preserves_copy();
-        std::puts("PASS visibility_denial_preserves_copy");
-#if defined(__FreeBSD__)
-        visibility_denial_preserves_copy(true);
-        std::puts("PASS empty_process_record_preserves_copy");
-#endif
-#endif
+        for (const auto& protection : k_protection_cases) {
+            live_owner_protection(protection);
+            std::printf("PASS live_owner_protection: %s\n", protection.name);
+        }
         return 0;
     }
     catch (const std::exception& error) {

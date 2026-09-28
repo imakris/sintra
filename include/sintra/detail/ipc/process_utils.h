@@ -11,6 +11,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #include "../time_utils.h"
@@ -311,11 +312,6 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
 #endif
 }
 
-inline std::optional<uint64_t> current_process_start_stamp()
-{
-    return query_process_start_stamp(get_current_pid());
-}
-
 enum class Process_identity_status
 {
     LIVE,
@@ -329,21 +325,58 @@ struct process_identity_result_t
     std::error_code error;
 };
 
+// Availability of one piece of process metadata. Neither UNKNOWN nor ABSENT
+// is evidence about a process, and a cleared slot field reads as UNKNOWN.
+enum class Process_metadata_state : uint8_t
+{
+    UNKNOWN = 0, // The metadata could not be read.
+    ABSENT  = 1, // The kernel does not provide it.
+    VALID   = 2
+};
+
+// A Linux namespace, identified by the device and inode of its nsfs object.
+struct process_namespace_t
+{
+    Process_metadata_state state  = Process_metadata_state::UNKNOWN;
+    uint64_t               device = 0;
+    uint64_t               inode  = 0;
+};
+
+// The Linux namespaces that give a process's PID and start stamp their
+// meaning. Other platforms record none.
+struct process_namespaces_t
+{
+    process_namespace_t pid;
+    process_namespace_t time;
+};
+
+// One process incarnation, as a reader slot publishes it.
+struct process_incarnation_t
+{
+    uint32_t             pid         = 0;
+    uint64_t             start_stamp = 0;
+    process_namespaces_t namespaces;
+};
+
 namespace detail {
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
-using process_identity_probe_hook_t = process_identity_result_t (*)(uint32_t, uint64_t);
+using process_identity_probe_hook_t = process_identity_result_t (*)(const process_incarnation_t&);
 inline process_identity_probe_hook_t process_identity_probe_hook = nullptr;
 #ifdef _WIN32
 inline decltype(&::OpenProcess) process_identity_open_process = ::OpenProcess;
 inline decltype(&::GetProcessTimes) process_identity_get_process_times = ::GetProcessTimes;
 inline decltype(&::WaitForSingleObject) process_identity_wait_for_single_object = ::WaitForSingleObject;
-#elif defined(__APPLE__)
+#else
+inline int (*process_identity_kill)(pid_t, int) = ::kill;
+#if defined(__APPLE__)
 inline decltype(&::proc_pidinfo) process_identity_proc_pidinfo = ::proc_pidinfo;
 #elif defined(__FreeBSD__)
 inline decltype(&::sysctl) process_identity_sysctl = ::sysctl;
 #elif defined(__linux__)
-inline decltype(&::open) process_identity_open_stat = ::open;
+inline decltype(&::open) process_identity_open_procfs = ::open;
+inline int (*process_identity_stat_namespace)(const char*, struct stat*) = ::stat;
+#endif
 #endif
 #endif
 
@@ -352,7 +385,35 @@ inline process_identity_result_t unknown_process_identity(int error)
     return {Process_identity_status::UNKNOWN, std::error_code(error, std::system_category())};
 }
 
+#ifndef _WIN32
+// A positive-PID signal lookup runs in the caller's PID namespace. Under the
+// documented deployment requirement, ESRCH means that no process holds the
+// PID. Success or EPERM shows that some process holds it, which does not
+// identify the published incarnation. A successful call sets no errno, so the
+// failed observation's own error stands.
+inline process_identity_result_t confirm_absence_by_signal(pid_t pid, int observation_error)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const int result = process_identity_kill(pid, 0);
+#else
+    const int result = ::kill(pid, 0);
+#endif
+    if (result == 0) {
+        return unknown_process_identity(observation_error);
+    }
+    const int error = errno;
+    if (error == ESRCH) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    return unknown_process_identity(error);
+}
+#endif
+
 #if defined(__linux__)
+// The error of an UNKNOWN result whose process record is readable but lies in
+// coordinates known to differ from those of the published incarnation.
+inline constexpr int k_foreign_process_record_error = EXDEV;
+
 inline int open_process_pidfd(pid_t pid)
 {
 #ifdef SYS_pidfd_open
@@ -368,7 +429,10 @@ inline int open_process_pidfd(pid_t pid)
 inline int (*process_identity_pidfd_open)(pid_t) = open_process_pidfd;
 #endif
 
-inline process_identity_result_t probe_linux_process_absence(pid_t pid, int observation_error)
+// Native lookup establishes absence in the caller's PID namespace, whatever
+// procfs shows and whatever namespace metadata is available. Without pidfd
+// support, a signal lookup does the same.
+inline process_identity_result_t confirm_linux_process_absence(pid_t pid, int observation_error)
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     const int fd = process_identity_pidfd_open(pid);
@@ -383,7 +447,19 @@ inline process_identity_result_t probe_linux_process_absence(pid_t pid, int obse
     if (error == ESRCH) {
         return {Process_identity_status::DEAD, {}};
     }
+    if (error == ENOSYS) {
+        return confirm_absence_by_signal(pid, observation_error);
+    }
     return unknown_process_identity(error);
+}
+
+inline int open_procfs_file(const char* path)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    return process_identity_open_procfs(path, O_RDONLY | O_CLOEXEC);
+#else
+    return ::open(path, O_RDONLY | O_CLOEXEC);
+#endif
 }
 
 struct linux_process_stat_t
@@ -415,12 +491,149 @@ inline bool parse_linux_process_stat(const std::string& stat_line, linux_process
     return (fields >> result.num_threads >> skipped >> result.start_stamp) &&
         result.num_threads != 0 && result.start_stamp != 0;
 }
+
+// Reads one complete process-stat record. Returns zero, or the errno of the
+// failed step: ENOENT or ESRCH when no record exists, EOVERFLOW or EIO when
+// the record is incomplete.
+inline int read_linux_process_stat(const char* path, linux_process_stat_t& record)
+{
+    const int fd = open_procfs_file(path);
+    if (fd < 0) {
+        return errno;
+    }
+
+    char buffer[4096];
+    const auto size = ::read(fd, buffer, sizeof(buffer));
+    const int error = errno;
+    ::close(fd);
+    if (size < 0) {
+        return error;
+    }
+    if (static_cast<size_t>(size) == sizeof(buffer)) {
+        return EOVERFLOW;
+    }
+    return parse_linux_process_stat(std::string(buffer, static_cast<size_t>(size)), record) ? 0 : EIO;
+}
+
+// Follows a namespace entry to the namespace object: the link's own inode does
+// not identify the namespace. A kernel built without this namespace type has
+// no entry.
+inline process_namespace_t read_linux_namespace(const char* path)
+{
+    struct stat status{};
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const int result = process_identity_stat_namespace(path, &status);
+#else
+    const int result = ::stat(path, &status);
+#endif
+    if (result != 0) {
+        const auto state = errno == ENOENT ? Process_metadata_state::ABSENT : Process_metadata_state::UNKNOWN;
+        return {state, 0, 0};
+    }
+    return {Process_metadata_state::VALID, static_cast<uint64_t>(status.st_dev), static_cast<uint64_t>(status.st_ino)};
+}
+
+// Read at every use, never cached: a process can join another time namespace
+// between one reader slot's lifetime and the next.
+inline process_namespaces_t current_linux_namespaces()
+{
+    return {read_linux_namespace("/proc/self/ns/pid"), read_linux_namespace("/proc/self/ns/time")};
+}
+
+// procfs mounted for an ancestor PID namespace lists this process's ID at each
+// level from that namespace down, so NStgid has more than one entry. A missing
+// line (Linux before 4.1) or an unreadable file is not evidence of such a view.
+inline bool linux_procfs_shows_ancestor_namespace()
+{
+    const int fd = open_procfs_file("/proc/self/status");
+    if (fd < 0) {
+        return false;
+    }
+    std::string status;
+    char buffer[4096];
+    ssize_t size = 0;
+    while ((size = ::read(fd, buffer, sizeof(buffer))) > 0) {
+        status.append(buffer, static_cast<size_t>(size));
+    }
+    ::close(fd);
+
+    constexpr std::string_view k_label = "\nNStgid:";
+    const auto label = status.find(k_label);
+    if (label == std::string::npos) {
+        return false;
+    }
+    const auto begin = label + k_label.size();
+    std::istringstream ids(status.substr(begin, status.find('\n', begin) - begin));
+    uint64_t id = 0;
+    int entries = 0;
+    while (ids >> id) {
+        ++entries;
+    }
+    return entries > 1;
+}
+
+inline bool namespaces_contradict(const process_namespace_t& published, const process_namespace_t& observed)
+{
+    return published.state == Process_metadata_state::VALID &&
+        observed.state == Process_metadata_state::VALID &&
+        (published.device != observed.device || published.inode != observed.inode);
+}
+
+// A process record is death evidence only in the coordinates of the published
+// stamp. Its PID is numbered in the procfs view's PID namespace, and its start
+// time (stat field 22) includes the observer's time-namespace offset. A known
+// contradiction makes the record unusable; missing metadata is none. The
+// observer's side is read now, for the context it observes in.
+inline bool linux_record_coordinates_contradict(const process_namespaces_t& owner)
+{
+    const auto observer = current_linux_namespaces();
+    return namespaces_contradict(owner.pid, observer.pid) ||
+        namespaces_contradict(owner.time, observer.time) ||
+        linux_procfs_shows_ancestor_namespace();
+}
 #endif
 
-// Observe one native process incarnation. Observation errors never authorize
-// release of memory still protected by its reader slot.
-inline process_identity_result_t probe_process_identity_native(uint32_t pid, uint64_t start_stamp)
+} // namespace detail
+
+inline std::optional<uint64_t> current_process_start_stamp()
 {
+#if defined(__linux__)
+    // A self-resolving record describes this process in any procfs view.
+    detail::linux_process_stat_t record;
+    if (detail::read_linux_process_stat("/proc/self/stat", record) != 0) {
+        return std::nullopt;
+    }
+    return record.start_stamp;
+#else
+    return query_process_start_stamp(get_current_pid());
+#endif
+}
+
+// Captures this process's incarnation for one reader-slot acquisition. On
+// Linux its namespaces are read afresh, alongside the start stamp.
+inline std::optional<process_incarnation_t> current_process_incarnation()
+{
+    const auto start_stamp = current_process_start_stamp();
+    if (!start_stamp || *start_stamp == 0) {
+        return std::nullopt;
+    }
+    process_incarnation_t incarnation{get_current_pid(), *start_stamp, {}};
+#if defined(__linux__)
+    incarnation.namespaces = detail::current_linux_namespaces();
+#endif
+    return incarnation;
+}
+
+namespace detail {
+
+// Observe one native process incarnation. Absence comes from native PID
+// lookup; a different incarnation or a terminal state comes from a complete
+// process record. Observation errors never authorize release of memory still
+// protected by its reader slot.
+inline process_identity_result_t probe_process_identity_native(const process_incarnation_t& owner)
+{
+    const uint32_t pid = owner.pid;
+    const uint64_t start_stamp = owner.start_stamp;
 #ifdef _WIN32
     if (pid == 0 || start_stamp == 0) {
         return unknown_process_identity(ERROR_INVALID_PARAMETER);
@@ -479,62 +692,44 @@ inline process_identity_result_t probe_process_identity_native(uint32_t pid, uin
     }
 #if defined(__linux__)
     const auto path = std::string("/proc/") + std::to_string(pid) + "/stat";
-#if defined(SINTRA_ENABLE_TEST_HOOKS)
-    const int fd = process_identity_open_stat(path.c_str(), O_RDONLY | O_CLOEXEC);
-#else
-    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-#endif
-    if (fd < 0) {
-        const int error = errno;
-        // procfs can hide a live process. A pidfd lookup establishes absence
-        // independently of procfs visibility and signal permission policy.
-        if (error == ENOENT || error == ESRCH) {
-            return probe_linux_process_absence(static_cast<pid_t>(pid), error);
-        }
-        return unknown_process_identity(error);
-    }
-
-    char buffer[4096];
-    const auto size = ::read(fd, buffer, sizeof(buffer));
-    const int error = errno;
-    ::close(fd);
-    if (size < 0) {
-        if (error == ESRCH) {
-            return probe_linux_process_absence(static_cast<pid_t>(pid), error);
-        }
-        return unknown_process_identity(error);
-    }
-    if (size == sizeof(buffer)) {
-        return unknown_process_identity(EOVERFLOW);
-    }
-
     linux_process_stat_t record;
-    if (!parse_linux_process_stat(std::string(buffer, static_cast<size_t>(size)), record)) {
-        return unknown_process_identity(EIO);
+    const int error = read_linux_process_stat(path.c_str(), record);
+    if (error == ENOENT || error == ESRCH) {
+        return confirm_linux_process_absence(static_cast<pid_t>(pid), error);
     }
-    if (record.start_stamp != start_stamp ||
-        ((record.state == 'Z' || record.state == 'X') && record.num_threads == 1))
-    {
-        return {Process_identity_status::DEAD, {}};
+    if (error != 0) {
+        return unknown_process_identity(error);
     }
-    return {Process_identity_status::LIVE, {}};
+
+    // A zombie leader whose other threads still run is live (a1c835e1).
+    const bool incarnation_ended = record.start_stamp != start_stamp ||
+        ((record.state == 'Z' || record.state == 'X') && record.num_threads == 1);
+    if (!incarnation_ended) {
+        return {Process_identity_status::LIVE, {}};
+    }
+    if (linux_record_coordinates_contradict(owner.namespaces)) {
+        return unknown_process_identity(k_foreign_process_record_error);
+    }
+    return {Process_identity_status::DEAD, {}};
 #elif defined(__APPLE__)
+    // Argument 1 includes zombies, whose records carry their terminal status.
     struct proc_bsdinfo record{};
     errno = 0;
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     const int size = process_identity_proc_pidinfo(
-        static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &record, sizeof(record));
+        static_cast<int>(pid), PROC_PIDTBSDINFO, 1, &record, sizeof(record));
 #else
-    const int size = ::proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &record, sizeof(record));
+    const int size = ::proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 1, &record, sizeof(record));
 #endif
-    if (size <= 0 && errno == ESRCH) {
-        if (::kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH) {
-            return {Process_identity_status::DEAD, {}};
+    if (size <= 0) {
+        const int error = errno ? errno : EIO;
+        if (error == ESRCH) {
+            return confirm_absence_by_signal(static_cast<pid_t>(pid), error);
         }
-        return unknown_process_identity(ESRCH);
+        return unknown_process_identity(error);
     }
-    if (size != sizeof(record)) {
-        return unknown_process_identity(errno ? errno : EIO);
+    if (static_cast<size_t>(size) != sizeof(record)) {
+        return unknown_process_identity(EIO);
     }
     const uint64_t observed_stamp = static_cast<uint64_t>(record.pbi_start_tvsec) * 1000000000ull +
         static_cast<uint64_t>(record.pbi_start_tvusec) * 1000ull;
@@ -556,10 +751,14 @@ inline process_identity_result_t probe_process_identity_native(uint32_t pid, uin
 #endif
     if (result != 0) {
         const int error = errno;
+        if (error == ESRCH) {
+            return confirm_absence_by_signal(static_cast<pid_t>(pid), error);
+        }
         return unknown_process_identity(error);
     }
+    // A successful empty result is a missing record; a short one is malformed.
     if (size == 0) {
-        return unknown_process_identity(EIO);
+        return confirm_absence_by_signal(static_cast<pid_t>(pid), ESRCH);
     }
     if (size != sizeof(record)) {
         return unknown_process_identity(EIO);
@@ -585,14 +784,14 @@ inline process_identity_result_t probe_process_identity_native(uint32_t pid, uin
 
 } // namespace detail
 
-inline process_identity_result_t probe_process_identity(uint32_t pid, uint64_t start_stamp)
+inline process_identity_result_t probe_process_identity(const process_incarnation_t& owner)
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (detail::process_identity_probe_hook) {
-        return detail::process_identity_probe_hook(pid, start_stamp);
+        return detail::process_identity_probe_hook(owner);
     }
 #endif
-    return detail::probe_process_identity_native(pid, start_stamp);
+    return detail::probe_process_identity_native(owner);
 }
 
 struct run_marker_record_t

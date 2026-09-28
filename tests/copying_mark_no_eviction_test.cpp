@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -24,6 +25,7 @@
 #undef private
 
 #include "test_copying_mark_utils.h"
+#include "test_copying_mark_death.h"
 #include "test_ring_utils.h"
 
 namespace {
@@ -44,10 +46,10 @@ void write_frame(Writer& writer, const std::string& text)
     writer.done_writing();
 }
 
-sintra::process_identity_result_t observe_identity(uint32_t pid, uint64_t stamp)
+sintra::process_identity_result_t observe_identity(const sintra::process_incarnation_t& owner)
 {
-    const auto result = sintra::detail::probe_process_identity_native(pid, stamp);
-    if (pid == watched_pid && result.status == sintra::Process_identity_status::LIVE) {
+    const auto result = sintra::detail::probe_process_identity_native(owner);
+    if (owner.pid == watched_pid && result.status == sintra::Process_identity_status::LIVE) {
         live_probes.fetch_add(1);
     }
     return result;
@@ -142,9 +144,13 @@ int main(int argc, char* argv[])
         if (argc == 4 && std::string_view(argv[1]) == "--child") {
             return child(argv[2], std::string_view(argv[3]) == "marked");
         }
+        if (argc == 4 && std::string_view(argv[1]) == "--death-child") {
+            return fixture::run_death_child(argv[2], std::atoi(argv[3]));
+        }
         run(argv[0], true);
         run(argv[0], false);
         std::puts("PASS numeric disabled eviction: live protection and dead blocking-guard reclamation");
+        fixture::run_dead_reader_cases(std::filesystem::absolute(argv[0]).string());
         return 0;
     }
     catch (const std::exception& error) {

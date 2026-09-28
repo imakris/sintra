@@ -114,65 +114,77 @@ void test_attach_rejects_mismatched_fingerprint()
         (void)reader;
     }
 
-    // A control from the previous shared-copy-lock protocol must be rejected even
-    // when its size happens to match this build on a supported platform.
-    constexpr std::uint64_t k_wrong_fingerprint = sintra::detail::fnv1a_64({
-        9,
-        static_cast<uint64_t>(sintra::num_process_index_bits),
-        static_cast<uint64_t>(sintra::max_process_index),
-        static_cast<uint64_t>(sintra::max_message_length),
-        static_cast<uint64_t>(sintra::assumed_cache_line_size),
-        static_cast<uint64_t>(sintra::num_reserved_service_instances),
-    });
-    poke_fingerprint(control_file, k_wrong_fingerprint);
-
-    bool threw_typed   = false;
-    bool threw_generic = false;
-    try {
-        sintra::Ring_R<element_t> reader(directory, ring_name, capacity, 2);
-        (void)reader;
-    }
-    catch (const sintra::ring_abi_mismatch_exception& e) {
-        threw_typed = true;
-        sintra::test::require_true(
-            e.observed_fingerprint() == k_wrong_fingerprint,
-            k_failure_prefix,
-            "exception should carry the observed fingerprint");
-        sintra::test::require_true(
-            e.expected_fingerprint() == sintra::detail::k_ring_abi_fingerprint,
-            k_failure_prefix,
-            "exception should carry this binary's expected fingerprint");
-    }
-    catch (const std::exception&) {
-        threw_generic = true;
-    }
-
-    sintra::test::require_true(threw_typed,
+    // Controls from the previous shared-copy-lock protocol (ABI 9) and from the
+    // first ABI-10 layout, whose reader slots lacked namespace identities, must
+    // be rejected even when their size happens to match this build.
+    const auto previous_fingerprint = [](std::uint64_t abi_version) {
+        return sintra::detail::fnv1a_64({
+            abi_version,
+            static_cast<uint64_t>(sintra::num_process_index_bits),
+            static_cast<uint64_t>(sintra::max_process_index),
+            static_cast<uint64_t>(sintra::max_message_length),
+            static_cast<uint64_t>(sintra::assumed_cache_line_size),
+            static_cast<uint64_t>(sintra::num_reserved_service_instances),
+        });
+    };
+    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 2,
         k_failure_prefix,
-        "attach should throw ring_abi_mismatch_exception on fingerprint mismatch");
-    sintra::test::require_true(!threw_generic,
-        k_failure_prefix,
-        "attach should not fall back to a generic exception on fingerprint mismatch");
+        "reader-slot namespace identities require ABI-10 layout revision 2");
 
-    // The failed Ring_R constructor must not leak its mapped control region.
-    // Repeat the failed attach a few times; a leak would balloon virtual
-    // memory or, on Windows, eventually exhaust mapping handles. We can't
-    // assert the leak directly in a portable way, but the explicit retry
-    // makes the failure mode (e.g. address-space exhaustion in ASan or
-    // mapping-handle accumulation on Windows) reproducible if the leak
-    // ever returns.
-    for (int i = 0; i < 64; ++i) {
-        bool retry_threw_typed = false;
+    for (const std::uint64_t wrong_fingerprint : {previous_fingerprint(9), previous_fingerprint(10)}) {
+        sintra::test::require_true(wrong_fingerprint != sintra::detail::k_ring_abi_fingerprint,
+            k_failure_prefix,
+            "an earlier control layout must not share this build's fingerprint");
+        poke_fingerprint(control_file, wrong_fingerprint);
+
+        bool threw_typed   = false;
+        bool threw_generic = false;
         try {
             sintra::Ring_R<element_t> reader(directory, ring_name, capacity, 2);
             (void)reader;
         }
-        catch (const sintra::ring_abi_mismatch_exception&) {
-            retry_threw_typed = true;
+        catch (const sintra::ring_abi_mismatch_exception& e) {
+            threw_typed = true;
+            sintra::test::require_true(
+                e.observed_fingerprint() == wrong_fingerprint,
+                k_failure_prefix,
+                "exception should carry the observed fingerprint");
+            sintra::test::require_true(
+                e.expected_fingerprint() == sintra::detail::k_ring_abi_fingerprint,
+                k_failure_prefix,
+                "exception should carry this binary's expected fingerprint");
         }
-        sintra::test::require_true(retry_threw_typed,
+        catch (const std::exception&) {
+            threw_generic = true;
+        }
+
+        sintra::test::require_true(threw_typed,
             k_failure_prefix,
-            "repeated mismatched attach should keep throwing the typed exception");
+            "attach should throw ring_abi_mismatch_exception on fingerprint mismatch");
+        sintra::test::require_true(!threw_generic,
+            k_failure_prefix,
+            "attach should not fall back to a generic exception on fingerprint mismatch");
+
+        // The failed Ring_R constructor must not leak its mapped control region.
+        // Repeat the failed attach a few times; a leak would balloon virtual
+        // memory or, on Windows, eventually exhaust mapping handles. We can't
+        // assert the leak directly in a portable way, but the explicit retry
+        // makes the failure mode (e.g. address-space exhaustion in ASan or
+        // mapping-handle accumulation on Windows) reproducible if the leak
+        // ever returns.
+        for (int i = 0; i < 64; ++i) {
+            bool retry_threw_typed = false;
+            try {
+                sintra::Ring_R<element_t> reader(directory, ring_name, capacity, 2);
+                (void)reader;
+            }
+            catch (const sintra::ring_abi_mismatch_exception&) {
+                retry_threw_typed = true;
+            }
+            sintra::test::require_true(retry_threw_typed,
+                k_failure_prefix,
+                "repeated mismatched attach should keep throwing the typed exception");
+        }
     }
 
     // Restore the correct fingerprint so the writer's destructor doesn't see

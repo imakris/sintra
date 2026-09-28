@@ -502,8 +502,14 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
     return hash;
 }
 
+// Layout revision within the unreleased ring ABI version. Revision 2 of ABI 10
+// adds Linux namespace identities to reader slots; the first ABI-10 layout was
+// fingerprinted without this input, so each rejects the other's mappings.
+inline constexpr uint64_t k_ring_abi_layout_revision = 2;
+
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_sintra_ring_abi_version,
+    k_ring_abi_layout_revision,
     static_cast<uint64_t>(num_process_index_bits),
     static_cast<uint64_t>(max_process_index),
     static_cast<uint64_t>(max_message_length),
@@ -1853,16 +1859,59 @@ struct Ring:
         struct Payload : Packed_reader_state
         {
             std::atomic<sequence_counter_type> v;
+
+            // The owning process incarnation. Written only under the slot
+            // lifetime lock: published before ACTIVE, cleared after the
+            // slot's guard and count teardown. Namespace states hold
+            // Process_metadata_state values; cleared fields read UNKNOWN.
             std::atomic<uint32_t> owner_pid{0};
+            std::atomic<uint8_t>  owner_pid_namespace_state{0};
+            std::atomic<uint8_t>  owner_time_namespace_state{0};
             std::atomic<uint64_t> owner_start_stamp{0};
+            std::atomic<uint64_t> owner_pid_namespace_device{0};
+            std::atomic<uint64_t> owner_pid_namespace_inode{0};
+            std::atomic<uint64_t> owner_time_namespace_device{0};
+            std::atomic<uint64_t> owner_time_namespace_inode{0};
+
+            void publish_owner(const process_incarnation_t& incarnation)
+            {
+                const auto& namespaces = incarnation.namespaces;
+                owner_pid = incarnation.pid;
+                owner_start_stamp = incarnation.start_stamp;
+                owner_pid_namespace_state = static_cast<uint8_t>(namespaces.pid.state);
+                owner_pid_namespace_device = namespaces.pid.device;
+                owner_pid_namespace_inode = namespaces.pid.inode;
+                owner_time_namespace_state = static_cast<uint8_t>(namespaces.time.state);
+                owner_time_namespace_device = namespaces.time.device;
+                owner_time_namespace_inode = namespaces.time.inode;
+            }
+
+            void clear_owner() { publish_owner({}); }
+
+            process_incarnation_t owner() const
+            {
+                process_incarnation_t result{owner_pid.load(), owner_start_stamp.load(), {}};
+                result.namespaces.pid = {
+                    static_cast<Process_metadata_state>(owner_pid_namespace_state.load()),
+                    owner_pid_namespace_device.load(),
+                    owner_pid_namespace_inode.load()};
+                result.namespaces.time = {
+                    static_cast<Process_metadata_state>(owner_time_namespace_state.load()),
+                    owner_time_namespace_device.load(),
+                    owner_time_namespace_inode.load()};
+                return result;
+            }
         };
 
+        // The payload fills the line exactly, so no padding follows it.
         Payload data;
-        std::array<uint8_t, (assumed_cache_line_size - sizeof(Payload))> padding{};
 
         static_assert(sizeof(Payload) <= assumed_cache_line_size,
             "The payload of cache_line_sized_t exceeds the assumed cache line size.");
     };
+
+    static_assert(sizeof(cache_line_sized_t) == assumed_cache_line_size,
+        "A reader slot must occupy exactly one assumed cache line.");
 
     /**
      * A simple fixed-capacity stack of indices. Eliminates duplicate
@@ -2056,8 +2105,7 @@ struct Ring:
                     clear_reader_wakeup(i);
                     clear_slot_guard(i, Slot_read_access_release::unpaired);
                     slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
-                    slot.owner_pid = 0;
-                    slot.owner_start_stamp = 0;
+                    slot.clear_owner();
                     if (!free_rs_stack.contains(i)) {
                         free_rs_stack.push(i);
                         freed = true;
@@ -2065,8 +2113,7 @@ struct Ring:
                     continue;
                 }
 
-                const uint32_t pid = slot.owner_pid.load();
-                const auto identity = probe_process_identity(pid, slot.owner_start_stamp.load());
+                const auto identity = probe_process_identity(slot.owner());
                 if (identity.status == Process_identity_status::DEAD) {
                     clear_reader_wakeup(i);
                     const bool release_read_access = slot.status() == READER_STATE_ACTIVE;
@@ -2077,8 +2124,7 @@ struct Ring:
                             : Slot_read_access_release::unpaired);
                     slot.set_status(READER_STATE_INACTIVE);
                     slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
-                    slot.owner_pid = 0;
-                    slot.owner_start_stamp = 0;
+                    slot.clear_owner();
 
                     if (!free_rs_stack.contains(i)) {
                         free_rs_stack.push(i);
@@ -2190,9 +2236,7 @@ struct Ring:
                     ++count;
                 }
                 if (state.guard_pending() && state.pending_octile() == target_octile) {
-                    const auto& slot = reading_sequences[i].data;
-                    const auto identity = probe_process_identity(
-                        slot.owner_pid.load(), slot.owner_start_stamp.load());
+                    const auto identity = probe_process_identity(reading_sequences[i].data.owner());
                     if (identity.status != Process_identity_status::DEAD) {
                         ++count;
                     }
@@ -2546,8 +2590,10 @@ struct Ring_R : Ring<T, true>
         assert(num_elements % 8 == 0);
         assert(max_trailing_elements <= 3 * num_elements / 4);
 
-        const auto start_stamp = current_process_start_stamp();
-        if (!start_stamp || *start_stamp == 0) {
+        // Capture the incarnation at every slot acquisition: this process's
+        // namespaces may differ from those of its earlier readers.
+        const auto owner = current_process_incarnation();
+        if (!owner) {
             throw ring_acquisition_failure_exception();
         }
 
@@ -2568,8 +2614,7 @@ struct Ring_R : Ring<T, true>
                     c.clear_slot_guard(
                         m_rs_index,
                         Ring<T, true>::Control::Slot_read_access_release::unpaired);
-                    slot.owner_pid = get_current_pid();
-                    slot.owner_start_stamp = *start_stamp;
+                    slot.publish_owner(*owner);
                     slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
                     slot.set_status(Ring<T, true>::READER_STATE_ACTIVE);
 
@@ -2612,8 +2657,7 @@ struct Ring_R : Ring<T, true>
                 release_read_access
                     ? Ring<T, true>::Control::Slot_read_access_release::paired
                     : Ring<T, true>::Control::Slot_read_access_release::unpaired);
-            slot.owner_pid = 0;
-            slot.owner_start_stamp = 0;
+            slot.clear_owner();
             slot.word.fetch_and(~(Reader_state_union::copying_mask | Reader_state_union::request_mask));
             slot.set_status(Ring<T, true>::READER_STATE_INACTIVE);
 
@@ -3627,14 +3671,13 @@ struct Ring_W : Ring<T, false>
                     spinlock::locker release_lock(c.rs_stack_spinlock);
                     auto state = slot.load_state();
                     if (blocks_on_identity(state)) {
-                        const auto pid   = slot.owner_pid.load();
-                        const auto stamp = slot.owner_start_stamp.load();
-                        if (observed_pids[i] != pid || observed_stamps[i] != stamp) {
-                            observed_pids[i] = pid;
-                            observed_stamps[i] = stamp;
+                        const auto owner = slot.owner();
+                        if (observed_pids[i] != owner.pid || observed_stamps[i] != owner.start_stamp) {
+                            observed_pids[i] = owner.pid;
+                            observed_stamps[i] = owner.start_stamp;
                             unknown_attempts[i] = 0;
                         }
-                        const auto identity = probe_process_identity(pid, stamp);
+                        const auto identity = probe_process_identity(owner);
                         if (identity.status == Process_identity_status::UNKNOWN) {
                             // An unrelated UNKNOWN never fails this operation.
                             // Recheck the obstruction after each native probe.
