@@ -84,9 +84,6 @@ namespace test_hooks {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 using Owned_lifecycle_worker_event = void (*)(const char*, uint64_t) noexcept;
 inline std::atomic<Owned_lifecycle_worker_event> s_owned_lifecycle_worker_event{nullptr};
-#if defined(__MINGW32__)
-inline std::atomic<std::atomic<bool>*> s_owned_lifecycle_native_construct_marker{nullptr};
-#endif
 #endif
 } // namespace test_hooks
 
@@ -3911,15 +3908,6 @@ inline void Managed_process::start_owned_lifecycle_worker(
         }
         detail::owned_lifecycle_worker_event_for_test("before_construct", worker_id);
         auto* const record = &*reservation;
-#if defined(SINTRA_ENABLE_TEST_HOOKS) && defined(__MINGW32__)
-        // The marker follows the callback and immediately precedes native
-        // construction, so an observed blocked thread is inside std::thread.
-        if (auto* marker = detail::test_hooks::s_owned_lifecycle_native_construct_marker.load(
-                std::memory_order_acquire))
-        {
-            marker->store(true, std::memory_order_release);
-        }
-#endif
         std::thread started([this, record, worker_id, guarded = std::move(guarded)]() mutable {
             struct Body_scope
             {

@@ -10,6 +10,7 @@
 #include <thread>
 
 #if defined(__MINGW32__)
+#include <dbghelp.h>
 #include <wct.h>
 #endif
 
@@ -27,14 +28,12 @@ struct Phase
     std::condition_variable changed;
     unsigned cleanup_entered = 0;
     unsigned cleanup_done = 0;
-    unsigned before_construct = 0;
     unsigned body_completed = 0;
     unsigned post_join = 0;
     bool release_cleanup = false;
     bool admission_failed = false;
 #if defined(__MINGW32__)
     DWORD cleanup_thread_id = 0;
-    std::atomic<bool> native_construct_entered{false};
 #endif
 
     template <typename Predicate>
@@ -89,10 +88,7 @@ void on_worker_event(const char* stage, uint64_t) noexcept
     }
     {
         std::lock_guard<std::mutex> lock(phase->mutex);
-        if (std::strcmp(stage, "before_construct") == 0) {
-            ++phase->before_construct;
-        }
-        else if (std::strcmp(stage, "body_completed") == 0) {
+        if (std::strcmp(stage, "body_completed") == 0) {
             ++phase->body_completed;
         }
         else if (std::strcmp(stage, "post_join") == 0) {
@@ -123,64 +119,153 @@ bool set_key(pthread_key_t key, Phase& phase)
 #endif
 
 #if defined(__MINGW32__)
-// Winpthreads holds its creation mutex across pthread-key cleanup. Windows
-// reports this wait only as a blocked thread, without naming that mutex. The
-// marker runs after the callback and just before std::thread construction;
-// together they establish that the wait is inside native creation.
+struct Native_function_range
+{
+    DWORD64 begin = 0;
+    DWORD64 end = 0;
+
+    bool contains(DWORD64 address) const
+    {
+        return begin <= address && address < end;
+    }
+};
+
+Native_function_range native_function_range(HMODULE module, const char* name)
+{
+    const FARPROC entry = module ? GetProcAddress(module, name) : nullptr;
+    DWORD64 image_base = 0;
+    const auto* unwind = entry ? RtlLookupFunctionEntry(
+        reinterpret_cast<DWORD64>(entry), &image_base, nullptr) : nullptr;
+    return unwind ? Native_function_range{
+        image_base + unwind->BeginAddress, image_base + unwind->EndAddress} :
+        Native_function_range{};
+}
+
+// A stack with pthread_mutex_lock below pthread_create resolves the native
+// acquisition. In this winpthreads path pthread_create first calls
+// pop_pthread_mem, which locks mtx_pthr_locked; key cleanup holds that mutex.
+bool blocked_in_native_creation_lock(HANDLE thread, HANDLE process,
+    const Native_function_range& create, const Native_function_range& lock,
+    std::array<DWORD64, 32>& last_stack, unsigned& last_count)
+{
+    if (SuspendThread(thread) == DWORD(-1)) {
+        return false;
+    }
+    bool matched = false;
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_FULL;
+    if (GetThreadContext(thread, &context)) {
+        STACKFRAME64 frame{};
+        frame.AddrPC.Offset = context.Rip;
+        frame.AddrPC.Mode = AddrModeFlat;
+        frame.AddrFrame.Offset = context.Rbp;
+        frame.AddrFrame.Mode = AddrModeFlat;
+        frame.AddrStack.Offset = context.Rsp;
+        frame.AddrStack.Mode = AddrModeFlat;
+        last_count = 0;
+        while (last_count < last_stack.size() &&
+            StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame,
+                &context, nullptr, SymFunctionTableAccess64, SymGetModuleBase64,
+                nullptr))
+        {
+            const auto address = frame.AddrPC.Offset;
+            if (!address) {
+                break;
+            }
+            last_stack[last_count++] = address;
+        }
+        bool saw_lock = false;
+        for (unsigned i = 0; i < last_count; ++i) {
+            saw_lock |= lock.contains(last_stack[i]);
+            if (saw_lock && create.contains(last_stack[i])) {
+                matched = true;
+                break;
+            }
+        }
+    }
+    ResumeThread(thread);
+    return matched;
+}
+
 bool native_creation_waits_on_cleanup(DWORD admitting_thread_id,
-    DWORD cleanup_thread_id, const std::atomic<bool>& native_construct_entered)
+    DWORD cleanup_thread_id)
 {
     const HWCT session = OpenThreadWaitChainSession(0, nullptr);
     if (!check(session != nullptr, "wait-chain session opened")) {
         return false;
     }
+    const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+        THREAD_QUERY_INFORMATION, FALSE, admitting_thread_id);
+    const HANDLE process = GetCurrentProcess();
+    const HMODULE winpthreads = GetModuleHandleA("libwinpthread-1.dll");
+    const auto create = native_function_range(winpthreads, "pthread_create");
+    const auto lock = native_function_range(winpthreads, "pthread_mutex_lock");
+    const bool ready = thread && create.begin && lock.begin &&
+        SymInitialize(process, nullptr, TRUE);
+    if (!check(ready, "native stack inspection initialized")) {
+        if (thread) {
+            CloseHandle(thread);
+        }
+        CloseThreadWaitChainSession(session);
+        return false;
+    }
     bool observed = false;
-    std::array<WAITCHAIN_NODE_INFO, 16> last_nodes{};
-    DWORD last_count = 0;
+    std::array<DWORD64, 32> last_stack{};
+    unsigned last_count = 0;
     DWORD last_error = 0;
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     do {
         std::array<WAITCHAIN_NODE_INFO, 16> nodes{};
         DWORD count = static_cast<DWORD>(nodes.size());
         BOOL cycle = FALSE;
-        if (native_construct_entered.load(std::memory_order_acquire)) {
-            if (GetThreadWaitChain(session, 0, 0, admitting_thread_id,
-                    &count, nodes.data(), &cycle))
+        if (GetThreadWaitChain(session, 0, 0, admitting_thread_id,
+                &count, nodes.data(), &cycle))
+        {
+            if (count >= 1 && nodes[0].ObjectType == WctThreadType &&
+                nodes[0].ThreadObject.ThreadId == admitting_thread_id &&
+                nodes[0].ObjectStatus == WctStatusBlocked)
             {
-                last_nodes = nodes;
-                last_count = count;
-                observed = count >= 1 && nodes[0].ObjectType == WctThreadType &&
-                    nodes[0].ThreadObject.ThreadId == admitting_thread_id &&
-                    nodes[0].ObjectStatus == WctStatusBlocked;
+                observed = blocked_in_native_creation_lock(thread, process,
+                    create, lock, last_stack, last_count);
             }
-            else {
-                last_error = GetLastError();
-            }
+        }
+        else {
+            last_error = GetLastError();
         }
         if (!observed) {
             std::this_thread::yield();
         }
     } while (!observed && std::chrono::steady_clock::now() < deadline);
+    SymCleanup(process);
+    CloseHandle(thread);
     CloseThreadWaitChainSession(session);
     if (!observed) {
-        std::fprintf(stderr, "WCT admitting=%lu cleanup=%lu entered=%d count=%lu error=%lu\n",
-            admitting_thread_id, cleanup_thread_id,
-            native_construct_entered.load(std::memory_order_acquire),
-            last_count, last_error);
-        for (DWORD i = 0; i < last_count && i < last_nodes.size(); ++i) {
-            std::fprintf(stderr, "WCT node %lu type=%d status=%d thread=%lu\n",
-                i, last_nodes[i].ObjectType, last_nodes[i].ObjectStatus,
-                last_nodes[i].ObjectType == WctThreadType ?
-                    last_nodes[i].ThreadObject.ThreadId : 0);
+        std::fprintf(stderr, "native stack admitting=%lu cleanup=%lu count=%u error=%lu\n",
+            admitting_thread_id, cleanup_thread_id, last_count, last_error);
+        for (unsigned i = 0; i < last_count; ++i) {
+            std::fprintf(stderr, "frame %u: %llx\n", i,
+                static_cast<unsigned long long>(last_stack[i]));
         }
     }
     if (observed) {
+        DWORD64 lock_offset = 0;
+        DWORD64 create_offset = 0;
+        for (unsigned i = 0; i < last_count; ++i) {
+            if (lock.contains(last_stack[i])) {
+                lock_offset = last_stack[i] - lock.begin;
+            }
+            if (create.contains(last_stack[i])) {
+                create_offset = last_stack[i] - create.begin;
+            }
+        }
         std::fprintf(stderr,
-            "NATIVE_WAIT: admitting=%lu blocked inside std::thread while cleanup=%lu holds winpthreads lock\n",
-            admitting_thread_id, cleanup_thread_id);
+            "NATIVE_LOCK_WAIT: admitting=%lu pthread_mutex_lock+%llx -> "
+            "pthread_create+%llx; cleanup=%lu\n",
+            admitting_thread_id, static_cast<unsigned long long>(lock_offset),
+            static_cast<unsigned long long>(create_offset), cleanup_thread_id);
     }
     return check(cleanup_thread_id != 0 && observed,
-        "native winpthreads creation waits during cleanup");
+        "pthread_create waits in pthread_mutex_lock during cleanup");
 }
 
 bool first_admission_overlaps_application_cleanup(Phase& phase)
@@ -199,36 +284,35 @@ bool first_admission_overlaps_application_cleanup(Phase& phase)
     std::atomic<DWORD> ordinary_thread_id{0};
     std::thread ordinary([&] {
         {
+            std::lock_guard<std::mutex> lock(phase.mutex);
+            ordinary_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+        }
+        phase.changed.notify_all();
+        {
             std::unique_lock<std::mutex> lock(admission_mutex);
             admission_changed.wait(lock, [&] { return release_admission; });
         }
-        ordinary_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
         sintra::s_mproc->start_owned_lifecycle_worker([] {});
         ordinary_returned.store(true, std::memory_order_release);
     });
+    bool valid = check(phase.wait([&] {
+        return ordinary_thread_id.load(std::memory_order_acquire) != 0;
+    }), "ordinary admission thread identified before cleanup");
     std::atomic<bool> key_set{false};
     std::thread application([&] {
         key_set.store(set_key(key, phase), std::memory_order_release);
     });
-    bool valid = check(phase.wait([&] { return phase.cleanup_entered == 1; }),
+    valid &= check(phase.wait([&] { return phase.cleanup_entered == 1; }),
         "application pthread-key destructor entered");
-    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
-        &phase.native_construct_entered, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(admission_mutex);
         release_admission = true;
     }
     admission_changed.notify_all();
-    const bool reached = phase.wait([&] { return phase.before_construct >= 1; });
-    valid &= check(reached,
-        "first ordinary admission reached native construction");
-    if (reached) {
+    if (ordinary_thread_id.load(std::memory_order_acquire) != 0) {
         valid &= native_creation_waits_on_cleanup(
-            ordinary_thread_id.load(std::memory_order_acquire), phase.cleanup_thread_id,
-            phase.native_construct_entered);
+            ordinary_thread_id.load(std::memory_order_acquire), phase.cleanup_thread_id);
     }
-    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
-        nullptr, std::memory_order_release);
     valid &= check(!ordinary_returned.load(std::memory_order_acquire),
         "native construction remains blocked during key cleanup");
     phase.release();
@@ -260,37 +344,36 @@ bool owned_cleanup_overlaps_construction(Phase& phase)
     std::atomic<DWORD> other_thread_id{0};
     std::thread other([&] {
         {
+            std::lock_guard<std::mutex> lock(phase.mutex);
+            other_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+        }
+        phase.changed.notify_all();
+        {
             std::unique_lock<std::mutex> lock(admission_mutex);
             admission_changed.wait(lock, [&] { return release_admission; });
         }
-        other_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
         sintra::s_mproc->start_owned_lifecycle_worker([] {});
         other_returned.store(true, std::memory_order_release);
     });
+    bool valid = check(phase.wait([&] {
+        return other_thread_id.load(std::memory_order_acquire) != 0;
+    }), "separate admission thread identified before owned worker");
     std::atomic<bool> key_set{false};
     sintra::s_mproc->start_owned_lifecycle_worker([&] {
         key_set.store(set_key(key, phase), std::memory_order_release);
     });
-    bool valid = check(phase.wait([&] {
+    valid &= check(phase.wait([&] {
         return phase.cleanup_entered == 1 && phase.body_completed >= 1;
     }), "owned pthread-key destructor overlaps body completion");
-    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
-        &phase.native_construct_entered, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(admission_mutex);
         release_admission = true;
     }
     admission_changed.notify_all();
-    const bool reached = phase.wait([&] { return phase.before_construct >= 2; });
-    valid &= check(reached,
-        "separate admission reached native construction");
-    if (reached) {
+    if (other_thread_id.load(std::memory_order_acquire) != 0) {
         valid &= native_creation_waits_on_cleanup(
-            other_thread_id.load(std::memory_order_acquire), phase.cleanup_thread_id,
-            phase.native_construct_entered);
+            other_thread_id.load(std::memory_order_acquire), phase.cleanup_thread_id);
     }
-    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
-        nullptr, std::memory_order_release);
     valid &= check(!other_returned.load(std::memory_order_acquire),
         "native construction remains blocked during owned-worker cleanup");
     phase.release();
