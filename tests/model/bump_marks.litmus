@@ -1,0 +1,12 @@
+C spinlock_stale_bump_marks
+{
+  [G] = 1;
+}
+P0 (atomic_int* G) {
+  atomic_fetch_add_explicit(G, 2, memory_order_acq_rel);
+}
+P1 (atomic_int* G) {
+  atomic_fetch_add_explicit(G, 1, memory_order_acq_rel);
+  atomic_fetch_add_explicit(G, 1, memory_order_acq_rel);
+}
+exists (G=3)

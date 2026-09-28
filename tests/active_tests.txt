@@ -139,6 +139,7 @@ shutdown_user_barrier_departure_test                     1
 spawn_detached_test                                     50
 spawn_wait_test                                         10
 spinlock_recovery_test                                   1
+spinlock_real_clock_test                                 1
 teardown_targeted_rpc_exception_test                     5
 tls_post_handler_test                                   20
 tn_type_hash_test                                       10

@@ -1,0 +1,25 @@
+C spinlock_stale_winning_contender
+{
+  [O] = 0; [G] = 0; [S] = 0; [D] = 0; [EA] = 0; [EB] = 0;
+}
+P0 (atomic_int* O, atomic_int* G, atomic_int* S, atomic_int* D, int* EA) {
+  int s = atomic_load_explicit(S, memory_order_acquire);
+  if (s == 1) {
+    atomic_compare_exchange_strong_explicit(O, EA, 1, memory_order_acquire, memory_order_relaxed);
+    atomic_fetch_add_explicit(G, 1, memory_order_acq_rel);
+    atomic_fetch_add_explicit(G, 1, memory_order_acq_rel);
+    atomic_store_explicit(O, 0, memory_order_release);
+    atomic_store_explicit(D, 1, memory_order_release);
+  }
+}
+P1 (atomic_int* O, atomic_int* G, atomic_int* S, atomic_int* D, int* EB) {
+  int zero_probe = atomic_load_explicit(O, memory_order_relaxed);
+  atomic_store_explicit(S, 1, memory_order_release);
+  int d = atomic_load_explicit(D, memory_order_acquire);
+  int won = atomic_compare_exchange_strong_explicit(O, EB, 2, memory_order_acquire, memory_order_relaxed);
+  if (won == 1) {
+    atomic_fetch_add_explicit(G, 1, memory_order_acq_rel);
+  }
+  int g = atomic_load_explicit(G, memory_order_acquire);
+}
+exists (1:zero_probe=0 /\ 1:d=1 /\ 1:won=1 /\ 1:g=1)

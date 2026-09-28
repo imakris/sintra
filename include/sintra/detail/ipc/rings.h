@@ -511,7 +511,9 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // destroy a live revision-3 writer's ownership, so the two must not share a
 // control mapping. Revision 4 records the owners of the control block's
 // spinlocks and ownership mutex as process instances.
-inline constexpr uint64_t k_ring_abi_layout_revision = 4;
+// Revision 5 gives the spinlock's second word generation semantics instead of
+// a wall-clock progress stamp. Old controls cannot be safely attached.
+inline constexpr uint64_t k_ring_abi_layout_revision = 5;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_sintra_ring_abi_version,

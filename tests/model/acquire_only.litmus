@@ -1,0 +1,18 @@
+C spinlock_acquire_only
+{
+  [O] = 1; [G] = 1; [E] = 0;
+}
+P0 (atomic_int* O, atomic_int* G, int* E) {
+  atomic_fetch_add_explicit(G, 1, memory_order_acq_rel);
+  atomic_store_explicit(O, 0, memory_order_release);
+  int expected = 0;
+  atomic_compare_exchange_strong_explicit(O, E, 2, memory_order_acquire, memory_order_relaxed);
+  atomic_fetch_add_explicit(G, 1, memory_order_acq_rel);
+}
+P1 (atomic_int* O, atomic_int* G) {
+  int g0 = atomic_load_explicit(G, memory_order_acquire);
+  int o0 = atomic_fetch_add_explicit(O, 0, memory_order_acq_rel);
+  int oi = atomic_fetch_add_explicit(O, 0, memory_order_acq_rel);
+  int gi = atomic_load_explicit(G, memory_order_acquire);
+}
+exists (1:g0=1 /\ 1:o0=1 /\ 1:oi=2 /\ 1:gi=1)

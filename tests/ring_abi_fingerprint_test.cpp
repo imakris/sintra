@@ -114,7 +114,8 @@ void test_attach_rejects_mismatched_fingerprint()
     // Controls from the previous shared-copy-lock protocol (ABI 9), from the
     // first ABI-10 layout, whose reader slots lacked namespace identities, from
     // ABI-10 revision 2, whose Windows writers rebuild ownership_mutex from
-    // writer_pid, and from revision 3, whose locks recorded owners by PID alone,
+    // writer_pid, from revision 3, whose locks recorded owners by PID alone,
+    // and from revision 4, whose second spinlock word was a wall-clock stamp,
     // must be rejected even when their size happens to match.
     const auto previous_fingerprint = [](std::uint64_t abi_version) {
         return sintra::detail::fnv1a_64({
@@ -137,17 +138,17 @@ void test_attach_rejects_mismatched_fingerprint()
             static_cast<uint64_t>(sintra::num_reserved_service_instances),
         });
     };
-    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 4,
+    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 5,
         k_failure_prefix,
-        "process-instance lock owners require ABI-10 layout revision 4");
+        "spinlock generation words require ABI-10 layout revision 5");
     sintra::test::require_true(
-        revision_fingerprint(4) == sintra::detail::k_ring_abi_fingerprint,
+        revision_fingerprint(5) == sintra::detail::k_ring_abi_fingerprint,
         k_failure_prefix,
         "the revision fixture must reproduce this build's fingerprint");
 
     for (const std::uint64_t wrong_fingerprint :
             {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(2),
-                revision_fingerprint(3)})
+                revision_fingerprint(3), revision_fingerprint(4)})
     {
         sintra::test::require_true(wrong_fingerprint != sintra::detail::k_ring_abi_fingerprint,
             k_failure_prefix,

@@ -128,6 +128,31 @@ exited. An owner with the observer's own instance is held by the observer's
 process, through whichever mapping, and keeps excluding. A token collision
 fails safe, as ownership by the observer's process.
 
+The shared spinlock's live-stall diagnostic requires an unchanged odd
+generation and owner across a baseline and later OS-reported waiter thread-CPU
+samples. It aborts when their direct difference reaches two seconds, the owner
+is still live, debug pause is inactive, and a final owner/generation check
+agrees. This is an approximate diagnostic timeout: one reported two-second
+jump can reach it, including if a system charges a suspended or descheduled
+interval to thread CPU. Wall time alone does not count. Death recovery requires
+process-instance death evidence and an owner-word CAS; time never licenses a
+takeover. A holder stopped between its acquisition CAS and odd mark, or between
+its even mark and release store, may escape live-stall diagnosis while stopped.
+Those publication gaps are permitted misses; death remains recoverable.
+
+The generation witness assumes its observed modification history does not
+advance by a full 2^64 cycle. A full repetition can hide intervening holds and
+cause a false diagnostic abort. The assumption is a disclosed operational
+residual, not a guaranteed lifetime or rate bound.
+
+**Recovery ABA residual (separate item).** A recoverer paused after proving an
+owner dead but before its owner-word CAS can later take over a live process
+whose recycled PID and 32-bit token repeat the dead owner's word. This needs a
+token collision on PID reuse inside that pause (probability 2^-32 for one
+independent random draw). The generation witness detects the intervening holds
+for stall diagnosis, but does not prevent that stale recovery CAS. Resolving
+this identity-lifetime issue is tracked separately.
+
 **7. Define the contract before working around behaviour.**
 When a mechanism causes trouble, first decide what it should do. Don't accept
 its current behaviour and pay to work around it.

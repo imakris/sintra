@@ -1,0 +1,23 @@
+C spinlock_aba_withheld_marks
+{
+  [O] = 1; [G] = 1; [S] = 0; [D] = 0; [E1] = 1; [E2] = 2;
+}
+P0 (atomic_int* O, atomic_int* G, atomic_int* S, atomic_int* D, int* E1, int* E2) {
+  int s = atomic_load_explicit(S, memory_order_acquire);
+  if (s == 1) {
+    atomic_fetch_add_explicit(G, 2, memory_order_acq_rel);
+    atomic_compare_exchange_strong_explicit(O, E1, 2, memory_order_acq_rel, memory_order_acquire);
+    atomic_fetch_add_explicit(G, 2, memory_order_acq_rel);
+    atomic_compare_exchange_strong_explicit(O, E2, 1, memory_order_acq_rel, memory_order_acquire);
+    atomic_store_explicit(D, 1, memory_order_release);
+  }
+}
+P1 (atomic_int* O, atomic_int* G, atomic_int* S, atomic_int* D) {
+  int g0 = atomic_load_explicit(G, memory_order_acquire);
+  int o0 = atomic_fetch_add_explicit(O, 0, memory_order_acq_rel);
+  atomic_store_explicit(S, 1, memory_order_release);
+  int d = atomic_load_explicit(D, memory_order_acquire);
+  int oi = atomic_fetch_add_explicit(O, 0, memory_order_acq_rel);
+  int gi = atomic_load_explicit(G, memory_order_acquire);
+}
+exists (1:d=1 /\ 1:gi=5)

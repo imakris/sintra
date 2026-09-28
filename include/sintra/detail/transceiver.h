@@ -728,7 +728,8 @@ private:
     // so this cannot deadlock.
     //
     // Every other caller of the same exported function spins on that spinlock
-    // meanwhile, and a hold longer than the spinlock's live-owner timeout
+    // meanwhile, and an unchanged marked hold spanning two seconds of
+    // OS-reported waiting-thread CPU time
     // aborts the process. m_rpc_lifecycle_mutex must therefore only ever be
     // held briefly: never across user code such as the log callback.
     //

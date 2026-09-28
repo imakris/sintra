@@ -1,0 +1,15 @@
+C spinlock_takeover_bump
+{
+  [O] = 1; [G] = 1; [E] = 1;
+}
+P0 (atomic_int* O, atomic_int* G, int* E) {
+  atomic_fetch_add_explicit(G, 2, memory_order_acq_rel);
+  atomic_compare_exchange_strong_explicit(O, E, 2, memory_order_acq_rel, memory_order_acquire);
+}
+P1 (atomic_int* O, atomic_int* G) {
+  int g0 = atomic_load_explicit(G, memory_order_acquire);
+  int o0 = atomic_fetch_add_explicit(O, 0, memory_order_acq_rel);
+  int oi = atomic_fetch_add_explicit(O, 0, memory_order_acq_rel);
+  int gi = atomic_load_explicit(G, memory_order_acquire);
+}
+exists (1:g0=1 /\ 1:o0=1 /\ 1:oi=2 /\ 1:gi=1)

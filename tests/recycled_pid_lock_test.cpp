@@ -64,8 +64,7 @@ uint64_t earlier_instance()
 
 void install_spinlock_owner(sintra::spinlock& lock, uint64_t owner)
 {
-    lock.m_owner.store(owner, std::memory_order_release);
-    lock.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+    lock.test_install_owner(owner, 1);
 }
 
 void install_earlier_mutex_owner(sintra::detail::interprocess_mutex& mutex)
@@ -88,14 +87,14 @@ void ring_spinlock_left_by_earlier_process()
 
     install_spinlock_owner(lock, earlier_instance());
     lock.lock();
-    const uint64_t owner = lock.m_owner.load();
+    const uint64_t owner = lock.test_owner();
     lock.unlock();
     require(owner == self_instance(),
         "a slot-stack spinlock left by an earlier process with this PID must be taken over");
 
     install_spinlock_owner(lock, earlier_instance());
     Reader replacement(directory.str(), "raw", elements);
-    require(replacement.m_rs_index != keeper.m_rs_index && lock.m_owner.load() == 0,
+    require(replacement.m_rs_index != keeper.m_rs_index && lock.test_owner() == 0,
         "a replacement reader with the dead reader's PID must acquire a slot and release the lock");
 }
 
@@ -257,7 +256,7 @@ void fork_child_draws_own_instance()
         }
         shared->lock.lock();
         const bool excluded = shared->parent_released.load();
-        const bool recorded = shared->lock.m_owner.load() == self_instance();
+        const bool recorded = shared->lock.test_owner() == self_instance();
         shared->lock.unlock();
         if (!excluded) {
             ::_exit(3);
