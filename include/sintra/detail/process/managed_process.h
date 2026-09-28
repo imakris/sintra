@@ -1506,6 +1506,29 @@ private:
 
 } // namespace detail
 
+namespace detail {
+
+struct Lifecycle_worker_admission_closed: std::runtime_error
+{
+    Lifecycle_worker_admission_closed():
+        std::runtime_error("Sintra lifecycle worker admission is closed.")
+    {}
+};
+
+// This flag covers the callable and destruction of its body-owned captures.
+// Thread-exit cleanup runs after it is cleared and cannot use this guard.
+inline thread_local bool tl_owned_lifecycle_worker_body = false;
+
+inline void reject_owned_lifecycle_worker_teardown(const char* api_name)
+{
+    if (tl_owned_lifecycle_worker_body) {
+        throw std::logic_error(
+            std::string(api_name) + " must not be called from an owned lifecycle worker body.");
+    }
+}
+
+} // namespace detail
+
 
 
 template <typename T>
@@ -1914,6 +1937,7 @@ public:
         instance_id_type failure_process_instance_id = invalid_instance_id,
         uint32_t failure_occurrence = 0);
     void join_owned_lifecycle_workers();
+    void run_owned_lifecycle_reaper() noexcept;
     Native_family_status observe_native_family();
     void observe_native_family_changes(const Managed_child_native_change_signal& signal);
     detail::Managed_child_change_condition m_native_family_changed;
@@ -1947,13 +1971,22 @@ public:
     std::map<instance_id_type, detail::Managed_child_active_occurrence>
                                         m_child_custody_by_process;
     mutable std::mutex                  m_owned_lifecycle_workers_mutex;
-    bool                                m_owned_lifecycle_worker_admission_open = true;
+    std::condition_variable             m_owned_lifecycle_workers_changed;
+    bool                                m_owned_lifecycle_worker_admission_open = false;
+    bool                                m_owned_lifecycle_reaper_draining = false;
+    bool                                m_owned_lifecycle_reaper_joining = false;
+    bool                                m_owned_lifecycle_reaper_joined = false;
+    uint64_t                            m_next_owned_lifecycle_worker_id = 1;
+    std::thread                         m_owned_lifecycle_reaper;
     struct Owned_lifecycle_worker
     {
-        std::thread                         thread;
-        std::shared_ptr<std::atomic<bool>>  complete;
+        uint64_t    id = 0;
+        std::thread thread;
+        bool        published = false;
+        bool        body_completed = false;
+        bool        joining = false;
     };
-    std::vector<Owned_lifecycle_worker> m_owned_lifecycle_workers;
+    std::list<Owned_lifecycle_worker> m_owned_lifecycle_workers;
     std::mutex                          m_child_exit_dispatch_mutex;
     std::condition_variable             m_child_exit_dispatch_changed;
     std::thread                         m_child_exit_dispatch_thread;

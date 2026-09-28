@@ -698,6 +698,7 @@ namespace detail {
 /// Ordinary callers should use `shutdown()` instead.
 inline bool finalize_impl()
 {
+    reject_owned_lifecycle_worker_teardown("sintra::detail::finalize_impl()");
     if (!s_mproc) {
         return false;
     }
@@ -924,6 +925,7 @@ inline void validate_leave_context()
 /// path is an illegal composition.
 inline bool finalize()
 {
+    reject_owned_lifecycle_worker_teardown("sintra::detail::finalize()");
     close_teardown_admission_and_claim_state(
         shutdown_protocol_state::finalizing,
         "sintra::detail::finalize()");
@@ -1070,11 +1072,13 @@ inline bool coordinator_can_leave_now()
 
 inline bool shutdown()
 {
+    detail::reject_owned_lifecycle_worker_teardown("sintra::shutdown()");
     return shutdown(shutdown_options{});
 }
 
 inline bool shutdown(const shutdown_options& options)
 {
+    detail::reject_owned_lifecycle_worker_teardown("sintra::shutdown()");
     const bool resume_finalization =
         detail::close_teardown_admission_for_shutdown("sintra::shutdown()");
 
@@ -1188,6 +1192,7 @@ inline bool shutdown(const shutdown_options& options)
 
 inline bool leave()
 {
+    detail::reject_owned_lifecycle_worker_teardown("sintra::leave()");
     detail::validate_leave_context();
     detail::close_teardown_admission_and_claim_state(
         detail::shutdown_protocol_state::local_departure_entered,

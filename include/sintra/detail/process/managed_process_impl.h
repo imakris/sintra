@@ -27,6 +27,7 @@
 #include <limits>
 #include <vector>
 #include <memory>
+#include <new>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -78,6 +79,28 @@ inline void child_reaped_for_test(pid_t pid, int status) noexcept
 #endif
 
 namespace detail {
+
+namespace test_hooks {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+using Owned_lifecycle_worker_event = void (*)(const char*, uint64_t) noexcept;
+inline std::atomic<Owned_lifecycle_worker_event> s_owned_lifecycle_worker_event{nullptr};
+#endif
+} // namespace test_hooks
+
+inline void owned_lifecycle_worker_event_for_test(
+    const char* stage, uint64_t worker_id) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_owned_lifecycle_worker_event.load(
+            std::memory_order_acquire))
+    {
+        callback(stage, worker_id);
+    }
+#else
+    (void)stage;
+    (void)worker_id;
+#endif
+}
 
 inline Managed_child_exit_subscription_state::
 Managed_child_exit_subscription_state(
@@ -2836,8 +2859,6 @@ Managed_process::Managed_process():
         m_process_start_stamp = *start_stamp;
     }
 
-    install_signal_handler();
-
     // NOTE: Do not use external library helpers for process creation time,
     // it is only implemented for Windows.
     m_time_instantiated = std::chrono::steady_clock::now();
@@ -3130,6 +3151,20 @@ inline void Managed_process::reap_finished_children()
 inline
 void Managed_process::init(int argc, const char* const* argv)
 {
+    // Start the sole joiner before any runtime service can admit lifecycle
+    // work. If construction fails, admission is still closed and init rolls
+    // back through the ordinary failed-init cleanup.
+    detail::managed_child_failure_for_test(
+        "owned_lifecycle_reaper_construct", invalid_instance_id, 0);
+    std::thread reaper([this] { run_owned_lifecycle_reaper(); });
+    {
+        std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+        m_owned_lifecycle_reaper = std::move(reaper);
+        m_owned_lifecycle_worker_admission_open = true;
+    }
+    detail::managed_child_failure_for_test(
+        "owned_lifecycle_after_reaper_publication", invalid_instance_id, 0);
+    install_signal_handler();
 #ifdef _WIN32
     if (detail::native_process_family().m_active.load()) {
         start_owned_lifecycle_worker([this]() { observe_native_family_job(); });
@@ -3843,40 +3878,27 @@ inline void Managed_process::start_owned_lifecycle_worker(
     instance_id_type failure_process_instance_id,
     uint32_t failure_occurrence)
 {
-    // Join finished workers outside the ownership lock, so no thread's exit
-    // path can wait for an admission that is waiting for it.
-    std::vector<std::thread> finished;
+    std::function<void()> guarded;
+    std::list<Owned_lifecycle_worker>::iterator reservation;
+    uint64_t worker_id;
     {
         std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
-        for (auto it = m_owned_lifecycle_workers.begin(); it != m_owned_lifecycle_workers.end();) {
-            if (it->complete->load(std::memory_order_acquire)) {
-                finished.push_back(std::move(it->thread));
-                it = m_owned_lifecycle_workers.erase(it);
-            }
-            else {
-                ++it;
-            }
+        if (!m_owned_lifecycle_worker_admission_open) {
+            throw detail::Lifecycle_worker_admission_closed();
         }
-    }
-    for (auto& thread : finished) {
-        if (thread.joinable()) {
-            thread.join();
+        guarded = detail::Exception_boundary{"owned_lifecycle_worker"}.wrap(
+            std::move(worker));
+        if (detail::managed_child_failure_selected_for_test(
+                "owned_lifecycle_worker_allocation", invalid_instance_id, 0))
+        {
+            throw std::bad_alloc();
         }
+        reservation = m_owned_lifecycle_workers.emplace(
+            m_owned_lifecycle_workers.end());
+        worker_id = m_next_owned_lifecycle_worker_id++;
+        reservation->id = worker_id;
     }
-
-    std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
-    if (!m_owned_lifecycle_worker_admission_open) {
-        throw std::runtime_error("Sintra lifecycle worker admission is closed.");
-    }
-    auto complete = std::make_shared<std::atomic<bool>>(false);
-    auto guarded = detail::Exception_boundary{"owned_lifecycle_worker"}.wrap(
-        std::move(worker));
-    // Register a nonjoinable owned slot first. If injection or std::thread
-    // construction fails, erasing this slot is safe; no joinable local thread
-    // can escape registration and trigger std::terminate during unwinding.
-    m_owned_lifecycle_workers.emplace_back();
-    auto& owned = m_owned_lifecycle_workers.back();
-    owned.complete = complete;
+    detail::owned_lifecycle_worker_event_for_test("reserved", worker_id);
     try {
         if (failure_stage) {
             detail::managed_child_failure_for_test(
@@ -3884,30 +3906,90 @@ inline void Managed_process::start_owned_lifecycle_worker(
                 failure_process_instance_id,
                 failure_occurrence);
         }
-        owned.thread = std::thread(
-            [guarded = std::move(guarded), complete]() mutable {
-                // Completion comes from this thread's exit cleanup. Constructed
-                // first, this thread_local is destroyed after the callable's
-                // captures and after every thread_local the worker constructs,
-                // so a reaped thread runs no more user code.
-                struct Exit_signal
-                {
-                    std::shared_ptr<std::atomic<bool>> complete;
-                    ~Exit_signal()
-                    {
-                        if (complete) {
-                            complete->store(true, std::memory_order_release);
-                        }
-                    }
-                };
-                thread_local Exit_signal exit_signal;
-                exit_signal.complete = std::move(complete);
-                guarded();
-            });
+        detail::owned_lifecycle_worker_event_for_test("before_construct", worker_id);
+        auto* const record = &*reservation;
+        std::thread started([this, record, worker_id, guarded = std::move(guarded)]() mutable {
+            struct Body_scope
+            {
+                ~Body_scope() { detail::tl_owned_lifecycle_worker_body = false; }
+            };
+            detail::tl_owned_lifecycle_worker_body = true;
+            {
+                Body_scope scope;
+                auto body = std::move(guarded);
+                detail::owned_lifecycle_worker_event_for_test("body_started", worker_id);
+                body();
+            }
+            {
+                std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+                record->body_completed = true;
+            }
+            detail::owned_lifecycle_worker_event_for_test("body_completed", worker_id);
+            m_owned_lifecycle_workers_changed.notify_all();
+        });
+        detail::owned_lifecycle_worker_event_for_test("before_publish", worker_id);
+        {
+            std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+            reservation->thread = std::move(started);
+            reservation->published = true;
+            m_owned_lifecycle_workers_changed.notify_all();
+        }
+        detail::owned_lifecycle_worker_event_for_test("published", worker_id);
     }
     catch (...) {
-        m_owned_lifecycle_workers.pop_back();
+        {
+            std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+            m_owned_lifecycle_workers.erase(reservation);
+            m_owned_lifecycle_workers_changed.notify_all();
+        }
         throw;
+    }
+}
+
+inline void Managed_process::run_owned_lifecycle_reaper() noexcept
+{
+    for (;;) {
+        std::list<Owned_lifecycle_worker>::iterator selected;
+        {
+            std::unique_lock<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+            m_owned_lifecycle_workers_changed.wait(lock, [&] {
+                if (m_owned_lifecycle_reaper_draining && m_owned_lifecycle_workers.empty()) {
+                    return true;
+                }
+                return std::any_of(
+                    m_owned_lifecycle_workers.begin(), m_owned_lifecycle_workers.end(),
+                    [this](const Owned_lifecycle_worker& record) {
+                        return record.published && !record.joining &&
+                            (record.body_completed || m_owned_lifecycle_reaper_draining);
+                    });
+            });
+            if (m_owned_lifecycle_reaper_draining && m_owned_lifecycle_workers.empty()) {
+                return;
+            }
+            selected = std::find_if(
+                m_owned_lifecycle_workers.begin(), m_owned_lifecycle_workers.end(),
+                [this](const Owned_lifecycle_worker& record) {
+                    return record.published && !record.joining &&
+                        (record.body_completed || m_owned_lifecycle_reaper_draining);
+                });
+            selected->joining = true;
+        }
+        // Keep the record owned throughout join, including thread-exit cleanup.
+        if (!selected->thread.joinable()) {
+            std::terminate();
+        }
+        try {
+            selected->thread.join();
+        }
+        catch (...) {
+            std::terminate();
+        }
+        detail::owned_lifecycle_worker_event_for_test("post_join", selected->id);
+        {
+            std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+            m_owned_lifecycle_workers.erase(selected);
+        }
+        m_owned_lifecycle_workers_changed.notify_all();
     }
 }
 
@@ -4049,16 +4131,32 @@ inline void Managed_process::dispatch_child_exit_subscription(
 
 inline void Managed_process::join_owned_lifecycle_workers()
 {
-    std::vector<Owned_lifecycle_worker> workers;
+    detail::reject_owned_lifecycle_worker_teardown(
+        "Managed_process::join_owned_lifecycle_workers()");
+    {
+        std::unique_lock<std::mutex> lock(m_owned_lifecycle_workers_mutex);
+        m_owned_lifecycle_worker_admission_open = false;
+        m_owned_lifecycle_reaper_draining = true;
+        m_owned_lifecycle_workers_changed.notify_all();
+        if (m_owned_lifecycle_reaper_joined) {
+            return;
+        }
+        if (m_owned_lifecycle_reaper_joining) {
+            m_owned_lifecycle_workers_changed.wait(lock, [this] {
+                return m_owned_lifecycle_reaper_joined;
+            });
+            return;
+        }
+        m_owned_lifecycle_reaper_joining = true;
+    }
+    detail::owned_lifecycle_worker_event_for_test("drain_requested", 0);
+    if (m_owned_lifecycle_reaper.joinable()) {
+        m_owned_lifecycle_reaper.join();
+    }
     {
         std::lock_guard<std::mutex> lock(m_owned_lifecycle_workers_mutex);
-        m_owned_lifecycle_worker_admission_open = false;
-        workers.swap(m_owned_lifecycle_workers);
-    }
-    for (auto& worker : workers) {
-        if (worker.thread.joinable()) {
-            worker.thread.join();
-        }
+        m_owned_lifecycle_reaper_joined = true;
+        m_owned_lifecycle_workers_changed.notify_all();
     }
 }
 

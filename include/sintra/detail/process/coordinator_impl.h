@@ -2341,8 +2341,13 @@ void Coordinator::recover_if_required(
     };
 
     if (!runner) {
-        s_mproc->start_owned_lifecycle_worker(detail::Exception_boundary{"recovery_runner"}.wrap(
-            [spawn_now]() mutable { spawn_now(); }));
+        try {
+            s_mproc->start_owned_lifecycle_worker(detail::Exception_boundary{"recovery_runner"}.wrap(
+                [spawn_now]() mutable { spawn_now(); }));
+        }
+        catch (const detail::Lifecycle_worker_admission_closed&) {
+            return;
+        }
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
         recovery_decision.mark_scheduled();
 #endif
@@ -2352,8 +2357,13 @@ void Coordinator::recover_if_required(
     Recovery_control control;
     control.should_cancel = should_cancel;
     control.spawn = spawn_now;
-    s_mproc->start_owned_lifecycle_worker(detail::Exception_boundary{"recovery_runner"}.wrap(
-        [info, runner, control]() mutable { runner(info, control); }));
+    try {
+        s_mproc->start_owned_lifecycle_worker(detail::Exception_boundary{"recovery_runner"}.wrap(
+            [info, runner, control]() mutable { runner(info, control); }));
+    }
+    catch (const detail::Lifecycle_worker_admission_closed&) {
+        return;
+    }
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     recovery_decision.mark_scheduled();
 #endif
