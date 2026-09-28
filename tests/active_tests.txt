@@ -112,6 +112,7 @@ recovery_runner_thread_test                              1
 recovery_test                                           30
 recovery_unpublish_deadlock_test                         1
 recovery_worker_retirement_test                          1
+recycled_pid_lock_test                                  10
 rendezvous_barrier_error_paths_test                      5
 ring_abi_fingerprint_test                                5
 ring_cleanup_stress_test                               100

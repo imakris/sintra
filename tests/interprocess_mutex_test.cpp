@@ -6,6 +6,10 @@
 #include <system_error>
 #include <thread>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 using namespace std::chrono_literals;
 
 #include "test_utils.h"
@@ -48,14 +52,7 @@ owner_token make_current_owner_token()
         static_cast<uint32_t>(sintra::get_current_tid()));
 }
 
-void install_owner_fixture(
-    Test_mutex&   mutex,
-    uint32_t      pid,
-    uint32_t      tid,
-    uint64_t      start_stamp)
-{
-    mutex.test_install_owner_fixture({pid, tid, start_stamp});
-}
+using Owner_fixture = Test_mutex::test_owner_fixture;
 
 void run_owner_generation_recovery_red_gate()
 {
@@ -70,11 +67,26 @@ void run_owner_generation_recovery_red_gate()
     const auto other_tid = (current_tid == 1u) ? 2u : 1u;
     const auto stale_start_stamp =
         (*current_start_stamp == 1u) ? 2u : (*current_start_stamp - 1u);
+    const auto self_instance = sintra::detail::current_process_instance();
+    const auto own_token = static_cast<uint32_t>(self_instance);
+    // An earlier process with this PID drew another token.
+    const auto earlier_token = own_token + 1u;
+    const auto earlier_instance = (static_cast<uint64_t>(current_pid) << 32u) | earlier_token;
 
     bool ok = true;
-    auto require_no_recovery = [&](uint32_t tid, uint64_t start_stamp, std::string_view context) {
+    auto require_recovery = [&](const Owner_fixture& owner, std::string_view context) {
         Test_mutex mutex;
-        install_owner_fixture(mutex, current_pid, tid, start_stamp);
+        mutex.test_install_owner_fixture(owner);
+        const bool acquired = mutex.try_lock_for(20ms);
+        ok &= sintra::test::assert_true(acquired, k_failure_prefix, context);
+        if (acquired) {
+            mutex.unlock();
+        }
+    };
+
+    auto require_no_recovery = [&](const Owner_fixture& owner, std::string_view context) {
+        Test_mutex mutex;
+        mutex.test_install_owner_fixture(owner);
         const auto seeded_owner = mutex.test_owner_token();
         const bool acquired = mutex.try_lock_for(20ms);
         const auto after_owner = mutex.test_owner_token();
@@ -87,40 +99,102 @@ void run_owner_generation_recovery_red_gate()
         }
     };
 
-#if defined(__FreeBSD__)
-    // A missed boot-time change can make the stamps of one live process
-    // differ, so a different stamp on a live PID is no proof of death.
-    require_no_recovery(other_tid, stale_start_stamp,
-        "a different start stamp on a live FreeBSD owner with a different tid should not recover");
-    require_no_recovery(current_tid, stale_start_stamp,
-        "a different start stamp on a live FreeBSD owner with the current tid should not recover");
-    {
-        namespace fakes = sintra::test::identity_fakes;
-        fakes::Scoped_fakes injected;
-        fakes::s_record_boot_time_shift = 3600;
-        require_no_recovery(other_tid, *current_start_stamp,
-            "a boot-time change reversed during observation should not recover a live owner's lock");
+    // An earlier process with this PID left the mutex held. Its token, not its
+    // start stamp, shows that it is not this process.
+    for (const auto tid : {other_tid, current_tid}) {
+        require_recovery({current_pid, tid, stale_start_stamp, earlier_token},
+            "an earlier process with this PID and another start stamp should be recovered");
+        require_recovery({current_pid, tid, *current_start_stamp, earlier_token},
+            "an earlier process with this PID and the same start stamp should be recovered");
     }
-#else
-    auto require_recovery = [&](uint32_t tid, std::string_view context) {
+    {
         Test_mutex mutex;
-        install_owner_fixture(mutex, current_pid, tid, stale_start_stamp);
-        const bool acquired = mutex.try_lock_for(20ms);
-        ok &= sintra::test::assert_true(acquired, k_failure_prefix, context);
-        if (acquired) {
+        mutex.test_install_owner_fixture({current_pid, current_tid, *current_start_stamp, earlier_token});
+        try {
+            mutex.lock();
+            ok &= sintra::test::assert_true(mutex.test_owner_token() == make_current_owner_token(),
+                k_failure_prefix,
+                "lock should recover the mutex of an earlier process with this PID and TID");
             mutex.unlock();
         }
-    };
+        catch (const std::system_error&) {
+            ok &= sintra::test::assert_true(false, k_failure_prefix,
+                "an earlier process with this PID and TID must not be reported as recursion");
+        }
+    }
 
-    require_recovery(other_tid,
-        "stale-generation owner with current pid and different tid should recover");
-    require_recovery(current_tid,
-        "stale-generation owner with current pid and current tid should recover");
+    // A recovery gate left by an earlier process with this PID is reclaimed,
+    // while this process's own gate holder is not preempted.
+    require_recovery({0, 0, 0, 0, earlier_instance},
+        "a recovery gate left by an earlier process with this PID should be reclaimed");
+    require_no_recovery({0, 0, 0, 0, self_instance},
+        "a recovery gate held by this process should not be preempted");
+
+    // This process holds the mutex, whatever start stamp it recorded.
+    for (const auto tid : {other_tid, current_tid}) {
+        require_no_recovery({current_pid, tid, *current_start_stamp, own_token},
+            "live current-generation owner should not recover");
+        require_no_recovery({current_pid, tid, stale_start_stamp, own_token},
+            "an owner recorded by this process should not recover whatever its start stamp");
+    }
+
+    // Another thread of this process holds the mutex: it keeps excluding.
+    {
+        Test_mutex mutex;
+        std::atomic<bool> locked{false};
+        std::atomic<bool> release{false};
+        std::thread holder([&] {
+            mutex.lock();
+            locked = true;
+            while (!release) {
+                std::this_thread::yield();
+            }
+            mutex.unlock();
+        });
+        while (!locked) {
+            std::this_thread::yield();
+        }
+        const auto held_owner = mutex.test_owner_token();
+        const bool acquired = mutex.try_lock_for(50ms);
+        ok &= sintra::test::assert_true(!acquired && mutex.test_owner_token() == held_owner,
+            k_failure_prefix,
+            "a mutex held by another thread of this process should not be recovered");
+        release = true;
+        holder.join();
+        const bool acquired_after_release = mutex.try_lock();
+        ok &= sintra::test::assert_true(acquired_after_release, k_failure_prefix,
+            "the mutex should be acquirable once the other thread releases it");
+        if (acquired_after_release) {
+            mutex.unlock();
+        }
+    }
+
+#ifndef _WIN32
+    // A live foreign PID whose start stamp differs from the recorded one.
+    const auto parent_pid = static_cast<uint32_t>(::getppid());
+    const auto parent_stamp = sintra::query_process_start_stamp(parent_pid);
+    ok &= sintra::test::assert_true(parent_stamp.has_value(), k_failure_prefix,
+        "the parent process must have a start stamp");
+    if (parent_stamp) {
+        const Owner_fixture reused_parent_pid{parent_pid, 1, *parent_stamp + 1};
+#if defined(__FreeBSD__)
+        // A missed boot-time change can make the stamps of one live process
+        // differ, so a different stamp on a live PID is no proof of death.
+        require_no_recovery(reused_parent_pid,
+            "a different start stamp on a live FreeBSD owner should not recover");
+        {
+            namespace fakes = sintra::test::identity_fakes;
+            fakes::Scoped_fakes injected;
+            fakes::s_record_boot_time_shift = 3600;
+            require_no_recovery({parent_pid, 1, *parent_stamp},
+                "a boot-time change reversed during observation should not recover a live owner's lock");
+        }
+#else
+        require_recovery(reused_parent_pid,
+            "a live PID whose start stamp differs should be recovered as another incarnation");
 #endif
-    require_no_recovery(other_tid, *current_start_stamp,
-        "live current-generation owner with different tid should not recover");
-    require_no_recovery(current_tid, *current_start_stamp,
-        "live current-generation owner with current tid should not recover");
+    }
+#endif
 
     sintra::test::expect(ok, k_failure_prefix,
         "owner-generation recovery red gate failed");
@@ -313,7 +387,7 @@ int main()
     const auto dead_pid = static_cast<uint32_t>(0);
     // PID 0 is reserved on all supported platforms and treated as always-dead by
     // is_process_alive, guaranteeing deterministic recovery behaviour.
-    install_owner_fixture(recovery, dead_pid, 0x12345678u, 0);
+    recovery.test_install_owner_fixture({dead_pid, 0x12345678u, 0});
 
     recovery.lock();
     const auto expected_owner = make_current_owner_token();

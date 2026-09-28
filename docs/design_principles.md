@@ -104,7 +104,9 @@ The residual behaviour:
   writer blocked by the slot fails the write with the UNKNOWN error instead
   of overwriting the copy.
 - Mutex dead-owner recovery, lifecycle-attachment scavenging and run-directory
-  cleanup wait the same way for the process holding the PID to exit.
+  cleanup wait the same way for the process holding the PID to exit. A lock
+  waiter that holds the PID itself recovers at once, by process instance (see
+  below).
 
 Under this requirement, `ESRCH` from the native lookup means that the
 process is absent. Death has two kinds of evidence, kept separate:
@@ -116,6 +118,15 @@ process is absent. Death has two kinds of evidence, kept separate:
   with the published stamp. A known contradiction makes that evidence
   UNKNOWN, never DEAD. A lookup that finds some process while the published
   incarnation cannot be confirmed from a record is UNKNOWN.
+
+Shared locks (the interprocess mutex, with its recovery gate, and the shared
+spinlocks) record their owner as a process instance: the PID plus a random
+token that each process image draws for itself. Two live processes never
+share a PID, so an owner recorded with the observer's own PID and another
+token was an earlier process with that PID, which has exited. An owner with
+the observer's own instance is held by the observer's process, through
+whichever mapping, and keeps excluding. A token collision fails safe, as
+ownership by the observer's process.
 
 **7. Define the contract before working around behaviour.**
 When a mechanism causes trouble, first decide what it should do. Don't accept

@@ -50,9 +50,24 @@ using sintra::test::Exact_child_state;
 struct spinlock_layout_t
 {
     std::atomic_flag       m_locked;
-    std::atomic<uint32_t>  m_owner_pid;
+    std::atomic<uint64_t>  m_owner;
     std::atomic<uint64_t>  m_last_progress_ns;
 };
+
+// A spinlock owner is a process instance: the PID in the upper 32 bits and the
+// process's token in the lower 32.
+uint64_t owner_instance(uint32_t pid, uint32_t token = 0)
+{
+    return (static_cast<uint64_t>(pid) << 32) | token;
+}
+
+void install_owner(spinlock_layout_t& layout, uint64_t owner)
+{
+    layout.m_locked.clear(std::memory_order_release);
+    layout.m_locked.test_and_set(std::memory_order_acquire);
+    layout.m_owner.store(owner, std::memory_order_release);
+    layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+}
 
 spinlock_layout_t& access_layout(sintra::spinlock& lock)
 {
@@ -390,12 +405,12 @@ void observe_short_hold_poll(const void* lock, Steady_time poll_time, bool timed
 // against the waiter. The flag stays set, so the waiter cannot acquire. The
 // next hold's start is taken before it is published and the previous hold's
 // end after, so both bound the holds from outside.
-void hand_over_to_next_hold(spinlock_layout_t& layout, uint32_t self_pid)
+void hand_over_to_next_hold(spinlock_layout_t& layout, uint64_t self_instance)
 {
     const auto next_started = std::chrono::steady_clock::now();
-    layout.m_owner_pid.store(0, std::memory_order_release);
+    layout.m_owner.store(0, std::memory_order_release);
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
-    layout.m_owner_pid.store(self_pid, std::memory_order_release);
+    layout.m_owner.store(self_instance, std::memory_order_release);
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
     const auto previous_ended = std::chrono::steady_clock::now();
     if (previous_ended - from_ticks(g_waiter_polls.hold_started.load()) >= k_overlong_hold) {
@@ -413,7 +428,7 @@ int run_short_holds_child(
     const std::filesystem::path& marker_path,
     std::string_view             marker_token)
 {
-    const uint32_t self_pid = static_cast<uint32_t>(sintra::detail::get_current_process_id());
+    const uint64_t self_instance = sintra::detail::current_process_instance();
     sintra::spinlock short_hold_lock;
     auto& layout = access_layout(short_hold_lock);
     g_waiter_polls.hold_started = to_ticks(std::chrono::steady_clock::now());
@@ -432,7 +447,7 @@ int run_short_holds_child(
             exit_inconclusive();
         }
         std::this_thread::sleep_for(k_short_hold);
-        hand_over_to_next_hold(layout, self_pid);
+        hand_over_to_next_hold(layout, self_instance);
     }
     g_waiter_polls.hold_stream_over = true;
     if (!publish_ready_marker(marker_path, marker_token)) {
@@ -665,11 +680,7 @@ int main(int argc, char* argv[])
             contender.join();
             return 1;
         }
-        auto& stall_layout = access_layout(stall_lock);
-        stall_layout.m_locked.clear(std::memory_order_release);
-        stall_layout.m_locked.test_and_set(std::memory_order_acquire);
-        stall_layout.m_owner_pid.store(owner_pid, std::memory_order_release);
-        stall_layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+        install_owner(access_layout(stall_lock), owner_instance(owner_pid));
         if (!publish_ready_marker(marker_path, marker_token)) {
             return 2;
         }
@@ -689,19 +700,13 @@ int main(int argc, char* argv[])
     sintra::test::require_true(!sintra::is_process_alive(dead_pid), k_failure_prefix,
         "dead pid should not be alive");
 
-    layout.m_locked.clear(std::memory_order_release);
-    layout.m_locked.test_and_set(std::memory_order_acquire);
-    layout.m_owner_pid.store(dead_pid, std::memory_order_release);
-    layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+    install_owner(layout, owner_instance(dead_pid));
 
     lock.lock();
     lock.unlock();
 
     // Contenders that observe the same dead owner must not both acquire.
-    layout.m_locked.clear(std::memory_order_release);
-    layout.m_locked.test_and_set(std::memory_order_acquire);
-    layout.m_owner_pid.store(dead_pid, std::memory_order_release);
-    layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+    install_owner(layout, owner_instance(dead_pid));
 
     Stale_recovery_race race;
     race.lock = &lock;
@@ -722,6 +727,48 @@ int main(int argc, char* argv[])
     sintra::test::require_true(!exclusion_broken, k_failure_prefix,
         "a contender acting on a stale dead-owner observation acquired the spinlock "
         "while the contender that recovered it first still held it");
+
+    // Case 1b: an earlier process with this PID died holding the lock. Its
+    // token differs from this process's, so the lock is taken over at the
+    // first liveness poll instead of being diagnosed as a 2 s self stall.
+    const uint64_t self_instance = sintra::detail::current_process_instance();
+    sintra::test::require_true(
+        sintra::detail::process_instance_pid(self_instance) == self_pid, k_failure_prefix,
+        "the process instance must carry this process's PID");
+    install_owner(layout, owner_instance(self_pid, static_cast<uint32_t>(self_instance) + 1));
+    const auto takeover_start = std::chrono::steady_clock::now();
+    lock.lock();
+    const auto takeover_time = std::chrono::steady_clock::now() - takeover_start;
+    const uint64_t takeover_owner = layout.m_owner.load();
+    lock.unlock();
+    sintra::test::require_true(
+        takeover_time < std::chrono::seconds(1) && takeover_owner == self_instance,
+        k_failure_prefix,
+        "a lock left by an earlier process with this PID must be taken over promptly");
+
+    // Case 1c: another thread of this process holds the lock. It keeps
+    // excluding and is never taken over.
+    {
+        std::atomic<bool> holder_locked{false};
+        std::atomic<bool> holder_released{false};
+        std::thread holder([&] {
+            lock.lock();
+            holder_locked = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            holder_released = true;
+            lock.unlock();
+        });
+        while (!holder_locked) {
+            std::this_thread::yield();
+        }
+        const uint64_t held_owner = layout.m_owner.load();
+        lock.lock();
+        const bool excluded = holder_released.load();
+        lock.unlock();
+        holder.join();
+        sintra::test::require_true(held_owner == self_instance && excluded, k_failure_prefix,
+            "a lock held by another thread of this process must exclude and not be taken over");
+    }
 
     // Case 2: live owner with debug pause active should be taken over.
     const std::string sleep_arg = "30000";
@@ -748,10 +795,7 @@ int main(int argc, char* argv[])
     }
     const int child_pid = sleep_child.pid();
 
-    layout.m_locked.clear(std::memory_order_release);
-    layout.m_locked.test_and_set(std::memory_order_acquire);
-    layout.m_owner_pid.store(static_cast<uint32_t>(child_pid), std::memory_order_release);
-    layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+    install_owner(layout, owner_instance(static_cast<uint32_t>(child_pid)));
 
     sintra::detail::set_debug_pause_active(true);
     lock.lock();

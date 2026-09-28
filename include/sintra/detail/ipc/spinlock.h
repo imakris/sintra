@@ -14,7 +14,6 @@
 
 #include "../debug_pause.h"
 #include "../logging.h"
-#include "../process/process_id.h"
 #include "../time_utils.h"
 #include "process_utils.h"
 
@@ -107,7 +106,7 @@ struct spinlock
 
     void lock()
     {
-        const uint32_t self_pid = static_cast<uint32_t>(detail::get_current_process_id());
+        const uint64_t self = detail::current_process_instance();
         auto next_liveness_check = std::chrono::steady_clock::now();
         hold_t observed_hold{};
         auto   hold_observed_since = next_liveness_check;
@@ -116,7 +115,7 @@ struct spinlock
 
         while (true) {
             if (!m_locked.test_and_set(std::memory_order_acquire)) {
-                m_owner_pid.store(self_pid, std::memory_order_release);
+                m_owner.store(self, std::memory_order_release);
                 m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
                 return;
             }
@@ -133,7 +132,7 @@ struct spinlock
             const bool waiter_was_stopped = now - next_liveness_check > k_live_owner_timeout;
             next_liveness_check = now + k_owner_liveness_poll;
 
-            if (try_take_over_dead_owner(self_pid)) {
+            if (try_take_over_exited_owner(self)) {
                 return;
             }
 
@@ -160,27 +159,31 @@ struct spinlock
                 continue;
             }
 
-            const auto owner = hold.owner_pid;
-            if (owner == self_pid) {
-                report_live_owner_stall(owner);
+            const auto owner     = hold.owner;
+            const auto owner_pid = detail::process_instance_pid(owner);
+            if (owner == self) {
+                report_live_owner_stall(owner_pid);
             }
-            if (owner != 0 && is_process_alive(owner)) {
+            if (owner != 0 &&
+                owner_pid != detail::process_instance_pid(self) &&
+                is_process_alive(owner_pid))
+            {
                 if (detail::is_debug_pause_active()) {
                     Log_stream(log_level::warning)
-                        << "[sintra][spinlock] Owner PID " << owner
+                        << "[sintra][spinlock] Owner PID " << owner_pid
                         << " is paused under debug control; "
                         << "taking over the spinlock to allow shutdown to proceed.\n";
-                    if (take_over_owner(owner, self_pid)) {
+                    if (take_over_owner(owner, self)) {
                         return;
                     }
                     hold_observed = false;
                     continue;
                 }
-                report_live_owner_stall(owner);
+                report_live_owner_stall(owner_pid);
             }
 
             // A dead owner is recovered only by takeover. A zero owner has no
-            // identity to take over from: the holder is between the flag and pid
+            // identity to take over from: the holder is between the flag and owner
             // updates of lock() or unlock(), or died there.
             if (owner == 0) {
                 force_unlock();
@@ -191,7 +194,7 @@ struct spinlock
 
     void unlock()
     {
-        m_owner_pid.store(0, std::memory_order_release);
+        m_owner.store(0, std::memory_order_release);
         m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
         m_locked.clear(std::memory_order_release);
     }
@@ -203,7 +206,7 @@ private:
 
     struct hold_t
     {
-        uint32_t owner_pid;
+        uint64_t owner;
         uint64_t progress_ns;
 
         bool operator==(const hold_t&) const = default;
@@ -211,23 +214,22 @@ private:
 
     hold_t current_hold() const
     {
-        const auto owner = m_owner_pid.load(std::memory_order_acquire);
+        const auto owner = m_owner.load(std::memory_order_acquire);
         return {owner, m_last_progress_ns.load(std::memory_order_relaxed)};
     }
 
-    bool try_take_over_dead_owner(uint32_t self_pid)
+    // Only a thread of this process instance can hold the lock under its
+    // instance. An owner recorded under this process's PID with another token
+    // was an earlier process with this PID, which has exited.
+    bool try_take_over_exited_owner(uint64_t self)
     {
-        const auto owner = m_owner_pid.load(std::memory_order_acquire);
-        if (owner == 0 || owner == self_pid) {
+        const auto owner = m_owner.load(std::memory_order_acquire);
+        if (owner == 0 || !detail::process_instance_has_exited(owner, self)) {
             return false;
         }
 
-        if (is_process_alive(owner)) {
-            return false;
-        }
-
-        log_recovery(owner);
-        return take_over_owner(owner, self_pid);
+        log_recovery(detail::process_instance_pid(owner));
+        return take_over_owner(owner, self);
     }
 
     // Recovery inherits the lock instead of releasing it. Every contender that
@@ -235,11 +237,11 @@ private:
     // has already recovered the lock, so a release would clear the recovered
     // holder's ownership. The flag stays set, and the compare-exchange admits
     // exactly one contender per observed owner; the others keep waiting.
-    bool take_over_owner(uint32_t observed_owner, uint32_t self_pid)
+    bool take_over_owner(uint64_t observed_owner, uint64_t self)
     {
-        if (!m_owner_pid.compare_exchange_strong(
+        if (!m_owner.compare_exchange_strong(
                 observed_owner,
-                self_pid,
+                self,
                 std::memory_order_acq_rel,
                 std::memory_order_acquire))
         {
@@ -275,13 +277,17 @@ private:
 
     void force_unlock()
     {
-        m_owner_pid.store(0, std::memory_order_release);
+        m_owner.store(0, std::memory_order_release);
         m_locked.clear(std::memory_order_release);
         m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
     }
 
+    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+        "spinlock requires lock-free 64-bit atomics");
+
     std::atomic_flag           m_locked{};
-    std::atomic<uint32_t>      m_owner_pid{0};
+    // The owner's process instance (detail::current_process_instance), or zero.
+    std::atomic<uint64_t>      m_owner{0};
     std::atomic<uint64_t>      m_last_progress_ns{0};
 };
 

@@ -3,12 +3,15 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -288,6 +291,74 @@ inline bool is_process_alive(uint32_t pid)
 #endif
 #endif
 }
+
+namespace detail {
+
+// A process instance identifies one process image: its PID in the upper 32
+// bits and, in the lower 32, a random token that the image draws when it
+// first needs one. Shared locks record their owner as a process instance. Two
+// live processes never share a PID, so an owner recorded with this process's
+// PID and another token was recorded by an earlier process with this PID,
+// which has exited or replaced its image. A token collision hides that and
+// fails safe, as ownership by this process. Like Sintra's runtime state, the
+// token belongs to the one copy of Sintra in the process.
+inline constexpr uint32_t process_instance_pid(uint64_t instance) noexcept
+{
+    return static_cast<uint32_t>(instance >> 32);
+}
+
+// Mixes platform randomness with clocks and an address, which still differ
+// between process instances where no random device is available.
+inline uint32_t draw_process_instance_token() noexcept
+{
+    uint64_t entropy =
+        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) ^
+        static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()) *
+            0x9e3779b97f4a7c15ull;
+    entropy ^= static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(&entropy));
+    try {
+        std::random_device device;
+        entropy ^= (static_cast<uint64_t>(device()) << 32) | device();
+    }
+    catch (...) {
+    }
+    // splitmix64 finaliser
+    entropy = (entropy ^ (entropy >> 30)) * 0xbf58476d1ce4e5b9ull;
+    entropy = (entropy ^ (entropy >> 27)) * 0x94d049bb133111ebull;
+    entropy ^= entropy >> 31;
+    return static_cast<uint32_t>(entropy ^ (entropy >> 32));
+}
+
+// A fork child keeps the parent's token under a new PID until it draws its
+// own here, before its first use.
+inline uint64_t current_process_instance()
+{
+    static std::atomic<uint64_t> s_instance{0};
+    const uint64_t pid = get_current_pid();
+    uint64_t instance = s_instance.load(std::memory_order_acquire);
+    while (process_instance_pid(instance) != pid) {
+        const uint64_t drawn = (pid << 32) | draw_process_instance_token();
+        if (s_instance.compare_exchange_strong(
+                instance, drawn, std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            return drawn;
+        }
+    }
+    return instance;
+}
+
+// Whether the process instance that recorded a shared lock's owner has
+// exited, as this process instance observes it.
+inline bool process_instance_has_exited(uint64_t recorded, uint64_t self)
+{
+    const uint32_t pid = process_instance_pid(recorded);
+    if (pid == process_instance_pid(self)) {
+        return recorded != self;
+    }
+    return !is_process_alive(pid);
+}
+
+} // namespace detail
 
 inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
 {

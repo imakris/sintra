@@ -1,0 +1,280 @@
+// Copyright (c) 2026, Ioannis Makris
+// Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
+
+// Shared locks record their owner as a process instance: a PID and a token
+// that each process image draws for itself. A lock recorded with this
+// process's PID and another token was left by an earlier process with this
+// PID, which has exited. A replacement process must recover such a lock in a
+// ring's control block or lifecycle anchor without hanging or aborting, while
+// a lock that this process holds, through any mapping, keeps excluding.
+
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <new>
+#include <string>
+#include <string_view>
+#include <thread>
+
+#ifndef _WIN32
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+#define private public
+#define protected public
+#include <sintra/detail/ipc/rings.h>
+#undef protected
+#undef private
+
+#include "test_ring_utils.h"
+#include "test_utils.h"
+
+namespace {
+
+using namespace std::chrono_literals;
+using Writer = sintra::Ring_W<uint32_t>;
+using Reader = sintra::Ring_R<uint32_t>;
+
+constexpr std::string_view k_failure_prefix = "recycled_pid_lock_test: ";
+
+void require(bool condition, std::string_view message)
+{
+    sintra::test::require_true(condition, k_failure_prefix, message);
+}
+
+uint64_t self_instance()
+{
+    return sintra::detail::current_process_instance();
+}
+
+// The token that an earlier process with this PID drew.
+uint32_t earlier_token()
+{
+    return static_cast<uint32_t>(self_instance()) + 1u;
+}
+
+uint64_t earlier_instance()
+{
+    return (static_cast<uint64_t>(sintra::get_current_pid()) << 32) | earlier_token();
+}
+
+void install_spinlock_owner(sintra::spinlock& lock, uint64_t owner)
+{
+    lock.m_locked.test_and_set(std::memory_order_acquire);
+    lock.m_owner.store(owner, std::memory_order_release);
+    lock.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+}
+
+void install_earlier_mutex_owner(sintra::detail::interprocess_mutex& mutex)
+{
+    mutex.test_install_owner_fixture({
+        sintra::get_current_pid(),
+        sintra::get_current_tid(),
+        sintra::current_process_start_stamp().value_or(0),
+        earlier_token()});
+}
+
+// A reader died holding the slot stack's spinlock, and a replacement reader
+// with its PID acquires a slot.
+void ring_spinlock_left_by_earlier_process()
+{
+    sintra::test::Temp_ring_dir directory("recycled_pid_spinlock");
+    const size_t elements = sintra::test::pick_ring_elements<uint32_t>();
+    Reader keeper(directory.str(), "raw", elements);
+    auto& lock = keeper.c.rs_stack_spinlock;
+
+    install_spinlock_owner(lock, earlier_instance());
+    const auto start = std::chrono::steady_clock::now();
+    lock.lock();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const uint64_t owner = lock.m_owner.load();
+    lock.unlock();
+    require(elapsed < 1s && owner == self_instance(),
+        "a slot-stack spinlock left by an earlier process with this PID must be taken over promptly");
+
+    install_spinlock_owner(lock, earlier_instance());
+    Reader replacement(directory.str(), "raw", elements);
+    require(replacement.m_rs_index != keeper.m_rs_index && lock.m_owner.load() == 0,
+        "a replacement reader with the dead reader's PID must acquire a slot and release the lock");
+}
+
+// A writer died holding the ring's ownership mutex, or a process died holding
+// the lifecycle anchor's mutex, and a replacement with its PID attaches.
+void ring_mutexes_left_by_earlier_process()
+{
+    sintra::test::Temp_ring_dir directory("recycled_pid_mutex");
+    const size_t elements = sintra::test::pick_ring_elements<uint32_t>();
+    Reader keeper(directory.str(), "raw", elements);
+
+    auto& ownership = keeper.c.ownership_mutex;
+    install_earlier_mutex_owner(ownership);
+    const bool ownership_recovered = ownership.try_lock_for(1s);
+    if (ownership_recovered) {
+        ownership.unlock();
+    }
+    require(ownership_recovered,
+        "a ring ownership mutex left by an earlier process with this PID and TID must be recovered");
+    install_earlier_mutex_owner(ownership);
+    {
+        Writer replacement(directory.str(), "raw", elements);
+    }
+
+    auto& anchor = keeper.m_anchor->mutex;
+    install_earlier_mutex_owner(anchor);
+    const bool anchor_recovered = anchor.try_lock_for(1s);
+    if (anchor_recovered) {
+        anchor.unlock();
+    }
+    require(anchor_recovered,
+        "a lifecycle-anchor mutex left by an earlier process with this PID and TID must be recovered");
+    install_earlier_mutex_owner(anchor);
+    Reader replacement(directory.str(), "raw", elements);
+}
+
+// A writer and a reader of one ring map its control block and lifecycle
+// anchor separately. A lock that this process holds through one mapping
+// excludes through the other, and is never taken over.
+void locks_held_through_another_mapping()
+{
+    sintra::test::Temp_ring_dir directory("recycled_pid_mappings");
+    const size_t elements = sintra::test::pick_ring_elements<uint32_t>();
+    Writer writer(directory.str(), "raw", elements);
+    Reader reader(directory.str(), "raw", elements);
+    require(
+        static_cast<const void*>(&writer.c) != static_cast<const void*>(&reader.c) &&
+        writer.m_anchor != reader.m_anchor,
+        "the writer and the reader must map the shared objects separately");
+
+    {
+        std::atomic<bool> locked{false};
+        std::atomic<bool> released{false};
+        std::thread holder([&] {
+            writer.c.rs_stack_spinlock.lock();
+            locked = true;
+            std::this_thread::sleep_for(300ms);
+            released = true;
+            writer.c.rs_stack_spinlock.unlock();
+        });
+        while (!locked) {
+            std::this_thread::yield();
+        }
+        reader.c.rs_stack_spinlock.lock();
+        const bool excluded = released.load();
+        reader.c.rs_stack_spinlock.unlock();
+        holder.join();
+        require(excluded, "a spinlock held through another mapping must exclude until its release");
+    }
+
+    // The writer holds the ownership mutex on this thread.
+    auto& ownership = reader.c.ownership_mutex;
+    const auto writer_owner = ownership.test_owner_token();
+    bool other_thread_acquired = true;
+    std::thread contender([&] { other_thread_acquired = ownership.try_lock_for(50ms); });
+    contender.join();
+    const bool this_thread_acquired = ownership.try_lock();
+    require(
+        !other_thread_acquired && !this_thread_acquired &&
+        ownership.test_owner_token() == writer_owner,
+        "a mutex held through another mapping must neither be recovered nor acquired");
+
+    auto& anchor = reader.m_anchor->mutex;
+    std::atomic<bool> locked{false};
+    std::atomic<bool> release{false};
+    std::thread holder([&] {
+        writer.m_anchor->mutex.lock();
+        locked = true;
+        while (!release) {
+            std::this_thread::yield();
+        }
+        writer.m_anchor->mutex.unlock();
+    });
+    while (!locked) {
+        std::this_thread::yield();
+    }
+    const bool acquired_while_held = anchor.try_lock_for(50ms);
+    release = true;
+    holder.join();
+    const bool acquired_after_release = anchor.try_lock();
+    if (acquired_after_release) {
+        anchor.unlock();
+    }
+    require(!acquired_while_held && acquired_after_release,
+        "an anchor mutex held through another mapping must exclude until its release");
+}
+
+#ifndef _WIN32
+struct Fork_shared
+{
+    sintra::spinlock  lock;
+    std::atomic<bool> parent_released{false};
+};
+
+// A fork child inherits the parent's token, so it must draw its own before it
+// records ownership: otherwise an earlier child with its PID would look like
+// itself.
+void fork_child_draws_own_instance()
+{
+    const uint64_t parent = self_instance();
+    void* memory = ::mmap(
+        nullptr,
+        sizeof(Fork_shared),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS,
+        -1,
+        0);
+    require(memory != MAP_FAILED, "mmap failed");
+    auto* shared = new (memory) Fork_shared();
+    shared->lock.lock();
+
+    const pid_t child = ::fork();
+    require(child >= 0, "fork failed");
+    if (child == 0) {
+        const uint64_t instance = self_instance();
+        if (sintra::detail::process_instance_pid(instance) != static_cast<uint32_t>(::getpid())) {
+            ::_exit(1);
+        }
+        if (static_cast<uint32_t>(instance) == static_cast<uint32_t>(parent)) {
+            ::_exit(2);
+        }
+        shared->lock.lock();
+        const bool excluded = shared->parent_released.load();
+        const bool recorded = shared->lock.m_owner.load() == instance;
+        shared->lock.unlock();
+        if (!excluded) {
+            ::_exit(3);
+        }
+        ::_exit(recorded ? 0 : 4);
+    }
+
+    std::this_thread::sleep_for(200ms);
+    shared->parent_released = true;
+    shared->lock.unlock();
+    int status = 0;
+    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    shared->~Fork_shared();
+    ::munmap(memory, sizeof(Fork_shared));
+    require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+        "a fork child must draw its own process instance and wait for the parent's lock");
+}
+#endif
+
+} // namespace
+
+int main()
+{
+    ring_spinlock_left_by_earlier_process();
+    std::puts("PASS ring_spinlock_left_by_earlier_process");
+    ring_mutexes_left_by_earlier_process();
+    std::puts("PASS ring_mutexes_left_by_earlier_process");
+    locks_held_through_another_mapping();
+    std::puts("PASS locks_held_through_another_mapping");
+#ifndef _WIN32
+    fork_child_draws_own_instance();
+    std::puts("PASS fork_child_draws_own_instance");
+#endif
+    return 0;
+}

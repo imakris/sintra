@@ -509,8 +509,9 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // writer_pid and leaves ownership_mutex as the only writer-recovery authority.
 // Revision-2 writers on Windows rebuild that mutex from writer_pid, which can
 // destroy a live revision-3 writer's ownership, so the two must not share a
-// control mapping.
-inline constexpr uint64_t k_ring_abi_layout_revision = 3;
+// control mapping. Revision 4 records the owners of the control block's
+// spinlocks and ownership mutex as process instances.
+inline constexpr uint64_t k_ring_abi_layout_revision = 4;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_sintra_ring_abi_version,
@@ -530,8 +531,9 @@ inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
 // order, alignment, interprocess_mutex representation, mutex recovery
 // semantics, or the encoding of the process start stamps that attachments and
 // the mutex record change in a way that affects compatibility of an existing
-// <ring>_lifecycle file.
-inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 4;
+// <ring>_lifecycle file. Version 5 records the mutex owner and gate holder as
+// process instances.
+inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 5;
 
 inline constexpr size_t k_ring_lifecycle_attachment_slots =
     static_cast<size_t>(max_process_index) + 1;

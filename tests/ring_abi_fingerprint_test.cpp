@@ -10,6 +10,7 @@
 #include "sintra/detail/messaging/message.h"
 #include "test_utils.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -31,9 +32,9 @@ void test_message_prefix_ring_abi()
         k_failure_prefix,
         "reader copying marks and process identity require ring ABI version 10");
     sintra::test::require_true(
-        sintra::detail::k_ring_lifecycle_anchor_abi_version == 4,
+        sintra::detail::k_ring_lifecycle_anchor_abi_version == 5,
         k_failure_prefix,
-        "uptime-based FreeBSD start stamps require lifecycle-anchor ABI version 4");
+        "process-instance mutex owners require lifecycle-anchor ABI version 5");
     sintra::test::require_true(
         sizeof(sintra::Message_prefix) == 64,
         k_failure_prefix,
@@ -111,9 +112,10 @@ void test_attach_rejects_mismatched_fingerprint()
     }
 
     // Controls from the previous shared-copy-lock protocol (ABI 9), from the
-    // first ABI-10 layout, whose reader slots lacked namespace identities, and
-    // from ABI-10 revision 2, whose Windows writers rebuild ownership_mutex from
-    // writer_pid, must be rejected even when their size happens to match.
+    // first ABI-10 layout, whose reader slots lacked namespace identities, from
+    // ABI-10 revision 2, whose Windows writers rebuild ownership_mutex from
+    // writer_pid, and from revision 3, whose locks recorded owners by PID alone,
+    // must be rejected even when their size happens to match.
     const auto previous_fingerprint = [](std::uint64_t abi_version) {
         return sintra::detail::fnv1a_64({
             abi_version,
@@ -135,16 +137,17 @@ void test_attach_rejects_mismatched_fingerprint()
             static_cast<uint64_t>(sintra::num_reserved_service_instances),
         });
     };
-    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 3,
+    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 4,
         k_failure_prefix,
-        "sole mutex writer recovery requires ABI-10 layout revision 3");
+        "process-instance lock owners require ABI-10 layout revision 4");
     sintra::test::require_true(
-        revision_fingerprint(3) == sintra::detail::k_ring_abi_fingerprint,
+        revision_fingerprint(4) == sintra::detail::k_ring_abi_fingerprint,
         k_failure_prefix,
         "the revision fixture must reproduce this build's fingerprint");
 
     for (const std::uint64_t wrong_fingerprint :
-            {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(2)})
+            {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(2),
+                revision_fingerprint(3)})
     {
         sintra::test::require_true(wrong_fingerprint != sintra::detail::k_ring_abi_fingerprint,
             k_failure_prefix,
@@ -260,6 +263,68 @@ void test_attach_rejects_mismatched_lifecycle_anchor()
         "control file should not be created after lifecycle anchor ABI mismatch");
 }
 
+// A persistent anchor left by an ABI-4 build has this build's size, but its
+// mutex records owners by PID alone. Its fingerprint must reject it before any
+// locking or cleanup.
+void test_attach_rejects_previous_lifecycle_anchor()
+{
+    using element_t = std::uint32_t;
+    namespace detail = sintra::detail;
+
+    const std::size_t capacity       = sintra::aligned_capacity<element_t>(128);
+    const auto        scratch_dir    = sintra::test::unique_scratch_directory("ring_lifecycle_anchor_abi4");
+    const std::string directory      = scratch_dir.string();
+    const std::string ring_name      = "lifecycle_anchor_abi4_ring";
+    const auto        data_file      = scratch_dir / ring_name;
+    const auto        control_file   = scratch_dir / (ring_name + "_control");
+    const auto        lifecycle_file = scratch_dir / (ring_name + "_lifecycle");
+
+    {
+        sintra::Ring_W<element_t> writer(directory, ring_name, capacity);
+    }
+    sintra::test::require_true(
+        std::filesystem::exists(lifecycle_file) &&
+            !std::filesystem::exists(data_file) && !std::filesystem::exists(control_file),
+        k_failure_prefix,
+        "the last detach should remove the ring files and keep the lifecycle anchor");
+
+    const std::uint64_t abi4_fingerprint = detail::fnv1a_64({
+        0x73696e7472615f6cull,
+        4,
+        4,
+        static_cast<uint64_t>(sizeof(std::atomic<uint64_t>)),
+        static_cast<uint64_t>(alignof(std::atomic<uint64_t>)),
+        static_cast<uint64_t>(sizeof(detail::interprocess_mutex)),
+        static_cast<uint64_t>(alignof(detail::interprocess_mutex)),
+        static_cast<uint64_t>(sizeof(std::atomic<uint32_t>)),
+        static_cast<uint64_t>(alignof(std::atomic<uint32_t>)),
+        static_cast<uint64_t>(detail::k_ring_lifecycle_attachment_slots),
+        static_cast<uint64_t>(sizeof(detail::ring_lifecycle_attachment_record)),
+        static_cast<uint64_t>(alignof(detail::ring_lifecycle_attachment_record)),
+    });
+    sintra::test::require_true(abi4_fingerprint != detail::k_ring_lifecycle_anchor_fingerprint,
+        k_failure_prefix,
+        "an ABI-4 lifecycle anchor must not share this build's fingerprint");
+    poke_fingerprint(lifecycle_file, abi4_fingerprint);
+
+    bool threw_typed = false;
+    try {
+        sintra::Ring_W<element_t> writer(directory, ring_name, capacity);
+        (void)writer;
+    }
+    catch (const sintra::ring_abi_mismatch_exception& e) {
+        threw_typed = e.observed_fingerprint() == abi4_fingerprint &&
+            e.expected_fingerprint() == detail::k_ring_lifecycle_anchor_fingerprint;
+    }
+    sintra::test::require_true(threw_typed,
+        k_failure_prefix,
+        "attach should reject an ABI-4 lifecycle anchor with the typed exception");
+    sintra::test::require_true(
+        !std::filesystem::exists(data_file) && !std::filesystem::exists(control_file),
+        k_failure_prefix,
+        "ring files should not be created after an ABI-4 lifecycle anchor is rejected");
+}
+
 } // namespace
 
 int main()
@@ -268,6 +333,7 @@ int main()
         test_message_prefix_ring_abi();
         test_attach_rejects_mismatched_fingerprint();
         test_attach_rejects_mismatched_lifecycle_anchor();
+        test_attach_rejects_previous_lifecycle_anchor();
     }
     catch (const std::exception& ex) {
         std::cerr << "ring_abi_fingerprint_test failed: " << ex.what() << std::endl;
