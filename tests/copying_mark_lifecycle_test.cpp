@@ -222,6 +222,10 @@ const protection_case_t k_protection_cases[] = {
     {"short_record", EIO, [](sintra::process_incarnation_t&) {
         fakes::s_record = fakes::Record::SHORT;
     }},
+    {"unstable_boot_time", EAGAIN, [](sintra::process_incarnation_t& published) {
+        published.start_stamp += 1000;
+        fakes::s_boot_time_unstable = true;
+    }},
 };
 #endif
 
@@ -429,6 +433,43 @@ void unrelated_unknown_and_incarnation_mismatch()
     neighbor.done_reading();
 }
 
+#if defined(__FreeBSD__)
+// A wall-clock step moves the live copying reader's reported ki_start by the
+// same amount as kern.boottime. Neither observation nor reclamation may take
+// the reader for another incarnation.
+void clock_step_preserves_copying_owner()
+{
+    sintra::test::Temp_ring_dir directory("clock_step_owner");
+    const size_t elements = sintra::test::pick_ring_elements<uint32_t>();
+    Writer writer(directory.str(), "raw", elements);
+    Reader reader(directory.str(), "raw", elements);
+    reader.start_reading();
+    auto& control = writer.c;
+    auto& slot = control.reading_sequences[reader.m_rs_index].data;
+    Held_copy copy(reader);
+    const auto owner = slot.owner();
+    const auto protected_word = slot.word.load();
+    const auto protected_count = control.read_access.load();
+    cm::require(State{protected_word}.copying() && State{protected_word}.guard_present(),
+        "clock-step case must hold a real copying mark and its guard");
+
+    sintra::process_identity_result_t observed{};
+    {
+        fakes::Scoped_fakes injected;
+        fakes::s_clock_step = 3600;
+        observed = sintra::probe_process_identity(owner);
+        control.scavenge_orphans();
+    }
+    cm::require(observed.status == sintra::Process_identity_status::LIVE && !observed.error,
+        "a clock step must leave the live copying owner LIVE");
+    cm::require(slot.word == protected_word && control.read_access == protected_count &&
+        same_incarnation(slot.owner(), owner) && !control.free_rs_stack.contains(reader.m_rs_index),
+        "a clock step must preserve COPYING, guard, count and slot ownership");
+    copy.release();
+    reader.done_reading();
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -457,6 +498,10 @@ int main(int argc, char** argv)
         std::puts("PASS inherited_reservation_unknown_rollback");
         unrelated_unknown_and_incarnation_mismatch();
         std::puts("PASS unrelated_unknown_and_incarnation_mismatch");
+#if defined(__FreeBSD__)
+        clock_step_preserves_copying_owner();
+        std::puts("PASS clock_step_preserves_copying_owner");
+#endif
         for (const auto& protection : k_protection_cases) {
             live_owner_protection(protection);
             std::printf("PASS live_owner_protection: %s\n", protection.name);

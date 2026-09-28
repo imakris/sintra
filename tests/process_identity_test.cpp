@@ -552,10 +552,62 @@ void exited_process()
     const auto owner = incarnation_of(child);
     require_result(sintra::probe_process_identity(owner), Process_identity_status::DEAD, 0,
         "an unreaped exited process must be DEAD from its terminal record");
+#if defined(__FreeBSD__)
+    {
+        fakes::Scoped_fakes injected;
+        fakes::s_boot_time_unstable = true;
+        require_result(sintra::probe_process_identity(owner), Process_identity_status::DEAD, 0,
+            "a terminal record must be DEAD without an established start stamp");
+    }
+#endif
     reap(child.pid);
     require_result(sintra::probe_process_identity(owner), Process_identity_status::DEAD, 0,
         "a reaped process must be DEAD once signal lookup confirms its absence");
+#if defined(__FreeBSD__)
+    fakes::Scoped_fakes injected;
+    fakes::s_boot_time_unstable = true;
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::DEAD, 0,
+        "absence must be DEAD without an established start stamp");
+#endif
 }
+
+#if defined(__FreeBSD__)
+// A wall-clock step moves kern.boottime and the ki_start of every process by
+// the same amount; the start stamp, the uptime at fork, must not move.
+void clock_step()
+{
+    const auto owner = own_incarnation();
+    const int name[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(owner.pid)};
+    struct kinfo_proc native{};
+    size_t native_size = sizeof(native);
+    require(::sysctl(name, 4, &native, &native_size, nullptr, 0) == 0 && native_size == sizeof(native),
+        "native process record missing");
+
+    fakes::Scoped_fakes injected;
+    fakes::s_clock_step = 3600;
+    struct kinfo_proc stepped{};
+    size_t stepped_size = sizeof(stepped);
+    require(sintra::detail::process_identity_sysctl(name, 4, &stepped, &stepped_size, nullptr, 0) == 0 &&
+        stepped.ki_start.tv_sec == native.ki_start.tv_sec + 3600,
+        "the simulated clock step must move the reported ki_start");
+    require(sintra::query_process_start_stamp(owner.pid) == owner.start_stamp,
+        "a clock step must not change a live process's start stamp");
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::LIVE, 0,
+        "a live process must stay LIVE across a clock step");
+    auto reused = owner;
+    reused.start_stamp += 1000;
+    require_result(sintra::probe_process_identity(reused), Process_identity_status::DEAD, 0,
+        "a record whose uptime-based stamp differs must be DEAD across a clock step");
+
+    fakes::s_boot_time_unstable = true;
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::UNKNOWN, EAGAIN,
+        "a boot time that moves during every attempt must leave a live process UNKNOWN");
+    require_result(sintra::probe_process_identity(reused), Process_identity_status::UNKNOWN, EAGAIN,
+        "a start stamp that cannot be established must never prove a different incarnation");
+    require(!sintra::query_process_start_stamp(owner.pid) && !sintra::current_process_incarnation(),
+        "a start stamp that cannot be established must be unavailable for capture");
+}
+#endif
 #endif
 #endif
 
@@ -601,6 +653,9 @@ int main(int argc, char** argv)
         {"live_thread_after_leader_exit", live_thread_after_leader_exit},
 #else
         {"native_observations", native_observations},
+#if defined(__FreeBSD__)
+        {"clock_step", clock_step},
+#endif
 #endif
 #endif
     };

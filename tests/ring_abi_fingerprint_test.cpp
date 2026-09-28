@@ -31,9 +31,9 @@ void test_message_prefix_ring_abi()
         k_failure_prefix,
         "reader copying marks and process identity require ring ABI version 10");
     sintra::test::require_true(
-        sintra::detail::k_ring_lifecycle_anchor_abi_version == 3,
+        sintra::detail::k_ring_lifecycle_anchor_abi_version == 4,
         k_failure_prefix,
-        "message-prefix layout must not change lifecycle-anchor ABI");
+        "uptime-based FreeBSD start stamps require lifecycle-anchor ABI version 4");
     sintra::test::require_true(
         sizeof(sintra::Message_prefix) == 64,
         k_failure_prefix,

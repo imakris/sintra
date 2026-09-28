@@ -317,7 +317,9 @@ inline void marked_reader_death(const std::string& executable, const death_case_
         !child_slot.load_state().copying() && !child_slot.load_state().request_pending() &&
         cleared.pid == 0 && cleared.start_stamp == 0 &&
         cleared.namespaces.pid.state == Process_metadata_state::UNKNOWN &&
-        cleared.namespaces.time.state == Process_metadata_state::UNKNOWN,
+        cleared.namespaces.pid.device == 0 && cleared.namespaces.pid.inode == 0 &&
+        cleared.namespaces.time.state == Process_metadata_state::UNKNOWN &&
+        cleared.namespaces.time.device == 0 && cleared.namespaces.time.inode == 0,
         "dead copying owner must have its flags and identity reclaimed");
     require(octile_count(control.read_access, marked.guard_octile()) == 0 &&
         octile_count(control.read_access, neighbor_state.guard_octile()) == 1 &&

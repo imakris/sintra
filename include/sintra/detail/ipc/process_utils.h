@@ -98,6 +98,79 @@ inline std::optional<bool> macos_process_is_exited_or_zombie(uint32_t pid)
 }
 #endif
 
+#if defined(__FreeBSD__)
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline decltype(&::sysctl) process_identity_sysctl = ::sysctl;
+#endif
+
+inline int freebsd_sysctl(const int* name, u_int length, void* value, size_t* size)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    return process_identity_sysctl(name, length, value, size, nullptr, 0);
+#else
+    return ::sysctl(name, length, value, size, nullptr, 0);
+#endif
+}
+
+// Returns zero, or the errno of the failed lookup.
+inline int read_freebsd_boot_time(struct timeval& boot_time)
+{
+    const int name[2] = {CTL_KERN, KERN_BOOTTIME};
+    size_t size = sizeof(boot_time);
+    return freebsd_sysctl(name, 2, &boot_time, &size) == 0 ? 0 : errno;
+}
+
+// A process record and, when established, the process's start stamp: its
+// uptime at fork, in nanoseconds.
+struct freebsd_process_record_t
+{
+    struct kinfo_proc record{};
+    size_t            size        = 0;
+    uint64_t          start_stamp = 0;
+    int               stamp_error = 0; // Zero exactly when start_stamp is established.
+};
+
+// ki_start is the uptime at fork plus the kernel's boot-time estimate when the
+// record is filled (kern_proc.c, fill_kinfo_proc_only), and a wall-clock step
+// or leap second moves that estimate (kern_tc.c). kern.boottime reports the
+// same estimate, so while it is unchanged around the record, the difference is
+// the uptime at fork. A boot time that moves during every attempt leaves the
+// stamp unavailable (EAGAIN).
+inline constexpr int k_freebsd_boot_time_attempts = 3;
+
+// Returns zero, or the errno of a failed record lookup.
+inline int read_freebsd_process_record(uint32_t pid, freebsd_process_record_t& result)
+{
+    const int name[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
+    for (int attempt = 0; attempt < k_freebsd_boot_time_attempts; ++attempt) {
+        struct timeval before{};
+        struct timeval after{};
+        const int before_error = read_freebsd_boot_time(before);
+        result.size = sizeof(result.record);
+        if (freebsd_sysctl(name, 4, &result.record, &result.size) != 0) {
+            return errno;
+        }
+        if (result.size != sizeof(result.record)) {
+            result.stamp_error = EIO;
+            return 0;
+        }
+        result.stamp_error = before_error != 0 ? before_error : read_freebsd_boot_time(after);
+        if (result.stamp_error != 0) {
+            return 0;
+        }
+        if (before.tv_sec == after.tv_sec && before.tv_usec == after.tv_usec) {
+            const auto& start = result.record.ki_start;
+            result.start_stamp = static_cast<uint64_t>(
+                (static_cast<int64_t>(start.tv_sec) - static_cast<int64_t>(before.tv_sec)) * 1000000000 +
+                (static_cast<int64_t>(start.tv_usec) - static_cast<int64_t>(before.tv_usec)) * 1000);
+            return 0;
+        }
+    }
+    result.stamp_error = EAGAIN;
+    return 0;
+}
+#endif
+
 } // namespace detail
 
 inline bool is_process_alive(uint32_t pid)
@@ -253,17 +326,11 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
         return std::nullopt;
     }
 
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
-    struct kinfo_proc kip;
-    std::memset(&kip, 0, sizeof(kip));
-    size_t len = sizeof(kip);
-    if (::sysctl(mib, 4, &kip, &len, nullptr, 0) != 0 || len != sizeof(kip)) {
+    detail::freebsd_process_record_t observed;
+    if (detail::read_freebsd_process_record(pid, observed) != 0 || observed.stamp_error != 0) {
         return std::nullopt;
     }
-
-    const uint64_t seconds = static_cast<uint64_t>(kip.ki_start.tv_sec);
-    const uint64_t usec    = static_cast<uint64_t>(kip.ki_start.tv_usec);
-    return seconds * 1000000000ull + usec * 1000ull;
+    return observed.start_stamp;
 #elif defined(__linux__)
     if (pid == 0) {
         return std::nullopt;
@@ -371,8 +438,6 @@ inline decltype(&::WaitForSingleObject) process_identity_wait_for_single_object 
 inline int (*process_identity_kill)(pid_t, int) = ::kill;
 #if defined(__APPLE__)
 inline decltype(&::proc_pidinfo) process_identity_proc_pidinfo = ::proc_pidinfo;
-#elif defined(__FreeBSD__)
-inline decltype(&::sysctl) process_identity_sysctl = ::sysctl;
 #elif defined(__linux__)
 inline decltype(&::open) process_identity_open_procfs = ::open;
 inline int (*process_identity_stat_namespace)(const char*, struct stat*) = ::stat;
@@ -741,38 +806,33 @@ inline process_identity_result_t probe_process_identity_native(const process_inc
     }
     return {Process_identity_status::LIVE, {}};
 #elif defined(__FreeBSD__)
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
-    struct kinfo_proc record{};
-    size_t size = sizeof(record);
-#if defined(SINTRA_ENABLE_TEST_HOOKS)
-    const int result = process_identity_sysctl(mib, 4, &record, &size, nullptr, 0);
-#else
-    const int result = ::sysctl(mib, 4, &record, &size, nullptr, 0);
-#endif
-    if (result != 0) {
-        const int error = errno;
+    freebsd_process_record_t observed;
+    const int error = read_freebsd_process_record(pid, observed);
+    if (error != 0) {
         if (error == ESRCH) {
             return confirm_absence_by_signal(static_cast<pid_t>(pid), error);
         }
         return unknown_process_identity(error);
     }
     // A successful empty result is a missing record; a short one is malformed.
-    if (size == 0) {
+    if (observed.size == 0) {
         return confirm_absence_by_signal(static_cast<pid_t>(pid), ESRCH);
     }
-    if (size != sizeof(record)) {
+    if (observed.size != sizeof(observed.record)) {
         return unknown_process_identity(EIO);
     }
-    const uint64_t observed_stamp = static_cast<uint64_t>(record.ki_start.tv_sec) * 1000000000ull +
-        static_cast<uint64_t>(record.ki_start.tv_usec) * 1000ull;
-    if (observed_stamp == 0) {
-        return unknown_process_identity(EIO);
-    }
-    if (observed_stamp != start_stamp || record.ki_stat == SZOMB
+    // A terminal record ends the published incarnation, whichever one it shows.
+    if (observed.record.ki_stat == SZOMB
 #ifdef SDEAD
-        || record.ki_stat == SDEAD
+        || observed.record.ki_stat == SDEAD
 #endif
     ) {
+        return {Process_identity_status::DEAD, {}};
+    }
+    if (observed.stamp_error != 0) {
+        return unknown_process_identity(observed.stamp_error);
+    }
+    if (observed.start_stamp != start_stamp) {
         return {Process_identity_status::DEAD, {}};
     }
     return {Process_identity_status::LIVE, {}};
@@ -812,6 +872,19 @@ inline const char* run_marker_cleanup_suffix()
     return ".cleanup";
 }
 
+// Names the encoding of the marker's start stamp. FreeBSD's uptime-based stamp
+// has its own key, so a build that records the clock-dependent ki_start under
+// start_ns and this build never compare the two: each judges the other's
+// markers by process liveness alone.
+inline const char* run_marker_start_stamp_key()
+{
+#if defined(__FreeBSD__)
+    return "start_uptime_ns";
+#else
+    return "start_ns";
+#endif
+}
+
 inline std::filesystem::path run_marker_path(const std::filesystem::path& directory)
 {
     return directory / run_marker_filename();
@@ -837,7 +910,7 @@ inline bool write_run_marker(
     }
 
     marker << "pid=" << record.pid << '\n';
-    marker << "start_ns=" << record.start_stamp << '\n';
+    marker << run_marker_start_stamp_key() << '=' << record.start_stamp << '\n';
     marker << "created_ns=" << record.created_monotonic_ns << '\n';
     marker << "occurrence=" << record.recovery_occurrence << '\n';
     marker.close();
@@ -863,10 +936,10 @@ inline std::optional<run_marker_record_t> read_run_marker(const std::filesystem:
         auto value = line.substr(pos + 1);
 
         try {
-            if (key == "pid")        { record.pid = static_cast<uint32_t>(std::stoul(value)); } else
-            if (key == "start_ns")   { record.start_stamp = std::stoull(value);               } else
-            if (key == "created_ns") { record.created_monotonic_ns = std::stoull(value);      } else
-            if (key == "occurrence") { record.recovery_occurrence = static_cast<uint32_t>(std::stoul(value)); }
+            if (key == "pid")                        { record.pid = static_cast<uint32_t>(std::stoul(value)); } else
+            if (key == run_marker_start_stamp_key()) { record.start_stamp = std::stoull(value);               } else
+            if (key == "created_ns")                 { record.created_monotonic_ns = std::stoull(value);      } else
+            if (key == "occurrence")                 { record.recovery_occurrence = static_cast<uint32_t>(std::stoul(value)); }
         }
         catch (...) {
             return std::nullopt;
@@ -911,7 +984,7 @@ inline void mark_run_directory_for_cleanup(const std::filesystem::path& director
         if (record_opt) {
             const auto& record = *record_opt;
             cleanup_file << "pid=" << record.pid << '\n';
-            cleanup_file << "start_ns=" << record.start_stamp << '\n';
+            cleanup_file << run_marker_start_stamp_key() << '=' << record.start_stamp << '\n';
             cleanup_file << "created_ns=" << record.created_monotonic_ns << '\n';
             cleanup_file << "occurrence=" << record.recovery_occurrence << '\n';
         }

@@ -183,11 +183,31 @@ inline int fake_proc_pidinfo(int pid, int flavor, uint64_t argument, void* buffe
     return 0;
 }
 #else
+// A wall-clock step of this many seconds: kern.boottime and every native
+// record's ki_start move by it, while the uptime at fork stays unchanged.
+inline time_t s_clock_step = 0;
+// Every kern.boottime lookup reports a later boot time than the one before.
+inline bool s_boot_time_unstable = false;
+inline time_t s_boot_time_moves = 0;
+
 inline int fake_sysctl(const int* name, u_int length, void* old, size_t* old_size, const void* next, size_t next_size)
 {
+    if (length == 2 && name[0] == CTL_KERN && name[1] == KERN_BOOTTIME) {
+        const int result = ::sysctl(name, length, old, old_size, next, next_size);
+        if (result == 0) {
+            static_cast<struct timeval*>(old)->tv_sec +=
+                s_clock_step + (s_boot_time_unstable ? ++s_boot_time_moves : 0);
+        }
+        return result;
+    }
     switch (s_record) {
-        case Record::NATIVE:
-            return ::sysctl(name, length, old, old_size, next, next_size);
+        case Record::NATIVE: {
+            const int result = ::sysctl(name, length, old, old_size, next, next_size);
+            if (result == 0 && *old_size == sizeof(struct kinfo_proc)) {
+                static_cast<struct kinfo_proc*>(old)->ki_start.tv_sec += s_clock_step;
+            }
+            return result;
+        }
         case Record::FAILED:
             errno = s_record_error;
             return -1;
@@ -252,6 +272,9 @@ public:
         sintra::detail::process_identity_sysctl = ::sysctl;
         s_record = Record::NATIVE;
         s_record_error = ESRCH;
+        s_clock_step = 0;
+        s_boot_time_unstable = false;
+        s_boot_time_moves = 0;
 #endif
     }
 

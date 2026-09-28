@@ -503,8 +503,9 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 }
 
 // Layout revision within the unreleased ring ABI version. Revision 2 of ABI 10
-// adds Linux namespace identities to reader slots; the first ABI-10 layout was
-// fingerprinted without this input, so each rejects the other's mappings.
+// adds Linux namespace identities to reader slots and records FreeBSD start
+// stamps as uptime at fork; the first ABI-10 layout was fingerprinted without
+// this input, so each rejects the other's mappings.
 inline constexpr uint64_t k_ring_abi_layout_revision = 2;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
@@ -522,10 +523,11 @@ inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
 // not force users to remove the anchor file from an otherwise clean ring dir.
 //
 // Bump k_ring_lifecycle_anchor_abi_version whenever the Anchor layout, field
-// order, alignment, interprocess_mutex representation, or mutex recovery
-// semantics change in a way that affects compatibility of an existing
+// order, alignment, interprocess_mutex representation, mutex recovery
+// semantics, or the encoding of the process start stamps that attachments and
+// the mutex record change in a way that affects compatibility of an existing
 // <ring>_lifecycle file.
-inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 3;
+inline constexpr uint64_t k_ring_lifecycle_anchor_abi_version = 4;
 
 inline constexpr size_t k_ring_lifecycle_attachment_slots =
     static_cast<size_t>(max_process_index) + 1;
