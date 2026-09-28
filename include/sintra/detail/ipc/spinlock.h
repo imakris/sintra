@@ -79,8 +79,10 @@ struct spinlock
     {
         const uint32_t self_pid = static_cast<uint32_t>(detail::get_current_process_id());
         auto next_liveness_check = std::chrono::steady_clock::now();
-        auto live_owner_deadline = next_liveness_check + k_live_owner_timeout;
-        size_t spin_count = 0;
+        hold_t observed_hold{};
+        auto   hold_observed_since = next_liveness_check;
+        bool   hold_observed       = false;
+        size_t spin_count          = 0;
 
         while (true) {
             if (!m_locked.test_and_set(std::memory_order_acquire)) {
@@ -95,45 +97,64 @@ struct spinlock
             }
 
             const auto now = std::chrono::steady_clock::now();
-            if (now >= next_liveness_check) {
-                if (try_take_over_dead_owner(self_pid)) {
-                    return;
-                }
-                next_liveness_check = now + k_owner_liveness_poll;
+            if (now < next_liveness_check) {
+                continue;
+            }
+            const bool waiter_was_stopped = now - next_liveness_check > k_live_owner_timeout;
+            next_liveness_check = now + k_owner_liveness_poll;
+
+            if (try_take_over_dead_owner(self_pid)) {
+                return;
             }
 
-            if (now >= live_owner_deadline) {
-                if (try_take_over_dead_owner(self_pid)) {
-                    return;
-                }
+            // The live-owner timeout bounds one hold, not this wait. A waiter can
+            // lose every race against a stream of short holds, or resume from a
+            // system suspend, although no hold stalled. A hold is identified by its
+            // owner and by the progress stamp that lock(), unlock() and takeover
+            // write, so a new hold is recognized even when the owner repeats, as it
+            // does for threads of one process. The stamp is not the hold's start
+            // time: the flag, owner and stamp are written separately, so a snapshot
+            // taken between those writes pairs a new hold with an older stamp. The
+            // hold is timed from this waiter's first observation of it instead, and
+            // only while this waiter runs: a poll overdue by more than the timeout
+            // means it was stopped, as a suspend also stops the holder.
+            const hold_t hold = current_hold();
+            if (!hold_observed || waiter_was_stopped || hold != observed_hold) {
+                observed_hold       = hold;
+                hold_observed_since = now;
+                hold_observed       = true;
+                continue;
+            }
+            if (now - hold_observed_since < k_live_owner_timeout) {
+                continue;
+            }
 
-                const auto owner = m_owner_pid.load(std::memory_order_acquire);
-                if (owner == self_pid) {
-                    report_live_owner_stall(owner);
-                }
-                if (owner != 0 && owner != self_pid && is_process_alive(owner)) {
-                    if (detail::is_debug_pause_active()) {
-                        Log_stream(log_level::warning)
-                            << "[sintra][spinlock] Owner PID " << owner
-                            << " is paused under debug control; "
-                            << "taking over the spinlock to allow shutdown to proceed.\n";
-                        if (take_over_owner(owner, self_pid)) {
-                            return;
-                        }
-                        live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
-                        continue;
+            const auto owner = hold.owner_pid;
+            if (owner == self_pid) {
+                report_live_owner_stall(owner);
+            }
+            if (owner != 0 && is_process_alive(owner)) {
+                if (detail::is_debug_pause_active()) {
+                    Log_stream(log_level::warning)
+                        << "[sintra][spinlock] Owner PID " << owner
+                        << " is paused under debug control; "
+                        << "taking over the spinlock to allow shutdown to proceed.\n";
+                    if (take_over_owner(owner, self_pid)) {
+                        return;
                     }
-                    report_live_owner_stall(owner);
+                    hold_observed = false;
+                    continue;
                 }
-
-                // A dead owner is recovered only by takeover. A zero owner has no
-                // identity to take over from: the holder is between the flag and pid
-                // updates of lock() or unlock(), or died there.
-                if (owner == 0) {
-                    force_unlock();
-                }
-                live_owner_deadline = std::chrono::steady_clock::now() + k_live_owner_timeout;
+                report_live_owner_stall(owner);
             }
+
+            // A dead owner is recovered only by takeover. A zero owner has no
+            // identity to take over from: the holder is between the flag and pid
+            // updates of lock() or unlock(), or died there.
+            if (owner == 0) {
+                force_unlock();
+            }
+            hold_observed = false;
         }
     }
 
@@ -148,6 +169,20 @@ private:
     static constexpr size_t    k_spin_yield_mask     = 0x3FF; // yield every 1024 spins
     static constexpr auto      k_owner_liveness_poll = std::chrono::milliseconds(5);
     static constexpr auto      k_live_owner_timeout  = std::chrono::milliseconds(2000);
+
+    struct hold_t
+    {
+        uint32_t owner_pid;
+        uint64_t progress_ns;
+
+        bool operator==(const hold_t&) const = default;
+    };
+
+    hold_t current_hold() const
+    {
+        const auto owner = m_owner_pid.load(std::memory_order_acquire);
+        return {owner, m_last_progress_ns.load(std::memory_order_relaxed)};
+    }
 
     bool try_take_over_dead_owner(uint32_t self_pid)
     {
