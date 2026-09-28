@@ -206,6 +206,21 @@ before changing Sintra's design.
   architectures still succeed, but they emit a warning and fall back to a simple no-op
   spin pause for the interprocess primitives, so those primitives may run with a very
   basic implementation and performance is not guaranteed.
+* **Process visibility for reader liveness** - a writer reclaims a dead reader's slot only
+  on proof of that reader's death. From the capture of a reader slot's start stamp until the
+  slot is reclaimed, the processes of one swarm must observe one another through the native
+  process-lookup calls. Configurations outside the following are unsupported, and reader
+  liveness classification may be wrong there:
+  * **Linux** - all processes of a swarm share one PID namespace and one time namespace,
+    and neither changes during a slot's lifetime. The procfs at `/proc`, whose
+    `/proc/self/stat`, `/proc/<pid>/stat` and `/proc/self/status` Sintra reads, is mounted
+    for that PID namespace. No seccomp or similar filter fakes the results of `kill`,
+    `pidfd_open` or procfs reads.
+  * **FreeBSD** - processes of a swarm stay visible to one another through both
+    `sysctl(KERN_PROC_PID)` and `kill(pid, 0)` with a positive PID. No MAC policy (Biba,
+    MLS, `mac_seeotheruids`), `security.bsd.see_other_uids` or `see_other_gids`,
+    `see_jail_proc`, jail boundary or credential change may hide one from another.
+  * **macOS and Windows** - no additional requirement.
 * **macOS requirement** - Sintra requires macOS 15.0 or newer with the Command Line Tools
   for Xcode 15 (or newer) installed (the full Xcode IDE is not required). The build fails
   if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing.

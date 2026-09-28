@@ -71,6 +71,35 @@ Readers are other processes and can die at any instruction.
 - Signal and crash handlers are best effort and are never relied on:
   `SIGKILL` and `TerminateProcess` run no handler.
 
+Deployment requirement (owner decision). From the capture of a reader
+slot's start stamp until the slot is reclaimed, the processes of one swarm
+must be able to observe one another through the native process-lookup
+calls. Configurations that violate this are unsupported: liveness
+classification may be wrong there.
+- **Linux.** All processes of a swarm share one PID namespace and one time
+  namespace, and neither changes during a slot's lifetime. The procfs at
+  `/proc`, whose `/proc/self/stat`, `/proc/<pid>/stat` and
+  `/proc/self/status` Sintra reads, is mounted for that PID namespace. No
+  seccomp or similar filter fakes the results of `kill`, `pidfd_open` or
+  procfs reads.
+- **FreeBSD.** Processes of a swarm stay visible to one another through both
+  `sysctl(KERN_PROC_PID)` and `kill(pid, 0)` with a positive PID. No MAC
+  policy (Biba, MLS, `mac_seeotheruids`), `security.bsd.see_other_uids` or
+  `see_other_gids`, `see_jail_proc`, jail boundary or credential change may
+  hide one from another.
+- **macOS.** No additional requirement.
+
+Under this requirement, `ESRCH` from the native lookup means that the
+process is absent. Death has two kinds of evidence, kept separate:
+- **Absence** comes from the native PID lookup, which runs in the caller's
+  own PID namespace. It never depends on procfs, namespace metadata or start
+  stamps, and missing metadata never vetoes it.
+- **A different incarnation or a terminal state** comes from a complete
+  process record, and only where the record's coordinates are consistent
+  with the published stamp. A known contradiction makes that evidence
+  UNKNOWN, never DEAD. A lookup that finds some process while the published
+  incarnation cannot be confirmed from a record is UNKNOWN.
+
 **7. Define the contract before working around behaviour.**
 When a mechanism causes trouble, first decide what it should do. Don't accept
 its current behaviour and pay to work around it.

@@ -267,7 +267,12 @@ Contract:
   Both configurations periodically reclaim readers whose exact process
   identity is proven dead, including published blocking guards. An unresolved
   identity that prevents safe writer progress reports a bounded native error;
-  unrelated identity observation failures do not fail a write. Any
+  unrelated identity observation failures do not fail a write. A reader
+  slot publishes its process incarnation: PID, start stamp and, on Linux,
+  its PID and time namespaces. Liveness classification relies on the
+  process-visibility requirement in the README's
+  [Supported platforms and architectures](../../README.md#supported-platforms-and-architectures)
+  section; outside it, a reader's death may be misjudged. Any
   subsequent `start_reading` or `make_snapshot` throws
   `ring_reader_evicted_exception`; `try_snapshot_e` returns
   `Ring_R_snapshot_error::evicted`. The reader must be reconstructed.
