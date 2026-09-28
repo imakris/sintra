@@ -273,13 +273,101 @@ bool prepare_abort_expecting_child()
     return true;
 }
 
-// The live-owner timeout is 2 s. The stream of short holds and the stopped
-// waiter both outlast it, while every individual hold stays far below it.
+// The live-owner timeout is 2 s. Case 4 streams short holds until the waiter
+// has kept waiting well past it, and case 5 stops the waiter for longer than it.
+constexpr auto k_live_owner_timeout    = std::chrono::seconds(2);
+constexpr auto k_timeout_margin        = std::chrono::milliseconds(500);
 constexpr auto k_short_hold            = std::chrono::milliseconds(1);
-constexpr auto k_short_hold_stream     = std::chrono::seconds(3);
 constexpr auto k_waiter_stop           = std::chrono::seconds(3);
-constexpr auto k_waiter_observation    = std::chrono::milliseconds(100);
+constexpr auto k_interleaving_limit    = std::chrono::seconds(10);
 constexpr auto k_timed_child_deadline  = std::chrono::seconds(20);
+constexpr int  k_schedule_attempts     = 3;
+
+std::filesystem::path inconclusive_marker_path(const std::filesystem::path& marker_path)
+{
+    return marker_path.string() + ".inconclusive";
+}
+
+// What a child learns from the waiter's contended polls through the spinlock
+// test hook, which runs on the waiter thread; only that thread writes
+// first_poll. A schedule in which one hold really outlasts the timeout proves
+// nothing, since the abort is then correct. The hook records such a schedule
+// in the inconclusive marker before the abort, and the parent retries it.
+struct Waiter_polls
+{
+    const void*                                   lock = nullptr;
+    std::filesystem::path                         inconclusive_path;
+    std::string                                   token;
+    std::chrono::steady_clock::time_point         first_poll{};
+    std::atomic<bool>                             polled{false};
+    std::atomic<std::chrono::steady_clock::rep>   hold_started{0};
+    std::atomic<bool>                             hold_stream_over{false};
+    std::atomic<bool>                             outlasted_timeout{false};
+    std::atomic<bool>                             resumed{false};
+    std::atomic<bool>                             resumed_poll_kept_waiting{false};
+};
+
+Waiter_polls g_waiter_polls;
+
+void observe_waiter_polls(
+    const void*                                         lock,
+    const std::filesystem::path&                        marker_path,
+    std::string_view                                    marker_token,
+    sintra::detail::test_hooks::Spinlock_poll_callback  callback)
+{
+    g_waiter_polls.lock              = lock;
+    g_waiter_polls.inconclusive_path = inconclusive_marker_path(marker_path);
+    g_waiter_polls.token             = std::string(marker_token);
+    sintra::detail::test_hooks::s_spinlock_poll.store(callback, std::memory_order_release);
+}
+
+[[noreturn]] void exit_inconclusive()
+{
+    (void)publish_ready_marker(g_waiter_polls.inconclusive_path, g_waiter_polls.token);
+    std::_Exit(2);
+}
+
+// Waits for a flag that the waiter's polls set, or ends the schedule as
+// inconclusive when the waiter does not run within the limit.
+void await_waiter_poll(const std::atomic<bool>& flag)
+{
+    const auto deadline = std::chrono::steady_clock::now() + k_interleaving_limit;
+    while (!flag.load()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            exit_inconclusive();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void note_hold_started()
+{
+    g_waiter_polls.hold_started = std::chrono::steady_clock::now().time_since_epoch().count();
+}
+
+void observe_short_hold_poll(const void* lock, bool timed_out)
+{
+    auto& polls = g_waiter_polls;
+    if (lock != polls.lock) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!polls.polled.load()) {
+        polls.first_poll = now;
+        polls.polled = true;
+    }
+    if (!timed_out) {
+        if (now - polls.first_poll > k_live_owner_timeout + k_timeout_margin) {
+            polls.outlasted_timeout = true;
+        }
+        return;
+    }
+    const std::chrono::steady_clock::time_point hold_started{
+        std::chrono::steady_clock::duration(polls.hold_started.load())};
+    if (!polls.hold_stream_over.load() && now - hold_started >= k_live_owner_timeout) {
+        (void)publish_ready_marker(polls.inconclusive_path, polls.token);
+    }
+}
 
 // Ends one short hold and starts the next by the same thread, with the owner
 // and stamp writes of unlock() and lock(), as if this thread won every race
@@ -290,11 +378,13 @@ void hand_over_to_next_hold(spinlock_layout_t& layout, uint32_t self_pid)
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
     layout.m_owner_pid.store(self_pid, std::memory_order_release);
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
+    note_hold_started();
 }
 
-// A waiter behind a stream of short holds that together outlast the timeout
-// must keep waiting. The marker records that it did; the final hold is then
-// kept until the waiter's timeout aborts the process.
+// A waiter behind a stream of short holds must keep waiting past the timeout.
+// The stream starts once the waiter has polled inside lock() and ends once one
+// of its polls has kept waiting well past the timeout, which the marker then
+// records. The final hold is kept until the waiter's timeout aborts the process.
 int run_short_holds_child(
     const std::filesystem::path& marker_path,
     std::string_view             marker_token)
@@ -303,22 +393,24 @@ int run_short_holds_child(
     sintra::spinlock short_hold_lock;
     auto& layout = access_layout(short_hold_lock);
     short_hold_lock.lock();
+    note_hold_started();
+    observe_waiter_polls(&short_hold_lock, marker_path, marker_token, &observe_short_hold_poll);
 
-    std::atomic<bool> waiter_started{false};
     std::thread waiter([&] {
-        waiter_started = true;
         short_hold_lock.lock();
         short_hold_lock.unlock();
     });
-    while (!waiter_started) {
-        std::this_thread::yield();
-    }
+    await_waiter_poll(g_waiter_polls.polled);
 
-    const auto stream_end = std::chrono::steady_clock::now() + k_short_hold_stream;
-    while (std::chrono::steady_clock::now() < stream_end) {
+    const auto stream_limit = std::chrono::steady_clock::now() + k_interleaving_limit;
+    while (!g_waiter_polls.outlasted_timeout.load()) {
+        if (std::chrono::steady_clock::now() >= stream_limit) {
+            exit_inconclusive();
+        }
         std::this_thread::sleep_for(k_short_hold);
         hand_over_to_next_hold(layout, self_pid);
     }
+    g_waiter_polls.hold_stream_over = true;
     if (!publish_ready_marker(marker_path, marker_token)) {
         std::_Exit(2);
     }
@@ -326,55 +418,76 @@ int run_short_holds_child(
     return 1;
 }
 
-#ifndef _WIN32
-std::atomic<bool> g_stopped_waiter_resumed{false};
+void observe_stopped_waiter_poll(const void* lock, bool timed_out)
+{
+    auto& polls = g_waiter_polls;
+    if (lock != polls.lock) {
+        return;
+    }
+    polls.polled = true;
+    const bool resumed = polls.resumed.load();
+    if (!timed_out) {
+        if (resumed) {
+            polls.resumed_poll_kept_waiting = true;
+        }
+        return;
+    }
+    // Before the stop, or after a resumed poll has already kept waiting, a
+    // timeout means that the holder itself stayed descheduled past it.
+    if (!resumed || polls.resumed_poll_kept_waiting.load()) {
+        (void)publish_ready_marker(polls.inconclusive_path, polls.token);
+    }
+}
 
+#ifndef _WIN32
 void stop_waiter_thread(int)
 {
     timespec remaining{
         static_cast<time_t>(std::chrono::duration_cast<std::chrono::seconds>(k_waiter_stop).count()),
         0};
     while (nanosleep(&remaining, &remaining) == -1 && errno == EINTR) {}
-    g_stopped_waiter_resumed.store(true);
+    g_waiter_polls.resumed.store(true);
 }
 #endif
 
 // A suspend stops the holder and the waiter alike. A waiter that was stopped
 // for longer than the timeout must not count that time against a hold that is
-// released soon after both run again.
-int run_stopped_waiter_child()
+// released soon after both run again. The waiter is stopped only once it has
+// polled inside lock(), and the lock is released only once the waiter's first
+// poll after resuming has decided to keep waiting.
+int run_stopped_waiter_child(
+    const std::filesystem::path& marker_path,
+    std::string_view             marker_token)
 {
     sintra::spinlock stopped_lock;
     stopped_lock.lock();
+    observe_waiter_polls(&stopped_lock, marker_path, marker_token, &observe_stopped_waiter_poll);
 
-    std::atomic<bool> waiter_started{false};
     std::atomic<bool> waiter_acquired{false};
 #ifdef _WIN32
-    HANDLE waiter_handle = nullptr;
+    std::atomic<HANDLE> waiter_handle{nullptr};
 #endif
     std::thread waiter([&] {
 #ifdef _WIN32
         waiter_handle = OpenThread(THREAD_SUSPEND_RESUME, FALSE, GetCurrentThreadId());
 #endif
-        waiter_started = true;
         stopped_lock.lock();
         waiter_acquired = true;
         stopped_lock.unlock();
     });
-    while (!waiter_started) {
-        std::this_thread::yield();
-    }
-    std::this_thread::sleep_for(k_waiter_observation);
+    await_waiter_poll(g_waiter_polls.polled);
 
 #ifdef _WIN32
-    if (!waiter_handle || SuspendThread(waiter_handle) == static_cast<DWORD>(-1)) {
+    const HANDLE handle = waiter_handle.load();
+    if (!handle || SuspendThread(handle) == static_cast<DWORD>(-1)) {
         std::_Exit(2);
     }
     std::this_thread::sleep_for(k_waiter_stop);
-    if (ResumeThread(waiter_handle) == static_cast<DWORD>(-1)) {
+    g_waiter_polls.resumed = true;
+    if (ResumeThread(handle) == static_cast<DWORD>(-1)) {
         std::_Exit(2);
     }
-    CloseHandle(waiter_handle);
+    CloseHandle(handle);
 #else
     struct sigaction stop_action {};
     stop_action.sa_handler = stop_waiter_thread;
@@ -384,13 +497,9 @@ int run_stopped_waiter_child()
     {
         std::_Exit(2);
     }
-    while (!g_stopped_waiter_resumed.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
 #endif
+    await_waiter_poll(g_waiter_polls.resumed_poll_kept_waiting);
 
-    // Keep the same hold across the resumed waiter's next polls.
-    std::this_thread::sleep_for(k_waiter_observation);
     const bool acquired_while_held = waiter_acquired.load();
     stopped_lock.unlock();
     waiter.join();
@@ -437,6 +546,55 @@ void run_child_to_exit(
     }
 }
 
+struct Schedule_outcome
+{
+    bool          inconclusive   = false;
+    Marker_state  marker         = Marker_state::absent;
+    std::string   marker_diagnostic;
+    std::string   status;
+    bool          aborted        = false;
+    bool          exited_cleanly = false;
+};
+
+// Runs one schedule of a timed child, which reports through its markers
+// whether it survived the stream and whether a single hold really outlasted
+// the timeout, so that the schedule proved nothing.
+Schedule_outcome run_timed_schedule(
+    const char*         program,
+    const char*         mode,
+    const std::string&  label,
+    uint32_t            self_pid,
+    std::string_view    context)
+{
+    const Ready_marker marker = make_ready_marker(label, self_pid);
+    const std::string marker_arg = marker.path.string();
+    const std::vector<const char*> args = {
+        program,
+        mode,
+        marker_arg.c_str(),
+        marker.token.c_str(),
+        nullptr
+    };
+    Exact_child child(k_child_cleanup_timeout);
+    run_child_to_exit(child, program, args.data(), context);
+
+    Schedule_outcome outcome;
+    outcome.marker = probe_ready_marker(marker.path, marker.token, outcome.marker_diagnostic);
+    const auto inconclusive_path = inconclusive_marker_path(marker.path);
+    std::string inconclusive_diagnostic;
+    outcome.inconclusive =
+        probe_ready_marker(inconclusive_path, marker.token, inconclusive_diagnostic) ==
+        Marker_state::valid;
+    outcome.status         = child.describe_status();
+    outcome.aborted        = exited_as_expected_abort(child);
+    outcome.exited_cleanly = child.exited_with_code(0);
+
+    std::error_code cleanup_error;
+    std::filesystem::remove(inconclusive_path, cleanup_error);
+    remove_ready_marker(marker);
+    return outcome;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -457,11 +615,11 @@ int main(int argc, char* argv[])
         return run_short_holds_child(std::filesystem::path(argv[2]), argv[3]);
     }
 
-    if (argc >= 2 && std::string_view(argv[1]) == "--spinlock-stopped-waiter") {
+    if (argc >= 4 && std::string_view(argv[1]) == "--spinlock-stopped-waiter") {
         if (!prepare_abort_expecting_child()) {
             return 2;
         }
-        return run_stopped_waiter_child();
+        return run_stopped_waiter_child(std::filesystem::path(argv[2]), argv[3]);
     }
 
     if (argc >= 5 && std::string_view(argv[1]) == "--spinlock-stall-child") {
@@ -697,46 +855,49 @@ int main(int argc, char* argv[])
     // Case 4: a stream of short holds that together outlast the live-owner
     // timeout must not abort a waiting contender, and the single hold that
     // follows it must.
-    {
-        const Ready_marker marker = make_ready_marker("short_holds", self_pid);
-        const std::string marker_arg = marker.path.string();
-        const std::vector<const char*> short_hold_args = {
-            argv[0],
-            "--spinlock-short-holds",
-            marker_arg.c_str(),
-            marker.token.c_str(),
-            nullptr
-        };
-        Exact_child short_hold_child(k_child_cleanup_timeout);
-        run_child_to_exit(short_hold_child, argv[0], short_hold_args.data(), "case 4");
-
-        std::string marker_diagnostic;
-        const auto marker_state =
-            probe_ready_marker(marker.path, marker.token, marker_diagnostic);
-        remove_ready_marker(marker);
-        sintra::test::require_true(marker_state == Marker_state::valid, k_failure_prefix,
-            "case 4 the waiter did not outlast short holds that each stayed far below the "
-            "live-owner timeout (" + short_hold_child.describe_status() + "; " +
-            (marker_diagnostic.empty() ? std::string("no marker") : marker_diagnostic) + ")");
-        sintra::test::require_true(exited_as_expected_abort(short_hold_child), k_failure_prefix,
+    for (int attempt = 1;; ++attempt) {
+        const auto outcome = run_timed_schedule(
+            argv[0], "--spinlock-short-holds", "short_holds", self_pid, "case 4");
+        if (outcome.inconclusive && outcome.marker != Marker_state::valid) {
+            sintra::test::require_true(attempt < k_schedule_attempts, k_failure_prefix,
+                "case 4 every schedule had a single hold that really outlasted the "
+                "live-owner timeout");
+            std::fprintf(stderr,
+                "spinlock_recovery_test: case 4 schedule %d had a single hold that really "
+                "outlasted the live-owner timeout; retrying\n",
+                attempt);
+            continue;
+        }
+        sintra::test::require_true(outcome.marker == Marker_state::valid, k_failure_prefix,
+            "case 4 the waiter did not keep waiting past the live-owner timeout behind "
+            "short holds (" + outcome.status + "; " +
+            (outcome.marker_diagnostic.empty() ? std::string("no marker") : outcome.marker_diagnostic) +
+            ")");
+        sintra::test::require_true(outcome.aborted, k_failure_prefix,
             "case 4 a single hold past the live-owner timeout did not abort the waiter: " +
-                short_hold_child.describe_status());
+                outcome.status);
+        break;
     }
 
     // Case 5: a waiter stopped for longer than the timeout must not abort on a
     // hold that is released soon after it runs again.
-    {
-        const std::vector<const char*> stopped_waiter_args = {
-            argv[0],
-            "--spinlock-stopped-waiter",
-            nullptr
-        };
-        Exact_child stopped_waiter_child(k_child_cleanup_timeout);
-        run_child_to_exit(
-            stopped_waiter_child, argv[0], stopped_waiter_args.data(), "case 5");
-        sintra::test::require_true(stopped_waiter_child.exited_with_code(0), k_failure_prefix,
+    for (int attempt = 1;; ++attempt) {
+        const auto outcome = run_timed_schedule(
+            argv[0], "--spinlock-stopped-waiter", "stopped_waiter", self_pid, "case 5");
+        if (outcome.inconclusive && !outcome.exited_cleanly) {
+            sintra::test::require_true(attempt < k_schedule_attempts, k_failure_prefix,
+                "case 5 every schedule had a single hold that really outlasted the "
+                "live-owner timeout");
+            std::fprintf(stderr,
+                "spinlock_recovery_test: case 5 schedule %d had a single hold that really "
+                "outlasted the live-owner timeout; retrying\n",
+                attempt);
+            continue;
+        }
+        sintra::test::require_true(outcome.exited_cleanly, k_failure_prefix,
             "case 5 a waiter stopped past the live-owner timeout did not acquire the lock "
-            "released after it resumed: " + stopped_waiter_child.describe_status());
+            "released after it resumed: " + outcome.status);
+        break;
     }
 
     return 0;
