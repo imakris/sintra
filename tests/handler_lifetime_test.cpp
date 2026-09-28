@@ -596,7 +596,13 @@ int run_managed_named_receiver()
         const std::string name = "resolved-before-publish-reply";
         // Model resolution by a publication callback winning the race to cache
         // the same instance before assign_name handles its successful reply.
-        sintra::s_mproc->m_instance_id_of_assigned_name.set_value(name, sender.instance_id());
+        // Before publication only the cache can resolve the name.
+        sintra::s_mproc->m_instance_name_cache.resolve(
+            name,
+            [&](const std::string&) { return sender.instance_id(); });
+        sintra::test::require_true(
+            sintra::get_instance_id(std::string(name)) == sender.instance_id(),
+            k_failure_prefix, "name resolution did not consult the cached instance");
         sintra::test::require_true(sender.assign_name(name), k_failure_prefix,
             "publication rejected an already cached matching instance");
         sintra::test::require_true(
