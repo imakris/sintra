@@ -335,6 +335,16 @@ while one of them is held.
 
 ### Shutdown Sequence (detail::finalize)
 
+The managed process starts one owned lifecycle-worker reaper before opening
+worker admission. Workers publish body completion, and the reaper joins them
+outside the ownership mutex, including their thread-exit cleanup, before
+releasing their records. Finalization closes admission and drains this reaper
+before child-exit dispatch, readers, and the coordinator are destroyed. No
+owned lifecycle worker is detached. Terminal teardown from its body throws
+`std::logic_error` before changing state; an external thread must finalize.
+Teardown from worker TLS initialization or exit cleanup, and worker
+`std::exit`, are unsupported shared-fate paths that may deadlock or terminate.
+
 ```
 ┌────────────────────────────────────────────────────────────┐
 │ 1. Announce Draining                                       │

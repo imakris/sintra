@@ -139,9 +139,16 @@ custody, not a process-instance-id generation counter.
 - Default recovery uses the same recovery-thread mechanism,
   even though it calls `spawn()` immediately on that thread.
 - The local managed process owns these workers alongside its other lifecycle
-  work. Completed workers are joined and released when later lifecycle work is
-  admitted; active runners stay owned. Shutdown signals cancellation and joins
-  the remaining workers before destroying the coordinator.
+  work. One owned reaper joins and releases each finished worker promptly,
+  without waiting for another admission. Admission never joins. Shutdown
+  signals cancellation, closes worker admission, and drains the reaper before
+  destroying the coordinator. No owned lifecycle worker is detached.
+- `finalize`, `shutdown`, `leave`, direct `finalize_impl`, and direct worker
+  drain throw `std::logic_error` when called from an owned worker body, before
+  changing teardown state. Call them from an external thread after the worker
+  returns. Teardown from a worker's TLS initialization or thread-exit cleanup
+  is unsupported and may deadlock or terminate. Calling `std::exit` on a
+  worker also shares that fate.
 - A custody that did not call `enable_recovery()` is not respawned even when a
   policy or runner is configured.
 
