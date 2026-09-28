@@ -213,12 +213,33 @@ struct Fork_shared
     std::atomic<bool> parent_released{false};
 };
 
-// A fork child inherits the parent's token, so it must draw its own before it
-// records ownership: otherwise an earlier child with its PID would look like
-// itself.
+// Exit status of a fork child that checks its process instance: zero when it
+// started without one and drew its own under its PID. A drawn token equal to
+// an ancestor's is an independent collision, which the owner contract allows.
+int check_fork_child_instance()
+{
+    if (sintra::detail::cached_process_instance().load() != 0) {
+        return 1;
+    }
+    const uint64_t instance = self_instance();
+    if (sintra::detail::process_instance_pid(instance) != static_cast<uint32_t>(::getpid())) {
+        return 2;
+    }
+    return 0;
+}
+
+int wait_for_child(pid_t child)
+{
+    int status = 0;
+    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+}
+
+// A fork child must not record ownership under its parent's token: an earlier
+// child with its PID would then look like itself.
 void fork_child_draws_own_instance()
 {
-    const uint64_t parent = self_instance();
+    (void)self_instance();
     void* memory = ::mmap(
         nullptr,
         sizeof(Fork_shared),
@@ -233,16 +254,13 @@ void fork_child_draws_own_instance()
     const pid_t child = ::fork();
     require(child >= 0, "fork failed");
     if (child == 0) {
-        const uint64_t instance = self_instance();
-        if (sintra::detail::process_instance_pid(instance) != static_cast<uint32_t>(::getpid())) {
-            ::_exit(1);
-        }
-        if (static_cast<uint32_t>(instance) == static_cast<uint32_t>(parent)) {
-            ::_exit(2);
+        const int instance_status = check_fork_child_instance();
+        if (instance_status != 0) {
+            ::_exit(instance_status);
         }
         shared->lock.lock();
         const bool excluded = shared->parent_released.load();
-        const bool recorded = shared->lock.m_owner.load() == instance;
+        const bool recorded = shared->lock.m_owner.load() == self_instance();
         shared->lock.unlock();
         if (!excluded) {
             ::_exit(3);
@@ -253,12 +271,33 @@ void fork_child_draws_own_instance()
     std::this_thread::sleep_for(200ms);
     shared->parent_released = true;
     shared->lock.unlock();
-    int status = 0;
-    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    const int status = wait_for_child(child);
     shared->~Fork_shared();
     ::munmap(memory, sizeof(Fork_shared));
-    require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+    require(status == 0,
         "a fork child must draw its own process instance and wait for the parent's lock");
+}
+
+// A fork child that never uses Sintra forks again. The grandchild can receive
+// this process's PID after this process exits, so it must not start with the
+// instance that both inherited.
+void fork_grandchild_draws_own_instance()
+{
+    (void)self_instance();
+    const pid_t child = ::fork();
+    require(child >= 0, "fork failed");
+    if (child == 0) {
+        const pid_t grandchild = ::fork();
+        if (grandchild < 0) {
+            ::_exit(5);
+        }
+        if (grandchild == 0) {
+            ::_exit(check_fork_child_instance());
+        }
+        ::_exit(wait_for_child(grandchild));
+    }
+    require(wait_for_child(child) == 0,
+        "a fork grandchild must start without its ancestors' process instance");
 }
 #endif
 
@@ -275,6 +314,8 @@ int main()
 #ifndef _WIN32
     fork_child_draws_own_instance();
     std::puts("PASS fork_child_draws_own_instance");
+    fork_grandchild_draws_own_instance();
+    std::puts("PASS fork_grandchild_draws_own_instance");
 #endif
     return 0;
 }

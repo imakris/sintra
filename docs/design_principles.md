@@ -121,12 +121,12 @@ process is absent. Death has two kinds of evidence, kept separate:
 
 Shared locks (the interprocess mutex, with its recovery gate, and the shared
 spinlocks) record their owner as a process instance: the PID plus a random
-token that each process image draws for itself. Two live processes never
-share a PID, so an owner recorded with the observer's own PID and another
-token was an earlier process with that PID, which has exited. An owner with
-the observer's own instance is held by the observer's process, through
-whichever mapping, and keeps excluding. A token collision fails safe, as
-ownership by the observer's process.
+token that each process image, and each fork child, draws for itself. Two
+live processes never share a PID, so an owner recorded with the observer's
+own PID and another token was an earlier process with that PID, which has
+exited. An owner with the observer's own instance is held by the observer's
+process, through whichever mapping, and keeps excluding. A token collision
+fails safe, as ownership by the observer's process.
 
 **7. Define the contract before working around behaviour.**
 When a mechanism causes trouble, first decide what it should do. Don't accept

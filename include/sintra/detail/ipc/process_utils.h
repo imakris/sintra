@@ -26,6 +26,7 @@
 #else
   #include <cerrno>
   #include <fcntl.h>
+  #include <pthread.h>
   #include <signal.h>
   #include <sys/stat.h>
   #include <sys/types.h>
@@ -295,13 +296,14 @@ inline bool is_process_alive(uint32_t pid)
 namespace detail {
 
 // A process instance identifies one process image: its PID in the upper 32
-// bits and, in the lower 32, a random token that the image draws when it
-// first needs one. Shared locks record their owner as a process instance. Two
-// live processes never share a PID, so an owner recorded with this process's
-// PID and another token was recorded by an earlier process with this PID,
-// which has exited or replaced its image. A token collision hides that and
-// fails safe, as ownership by this process. Like Sintra's runtime state, the
-// token belongs to the one copy of Sintra in the process.
+// bits and, in the lower 32, a random token that the image, or each fork
+// child, draws when it first needs one. Shared locks record their owner as a
+// process instance. Two live processes never share a PID, so an owner
+// recorded with this process's PID and another token was recorded by an
+// earlier process with this PID, which has exited or replaced its image. A
+// token collision hides that and fails safe, as ownership by this process.
+// Like Sintra's runtime state, the token belongs to the one copy of Sintra in
+// the process.
 inline constexpr uint32_t process_instance_pid(uint64_t instance) noexcept
 {
     return static_cast<uint32_t>(instance >> 32);
@@ -329,16 +331,47 @@ inline uint32_t draw_process_instance_token() noexcept
     return static_cast<uint32_t>(entropy ^ (entropy >> 32));
 }
 
-// A fork child keeps the parent's token under a new PID until it draws its
-// own here, before its first use.
-inline uint64_t current_process_instance()
+// This process's instance, or zero before its first use.
+inline std::atomic<uint64_t>& cached_process_instance() noexcept
 {
     static std::atomic<uint64_t> s_instance{0};
-    const uint64_t pid = get_current_pid();
-    uint64_t instance = s_instance.load(std::memory_order_acquire);
-    while (process_instance_pid(instance) != pid) {
-        const uint64_t drawn = (pid << 32) | draw_process_instance_token();
-        if (s_instance.compare_exchange_strong(
+    return s_instance;
+}
+
+#ifndef _WIN32
+// A fork child copies its parent's instance, and so would the fork children
+// of a child that never used it; one of those can receive the parent's PID
+// after the parent exits. Every fork child therefore starts without one.
+inline void forget_process_instance_in_fork_child() noexcept
+{
+    cached_process_instance().store(0, std::memory_order_relaxed);
+}
+
+inline bool register_process_instance_fork_handler()
+{
+    const int error = ::pthread_atfork(nullptr, nullptr, forget_process_instance_in_fork_child);
+    if (error != 0) {
+        throw std::system_error(error, std::system_category(), "pthread_atfork");
+    }
+    return true;
+}
+#endif
+
+inline uint64_t current_process_instance()
+{
+#ifndef _WIN32
+    // Concurrent first callers wait until the fork handler is registered, so
+    // it precedes the first published instance. A failed registration throws,
+    // publishes nothing, and is attempted again by the next call.
+    [[maybe_unused]] static const bool s_fork_handler_registered =
+        register_process_instance_fork_handler();
+#endif
+    auto& cached = cached_process_instance();
+    uint64_t instance = cached.load(std::memory_order_acquire);
+    while (instance == 0) {
+        const uint64_t drawn =
+            (static_cast<uint64_t>(get_current_pid()) << 32) | draw_process_instance_token();
+        if (cached.compare_exchange_strong(
                 instance, drawn, std::memory_order_acq_rel, std::memory_order_acquire))
         {
             return drawn;
