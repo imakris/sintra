@@ -3,12 +3,16 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <system_error>
 
+#include "../process/process_id.h"
 #include "private_resources.h"
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
@@ -31,6 +35,10 @@ namespace detail {
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 inline std::function<void(const std::filesystem::path&)> before_directory_create_for_test;
+// Runs once publish_private_file has written all of the contents under their
+// staged name, before the staged file takes the published name.
+inline std::function<void(const std::filesystem::path& staged, const std::filesystem::path& path)>
+    after_private_file_staged_for_test;
 #endif
 
 enum class publish_file_result
@@ -186,6 +194,46 @@ inline bool write_private_file(const std::filesystem::path& path, const std::str
         auto existing = open_private_file(path, sintra::ipc::read_write);
         return truncate_file(existing.native_handle(), 0) &&
             write_file(existing.native_handle(), contents.data(), contents.size());
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+// Publishes contents as the private file at path in one step: a reader finds no
+// file or all of the contents, never part of them. They are written to a private
+// file beside path, which then takes path's name and keeps its owner and access.
+// Replacing an existing file works on POSIX; on Windows it fails while another
+// process has that file open without delete sharing, so publish each path once.
+inline bool publish_private_file(const std::filesystem::path& path, const std::string& contents)
+{
+    try {
+        static std::atomic<std::uint64_t> s_staged_files{0};
+        auto staged = path;
+        staged += ".staged." + std::to_string(get_current_process_id()) + '.' +
+            std::to_string(++s_staged_files);
+        const auto created = create_new_file(staged.string().c_str());
+        if (created == invalid_file()) {
+            return false;
+        }
+        const bool written = write_file(created, contents.data(), contents.size());
+        bool published = close_file(created) && written;
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (published && after_private_file_staged_for_test) {
+            after_private_file_staged_for_test(staged, path);
+        }
+#endif
+#ifdef _WIN32
+        published = published && ::MoveFileExW(staged.c_str(), path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+        published = published && ::rename(staged.c_str(), path.c_str()) == 0;
+#endif
+        if (!published) {
+            std::error_code ignored;
+            std::filesystem::remove(staged, ignored);
+        }
+        return published;
     }
     catch (...) {
         return false;

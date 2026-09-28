@@ -1042,7 +1042,9 @@ inline bool write_run_marker(
     marker << run_marker_start_stamp_key() << '=' << record.start_stamp << '\n';
     marker << "created_ns=" << record.created_monotonic_ns << '\n';
     marker << "occurrence=" << record.recovery_occurrence << '\n';
-    return detail::write_private_file(run_marker_path(directory), marker.str());
+    // Published in one step: a scan that found a partly written marker would
+    // take it for a malformed one and delete a live swarm's directory.
+    return detail::publish_private_file(run_marker_path(directory), marker.str());
 }
 
 inline std::optional<run_marker_record_t> read_run_marker(const std::filesystem::path& marker_path)

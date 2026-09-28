@@ -695,6 +695,61 @@ void test_marker_published_during_scan()
         "a marker created later than the scan's clock reading must be stale");
 }
 
+// A run marker is published in one step. While its contents are being written,
+// a scan finds no marker under its name, never a partial one, and keeps the
+// directory; afterwards the marker is complete and nothing staged remains.
+void test_marker_publication_is_atomic()
+{
+    if (!stale_directory_cleanup_runs()) {
+        return;
+    }
+    const auto current_pid   = static_cast<std::uint32_t>(sintra::get_current_pid());
+    const auto current_start = sintra::current_process_start_stamp().value_or(0);
+    const auto base_dir = sintra::test::unique_scratch_directory("utility_marker_publication") / "private";
+    const auto run_dir  = base_dir / "publishing";
+    sintra::test::require_true(
+        sintra::detail::create_private_directory(base_dir) &&
+            sintra::detail::create_private_directory(run_dir),
+        k_failure_prefix, "create private run directories");
+
+    sintra::run_marker_record_t record{};
+    record.pid                  = current_pid;
+    record.start_stamp          = current_start;
+    record.created_monotonic_ns = sintra::monotonic_now_ns();
+    record.recovery_occurrence  = 3;
+
+    bool staged_complete = false;
+    bool marker_absent   = false;
+    bool kept_while_staged = false;
+    sintra::detail::after_private_file_staged_for_test =
+        [&](const std::filesystem::path& staged, const std::filesystem::path& path) {
+            const auto staged_record = sintra::read_run_marker(staged);
+            staged_complete = staged_record &&
+                staged_record->created_monotonic_ns == record.created_monotonic_ns &&
+                staged_record->recovery_occurrence == record.recovery_occurrence;
+            marker_absent = !std::filesystem::exists(path);
+            sintra::cleanup_stale_swarm_directories(base_dir, current_pid, current_start);
+            kept_while_staged = std::filesystem::exists(run_dir);
+        };
+    const bool published = sintra::write_run_marker(run_dir, record);
+    sintra::detail::after_private_file_staged_for_test = nullptr;
+
+    sintra::test::require_true(published && staged_complete, k_failure_prefix,
+        "the marker's contents must be written in full before it is published");
+    sintra::test::require_true(marker_absent && kept_while_staged, k_failure_prefix,
+        "a scan during publication must find no marker and keep the directory");
+    const auto marker = sintra::read_run_marker(sintra::run_marker_path(run_dir));
+    std::size_t entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(run_dir)) {
+        (void)entry;
+        ++entries;
+    }
+    sintra::test::require_true(
+        marker && marker->created_monotonic_ns == record.created_monotonic_ns && entries == 1,
+        k_failure_prefix,
+        "the published marker must be complete, with no staged file left behind");
+}
+
 #if defined(__linux__)
 char linux_leader_state(pid_t pid)
 {
@@ -822,6 +877,7 @@ int main()
         test_process_utility_helpers();
         test_stale_directory_start_stamp();
         test_marker_published_during_scan();
+        test_marker_publication_is_atomic();
 #if defined(__linux__)
         test_process_alive_after_main_thread_exit();
 #endif
