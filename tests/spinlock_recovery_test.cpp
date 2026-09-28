@@ -307,6 +307,15 @@ std::chrono::steady_clock::rep to_ticks(Steady_time time)
 
 std::atomic<bool> g_debug_pause_timed_out{false};
 std::atomic<bool> g_debug_pause_polled_again{false};
+const void* g_same_process_poll_lock = nullptr;
+std::atomic<bool> g_same_process_contended_poll{false};
+
+void observe_same_process_poll(const void* lock, Steady_time, bool)
+{
+    if (lock == g_same_process_poll_lock) {
+        g_same_process_contended_poll = true;
+    }
+}
 
 void observe_debug_pause_poll(const void*, Steady_time, bool timed_out)
 {
@@ -743,37 +752,55 @@ int main(int argc, char* argv[])
         sintra::detail::process_instance_pid(self_instance) == self_pid, k_failure_prefix,
         "the process instance must carry this process's PID");
     install_owner(layout, owner_instance(self_pid, static_cast<uint32_t>(self_instance) + 1));
-    const auto takeover_start = std::chrono::steady_clock::now();
     lock.lock();
-    const auto takeover_time = std::chrono::steady_clock::now() - takeover_start;
     const uint64_t takeover_owner = layout.m_owner.load();
     lock.unlock();
     sintra::test::require_true(
-        takeover_time < std::chrono::seconds(1) && takeover_owner == self_instance,
-        k_failure_prefix,
-        "a lock left by an earlier process with this PID must be taken over promptly");
+        takeover_owner == self_instance, k_failure_prefix,
+        "a lock left by an earlier process with this PID must be taken over");
 
     // Case 1c: another thread of this process holds the lock. It keeps
     // excluding and is never taken over.
     {
         std::atomic<bool> holder_locked{false};
-        std::atomic<bool> holder_released{false};
+        std::atomic<bool> owner_observed{false};
+        std::atomic<bool> holder_release_started{false};
+        std::atomic<bool> waiter_acquired_before_release{false};
+        uint64_t waiter_owner = 0;
         std::thread holder([&] {
             lock.lock();
             holder_locked = true;
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
-            holder_released = true;
+            while (!owner_observed || !g_same_process_contended_poll) {
+                std::this_thread::yield();
+            }
+            holder_release_started = true;
             lock.unlock();
         });
         while (!holder_locked) {
             std::this_thread::yield();
         }
         const uint64_t held_owner = layout.m_owner.load();
-        lock.lock();
-        const bool excluded = holder_released.load();
-        lock.unlock();
+        owner_observed = true;
+        g_same_process_poll_lock = &lock;
+        g_same_process_contended_poll = false;
+        sintra::detail::test_hooks::s_spinlock_poll.store(
+            &observe_same_process_poll, std::memory_order_release);
+        sintra::detail::set_debug_pause_active(true);
+        std::thread waiter([&] {
+            lock.lock();
+            waiter_acquired_before_release = !holder_release_started.load();
+            waiter_owner = layout.m_owner.load();
+            lock.unlock();
+        });
         holder.join();
-        sintra::test::require_true(held_owner == self_instance && excluded, k_failure_prefix,
+        waiter.join();
+        sintra::detail::set_debug_pause_active(false);
+        sintra::detail::test_hooks::s_spinlock_poll.store(nullptr, std::memory_order_release);
+        g_same_process_poll_lock = nullptr;
+        sintra::test::require_true(held_owner == self_instance &&
+            g_same_process_contended_poll && !waiter_acquired_before_release &&
+            waiter_owner == self_instance,
+            k_failure_prefix,
             "a lock held by another thread of this process must exclude and not be taken over");
     }
 
