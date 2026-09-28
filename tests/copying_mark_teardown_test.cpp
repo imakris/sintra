@@ -78,6 +78,11 @@ int abandoned_writer(const char* directory, const char* sync, uint64_t process_i
         auto* frame = writer.write<Frame>(sintra::vb_size<Frame>(message), message);
         frame->sender_instance_id = process_id;
         writer.done_writing();
+        if (i == 0) {
+            // A REQUEST published before the reader admits its copy correctly
+            // denies that admission, so wrap only once the copy is paused.
+            fixture::wait_for_file(synchronization / "copy-paused");
+        }
     }
     return 2;
 }
@@ -105,6 +110,7 @@ void check_session(int argc, char* argv[])
         sintra::detail::test_hooks::s_ring_guard_operation = &observe_reader;
         fixture::signal_file(sync.path / "start");
         const bool paused = fixture::wait_until([]() { return copy_paused.load(); });
+        fixture::signal_file(sync.path / "copy-paused");
         fixture::wait_for_file(sync.path / "requested");
         const bool requested = true;
         writer.terminate();
