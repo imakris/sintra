@@ -101,9 +101,9 @@ jobs:
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          # Use --ignore-errors negative for multi-threaded test race conditions
-          lcov --quiet --capture --directory . --ignore-errors negative -o lcov.all.info
-          lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative -o lcov.info
+          # negative: multi-threaded counter races; mismatch: lcov 2.x rejects GCC end-line data for some lambdas
+          lcov --quiet --capture --directory . --ignore-errors negative,mismatch -o lcov.all.info
+          lcov --quiet --extract lcov.all.info "*/include/sintra/*" --ignore-errors negative,mismatch -o lcov.info
           lcov --list lcov.info || true
 
       # Clang: capture gcov-compatible data with llvm-cov gcov, then filter to sintra headers
