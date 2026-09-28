@@ -1065,7 +1065,8 @@ private:
         }
 
         const auto observed_start_stamp = query_process_start_stamp(pid);
-        return !observed_start_stamp || *observed_start_stamp == start_stamp;
+        return !observed_start_stamp ||
+            !start_stamp_proves_other_incarnation(start_stamp, *observed_start_stamp);
     }
 
     static void clear_attachment_slot(

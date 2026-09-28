@@ -134,10 +134,19 @@ struct freebsd_process_record_t
 // ki_start is the uptime at fork plus the kernel's boot-time estimate when the
 // record is filled (kern_proc.c, fill_kinfo_proc_only), and a wall-clock step
 // or leap second moves that estimate (kern_tc.c). kern.boottime reports the
-// same estimate, so while it is unchanged around the record, the difference is
-// the uptime at fork. A boot time that moves during every attempt leaves the
-// stamp unavailable (EAGAIN).
+// same estimate, and the stamp is ki_start minus a boot time that reads the
+// same before and after the record. No snapshot covers the three lookups, so
+// that stability is best-effort evidence, never proof: a change reversed
+// between the two boot-time reads goes unseen, and the stamp of a live
+// process is then wrong, at capture as at observation. A different stamp in a
+// nonterminal record therefore proves no other incarnation
+// (probe_process_identity_native). A boot time that moves during every
+// attempt leaves the stamp unavailable (EAGAIN).
 inline constexpr int k_freebsd_boot_time_attempts = 3;
+
+// The error of an UNKNOWN result whose nonterminal record shows a start stamp
+// other than the published one.
+inline constexpr int k_start_stamp_mismatch_error = ESTALE;
 
 // Returns zero, or the errno of a failed record lookup.
 inline int read_freebsd_process_record(uint32_t pid, freebsd_process_record_t& result)
@@ -377,6 +386,22 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
 #else
     (void)pid;
     return std::nullopt;
+#endif
+}
+
+// Whether the start stamp observed for a live PID proves that the PID no longer
+// names the incarnation that published published_stamp. On FreeBSD it never
+// does: a missed boot-time change can make the stamps of one process differ
+// (read_freebsd_process_record). Recovery keyed by such a PID then waits until
+// the process holding it exits.
+inline bool start_stamp_proves_other_incarnation(uint64_t published_stamp, uint64_t observed_stamp)
+{
+#if defined(__FreeBSD__)
+    (void)published_stamp;
+    (void)observed_stamp;
+    return false;
+#else
+    return observed_stamp != published_stamp;
 #endif
 }
 
@@ -833,8 +858,11 @@ inline process_identity_result_t probe_process_identity_native(const process_inc
     if (observed.stamp_error != 0) {
         return unknown_process_identity(observed.stamp_error);
     }
+    // A missed boot-time change can make the stamps differ for one process.
+    // If the published process died and a live one took its PID before this
+    // lookup, the owner therefore stays UNKNOWN until that process exits.
     if (observed.start_stamp != start_stamp) {
-        return {Process_identity_status::DEAD, {}};
+        return unknown_process_identity(k_start_stamp_mismatch_error);
     }
     return {Process_identity_status::LIVE, {}};
 #else
@@ -1083,7 +1111,9 @@ inline void cleanup_stale_swarm_directories(
         else {
             const auto& record = *record_opt;
             if (record.pid == current_pid) {
-                if (record.start_stamp != 0 && current_start_stamp != 0 && record.start_stamp != current_start_stamp) {
+                if (record.start_stamp != 0 && current_start_stamp != 0 &&
+                    start_stamp_proves_other_incarnation(record.start_stamp, current_start_stamp))
+                {
                     stale = true;
                 }
                 else {
@@ -1098,7 +1128,9 @@ inline void cleanup_stale_swarm_directories(
                 else
                 if (record.start_stamp != 0) {
                     auto running_start = query_process_start_stamp(record.pid);
-                    if (running_start && *running_start != record.start_stamp) {
+                    if (running_start &&
+                        start_stamp_proves_other_incarnation(record.start_stamp, *running_start))
+                    {
                         stale = true;
                     }
                     else

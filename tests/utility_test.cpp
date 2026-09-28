@@ -379,6 +379,22 @@ void test_spinlocked_umap_scoped_erase()
         "'three' should remain");
 }
 
+// On Windows, cleanup_stale_swarm_directories leaves preserved scratch alone
+// unless a test root confines it.
+bool stale_directory_cleanup_runs()
+{
+#if defined(_WIN32)
+    const char* preserve_scratch = std::getenv("SINTRA_PRESERVE_SCRATCH");
+    const char* test_root        = std::getenv("SINTRA_TEST_ROOT");
+    const bool preserve_without_test_root =
+        preserve_scratch && preserve_scratch[0] != '\0' && preserve_scratch[0] != '0' &&
+        (!test_root || test_root[0] == '\0');
+    return !preserve_without_test_root;
+#else
+    return true;
+#endif
+}
+
 void test_process_utility_helpers()
 {
     const auto current_pid = static_cast<std::uint32_t>(sintra::get_current_pid());
@@ -475,16 +491,86 @@ void test_process_utility_helpers()
         k_failure_prefix, "create private malformed marker");
 
     sintra::cleanup_stale_swarm_directories(cleanup_base, current_pid, current_start);
-#if defined(_WIN32)
-    const char* preserve_scratch = std::getenv("SINTRA_PRESERVE_SCRATCH");
-    const char* test_root        = std::getenv("SINTRA_TEST_ROOT");
-    const bool preserve_without_test_root =
-        preserve_scratch && preserve_scratch[0] != '\0' && preserve_scratch[0] != '0' &&
-        (!test_root || test_root[0] == '\0');
-    if (!preserve_without_test_root)
+    if (stale_directory_cleanup_runs()) {
+        sintra::test::require_true(!std::filesystem::exists(stale_dir), k_failure_prefix,
+            "cleanup_stale_swarm_directories should remove malformed marker directories");
+    }
+}
+
+// A run marker of a live PID with another start stamp belongs to an earlier
+// incarnation, except on FreeBSD, where a missed boot-time change can make the
+// stamps of one live process differ. There the directory stays until the
+// process holding the PID exits.
+void test_stale_directory_start_stamp()
+{
+#if defined(__FreeBSD__)
+    constexpr bool k_mismatch_is_stale = false;
+#else
+    constexpr bool k_mismatch_is_stale = true;
 #endif
-    sintra::test::require_true(!std::filesystem::exists(stale_dir), k_failure_prefix,
-        "cleanup_stale_swarm_directories should remove malformed marker directories");
+    const auto current_pid   = static_cast<std::uint32_t>(sintra::get_current_pid());
+    const auto current_start = sintra::current_process_start_stamp().value_or(0);
+    const auto cleanup_base  = sintra::test::unique_scratch_directory("utility_stamp_cleanup") / "private";
+    sintra::test::require_true(sintra::detail::create_private_directory(cleanup_base),
+        k_failure_prefix, "create private cleanup root");
+
+    auto write_marker = [&](const char* name, std::uint32_t pid, std::uint64_t start_stamp) {
+        const auto directory = cleanup_base / name;
+        sintra::test::require_true(sintra::detail::create_private_directory(directory),
+            k_failure_prefix, "create private run directory");
+        sintra::run_marker_record_t record{};
+        record.pid                  = pid;
+        record.start_stamp          = start_stamp;
+        record.created_monotonic_ns = sintra::monotonic_now_ns();
+        sintra::test::require_true(sintra::write_run_marker(directory, record), k_failure_prefix,
+            "write_run_marker should write into an existing directory");
+        return directory;
+    };
+
+    sintra::test::require_true(current_start != 0, k_failure_prefix,
+        "the current process must have a start stamp");
+    const auto own_pid_dir = write_marker("own_pid", current_pid, current_start + 1);
+#ifndef _WIN32
+    int release_pipe[2];
+    sintra::test::require_true(::pipe(release_pipe) == 0, k_failure_prefix, "pipe should succeed");
+    const pid_t child_pid = ::fork();
+    sintra::test::require_true(child_pid >= 0, k_failure_prefix, "fork should succeed");
+    if (child_pid == 0) {
+        ::close(release_pipe[1]);
+        char release = 0;
+        while (::read(release_pipe[0], &release, 1) < 0 && errno == EINTR) {}
+        ::_exit(0);
+    }
+    ::close(release_pipe[0]);
+    const auto child_start = sintra::query_process_start_stamp(static_cast<std::uint32_t>(child_pid));
+    const auto live_pid_dir = write_marker(
+        "live_pid", static_cast<std::uint32_t>(child_pid), child_start.value_or(0) + 1);
+#endif
+
+    sintra::cleanup_stale_swarm_directories(cleanup_base, current_pid, current_start);
+    if (stale_directory_cleanup_runs()) {
+        sintra::test::require_true(std::filesystem::exists(own_pid_dir) != k_mismatch_is_stale,
+            k_failure_prefix,
+            "a marker of this PID with another start stamp is stale everywhere except on FreeBSD");
+    }
+#ifndef _WIN32
+    const bool live_pid_kept = std::filesystem::exists(live_pid_dir);
+    ::close(release_pipe[1]);
+    int   child_status = 0;
+    pid_t waited       = 0;
+    do {
+        waited = ::waitpid(child_pid, &child_status, 0);
+    }
+    while (waited < 0 && errno == EINTR);
+    sintra::test::require_true(child_start.has_value() && waited == child_pid, k_failure_prefix,
+        "the marker child must have a start stamp and be reaped");
+    sintra::test::require_true(live_pid_kept != k_mismatch_is_stale, k_failure_prefix,
+        "a marker of a live PID with another start stamp is stale everywhere except on FreeBSD");
+
+    sintra::cleanup_stale_swarm_directories(cleanup_base, current_pid, current_start);
+    sintra::test::require_true(!std::filesystem::exists(live_pid_dir), k_failure_prefix,
+        "a marker whose process has exited must be stale");
+#endif
 }
 
 #if defined(__linux__)
@@ -612,6 +698,7 @@ int main()
 #endif
         test_spinlocked_umap_scoped_erase();
         test_process_utility_helpers();
+        test_stale_directory_start_stamp();
 #if defined(__linux__)
         test_process_alive_after_main_thread_exit();
 #endif

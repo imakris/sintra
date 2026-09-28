@@ -89,6 +89,23 @@ classification may be wrong there.
   hide one from another.
 - **macOS.** No additional requirement.
 
+FreeBSD start stamps (owner decision). FreeBSD offers no immutable
+incarnation identity without held process references, which are out of
+scope. Sintra's start stamp is `ki_start` minus `kern.boottime`, taken when
+the boot time reads the same before and after the process record. A
+wall-clock change moves both values and no snapshot covers the reads, so
+that stability is best-effort evidence, never proof: a change reversed
+between the two boot-time reads goes unseen. A matching stamp is LIVE. A
+different stamp in a nonterminal record is UNKNOWN, never DEAD. A terminal
+record, and a missing record with `ESRCH` from `kill(pid, 0)`, stay DEAD.
+The residual behaviour:
+- If a reader dies mid-copy and a new live process takes its PID before the
+  check, its slot is reclaimed only once that process exits. Meanwhile a
+  writer blocked by the slot fails the write with the UNKNOWN error instead
+  of overwriting the copy.
+- Mutex dead-owner recovery, lifecycle-attachment scavenging and run-directory
+  cleanup wait the same way for the process holding the PID to exit.
+
 Under this requirement, `ESRCH` from the native lookup means that the
 process is absent. Death has two kinds of evidence, kept separate:
 - **Absence** comes from the native PID lookup, which runs in the caller's

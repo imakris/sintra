@@ -50,6 +50,10 @@ CAVEATS
 - Recursive lock attempts throw resource_deadlock_would_occur.
 - If process start-stamp evidence is unavailable, recovery stays conservative
   and falls back to PID-liveness only.
+- On FreeBSD a start stamp never proves that a live PID holds another
+  incarnation (start_stamp_proves_other_incarnation). If the owner dies and a
+  live process takes its PID, recovery waits until that process exits; a
+  waiter that itself holds the PID cannot recover the lock.
 */
 
 #include <algorithm>
@@ -271,7 +275,7 @@ private:
         }
 
         const auto current_stamp = query_process_start_stamp(owner_pid(token));
-        return current_stamp && *current_stamp != stored_stamp;
+        return current_stamp && start_stamp_proves_other_incarnation(stored_stamp, *current_stamp);
     }
 
     bool try_acquire_unowned_when_no_recovery(owner_token self)

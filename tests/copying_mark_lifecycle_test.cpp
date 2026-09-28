@@ -224,8 +224,19 @@ const protection_case_t k_protection_cases[] = {
     }},
     {"unstable_boot_time", EAGAIN, [](sintra::process_incarnation_t& published) {
         published.start_stamp += 1000;
-        fakes::s_boot_time_unstable = true;
+        fakes::s_moving_boot_time_lookups = fakes::k_every_lookup;
     }},
+    // A boot-time change reversed between the lookups around the observed
+    // record, or around the captured one, which stable observations then find
+    // to differ.
+    {"boot_time_change_during_observation", sintra::detail::k_start_stamp_mismatch_error,
+        [](sintra::process_incarnation_t&) {
+            fakes::s_record_boot_time_shift = 3600;
+        }},
+    {"boot_time_change_during_capture", sintra::detail::k_start_stamp_mismatch_error,
+        [](sintra::process_incarnation_t& published) {
+            published.start_stamp += 3600ull * 1'000'000'000;
+        }},
 };
 #endif
 
@@ -424,12 +435,25 @@ void unrelated_unknown_and_incarnation_mismatch()
             "unrelated UNKNOWN must permit safe reclamation/progress without clearing a marked guard");
     }
     slot.owner_start_stamp.fetch_add(1);
+#if defined(__FreeBSD__)
+    // A missed boot-time change can make the stamps of one live process
+    // differ, so the mismatch is UNKNOWN and the slot stays with its owner.
+    const auto reader_state = slot.word.load();
+    const auto counts = control.read_access.load();
+    cm::require(!control.scavenge_orphans(), "a live FreeBSD owner's stamp mismatch must reclaim nothing");
+    cm::require(slot.word == reader_state && control.read_access == counts &&
+        neighbor_slot.word == neighbor_state && !control.free_rs_stack.contains(reader.m_rs_index),
+        "a live FreeBSD owner's stamp mismatch must preserve its slot, guard and count");
+    slot.owner_start_stamp.fetch_sub(1);
+    reader.done_reading();
+#else
     cm::require(control.scavenge_orphans(), "a changed incarnation must reclaim the obsolete slot");
     cm::require(slot.status() == Writer::READER_STATE_INACTIVE &&
         neighbor_slot.word == neighbor_state &&
         cm::octile_count(control.read_access, neighbor_slot.load_state().guard_octile()) == 1,
         "incarnation mismatch must reclaim only the old owner and preserve its neighbor");
     reader.m_reading = false;
+#endif
     neighbor.done_reading();
 }
 
@@ -468,6 +492,27 @@ void clock_step_preserves_copying_owner()
     copy.release();
     reader.done_reading();
 }
+
+// Lifecycle attachments compare the same stamps, and their live count decides
+// whether the ring files are removed. A boot-time change reversed between the
+// lookups must neither scavenge a live attachment nor drop it from that count.
+void boot_time_change_keeps_attachments()
+{
+    sintra::test::Temp_ring_dir directory("boot_time_change_attachments");
+    const size_t elements = sintra::test::pick_ring_elements<uint32_t>();
+    Writer writer(directory.str(), "raw", elements);
+    Reader reader(directory.str(), "raw", elements);
+    const auto attached = writer.count_live_attachments();
+    size_t observed = 0;
+    {
+        fakes::Scoped_fakes injected;
+        fakes::s_record_boot_time_shift = 3600;
+        writer.scavenge_dead_attachments();
+        observed = writer.count_live_attachments();
+    }
+    cm::require(attached >= 2 && observed == attached && writer.count_live_attachments() == attached,
+        "a reversed boot-time change must keep every live attachment");
+}
 #endif
 
 } // namespace
@@ -501,6 +546,8 @@ int main(int argc, char** argv)
 #if defined(__FreeBSD__)
         clock_step_preserves_copying_owner();
         std::puts("PASS clock_step_preserves_copying_owner");
+        boot_time_change_keeps_attachments();
+        std::puts("PASS boot_time_change_keeps_attachments");
 #endif
         for (const auto& protection : k_protection_cases) {
             live_owner_protection(protection);

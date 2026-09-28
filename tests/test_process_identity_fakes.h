@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -186,17 +187,30 @@ inline int fake_proc_pidinfo(int pid, int flavor, uint64_t argument, void* buffe
 // A wall-clock step of this many seconds: kern.boottime and every native
 // record's ki_start move by it, while the uptime at fork stays unchanged.
 inline time_t s_clock_step = 0;
-// Every kern.boottime lookup reports a later boot time than the one before.
-inline bool s_boot_time_unstable = false;
+// The next this many kern.boottime lookups each report a boot time one second
+// later than the one before. Records are filled under the latest boot time.
+inline constexpr int k_every_lookup = std::numeric_limits<int>::max();
+inline int s_moving_boot_time_lookups = 0;
 inline time_t s_boot_time_moves = 0;
+// Records are filled under a boot time this many seconds later than the one
+// kern.boottime reports around them: a change reversed between the lookups.
+inline time_t s_record_boot_time_shift = 0;
+// Replace the native boot time and ki_start before the changes above apply.
+inline std::optional<struct timeval> s_boot_time;
+inline std::optional<struct timeval> s_start_time;
 
 inline int fake_sysctl(const int* name, u_int length, void* old, size_t* old_size, const void* next, size_t next_size)
 {
     if (length == 2 && name[0] == CTL_KERN && name[1] == KERN_BOOTTIME) {
         const int result = ::sysctl(name, length, old, old_size, next, next_size);
         if (result == 0) {
-            static_cast<struct timeval*>(old)->tv_sec +=
-                s_clock_step + (s_boot_time_unstable ? ++s_boot_time_moves : 0);
+            auto& boot_time = *static_cast<struct timeval*>(old);
+            if (s_moving_boot_time_lookups > 0) {
+                --s_moving_boot_time_lookups;
+                ++s_boot_time_moves;
+            }
+            boot_time = s_boot_time.value_or(boot_time);
+            boot_time.tv_sec += s_clock_step + s_boot_time_moves;
         }
         return result;
     }
@@ -204,7 +218,9 @@ inline int fake_sysctl(const int* name, u_int length, void* old, size_t* old_siz
         case Record::NATIVE: {
             const int result = ::sysctl(name, length, old, old_size, next, next_size);
             if (result == 0 && *old_size == sizeof(struct kinfo_proc)) {
-                static_cast<struct kinfo_proc*>(old)->ki_start.tv_sec += s_clock_step;
+                auto& start = static_cast<struct kinfo_proc*>(old)->ki_start;
+                start = s_start_time.value_or(start);
+                start.tv_sec += s_clock_step + s_boot_time_moves + s_record_boot_time_shift;
             }
             return result;
         }
@@ -273,8 +289,11 @@ public:
         s_record = Record::NATIVE;
         s_record_error = ESRCH;
         s_clock_step = 0;
-        s_boot_time_unstable = false;
+        s_moving_boot_time_lookups = 0;
         s_boot_time_moves = 0;
+        s_record_boot_time_shift = 0;
+        s_boot_time.reset();
+        s_start_time.reset();
 #endif
     }
 

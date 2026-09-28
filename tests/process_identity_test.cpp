@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -64,8 +65,14 @@ void mismatched_identity()
     auto owner = own_incarnation();
     owner.start_stamp += 1;
     const auto result = sintra::probe_process_identity(owner);
+#if defined(__FreeBSD__)
+    // A missed boot-time change can make the stamps of one live process differ.
+    require_result(result, Process_identity_status::UNKNOWN, sintra::detail::k_start_stamp_mismatch_error,
+        "a different start stamp in a live FreeBSD record must be UNKNOWN, never DEAD");
+#else
     require(result.status == Process_identity_status::DEAD && !result.error,
         "a different incarnation must be DEAD even while that PID is live");
+#endif
 }
 
 void invalid_identity()
@@ -555,17 +562,23 @@ void exited_process()
 #if defined(__FreeBSD__)
     {
         fakes::Scoped_fakes injected;
-        fakes::s_boot_time_unstable = true;
+        fakes::s_moving_boot_time_lookups = fakes::k_every_lookup;
         require_result(sintra::probe_process_identity(owner), Process_identity_status::DEAD, 0,
             "a terminal record must be DEAD without an established start stamp");
     }
+    auto reused = owner;
+    reused.start_stamp += 1000;
+    require_result(sintra::probe_process_identity(reused), Process_identity_status::DEAD, 0,
+        "a terminal record must be DEAD whatever start stamp it shows");
 #endif
     reap(child.pid);
     require_result(sintra::probe_process_identity(owner), Process_identity_status::DEAD, 0,
         "a reaped process must be DEAD once signal lookup confirms its absence");
 #if defined(__FreeBSD__)
+    require_result(sintra::probe_process_identity(reused), Process_identity_status::DEAD, 0,
+        "a missing record confirmed by signal ESRCH must be DEAD whatever stamp was published");
     fakes::Scoped_fakes injected;
-    fakes::s_boot_time_unstable = true;
+    fakes::s_moving_boot_time_lookups = fakes::k_every_lookup;
     require_result(sintra::probe_process_identity(owner), Process_identity_status::DEAD, 0,
         "absence must be DEAD without an established start stamp");
 #endif
@@ -596,16 +609,107 @@ void clock_step()
         "a live process must stay LIVE across a clock step");
     auto reused = owner;
     reused.start_stamp += 1000;
-    require_result(sintra::probe_process_identity(reused), Process_identity_status::DEAD, 0,
-        "a record whose uptime-based stamp differs must be DEAD across a clock step");
+    require_result(sintra::probe_process_identity(reused), Process_identity_status::UNKNOWN,
+        sintra::detail::k_start_stamp_mismatch_error,
+        "a live record whose uptime-based stamp differs must be UNKNOWN across a clock step");
 
-    fakes::s_boot_time_unstable = true;
+    fakes::s_moving_boot_time_lookups = fakes::k_every_lookup;
     require_result(sintra::probe_process_identity(owner), Process_identity_status::UNKNOWN, EAGAIN,
         "a boot time that moves during every attempt must leave a live process UNKNOWN");
     require_result(sintra::probe_process_identity(reused), Process_identity_status::UNKNOWN, EAGAIN,
         "a start stamp that cannot be established must never prove a different incarnation");
     require(!sintra::query_process_start_stamp(owner.pid) && !sintra::current_process_incarnation(),
         "a start stamp that cannot be established must be unavailable for capture");
+}
+
+// Records filled under a boot time one hour later than the one reported
+// around them: a change reversed between the lookups.
+constexpr time_t k_reversed_change_s = 3600;
+constexpr uint64_t k_reversed_change_ns = uint64_t(k_reversed_change_s) * 1'000'000'000;
+
+void boot_time_change_during_observation()
+{
+    const auto owner = own_incarnation();
+    fakes::Scoped_fakes injected;
+    fakes::s_record_boot_time_shift = k_reversed_change_s;
+    require(sintra::query_process_start_stamp(owner.pid) == owner.start_stamp + k_reversed_change_ns,
+        "equal boot-time readings must not detect a change reversed between them");
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::UNKNOWN,
+        sintra::detail::k_start_stamp_mismatch_error,
+        "a live process observed through a reversed boot-time change must be UNKNOWN, never DEAD");
+    fakes::s_record_boot_time_shift = 0;
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::LIVE, 0,
+        "a later stable observation must find the live process LIVE");
+}
+
+void boot_time_change_during_capture()
+{
+    std::optional<sintra::process_incarnation_t> captured;
+    {
+        fakes::Scoped_fakes injected;
+        fakes::s_record_boot_time_shift = k_reversed_change_s;
+        captured = sintra::current_process_incarnation();
+    }
+    require(captured && captured->start_stamp == own_stamp() + k_reversed_change_ns,
+        "a boot-time change reversed during capture must skew the published stamp");
+    for (int observation = 0; observation < 3; ++observation) {
+        require_result(sintra::probe_process_identity(*captured), Process_identity_status::UNKNOWN,
+            sintra::detail::k_start_stamp_mismatch_error,
+            "stable observations of a live process with a skewed stamp must stay UNKNOWN, never DEAD");
+    }
+}
+
+void boot_time_settles_on_retry()
+{
+    const auto owner = own_incarnation();
+    const int attempts = sintra::detail::k_freebsd_boot_time_attempts;
+    fakes::Scoped_fakes injected;
+    // Each attempt reads the boot time twice, so only the last attempt is stable.
+    fakes::s_moving_boot_time_lookups = 2 * (attempts - 1);
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::LIVE, 0,
+        "a boot time that settles by the last attempt must establish the start stamp");
+    require(fakes::s_moving_boot_time_lookups == 0 && fakes::s_boot_time_moves == 2 * (attempts - 1),
+        "every attempt before the last must have seen the boot time move");
+
+    fakes::s_moving_boot_time_lookups = 2 * attempts;
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::UNKNOWN, EAGAIN,
+        "a boot time that moves during every attempt must leave the stamp unavailable");
+    require(sintra::query_process_start_stamp(owner.pid) == owner.start_stamp,
+        "a boot time that settles before a later lookup must yield the original stamp");
+    require_result(sintra::probe_process_identity(owner), Process_identity_status::LIVE, 0,
+        "a later observation after the boot time settles must be LIVE");
+}
+
+// The stamp is ki_start minus the boot time. Boot-time microseconds beyond
+// those of ki_start borrow a second.
+void fractional_second_borrow()
+{
+    const uint32_t pid = sintra::get_current_pid();
+    constexpr uint64_t k_borrowed_stamp = 499'200'000'000;
+    fakes::Scoped_fakes injected;
+    fakes::s_boot_time = timeval{1790000000, 900000};
+    fakes::s_start_time = timeval{1790000500, 100000};
+    require(sintra::query_process_start_stamp(pid) == k_borrowed_stamp,
+        "a boot time with more microseconds than ki_start must borrow a second");
+    require_result(sintra::probe_process_identity({pid, k_borrowed_stamp, {}}), Process_identity_status::LIVE, 0,
+        "a borrowed stamp must match the published one");
+    fakes::s_start_time = timeval{1790000500, 950000};
+    require(sintra::query_process_start_stamp(pid) == 500'050'000'000,
+        "a boot time with fewer microseconds than ki_start must not borrow");
+}
+
+// Absence needs no start stamp, whatever stamp was published.
+void absence_with_other_stamp()
+{
+    auto reused = own_incarnation();
+    reused.start_stamp += 1000;
+    fakes::Scoped_fakes injected;
+    fakes::s_kill_result = ESRCH;
+    for (const auto record : {fakes::Record::FAILED, fakes::Record::EMPTY}) {
+        fakes::s_record = record;
+        require_result(sintra::probe_process_identity(reused), Process_identity_status::DEAD, 0,
+            "a missing record confirmed by signal ESRCH must be DEAD whatever stamp was published");
+    }
 }
 #endif
 #endif
@@ -655,6 +759,11 @@ int main(int argc, char** argv)
         {"native_observations", native_observations},
 #if defined(__FreeBSD__)
         {"clock_step", clock_step},
+        {"boot_time_change_during_observation", boot_time_change_during_observation},
+        {"boot_time_change_during_capture", boot_time_change_during_capture},
+        {"boot_time_settles_on_retry", boot_time_settles_on_retry},
+        {"fractional_second_borrow", fractional_second_borrow},
+        {"absence_with_other_stamp", absence_with_other_stamp},
 #endif
 #endif
 #endif

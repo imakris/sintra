@@ -12,6 +12,10 @@ using namespace std::chrono_literals;
 
 #include "sintra/detail/ipc/mutex.h"
 
+#if defined(__FreeBSD__)
+#include "test_process_identity_fakes.h"
+#endif
+
 namespace
 {
 
@@ -68,19 +72,9 @@ void run_owner_generation_recovery_red_gate()
         (*current_start_stamp == 1u) ? 2u : (*current_start_stamp - 1u);
 
     bool ok = true;
-    auto require_recovery = [&](uint32_t tid, std::string_view context) {
+    auto require_no_recovery = [&](uint32_t tid, uint64_t start_stamp, std::string_view context) {
         Test_mutex mutex;
-        install_owner_fixture(mutex, current_pid, tid, stale_start_stamp);
-        const bool acquired = mutex.try_lock_for(20ms);
-        ok &= sintra::test::assert_true(acquired, k_failure_prefix, context);
-        if (acquired) {
-            mutex.unlock();
-        }
-    };
-
-    auto require_no_recovery = [&](uint32_t tid, std::string_view context) {
-        Test_mutex mutex;
-        install_owner_fixture(mutex, current_pid, tid, *current_start_stamp);
+        install_owner_fixture(mutex, current_pid, tid, start_stamp);
         const auto seeded_owner = mutex.test_owner_token();
         const bool acquired = mutex.try_lock_for(20ms);
         const auto after_owner = mutex.test_owner_token();
@@ -93,13 +87,39 @@ void run_owner_generation_recovery_red_gate()
         }
     };
 
+#if defined(__FreeBSD__)
+    // A missed boot-time change can make the stamps of one live process
+    // differ, so a different stamp on a live PID is no proof of death.
+    require_no_recovery(other_tid, stale_start_stamp,
+        "a different start stamp on a live FreeBSD owner with a different tid should not recover");
+    require_no_recovery(current_tid, stale_start_stamp,
+        "a different start stamp on a live FreeBSD owner with the current tid should not recover");
+    {
+        namespace fakes = sintra::test::identity_fakes;
+        fakes::Scoped_fakes injected;
+        fakes::s_record_boot_time_shift = 3600;
+        require_no_recovery(other_tid, *current_start_stamp,
+            "a boot-time change reversed during observation should not recover a live owner's lock");
+    }
+#else
+    auto require_recovery = [&](uint32_t tid, std::string_view context) {
+        Test_mutex mutex;
+        install_owner_fixture(mutex, current_pid, tid, stale_start_stamp);
+        const bool acquired = mutex.try_lock_for(20ms);
+        ok &= sintra::test::assert_true(acquired, k_failure_prefix, context);
+        if (acquired) {
+            mutex.unlock();
+        }
+    };
+
     require_recovery(other_tid,
         "stale-generation owner with current pid and different tid should recover");
     require_recovery(current_tid,
         "stale-generation owner with current pid and current tid should recover");
-    require_no_recovery(other_tid,
+#endif
+    require_no_recovery(other_tid, *current_start_stamp,
         "live current-generation owner with different tid should not recover");
-    require_no_recovery(current_tid,
+    require_no_recovery(current_tid, *current_start_stamp,
         "live current-generation owner with current tid should not recover");
 
     sintra::test::expect(ok, k_failure_prefix,
