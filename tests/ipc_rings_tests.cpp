@@ -1331,7 +1331,7 @@ private:
         const bool visible_owner = state.status() == sintra::Ring<uint32_t, true>::READER_STATE_ACTIVE &&
             ((state.guard_present() && state.guard_octile() == octile) ||
              (state.guard_pending() && state.pending_octile() == octile));
-        const bool reclamation_excluded = reader.c.rs_stack_spinlock.m_locked.test();
+        const bool reclamation_excluded = reader.c.rs_stack_spinlock.m_owner.load() != 0;
         observer.m_all_releases_owned &= visible_owner || reclamation_excluded;
     }
 

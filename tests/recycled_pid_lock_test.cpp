@@ -64,7 +64,6 @@ uint64_t earlier_instance()
 
 void install_spinlock_owner(sintra::spinlock& lock, uint64_t owner)
 {
-    lock.m_locked.test_and_set(std::memory_order_acquire);
     lock.m_owner.store(owner, std::memory_order_release);
     lock.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
 }

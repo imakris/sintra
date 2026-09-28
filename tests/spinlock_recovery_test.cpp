@@ -49,13 +49,12 @@ using sintra::test::Exact_child_state;
 
 struct spinlock_layout_t
 {
-    std::atomic_flag       m_locked;
     std::atomic<uint64_t>  m_owner;
     std::atomic<uint64_t>  m_last_progress_ns;
 };
 
 // A spinlock owner is a process instance: the PID in the upper 32 bits and the
-// process's token in the lower 32.
+// process's token in the lower 32. A nonzero owner word holds the lock.
 uint64_t owner_instance(uint32_t pid, uint32_t token = 0)
 {
     return (static_cast<uint64_t>(pid) << 32) | token;
@@ -63,8 +62,6 @@ uint64_t owner_instance(uint32_t pid, uint32_t token = 0)
 
 void install_owner(spinlock_layout_t& layout, uint64_t owner)
 {
-    layout.m_locked.clear(std::memory_order_release);
-    layout.m_locked.test_and_set(std::memory_order_acquire);
     layout.m_owner.store(owner, std::memory_order_release);
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
 }
@@ -400,17 +397,15 @@ void observe_short_hold_poll(const void* lock, Steady_time poll_time, bool timed
     }
 }
 
-// Ends one short hold and starts the next by the same thread, with the owner
-// and stamp writes of unlock() and lock(), as if this thread won every race
-// against the waiter. The flag stays set, so the waiter cannot acquire. The
-// next hold's start is taken before it is published and the previous hold's
-// end after, so both bound the holds from outside.
-void hand_over_to_next_hold(spinlock_layout_t& layout, uint64_t self_instance)
+// Ends one short hold and starts the next by the same thread, as if this
+// thread won every race against the waiter. Both holds belong to this process
+// instance, so only the progress stamp that unlock() and lock() write changes;
+// the owner word stays set, and the waiter cannot acquire. The next hold's
+// start is taken before it is published and the previous hold's end after, so
+// both bound the holds from outside.
+void hand_over_to_next_hold(spinlock_layout_t& layout)
 {
     const auto next_started = std::chrono::steady_clock::now();
-    layout.m_owner.store(0, std::memory_order_release);
-    layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
-    layout.m_owner.store(self_instance, std::memory_order_release);
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
     const auto previous_ended = std::chrono::steady_clock::now();
     if (previous_ended - from_ticks(g_waiter_polls.hold_started.load()) >= k_overlong_hold) {
@@ -428,7 +423,6 @@ int run_short_holds_child(
     const std::filesystem::path& marker_path,
     std::string_view             marker_token)
 {
-    const uint64_t self_instance = sintra::detail::current_process_instance();
     sintra::spinlock short_hold_lock;
     auto& layout = access_layout(short_hold_lock);
     g_waiter_polls.hold_started = to_ticks(std::chrono::steady_clock::now());
@@ -447,7 +441,7 @@ int run_short_holds_child(
             exit_inconclusive();
         }
         std::this_thread::sleep_for(k_short_hold);
-        hand_over_to_next_hold(layout, self_instance);
+        hand_over_to_next_hold(layout);
     }
     g_waiter_polls.hold_stream_over = true;
     if (!publish_ready_marker(marker_path, marker_token)) {

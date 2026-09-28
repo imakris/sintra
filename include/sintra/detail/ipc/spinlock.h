@@ -114,8 +114,13 @@ struct spinlock
         size_t spin_count          = 0;
 
         while (true) {
-            if (!m_locked.test_and_set(std::memory_order_acquire)) {
-                m_owner.store(self, std::memory_order_release);
+            // The owner word is the lock: acquisition publishes the owner in the
+            // same step, so no holder is ever unidentified.
+            uint64_t unowned = 0;
+            if (m_owner.load(std::memory_order_relaxed) == 0 &&
+                m_owner.compare_exchange_strong(
+                    unowned, self, std::memory_order_acquire, std::memory_order_relaxed))
+            {
                 m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
                 return;
             }
@@ -142,7 +147,7 @@ struct spinlock
             // owner and by the progress stamp that lock(), unlock() and takeover
             // write, so a new hold is recognized even when the owner repeats, as it
             // does for threads of one process. The stamp is not the hold's start
-            // time: the flag, owner and stamp are written separately, so a snapshot
+            // time: the owner and stamp are written separately, so a snapshot
             // taken between those writes pairs a new hold with an older stamp. The
             // hold is timed from this waiter's first observation of it instead, and
             // only while this waiter runs: a poll overdue by more than the timeout
@@ -182,21 +187,15 @@ struct spinlock
                 report_live_owner_stall(owner_pid);
             }
 
-            // A dead owner is recovered only by takeover. A zero owner has no
-            // identity to take over from: the holder is between the flag and owner
-            // updates of lock() or unlock(), or died there.
-            if (owner == 0) {
-                force_unlock();
-            }
+            // A dead owner is recovered only by takeover, at the next poll.
             hold_observed = false;
         }
     }
 
     void unlock()
     {
-        m_owner.store(0, std::memory_order_release);
         m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
-        m_locked.clear(std::memory_order_release);
+        m_owner.store(0, std::memory_order_release);
     }
 
 private:
@@ -235,8 +234,9 @@ private:
     // Recovery inherits the lock instead of releasing it. Every contender that
     // saw the same owner may act on that stale observation after another one
     // has already recovered the lock, so a release would clear the recovered
-    // holder's ownership. The flag stays set, and the compare-exchange admits
-    // exactly one contender per observed owner; the others keep waiting.
+    // holder's ownership. The owner word never passes through zero, and the
+    // compare-exchange admits exactly one contender per observed owner; the
+    // others keep waiting.
     bool take_over_owner(uint64_t observed_owner, uint64_t self)
     {
         if (!m_owner.compare_exchange_strong(
@@ -275,18 +275,11 @@ private:
         detail::debug_aware_abort();
     }
 
-    void force_unlock()
-    {
-        m_owner.store(0, std::memory_order_release);
-        m_locked.clear(std::memory_order_release);
-        m_last_progress_ns.store(monotonic_now_ns(), std::memory_order_relaxed);
-    }
-
     static_assert(std::atomic<uint64_t>::is_always_lock_free,
         "spinlock requires lock-free 64-bit atomics");
 
-    std::atomic_flag           m_locked{};
-    // The owner's process instance (detail::current_process_instance), or zero.
+    // The lock: the owner's process instance (detail::current_process_instance),
+    // or zero while unlocked.
     std::atomic<uint64_t>      m_owner{0};
     std::atomic<uint64_t>      m_last_progress_ns{0};
 };
