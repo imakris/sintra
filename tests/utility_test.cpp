@@ -750,6 +750,57 @@ void test_marker_publication_is_atomic()
         "the published marker must be complete, with no staged file left behind");
 }
 
+#ifdef _WIN32
+void test_marker_read_during_delete_access_window()
+{
+    if (!stale_directory_cleanup_runs()) {
+        return;
+    }
+
+    const auto current_pid   = static_cast<std::uint32_t>(sintra::get_current_pid());
+    const auto current_start = sintra::current_process_start_stamp().value_or(0);
+    const auto base_dir = sintra::test::unique_scratch_directory("utility_marker_delete_share") / "private";
+    const auto run_dir  = base_dir / "publishing";
+    sintra::test::require_true(
+        sintra::detail::create_private_directory(base_dir) &&
+            sintra::detail::create_private_directory(run_dir),
+        k_failure_prefix, "create private run directories");
+
+    sintra::run_marker_record_t record{};
+    record.pid                  = current_pid;
+    record.start_stamp          = current_start;
+    record.created_monotonic_ns = sintra::monotonic_now_ns();
+    sintra::test::require_true(sintra::write_run_marker(run_dir, record),
+        k_failure_prefix, "publish run marker");
+    const auto marker_path = sintra::run_marker_path(run_dir);
+
+    const HANDLE shared_delete = ::CreateFileW(marker_path.c_str(), DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    sintra::test::require_true(shared_delete != INVALID_HANDLE_VALUE,
+        k_failure_prefix, "open marker with delete access and sharing");
+    const auto read_record = sintra::read_run_marker(marker_path);
+    const bool shared_closed = ::CloseHandle(shared_delete) != 0;
+    sintra::test::require_true(shared_closed && read_record && read_record->pid == current_pid,
+        k_failure_prefix, "read a marker while another handle has delete access");
+
+    const HANDLE exclusive_delete = ::CreateFileW(marker_path.c_str(), DELETE,
+        0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    sintra::test::require_true(exclusive_delete != INVALID_HANDLE_VALUE,
+        k_failure_prefix, "open marker with exclusive delete access");
+    bool read_succeeded = true;
+    const auto unreadable = sintra::read_run_marker(marker_path, &read_succeeded);
+    sintra::cleanup_stale_swarm_directories(base_dir, current_pid, current_start);
+    const bool kept_during_open = std::filesystem::exists(run_dir) &&
+        !std::filesystem::exists(sintra::run_marker_cleanup_path(run_dir));
+    const bool exclusive_closed = ::CloseHandle(exclusive_delete) != 0;
+    sintra::cleanup_stale_swarm_directories(base_dir, current_pid, current_start);
+    sintra::test::require_true(exclusive_closed && !read_succeeded && !unreadable && kept_during_open &&
+        std::filesystem::exists(run_dir) && std::filesystem::exists(marker_path),
+        k_failure_prefix, "a temporarily unreadable marker must not mark or delete a live directory");
+}
+#endif
+
 #if defined(__linux__)
 char linux_leader_state(pid_t pid)
 {
@@ -878,6 +929,9 @@ int main()
         test_stale_directory_start_stamp();
         test_marker_published_during_scan();
         test_marker_publication_is_atomic();
+#ifdef _WIN32
+        test_marker_read_during_delete_access_window();
+#endif
 #if defined(__linux__)
         test_process_alive_after_main_thread_exit();
 #endif

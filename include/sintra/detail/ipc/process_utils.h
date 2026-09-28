@@ -1047,12 +1047,57 @@ inline bool write_run_marker(
     return detail::publish_private_file(run_marker_path(directory), marker.str());
 }
 
-inline std::optional<run_marker_record_t> read_run_marker(const std::filesystem::path& marker_path)
+inline std::optional<run_marker_record_t> read_run_marker(
+    const std::filesystem::path& marker_path,
+    bool*                        read_succeeded = nullptr)
 {
-    std::ifstream marker(marker_path);
-    if (!marker.is_open()) {
+    if (read_succeeded) {
+        *read_succeeded = false;
+    }
+
+    std::string contents;
+#ifdef _WIN32
+    const HANDLE file = ::CreateFileW(marker_path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
         return std::nullopt;
     }
+    char buffer[4096];
+    DWORD bytes_read = 0;
+    bool complete = true;
+    while (true) {
+        if (!::ReadFile(file, buffer, sizeof(buffer), &bytes_read, nullptr)) {
+            complete = false;
+            break;
+        }
+        if (bytes_read == 0) {
+            break;
+        }
+        contents.append(buffer, bytes_read);
+    }
+    const bool closed = ::CloseHandle(file) != 0;
+    if (!complete || !closed) {
+        return std::nullopt;
+    }
+#else
+    std::ifstream file(marker_path, std::ios::binary);
+    if (!file.is_open()) {
+        return std::nullopt;
+    }
+    char buffer[4096];
+    while (file.read(buffer, sizeof(buffer))) {
+        contents.append(buffer, sizeof(buffer));
+    }
+    contents.append(buffer, static_cast<std::size_t>(file.gcount()));
+    if (!file.eof() || file.bad()) {
+        return std::nullopt;
+    }
+#endif
+    if (read_succeeded) {
+        *read_succeeded = true;
+    }
+    std::istringstream marker(contents);
 
     run_marker_record_t record;
     std::string line;
@@ -1219,7 +1264,12 @@ inline void cleanup_stale_swarm_directories(
             continue;
         }
 
-        auto record_opt = read_run_marker(has_marker ? marker_path : cleanup_path);
+        bool read_succeeded = false;
+        auto record_opt = read_run_marker(
+            has_marker ? marker_path : cleanup_path, &read_succeeded);
+        if (!read_succeeded) {
+            continue;
+        }
         // Read after the marker. The monotonic clock is system-wide and
         // restarts at boot, so a marker created later than this was created
         // before a reboot, whatever process now holds its PID.
