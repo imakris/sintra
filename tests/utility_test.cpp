@@ -17,10 +17,16 @@
 #include <thread>
 #include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <tlhelp32.h>
+#else
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+
+#if defined(__FreeBSD__)
+#include "test_process_identity_fakes.h"
 #endif
 
 #if defined(__linux__)
@@ -573,6 +579,122 @@ void test_stale_directory_start_stamp()
 #endif
 }
 
+// A live process other than this one: the test's parent.
+std::uint32_t live_foreign_pid()
+{
+#ifdef _WIN32
+    const DWORD self = ::GetCurrentProcessId();
+    HANDLE snapshot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    sintra::test::require_true(snapshot != INVALID_HANDLE_VALUE, k_failure_prefix,
+        "CreateToolhelp32Snapshot should succeed");
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    DWORD parent = 0;
+    for (BOOL found = ::Process32FirstW(snapshot, &entry);
+        found;
+        found = ::Process32NextW(snapshot, &entry))
+    {
+        if (entry.th32ProcessID == self) {
+            parent = entry.th32ParentProcessID;
+            break;
+        }
+    }
+    ::CloseHandle(snapshot);
+    return static_cast<std::uint32_t>(parent);
+#else
+    return static_cast<std::uint32_t>(::getppid());
+#endif
+}
+
+// A swarm publishes its run marker after a cleanup scan began.
+struct late_marker_t
+{
+    std::filesystem::path directory;
+    std::uint32_t         pid         = 0;
+    std::uint64_t         start_stamp = 0;
+};
+
+late_marker_t s_late_marker;
+
+void publish_late_marker(const std::filesystem::path&)
+{
+    sintra::test::require_true(sintra::detail::create_private_directory(s_late_marker.directory),
+        k_failure_prefix, "create the late swarm's private directory");
+    sintra::run_marker_record_t record{};
+    record.pid                  = s_late_marker.pid;
+    record.start_stamp          = s_late_marker.start_stamp;
+    record.created_monotonic_ns = sintra::monotonic_now_ns();
+    sintra::test::require_true(
+        sintra::write_run_marker(s_late_marker.directory, record), k_failure_prefix,
+        "write_run_marker should write the late marker");
+}
+
+// Scans the base directory while a live swarm publishes the late marker, and
+// reports whether its directory was kept.
+bool late_marker_survives_scan(const std::filesystem::path& base_dir)
+{
+    sintra::detail::test_hooks::s_swarm_directory_scan_started = publish_late_marker;
+    sintra::cleanup_stale_swarm_directories(
+        base_dir,
+        static_cast<std::uint32_t>(sintra::get_current_pid()),
+        sintra::current_process_start_stamp().value_or(0));
+    sintra::detail::test_hooks::s_swarm_directory_scan_started = nullptr;
+    return std::filesystem::exists(s_late_marker.directory);
+}
+
+// A marker created later than the scan's clock reading was created before a
+// reboot. The scan reads the clock after each marker, so a live swarm whose
+// marker appears after the scan began is never mistaken for one, even while
+// its start stamp is unavailable.
+void test_marker_published_during_scan()
+{
+    if (!stale_directory_cleanup_runs()) {
+        return;
+    }
+    const auto base_dir = sintra::test::unique_scratch_directory("utility_scan_race") / "private";
+    sintra::test::require_true(sintra::detail::create_private_directory(base_dir),
+        k_failure_prefix, "create private cleanup root");
+    const auto live_pid = live_foreign_pid();
+    sintra::test::require_true(live_pid != 0 && sintra::is_process_alive(live_pid), k_failure_prefix,
+        "the test's parent must be a live process");
+
+    s_late_marker = {base_dir / "without_stamp", live_pid, 0};
+    sintra::test::require_true(late_marker_survives_scan(base_dir), k_failure_prefix,
+        "a live swarm without a start stamp whose marker appears during the scan must be kept");
+
+#if defined(__FreeBSD__)
+    // The boot time moves during every attempt, so the live process's start
+    // stamp is unavailable while the scan runs.
+    const auto parent_stamp = sintra::query_process_start_stamp(live_pid);
+    sintra::test::require_true(parent_stamp.has_value(), k_failure_prefix,
+        "the parent process must have a start stamp");
+    s_late_marker = {base_dir / "stamp_unavailable", live_pid, *parent_stamp};
+    {
+        namespace fakes = sintra::test::identity_fakes;
+        fakes::Scoped_fakes injected;
+        fakes::s_moving_boot_time_lookups = fakes::k_every_lookup;
+        sintra::test::require_true(late_marker_survives_scan(base_dir), k_failure_prefix,
+            "a live swarm with an unavailable start stamp and a late marker must be kept");
+    }
+#endif
+
+    // A marker from before a reboot still reads later than the clock.
+    const auto rebooted_dir = base_dir / "before_reboot";
+    sintra::test::require_true(sintra::detail::create_private_directory(rebooted_dir),
+        k_failure_prefix, "create the earlier boot's private directory");
+    sintra::run_marker_record_t rebooted{};
+    rebooted.pid                  = live_pid;
+    rebooted.created_monotonic_ns = sintra::monotonic_now_ns() + 3'600'000'000'000ull;
+    sintra::test::require_true(sintra::write_run_marker(rebooted_dir, rebooted), k_failure_prefix,
+        "write_run_marker should write the earlier-boot marker");
+    sintra::cleanup_stale_swarm_directories(
+        base_dir,
+        static_cast<std::uint32_t>(sintra::get_current_pid()),
+        sintra::current_process_start_stamp().value_or(0));
+    sintra::test::require_true(!std::filesystem::exists(rebooted_dir), k_failure_prefix,
+        "a marker created later than the scan's clock reading must be stale");
+}
+
 #if defined(__linux__)
 char linux_leader_state(pid_t pid)
 {
@@ -699,6 +821,7 @@ int main()
         test_spinlocked_umap_scoped_erase();
         test_process_utility_helpers();
         test_stale_directory_start_stamp();
+        test_marker_published_during_scan();
 #if defined(__linux__)
         test_process_alive_after_main_thread_exit();
 #endif

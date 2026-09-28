@@ -1150,6 +1150,13 @@ inline bool path_has_prefix_ci(
 }
 #endif
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+namespace detail::test_hooks {
+// Runs when a scan of swarm directories begins, before it reads any marker.
+inline void (*s_swarm_directory_scan_started)(const std::filesystem::path& base_dir) = nullptr;
+}
+#endif
+
 inline void cleanup_stale_swarm_directories(
     const std::filesystem::path&   base_dir,
     uint32_t                       current_pid,
@@ -1186,7 +1193,11 @@ inline void cleanup_stale_swarm_directories(
 #endif
 #endif
 
-    const auto now_monotonic = monotonic_now_ns();
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (detail::test_hooks::s_swarm_directory_scan_started) {
+        detail::test_hooks::s_swarm_directory_scan_started(base_dir);
+    }
+#endif
 
     for (std::filesystem::directory_iterator it(base_dir, ec); !ec && it != std::filesystem::directory_iterator(); ++it) {
         if (!detail::private_directory_owned(it->path())) {
@@ -1207,7 +1218,11 @@ inline void cleanup_stale_swarm_directories(
         }
 
         auto record_opt = read_run_marker(has_marker ? marker_path : cleanup_path);
-        bool stale      = has_cleanup;
+        // Read after the marker. The monotonic clock is system-wide and
+        // restarts at boot, so a marker created later than this was created
+        // before a reboot, whatever process now holds its PID.
+        const auto now_monotonic = monotonic_now_ns();
+        bool stale = has_cleanup;
 
         if (!record_opt) {
             stale = true;
