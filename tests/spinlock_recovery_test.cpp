@@ -305,6 +305,19 @@ std::chrono::steady_clock::rep to_ticks(Steady_time time)
     return time.time_since_epoch().count();
 }
 
+std::atomic<bool> g_debug_pause_timed_out{false};
+std::atomic<bool> g_debug_pause_polled_again{false};
+
+void observe_debug_pause_poll(const void*, Steady_time, bool timed_out)
+{
+    if (g_debug_pause_timed_out.load()) {
+        g_debug_pause_polled_again = true;
+    }
+    if (timed_out) {
+        g_debug_pause_timed_out = true;
+    }
+}
+
 Steady_time from_ticks(std::chrono::steady_clock::rep ticks)
 {
     return Steady_time(std::chrono::steady_clock::duration(ticks));
@@ -764,7 +777,8 @@ int main(int argc, char* argv[])
             "a lock held by another thread of this process must exclude and not be taken over");
     }
 
-    // Case 2: live owner with debug pause active should be taken over.
+    // Case 2: debug pause must keep waiting behind a live owner, even after
+    // the timeout, then recover once that owner is proven dead.
     const std::string sleep_arg = "30000";
     const std::vector<const char*> sleep_args = {
         argv[0],
@@ -789,22 +803,30 @@ int main(int argc, char* argv[])
     }
     const int child_pid = sleep_child.pid();
 
-    install_owner(layout, owner_instance(static_cast<uint32_t>(child_pid)));
+    const uint64_t live_owner = owner_instance(static_cast<uint32_t>(child_pid));
+    install_owner(layout, live_owner);
 
+    g_debug_pause_timed_out = false;
+    g_debug_pause_polled_again = false;
+    sintra::detail::test_hooks::s_spinlock_poll.store(
+        &observe_debug_pause_poll, std::memory_order_release);
     sintra::detail::set_debug_pause_active(true);
-    lock.lock();
-    lock.unlock();
-    sintra::detail::set_debug_pause_active(false);
+    std::atomic<bool> waiter_acquired{false};
+    std::thread waiter([&] {
+        lock.lock();
+        waiter_acquired = true;
+        lock.unlock();
+    });
 
-    const auto post_recovery_child_state = sleep_child.poll();
-    if (post_recovery_child_state != Exact_child_state::running) {
-        fail_after_settling_child(
-            sleep_child,
-            "case 2 did not take over the lock while the exact owner remained live: " +
-                (post_recovery_child_state == Exact_child_state::exited
-                    ? sleep_child.describe_status()
-                    : sleep_child.error()));
+    const auto debug_wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (!g_debug_pause_polled_again && !waiter_acquired &&
+        std::chrono::steady_clock::now() < debug_wait_deadline)
+    {
+        std::this_thread::sleep_for(k_child_poll_interval);
     }
+    const bool excluded = g_debug_pause_timed_out && g_debug_pause_polled_again &&
+        !waiter_acquired && layout.m_owner.load() == live_owner;
+    const auto live_child_state = sleep_child.poll();
 
     std::string sleep_cleanup_diagnostic;
     if (!sleep_child.terminate_and_settle(sleep_cleanup_diagnostic)) {
@@ -812,6 +834,12 @@ int main(int argc, char* argv[])
             sleep_child,
             "case 2 exact-child cleanup failed: " + sleep_cleanup_diagnostic);
     }
+    waiter.join();
+    sintra::detail::set_debug_pause_active(false);
+    sintra::detail::test_hooks::s_spinlock_poll.store(nullptr, std::memory_order_release);
+    sintra::test::require_true(excluded && live_child_state == Exact_child_state::running &&
+        waiter_acquired, k_failure_prefix,
+        "case 2 debug pause must exclude a live owner through timeout and recover after death");
 
     // Live foreign and same-process owners must fail closed on a stalled lock.
     for (const std::string owner_arg : {std::to_string(self_pid), std::string("self")}) {

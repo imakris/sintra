@@ -166,22 +166,14 @@ struct spinlock
 
             const auto owner     = hold.owner;
             const auto owner_pid = detail::process_instance_pid(owner);
-            if (owner == self) {
-                report_live_owner_stall(owner_pid);
-            }
-            if (owner != 0 &&
-                owner_pid != detail::process_instance_pid(self) &&
-                is_process_alive(owner_pid))
+            if (owner == self ||
+                (owner != 0 &&
+                    owner_pid != detail::process_instance_pid(self) &&
+                    is_process_alive(owner_pid)))
             {
                 if (detail::is_debug_pause_active()) {
-                    Log_stream(log_level::warning)
-                        << "[sintra][spinlock] Owner PID " << owner_pid
-                        << " is paused under debug control; "
-                        << "taking over the spinlock to allow shutdown to proceed.\n";
-                    if (take_over_owner(owner, self)) {
-                        return;
-                    }
-                    hold_observed = false;
+                    // Debug pause belongs to this waiter, not to the owner.
+                    // Keep polling so a proven death can still be recovered.
                     continue;
                 }
                 report_live_owner_stall(owner_pid);
