@@ -208,8 +208,9 @@ int run_child(
         return 3;
     }
 #ifdef _WIN32
-    ExitProcess(k_high_bit_exit_status);
-    return 0;
+    // Preserve the native exit code without DLL-detach finalization.
+    TerminateProcess(GetCurrentProcess(), k_high_bit_exit_status);
+    return 4;
 #else
     return 0;
 #endif
