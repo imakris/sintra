@@ -62,22 +62,30 @@ private:
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 namespace test_hooks {
-// Reports each contended liveness poll with the waiter's decision on whether
-// the hold it observes has outlasted the live-owner timeout. It runs on the
-// waiting thread, before the stall handling that a timeout leads to.
-using Spinlock_poll_callback = void (*)(const void* lock, bool timed_out);
+// Reports each contended liveness poll with the time the waiter read for it
+// and its decision on whether the hold it observes has outlasted the
+// live-owner timeout by then. It runs on the waiting thread, before the stall
+// handling that a timeout leads to.
+using Spinlock_poll_callback = void (*)(
+    const void*                            lock,
+    std::chrono::steady_clock::time_point  poll_time,
+    bool                                   timed_out);
 inline std::atomic<Spinlock_poll_callback> s_spinlock_poll{nullptr};
 }
 #endif
 
-inline void spinlock_poll_for_test(const void* lock, bool timed_out)
+inline void spinlock_poll_for_test(
+    const void*                            lock,
+    std::chrono::steady_clock::time_point  poll_time,
+    bool                                   timed_out)
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_spinlock_poll.load(std::memory_order_acquire)) {
-        callback(lock, timed_out);
+        callback(lock, poll_time, timed_out);
     }
 #else
     (void)lock;
+    (void)poll_time;
     (void)timed_out;
 #endif
 }
@@ -147,7 +155,7 @@ struct spinlock
                 hold_observed       = true;
             }
             const bool timed_out = now - hold_observed_since >= k_live_owner_timeout;
-            detail::spinlock_poll_for_test(this, timed_out);
+            detail::spinlock_poll_for_test(this, now, timed_out);
             if (!timed_out) {
                 continue;
             }

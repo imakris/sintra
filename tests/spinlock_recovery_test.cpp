@@ -275,13 +275,28 @@ bool prepare_abort_expecting_child()
 
 // The live-owner timeout is 2 s. Case 4 streams short holds until the waiter
 // has kept waiting well past it, and case 5 stops the waiter for longer than it.
+// A hold of k_overlong_hold or more counts as one the waiter may legitimately
+// time out on; it is shorter than the timeout, so no such hold escapes it.
 constexpr auto k_live_owner_timeout    = std::chrono::seconds(2);
 constexpr auto k_timeout_margin        = std::chrono::milliseconds(500);
+constexpr auto k_overlong_hold         = std::chrono::milliseconds(1500);
 constexpr auto k_short_hold            = std::chrono::milliseconds(1);
 constexpr auto k_waiter_stop           = std::chrono::seconds(3);
 constexpr auto k_interleaving_limit    = std::chrono::seconds(10);
 constexpr auto k_timed_child_deadline  = std::chrono::seconds(20);
 constexpr int  k_schedule_attempts     = 3;
+
+using Steady_time = std::chrono::steady_clock::time_point;
+
+std::chrono::steady_clock::rep to_ticks(Steady_time time)
+{
+    return time.time_since_epoch().count();
+}
+
+Steady_time from_ticks(std::chrono::steady_clock::rep ticks)
+{
+    return Steady_time(std::chrono::steady_clock::duration(ticks));
+}
 
 std::filesystem::path inconclusive_marker_path(const std::filesystem::path& marker_path)
 {
@@ -290,20 +305,23 @@ std::filesystem::path inconclusive_marker_path(const std::filesystem::path& mark
 
 // What a child learns from the waiter's contended polls through the spinlock
 // test hook, which runs on the waiter thread; only that thread writes
-// first_poll. A schedule in which one hold really outlasts the timeout proves
-// nothing, since the abort is then correct. The hook records such a schedule
-// in the inconclusive marker before the abort, and the parent retries it.
+// first_poll. Every decision is judged by the time the waiter read for it, not
+// by when the hook runs, since the waiter can be descheduled in between. A
+// schedule in which one hold really outlasts the timeout proves nothing, since
+// the abort is then correct. The hook records such a schedule in the
+// inconclusive marker before the abort, and the parent retries it.
 struct Waiter_polls
 {
     const void*                                   lock = nullptr;
     std::filesystem::path                         inconclusive_path;
     std::string                                   token;
-    std::chrono::steady_clock::time_point         first_poll{};
+    Steady_time                                   first_poll{};
     std::atomic<bool>                             polled{false};
     std::atomic<std::chrono::steady_clock::rep>   hold_started{0};
+    std::atomic<bool>                             overlong_hold{false};
     std::atomic<bool>                             hold_stream_over{false};
     std::atomic<bool>                             outlasted_timeout{false};
-    std::atomic<bool>                             resumed{false};
+    std::atomic<std::chrono::steady_clock::rep>   resume_boundary{0};
     std::atomic<bool>                             resumed_poll_kept_waiting{false};
 };
 
@@ -340,51 +358,57 @@ void await_waiter_poll(const std::atomic<bool>& flag)
     }
 }
 
-void note_hold_started()
-{
-    g_waiter_polls.hold_started = std::chrono::steady_clock::now().time_since_epoch().count();
-}
-
-void observe_short_hold_poll(const void* lock, bool timed_out)
+void observe_short_hold_poll(const void* lock, Steady_time poll_time, bool timed_out)
 {
     auto& polls = g_waiter_polls;
     if (lock != polls.lock) {
         return;
     }
-    const auto now = std::chrono::steady_clock::now();
     if (!polls.polled.load()) {
-        polls.first_poll = now;
+        polls.first_poll = poll_time;
         polls.polled = true;
     }
     if (!timed_out) {
-        if (now - polls.first_poll > k_live_owner_timeout + k_timeout_margin) {
+        if (poll_time - polls.first_poll > k_live_owner_timeout + k_timeout_margin) {
             polls.outlasted_timeout = true;
         }
         return;
     }
-    const std::chrono::steady_clock::time_point hold_started{
-        std::chrono::steady_clock::duration(polls.hold_started.load())};
-    if (!polls.hold_stream_over.load() && now - hold_started >= k_live_owner_timeout) {
+    // The hold that timed out is either still current, and started no later
+    // than hold_started, or it has ended and left overlong_hold behind before
+    // hold_started moved on, which is why hold_started is read first.
+    const auto hold_started = from_ticks(polls.hold_started.load());
+    const bool overlong =
+        poll_time - hold_started >= k_overlong_hold || polls.overlong_hold.load();
+    if (!polls.hold_stream_over.load() && overlong) {
         (void)publish_ready_marker(polls.inconclusive_path, polls.token);
     }
 }
 
 // Ends one short hold and starts the next by the same thread, with the owner
 // and stamp writes of unlock() and lock(), as if this thread won every race
-// against the waiter. The flag stays set, so the waiter cannot acquire.
+// against the waiter. The flag stays set, so the waiter cannot acquire. The
+// next hold's start is taken before it is published and the previous hold's
+// end after, so both bound the holds from outside.
 void hand_over_to_next_hold(spinlock_layout_t& layout, uint32_t self_pid)
 {
+    const auto next_started = std::chrono::steady_clock::now();
     layout.m_owner_pid.store(0, std::memory_order_release);
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
     layout.m_owner_pid.store(self_pid, std::memory_order_release);
     layout.m_last_progress_ns.store(sintra::monotonic_now_ns(), std::memory_order_relaxed);
-    note_hold_started();
+    const auto previous_ended = std::chrono::steady_clock::now();
+    if (previous_ended - from_ticks(g_waiter_polls.hold_started.load()) >= k_overlong_hold) {
+        g_waiter_polls.overlong_hold = true;
+    }
+    g_waiter_polls.hold_started = to_ticks(next_started);
 }
 
 // A waiter behind a stream of short holds must keep waiting past the timeout.
-// The stream starts once the waiter has polled inside lock() and ends once one
-// of its polls has kept waiting well past the timeout, which the marker then
-// records. The final hold is kept until the waiter's timeout aborts the process.
+// The stream starts once the waiter has polled inside lock() and ends once a
+// poll has kept waiting well past the timeout, measured from the waiter's first
+// poll, which the marker then records. The final hold is kept until the
+// waiter's timeout aborts the process.
 int run_short_holds_child(
     const std::filesystem::path& marker_path,
     std::string_view             marker_token)
@@ -392,8 +416,8 @@ int run_short_holds_child(
     const uint32_t self_pid = static_cast<uint32_t>(sintra::detail::get_current_process_id());
     sintra::spinlock short_hold_lock;
     auto& layout = access_layout(short_hold_lock);
+    g_waiter_polls.hold_started = to_ticks(std::chrono::steady_clock::now());
     short_hold_lock.lock();
-    note_hold_started();
     observe_waiter_polls(&short_hold_lock, marker_path, marker_token, &observe_short_hold_poll);
 
     std::thread waiter([&] {
@@ -418,23 +442,24 @@ int run_short_holds_child(
     return 1;
 }
 
-void observe_stopped_waiter_poll(const void* lock, bool timed_out)
+void observe_stopped_waiter_poll(const void* lock, Steady_time poll_time, bool timed_out)
 {
     auto& polls = g_waiter_polls;
     if (lock != polls.lock) {
         return;
     }
     polls.polled = true;
-    const bool resumed = polls.resumed.load();
+    const auto resume_boundary = polls.resume_boundary.load();
+    const bool after_resume = resume_boundary != 0 && poll_time > from_ticks(resume_boundary);
     if (!timed_out) {
-        if (resumed) {
+        if (after_resume) {
             polls.resumed_poll_kept_waiting = true;
         }
         return;
     }
     // Before the stop, or after a resumed poll has already kept waiting, a
     // timeout means that the holder itself stayed descheduled past it.
-    if (!resumed || polls.resumed_poll_kept_waiting.load()) {
+    if (!after_resume || polls.resumed_poll_kept_waiting.load()) {
         (void)publish_ready_marker(polls.inconclusive_path, polls.token);
     }
 }
@@ -446,15 +471,15 @@ void stop_waiter_thread(int)
         static_cast<time_t>(std::chrono::duration_cast<std::chrono::seconds>(k_waiter_stop).count()),
         0};
     while (nanosleep(&remaining, &remaining) == -1 && errno == EINTR) {}
-    g_waiter_polls.resumed.store(true);
+    g_waiter_polls.resume_boundary.store(to_ticks(std::chrono::steady_clock::now()));
 }
 #endif
 
 // A suspend stops the holder and the waiter alike. A waiter that was stopped
 // for longer than the timeout must not count that time against a hold that is
 // released soon after both run again. The waiter is stopped only once it has
-// polled inside lock(), and the lock is released only once the waiter's first
-// poll after resuming has decided to keep waiting.
+// polled inside lock(), and the lock is released only once a poll that the
+// waiter read the time for after resuming has decided to keep waiting.
 int run_stopped_waiter_child(
     const std::filesystem::path& marker_path,
     std::string_view             marker_token)
@@ -483,7 +508,7 @@ int run_stopped_waiter_child(
         std::_Exit(2);
     }
     std::this_thread::sleep_for(k_waiter_stop);
-    g_waiter_polls.resumed = true;
+    g_waiter_polls.resume_boundary = to_ticks(std::chrono::steady_clock::now());
     if (ResumeThread(handle) == static_cast<DWORD>(-1)) {
         std::_Exit(2);
     }
