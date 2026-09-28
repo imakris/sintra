@@ -71,9 +71,14 @@ std::filesystem::path failure_log()
     return shared_dir() / "failures.txt";
 }
 
+// Readers take a marker's existence as publication and read it at once, so
+// the complete contents appear with one rename. Each marker has one writer.
 void write_marker(const std::filesystem::path& path, const std::string& value)
 {
-    sintra::test::write_lines(path, {value});
+    auto staged = path;
+    staged += ".staged";
+    sintra::test::write_lines(staged, {value});
+    std::filesystem::rename(staged, path);
 }
 
 std::string read_first_line(const std::filesystem::path& path)
