@@ -399,52 +399,64 @@ class WindowsDebuggerStrategy(DebuggerStrategy):
     def _create_minidump(self, pid: int) -> Tuple[Optional[str], Optional[str]]:
         """Generate a minidump for the given PID using comsvcs.dll."""
 
-        system_root = os.environ.get("SystemRoot", r"C:\Windows")
-        rundll32 = Path(system_root) / "System32" / "rundll32.exe"
+        system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        rundll32 = system32 / "rundll32.exe"
         if not rundll32.exists():
             return None, "rundll32.exe not found for minidump creation"
 
         try:
             tmp_fd, tmp_path = tempfile.mkstemp(prefix=f"sintra_{pid}_", suffix=".dmp")
             os.close(tmp_fd)
+            # MiniDump creates the dump with CREATE_NEW, so keep only the unique name.
+            os.remove(tmp_path)
         except OSError as exc:
             return None, f"failed to allocate dump file: {exc}"
+        # MiniDump splits its arguments at spaces and rejects quoted paths.
+        if " " in tmp_path:
+            return None, (
+                f"minidump path '{tmp_path}' contains a space, which comsvcs MiniDump "
+                "cannot parse; point TMP at a directory without spaces"
+            )
 
-        command = [
-            str(rundll32),
-            "comsvcs.dll, MiniDump",
-            str(pid),
-            tmp_path,
-            "full",
-        ]
-
+        # rundll32 parses its own command line. Quotes that subprocess would add to a
+        # list item make rundll32 treat "dll, entry" as a module name and report the
+        # load failure in a modal dialog, so the line is passed verbatim.
+        command = f"{rundll32} {system32 / 'comsvcs.dll'},MiniDump {pid} {tmp_path} full"
         try:
+            # subprocess.run kills rundll32 on timeout, so a dialog cannot hold the runner.
             result = subprocess.run(
                 command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                executable=str(rundll32),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=60,
             )
-        except subprocess.SubprocessError as exc:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-            return None, f"minidump command failed: {exc}"
+            code = self._normalize_windows_returncode(result.returncode)
+            if code != 0 or not os.path.isfile(tmp_path) or not os.path.getsize(tmp_path):
+                error = (
+                    f"minidump of PID {pid} wrote no dump (exit {self._format_windows_returncode(code)}); "
+                    "processes of other users require SeDebugPrivilege"
+                )
+            else:
+                # MiniDump grants the dump to SYSTEM and Administrators only. Inherit the
+                # temp directory's ACL so the debugger, running as this user, can read it.
+                reset = subprocess.run(
+                    [str(system32 / "icacls.exe"), tmp_path, "/reset", "/Q"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                )
+                if reset.returncode == 0:
+                    return tmp_path, None
+                error = f"minidump ACL reset exited with {reset.returncode}; the dump is unreadable"
+        except (subprocess.SubprocessError, OSError) as exc:
+            error = f"minidump command failed: {exc}"
 
-        if result.returncode != 0:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-            detail = result.stderr.strip() or result.stdout.strip()
-            return None, f"minidump command exited with {result.returncode}: {detail}"
-
-        if not Path(tmp_path).stat().st_size:
+        try:
             os.remove(tmp_path)
-            return None, "minidump command produced an empty dump"
-        return tmp_path, None
+        except OSError:
+            pass
+        return None, error
 
     @staticmethod
     def _should_use_minidump_fallback(

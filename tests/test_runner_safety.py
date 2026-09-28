@@ -232,10 +232,33 @@ class Runner_safety_test(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "Windows minidump helper")
     def test_successful_minidump_command_must_write_a_dump(self):
-        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")):
-            path, error = WindowsDebuggerStrategy(False)._create_minidump(os.getpid())
+        real_run = subprocess.run
+
+        def run_well_formed(command, *args, **kwargs):
+            command_line = command if isinstance(command, str) else subprocess.list2cmdline(command)
+            # A quoted "comsvcs.dll, MiniDump" token makes rundll32 block on a modal
+            # error dialog, so a malformed line fails here without being run.
+            if "rundll32" in command_line.lower():
+                self.assertNotIn('"comsvcs.dll, MiniDump"', command_line)
+                self.assertRegex(command_line, r"(?i)\\system32\\comsvcs\.dll,MiniDump \d+ \S+\.dmp full$")
+            return real_run(command, *args, **kwargs)
+
+        strategy = WindowsDebuggerStrategy(False)
+        # Dumping the test's own process needs no SeDebugPrivilege.
+        with mock.patch("subprocess.run", side_effect=run_well_formed):
+            path, error = strategy._create_minidump(os.getpid())
+        try:
+            self.assertIsNone(error)
+            with open(path, "rb") as dump:
+                self.assertEqual(dump.read(4), b"MDMP", "the analysis debugger must be able to read the dump")
+        finally:
+            if path:
+                os.remove(path)
+
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+            path, error = strategy._create_minidump(os.getpid())
         self.assertIsNone(path)
-        self.assertIn("empty dump", error)
+        self.assertIn("wrote no dump", error)
 
     def test_windows_debugger_preparation_keeps_registry_read_only(self):
         registry = mock.MagicMock()
