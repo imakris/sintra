@@ -157,7 +157,11 @@ int run_root(int argc, char* argv[], const fs::path& directory)
         control.spawn();
         control.spawn();
         if (call == 1) {
-            live_started.store(true, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(events.mutex);
+                live_started.store(true, std::memory_order_release);
+            }
+            events.changed.notify_all();
             while (!control.should_cancel()) {
                 std::this_thread::sleep_for(2ms);
             }
@@ -212,6 +216,11 @@ int run_root(int argc, char* argv[], const fs::path& directory)
         // Keep custom runner A live while the next crash uses default recovery.
         // Restore custom routing before that replacement is crashed again.
         if (occurrence == 1) {
+            std::unique_lock<std::mutex> lock(events.mutex);
+            valid &= check(events.changed.wait_for(lock, 10s, [&] {
+                return live_started.load(std::memory_order_acquire);
+            }), "custom runner A entered its live body");
+            lock.unlock();
             sintra::set_recovery_runner({});
         }
         else if (occurrence == 2) {

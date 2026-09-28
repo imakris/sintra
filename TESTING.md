@@ -317,6 +317,7 @@ Default timeout is 5 seconds per test run. Some tests override this:
 
 - `recovery_test`: 120 seconds (tests crash recovery, which is slow)
 - `barrier_processing_fence_backlog_test`: 90 seconds (runs 64 internal backlog rounds)
+- `lifecycle_reaper_contract_test`: 20 seconds (includes a 5-second shared-fate watchdog)
 
 Override globally with `--timeout`:
 

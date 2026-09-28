@@ -20,6 +20,8 @@ TEST_TIMEOUT_OVERRIDES = {
     "barrier_drain_and_unpublish_test_release": 75.0,
     "recovery_runner_thread_test_debug": 75.0,
     "recovery_runner_thread_test_release": 75.0,
+    # The accepted shared-fate path waits for its 5s subprocess watchdog.
+    "lifecycle_reaper_contract_test": 20.0,
     "crash_capture_self_test_debug": 120.0,
     "crash_capture_self_test_release": 120.0,
     "crash_capture_child_test_debug": 120.0,

@@ -1,12 +1,17 @@
 #include <sintra/sintra.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <thread>
+
+#if defined(__MINGW32__)
+#include <wct.h>
+#endif
 
 #if !defined(_WIN32) || defined(__MINGW32__)
 #include <pthread.h>
@@ -27,6 +32,10 @@ struct Phase
     unsigned post_join = 0;
     bool release_cleanup = false;
     bool admission_failed = false;
+#if defined(__MINGW32__)
+    DWORD cleanup_thread_id = 0;
+    std::atomic<bool> native_construct_entered{false};
+#endif
 
     template <typename Predicate>
     bool wait(Predicate predicate)
@@ -40,6 +49,9 @@ struct Phase
         {
             std::unique_lock<std::mutex> lock(mutex);
             ++cleanup_entered;
+#if defined(__MINGW32__)
+            cleanup_thread_id = GetCurrentThreadId();
+#endif
             changed.notify_all();
             changed.wait(lock, [this] { return release_cleanup; });
         }
@@ -111,9 +123,68 @@ bool set_key(pthread_key_t key, Phase& phase)
 #endif
 
 #if defined(__MINGW32__)
-bool first_admission_overlaps_application_cleanup()
+// Winpthreads holds its creation mutex across pthread-key cleanup. Windows
+// reports this wait only as a blocked thread, without naming that mutex. The
+// marker runs after the callback and just before std::thread construction;
+// together they establish that the wait is inside native creation.
+bool native_creation_waits_on_cleanup(DWORD admitting_thread_id,
+    DWORD cleanup_thread_id, const std::atomic<bool>& native_construct_entered)
 {
-    Phase phase;
+    const HWCT session = OpenThreadWaitChainSession(0, nullptr);
+    if (!check(session != nullptr, "wait-chain session opened")) {
+        return false;
+    }
+    bool observed = false;
+    std::array<WAITCHAIN_NODE_INFO, 16> last_nodes{};
+    DWORD last_count = 0;
+    DWORD last_error = 0;
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    do {
+        std::array<WAITCHAIN_NODE_INFO, 16> nodes{};
+        DWORD count = static_cast<DWORD>(nodes.size());
+        BOOL cycle = FALSE;
+        if (native_construct_entered.load(std::memory_order_acquire)) {
+            if (GetThreadWaitChain(session, 0, 0, admitting_thread_id,
+                    &count, nodes.data(), &cycle))
+            {
+                last_nodes = nodes;
+                last_count = count;
+                observed = count >= 1 && nodes[0].ObjectType == WctThreadType &&
+                    nodes[0].ThreadObject.ThreadId == admitting_thread_id &&
+                    nodes[0].ObjectStatus == WctStatusBlocked;
+            }
+            else {
+                last_error = GetLastError();
+            }
+        }
+        if (!observed) {
+            std::this_thread::yield();
+        }
+    } while (!observed && std::chrono::steady_clock::now() < deadline);
+    CloseThreadWaitChainSession(session);
+    if (!observed) {
+        std::fprintf(stderr, "WCT admitting=%lu cleanup=%lu entered=%d count=%lu error=%lu\n",
+            admitting_thread_id, cleanup_thread_id,
+            native_construct_entered.load(std::memory_order_acquire),
+            last_count, last_error);
+        for (DWORD i = 0; i < last_count && i < last_nodes.size(); ++i) {
+            std::fprintf(stderr, "WCT node %lu type=%d status=%d thread=%lu\n",
+                i, last_nodes[i].ObjectType, last_nodes[i].ObjectStatus,
+                last_nodes[i].ObjectType == WctThreadType ?
+                    last_nodes[i].ThreadObject.ThreadId : 0);
+        }
+    }
+    if (observed) {
+        std::fprintf(stderr,
+            "NATIVE_WAIT: admitting=%lu blocked inside std::thread while cleanup=%lu holds winpthreads lock\n",
+            admitting_thread_id, cleanup_thread_id);
+    }
+    return check(cleanup_thread_id != 0 && observed,
+        "native winpthreads creation waits during cleanup");
+}
+
+bool first_admission_overlaps_application_cleanup(Phase& phase)
+{
     g_phase.store(&phase, std::memory_order_release);
     pthread_key_t key{};
     if (!check(pthread_key_create(&key, &key_cleanup) == 0,
@@ -125,11 +196,13 @@ bool first_admission_overlaps_application_cleanup()
     std::condition_variable admission_changed;
     bool release_admission = false;
     std::atomic<bool> ordinary_returned{false};
+    std::atomic<DWORD> ordinary_thread_id{0};
     std::thread ordinary([&] {
         {
             std::unique_lock<std::mutex> lock(admission_mutex);
             admission_changed.wait(lock, [&] { return release_admission; });
         }
+        ordinary_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
         sintra::s_mproc->start_owned_lifecycle_worker([] {});
         ordinary_returned.store(true, std::memory_order_release);
     });
@@ -139,15 +212,25 @@ bool first_admission_overlaps_application_cleanup()
     });
     bool valid = check(phase.wait([&] { return phase.cleanup_entered == 1; }),
         "application pthread-key destructor entered");
+    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
+        &phase.native_construct_entered, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(admission_mutex);
         release_admission = true;
     }
     admission_changed.notify_all();
-    valid &= check(phase.wait([&] { return phase.before_construct >= 1; }),
+    const bool reached = phase.wait([&] { return phase.before_construct >= 1; });
+    valid &= check(reached,
         "first ordinary admission reached native construction");
+    if (reached) {
+        valid &= native_creation_waits_on_cleanup(
+            ordinary_thread_id.load(std::memory_order_acquire), phase.cleanup_thread_id,
+            phase.native_construct_entered);
+    }
+    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
+        nullptr, std::memory_order_release);
     valid &= check(!ordinary_returned.load(std::memory_order_acquire),
-        "native construction overlaps the held key destructor");
+        "native construction remains blocked during key cleanup");
     phase.release();
     ordinary.join();
     application.join();
@@ -161,9 +244,8 @@ bool first_admission_overlaps_application_cleanup()
     return valid;
 }
 
-bool owned_cleanup_overlaps_construction()
+bool owned_cleanup_overlaps_construction(Phase& phase)
 {
-    Phase phase;
     g_phase.store(&phase, std::memory_order_release);
     pthread_key_t key{};
     if (!check(pthread_key_create(&key, &key_cleanup) == 0,
@@ -175,11 +257,13 @@ bool owned_cleanup_overlaps_construction()
     std::condition_variable admission_changed;
     bool release_admission = false;
     std::atomic<bool> other_returned{false};
+    std::atomic<DWORD> other_thread_id{0};
     std::thread other([&] {
         {
             std::unique_lock<std::mutex> lock(admission_mutex);
             admission_changed.wait(lock, [&] { return release_admission; });
         }
+        other_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
         sintra::s_mproc->start_owned_lifecycle_worker([] {});
         other_returned.store(true, std::memory_order_release);
     });
@@ -190,15 +274,25 @@ bool owned_cleanup_overlaps_construction()
     bool valid = check(phase.wait([&] {
         return phase.cleanup_entered == 1 && phase.body_completed >= 1;
     }), "owned pthread-key destructor overlaps body completion");
+    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
+        &phase.native_construct_entered, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(admission_mutex);
         release_admission = true;
     }
     admission_changed.notify_all();
-    valid &= check(phase.wait([&] { return phase.before_construct >= 2; }),
+    const bool reached = phase.wait([&] { return phase.before_construct >= 2; });
+    valid &= check(reached,
         "separate admission reached native construction");
+    if (reached) {
+        valid &= native_creation_waits_on_cleanup(
+            other_thread_id.load(std::memory_order_acquire), phase.cleanup_thread_id,
+            phase.native_construct_entered);
+    }
+    sintra::detail::test_hooks::s_owned_lifecycle_native_construct_marker.store(
+        nullptr, std::memory_order_release);
     valid &= check(!other_returned.load(std::memory_order_acquire),
-        "construction overlaps the held owned-worker destructor");
+        "native construction remains blocked during owned-worker cleanup");
     phase.release();
     other.join();
     valid &= check(phase.wait([&] {
@@ -224,9 +318,8 @@ struct Namespace_tls_admission
 
 thread_local Namespace_tls_admission g_namespace_tls_admission;
 
-bool namespace_tls_cleanup_admits()
+bool namespace_tls_cleanup_admits(Phase& phase)
 {
-    Phase phase;
     g_phase.store(&phase, std::memory_order_release);
     sintra::s_mproc->start_owned_lifecycle_worker([&] {
         g_namespace_tls_admission.phase = &phase;
@@ -243,9 +336,8 @@ bool namespace_tls_cleanup_admits()
     return valid;
 }
 #else
-bool concurrent_posix_key_cleanups_admit()
+bool concurrent_posix_key_cleanups_admit(Phase& phase)
 {
-    Phase phase;
     g_phase.store(&phase, std::memory_order_release);
     pthread_key_t key{};
     if (!check(pthread_key_create(&key, &key_cleanup) == 0,
@@ -287,17 +379,24 @@ int main(int argc, char* argv[])
         &on_worker_event, std::memory_order_release);
     bool valid = true;
 #if defined(__MINGW32__)
-    valid &= first_admission_overlaps_application_cleanup();
-    valid &= owned_cleanup_overlaps_construction();
+    Phase application_phase;
+    Phase owned_phase;
+    valid = first_admission_overlaps_application_cleanup(application_phase);
+    if (valid) {
+        valid = owned_cleanup_overlaps_construction(owned_phase);
+    }
 #elif defined(_WIN32)
-    valid &= namespace_tls_cleanup_admits();
+    Phase phase;
+    valid = namespace_tls_cleanup_admits(phase);
 #else
-    valid &= concurrent_posix_key_cleanups_admit();
+    Phase phase;
+    valid = concurrent_posix_key_cleanups_admit(phase);
 #endif
     sintra::s_mproc->join_owned_lifecycle_workers();
     sintra::s_mproc->join_owned_lifecycle_workers();
-    valid &= check(sintra::detail::finalize(), "external drain and finalization complete");
     sintra::detail::test_hooks::s_owned_lifecycle_worker_event.store(
         nullptr, std::memory_order_release);
+    g_phase.store(nullptr, std::memory_order_release);
+    valid &= check(sintra::detail::finalize(), "external drain and finalization complete");
     return valid ? 0 : 1;
 }
