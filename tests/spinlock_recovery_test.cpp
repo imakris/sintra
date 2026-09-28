@@ -109,7 +109,7 @@ void event_hook(const void* address, spinlock_event event)
             scenario->lock->lock();
             ++scenario->short_handoffs;
         }
-        if (poll == scenario->release_poll &&
+        if (scenario->release_poll != 0 && poll == scenario->release_poll &&
             scenario->mode != Schedule::acquisition_gap &&
             scenario->mode != Schedule::release_gap)
         {
@@ -351,6 +351,25 @@ bool run_gap_schedule(Schedule mode)
         "waiter did not sample publication gap past the CPU timeout");
 }
 
+bool run_dead_owner_recovery(uint64_t owner, const char* message)
+{
+    sintra::spinlock lock;
+    lock.test_install_owner(owner, 1);
+    Scenario scenario;
+    scenario.lock = &lock;
+    scenario.mode = Schedule::still_cpu;
+    scenario.release_poll = 0;
+    Hook_scope hooks(scenario);
+    lock.lock();
+    const uint64_t takeover_mark = uint64_t(1) <<
+        static_cast<unsigned>(spinlock_event::after_takeover_mark);
+    const bool recovered = (scenario.seen_events.load() & takeover_mark) != 0 &&
+        lock.test_owner() == sintra::detail::current_process_instance() &&
+        lock.test_generation() == 5;
+    lock.unlock();
+    return expect(recovered, message);
+}
+
 bool prepare_abort_child()
 {
     sintra::detail::set_debug_pause_active(false);
@@ -438,24 +457,14 @@ int main(int argc, char* argv[])
     if (!expect(dead_pid != 0, "could not find an absent PID")) {
         return 1;
     }
-    {
-        sintra::spinlock lock;
-        lock.test_install_owner(owner_instance(dead_pid), 1);
-        Scenario scenario;
-        scenario.lock = &lock;
-        scenario.mode = Schedule::still_cpu;
-        Hook_scope hooks(scenario);
-        lock.lock();
-        const bool recovered = lock.test_owner() == sintra::detail::current_process_instance() &&
-            (lock.test_generation() & 1);
-        lock.unlock();
-        if (!expect(recovered, "dead owner was not recovered and freshly marked")) {
-            return 1;
-        }
-        const uint32_t other_token = uint32_t(sintra::detail::current_process_instance()) + 1;
-        lock.test_install_owner(owner_instance(self_pid, other_token), 1);
-        lock.lock();
-        lock.unlock();
+    if (!run_dead_owner_recovery(owner_instance(dead_pid),
+            "absent PID owner was not recovered and freshly marked")) {
+        return 1;
+    }
+    const uint32_t other_token = uint32_t(sintra::detail::current_process_instance()) + 1;
+    if (!run_dead_owner_recovery(owner_instance(self_pid, other_token),
+            "same-PID different-token owner was not recovered and freshly marked")) {
+        return 1;
     }
     {
         sintra::spinlock lock;
