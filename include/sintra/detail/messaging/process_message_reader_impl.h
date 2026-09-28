@@ -965,37 +965,39 @@ void Process_message_reader::request_reader_function()
                     // If addressed to a specified local receiver, this may only be an RPC call,
                     // thus the named receiver must exist.
 
-                    // if the receiver registered handler, call the handler
-                    // Hold spinlock while accessing the iterator to prevent use-after-invalidation
-                    void (*handler_fn)(Message_prefix&);
+                    // The handler map lock is shared by every reader dispatching a targeted
+                    // RPC, so only the lookup runs under it. Logging runs the user's log
+                    // callback and the reply-ring write can wait for other writers; neither
+                    // may extend the hold. A registered handler is never null.
+                    void (*handler_fn)(Message_prefix&) = nullptr;
                     {
                         auto scoped_map = Transceiver::get_rpc_handler_map().scoped();
                         auto it         = scoped_map.get().find(m->message_type_id);
-                        if (it == scoped_map.get().end()) {
-                            Log_stream(log_level::warning)
-                                << "Received RPC for unknown message type "
-                                << static_cast<unsigned long long>(m->message_type_id)
-                                << "; rejecting the request. "
-                                << diagnostic_summary() << "\n";
-
-                            const std::string reason     = "RPC function is not available.";
-                            auto*             placed_msg =
-                                s_mproc->m_out_rep_c->write<Transceiver::exception>(
-                                    vb_size<Transceiver::exception>(reason),
-                                    reason);
-                            placed_msg->sender_instance_id   = m->receiver_instance_id;
-                            placed_msg->receiver_instance_id = m->sender_instance_id;
-                            placed_msg->function_instance_id = m->function_instance_id;
-                            placed_msg->exception_type_id =
-                                (type_id_type)detail::reserved_id::sintra_rpc_unavailable;
-                            s_mproc->m_out_rep_c->done_writing();
-                            publish_request_progress(m_in_req_c->get_message_reading_sequence());
-                            continue;
+                        if (it != scoped_map.get().end()) {
+                            handler_fn = it->second;
                         }
+                    }
 
-                        // Copy the function pointer while holding the lock
-                        handler_fn = it->second;
-                        // Spinlock released here automatically when scoped_map goes out of scope
+                    if (!handler_fn) {
+                        Log_stream(log_level::warning)
+                            << "Received RPC for unknown message type "
+                            << static_cast<unsigned long long>(m->message_type_id)
+                            << "; rejecting the request. "
+                            << diagnostic_summary() << "\n";
+
+                        const std::string reason     = "RPC function is not available.";
+                        auto*             placed_msg =
+                            s_mproc->m_out_rep_c->write<Transceiver::exception>(
+                                vb_size<Transceiver::exception>(reason),
+                                reason);
+                        placed_msg->sender_instance_id   = m->receiver_instance_id;
+                        placed_msg->receiver_instance_id = m->sender_instance_id;
+                        placed_msg->function_instance_id = m->function_instance_id;
+                        placed_msg->exception_type_id =
+                            (type_id_type)detail::reserved_id::sintra_rpc_unavailable;
+                        s_mproc->m_out_rep_c->done_writing();
+                        publish_request_progress(m_in_req_c->get_message_reading_sequence());
+                        continue;
                     }
 
                     (*handler_fn)(*m);

@@ -261,14 +261,21 @@ Transceiver::ensure_rpc_shutdown()
                 break;
             }
 
+            // The log callback is user code, so it runs without the lifecycle mutex
+            // (see acquire_rpc_target). Shutdown is already requested, so no call is
+            // admitted meanwhile, a concurrent shutdown waits for completion, and the
+            // loop condition sees any release that happens while unlocked.
+            const size_t active_rpc_calls = m_active_rpc_calls;
+            ++warning_count;
+            lock.unlock();
+
             Log_stream(log_level::warning)
                 << "Transceiver shutdown is waiting for "
-                << m_active_rpc_calls
+                << active_rpc_calls
                 << " active RPC handler(s) on instance "
                 << m_instance_id
                 << ". Forced timeout is unsafe while handlers still execute against the object.\n";
 
-            ++warning_count;
             if (warning_count >= max_shutdown_warning_count) {
                 Log_stream(log_level::error)
                     << "Transceiver shutdown exceeded "
@@ -278,6 +285,8 @@ Transceiver::ensure_rpc_shutdown()
                     << ". Terminating to fail fast.\n";
                 std::terminate();
             }
+
+            lock.lock();
         }
         m_rpc_shutdown_complete = true;
         // Notify while still holding the lock to prevent race conditions

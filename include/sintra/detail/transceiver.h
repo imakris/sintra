@@ -727,6 +727,11 @@ private:
     // ensure_rpc_shutdown and release_rpc_execution never take the spinlock,
     // so this cannot deadlock.
     //
+    // Every other caller of the same exported function spins on that spinlock
+    // meanwhile, and a hold longer than the spinlock's live-owner timeout
+    // aborts the process. m_rpc_lifecycle_mutex must therefore only ever be
+    // held briefly: never across user code such as the log callback.
+    //
     // Callers distinguish two failure modes via the returned struct:
     //   object == nullptr        -> instance_id not present in the map
     //   !guard                   -> object exists but is shutting down
