@@ -198,7 +198,9 @@ be implemented until the design review concludes.
 - The reader protects its bounded copy with a **copying mark** in its own
   slot, not with a lock or a seqlock.
 
-Current master still uses the interim protection:
+Historical baseline at `a1c835e1` used the interim protection below. These
+are not current source claims; later changes added reader incarnation stamps.
+See [deferred work](deferred_work.md) for the current scope/status inventory:
 - each frame is copied under the ring's shared `rs_stack_spinlock` (`rings.h:3420-3422`, `message.h:854`);
 - slow readers are evicted after a 5 ms budget (`rings.h:162-172`);
 - reader-slot owners are identified by PID alone (`rings.h:1845`).

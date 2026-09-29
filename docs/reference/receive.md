@@ -62,9 +62,13 @@ transceiver instance.
 
 - Must be called from a control thread (a process entry function or a
   thread that is not a Sintra reader thread).
-- Variable-buffer-backed fields in the returned value reference ring
-  memory. Copy them out before any subsequent message processing if
-  they must outlive the current scope.
+- Generated `SINTRA_MESSAGE` values containing `message_string` or other
+  variable-buffer fields do not acquire ownership of their trailing payload.
+  Their self-relative descriptors are invalid when detached by the value
+  copies inside `receive`; copying fields after return is not safe. Use
+  ordinary owning value types (such as `std::string`) where applicable, or
+  decode fields into owning values within a valid const-reference callback.
+  See [the deferred ownership repair](../deferred_work.md#owning-values-for-variable-field-receivet).
 - The internal slot is removed automatically before the function
   returns. No deactivation by the caller is required.
 

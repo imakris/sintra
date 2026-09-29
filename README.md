@@ -198,6 +198,8 @@ The Markdown sources remain available for symbol lookup in
 exceptions, or runtime symptoms, use [docs/diagnostics.md](docs/diagnostics.md).
 Contributors should read [docs/design_principles.md](docs/design_principles.md)
 before changing Sintra's design.
+[Deferred development and current limitations](docs/deferred_work.md) records
+the work postponed for the current product release.
 
 ## Supported platforms and architectures
 
