@@ -572,8 +572,9 @@ Advanced message payload types:
 
 Variable-buffer backed data is tied to message storage. Convert it into owning
 values inside a valid const-reference callback before that callback returns.
-Generated variable-field messages returned by `receive<T>()` have detached,
-unsafe descriptors; see the [receive ownership limitation](reference/receive.md#threading-and-lifecycle).
+For an independently owned generated variable-field message, use
+`receive_owned<T>()`; by-value `receive<T>()` rejects these types at compile
+time. See the [receive ownership contract](reference/receive.md#threading-and-lifecycle).
 
 `sintra::detail::message_args` is an internal implementation detail. It may
 appear in template diagnostics, but application code should not name it.
@@ -1098,7 +1099,7 @@ threading rules.
 | Async RPC caller | Use `get_until` for bounded result retrieval; drop the handle to abandon caller-side interest. | Treat deadline expiry as remote cancellation. |
 | Collective shutdown | Have every live finishing participant call `shutdown()`. | Call `shutdown()` in only one participant while peers continue. |
 | Unilateral departure | Use `leave()` from a top-level control thread. | Use `leave()` from a coordinator that still owns known peers. |
-| Shared payload buffers | Convert data into owning values inside a valid const-reference callback. | Retain frame-backed data after the callback or access detached descriptors returned by `receive<T>()`. |
+| Shared payload buffers | Convert data into owning values inside a valid const-reference callback. | Retain borrowed frame-backed data after the callback. |
 
 Reader threads invoke slots and transported RPC handlers asynchronously. A
 barrier coordinates interprocess progress, not in-process data races.
@@ -1223,7 +1224,7 @@ sources.
 | Using `SINTRA_RPC` when local async behavior must use transport. | Use `SINTRA_RPC_STRICT`. |
 | Returning references or using non-const reference RPC parameters. | Return by value and model mutable results explicitly. |
 | Passing a string RPC target without first naming the transceiver. | Call `assign_name(...)` before the name is used, or exchange and use `instance_id()`. |
-| Retaining frame-backed variable data or using generated variable-field values returned by `receive<T>()`. | Convert fields into owning values inside a valid const-reference callback; see the [receive limitation](reference/receive.md#threading-and-lifecycle). |
+| Retaining borrowed frame-backed variable data after its callback. | Use `receive_owned<T>()`, or convert fields into owning values inside a valid const-reference callback; see the [receive ownership contract](reference/receive.md#threading-and-lifecycle). |
 | Adding polling around Sintra state. | Use slots, barriers, lifecycle hooks, or event messages. |
 
 ## API Index

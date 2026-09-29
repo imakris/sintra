@@ -31,6 +31,13 @@ private:
 };
 
 
+namespace detail {
+
+template <>
+struct fixed_message_field<Resolvable_instance_id> : std::true_type {};
+
+} // namespace detail
+
 } // sintra
 
 

@@ -122,9 +122,9 @@ Contract:
 - Convert variable-buffer fields into owning values before that callback
   returns if they must outlive it. Conversion to `T` (for example
   `std::string s = msg.text;`) is the standard way to do this. A generated
-  variable-field message returned by [`sintra::receive`](receive.md) does
-  not own its payload and its detached descriptors are unsafe even before
-  the next dispatch; copying fields after return is not a repair.
+  variable-field message cannot be received by value with
+  [`sintra::receive`](receive.md); that call is rejected at compile time.
+  Use `receive_owned` to retain the complete frame instead.
 - Use `receive_owned<Message>()` to retain a generated message's complete
   frame in a smart pointer. The fixed object and payload remain together;
   move the pointer, not the message value. Its fields remain usable until

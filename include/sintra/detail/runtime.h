@@ -2063,6 +2063,7 @@ inline void deactivate_all_slots()
 }
 
 template <typename MESSAGE_T, typename SENDER_T>
+    requires detail::Value_receive_supported_or_use_receive_owned<MESSAGE_T>
 MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
 {
 #ifndef NDEBUG
@@ -2099,6 +2100,7 @@ MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id)
 }
 
 template <typename MESSAGE_T>
+    requires detail::Value_receive_supported_or_use_receive_owned<MESSAGE_T>
 MESSAGE_T receive()
 {
     return receive<MESSAGE_T, void>(Typed_instance_id<void>(any_local_or_remote));

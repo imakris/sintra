@@ -77,13 +77,14 @@ transceiver instance.
 
 - Must be called from a control thread (a process entry function or a
   thread that is not a Sintra reader thread).
-- Generated `SINTRA_MESSAGE` values containing `message_string` or other
-  variable-buffer fields do not acquire ownership of their trailing payload.
-  Their self-relative descriptors are invalid when detached by the value
-  copies inside `receive`; copying fields after return is not safe. Use
-  `receive_owned<T>()` for these generated messages, ordinary owning value
-  types (such as `std::string`) where applicable, or decode fields into owning
-  values within a valid const-reference callback.
+- For generated `SINTRA_MESSAGE` types, `receive` requires supported fixed
+  fields. Plain fields (including array elements and nested plain structs)
+  must be trivial and standard-layout; `Resolvable_instance_id` is also
+  supported. Initializers on fixed fields do not change this classification.
+  Variable-buffer fields fail to compile with a diagnostic directing callers
+  to `receive_owned<T>()`. The same check applies to both receive overloads.
+  Ordinary owning values such as `std::string` and `std::vector<int>` continue
+  to use `receive<T>()`.
 - `receive_owned` retains the fixed object and variable payload together in
   an independent allocation. Move the smart pointer to transfer ownership;
   the message stays at the same address. Its descriptor fields remain valid

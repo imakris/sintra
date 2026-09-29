@@ -293,12 +293,14 @@ void deactivate_all_slots();
 ///
 /// \note Generated messages containing variable-buffer descriptors must use
 ///       receive_owned<MESSAGE_T>(); copying their fixed object by value does
-///       not retain their payload. Ordinary owning values such as std::string
+///       not retain their payload. Such receive<MESSAGE_T>() calls fail to compile.
+///       Ordinary owning values such as std::string
 ///       continue to use receive<MESSAGE_T>().
 ///
 /// \tparam MESSAGE_T The message type to wait for (must be copy-constructible).
 /// \return The received message payload.
 template <typename MESSAGE_T>
+    requires detail::Value_receive_supported_or_use_receive_owned<MESSAGE_T>
 MESSAGE_T receive();
 
 ///\brief Block until a message of the specified type is received from a specific sender.
@@ -308,6 +310,7 @@ MESSAGE_T receive();
 /// \param sender_id  The sender to filter messages from.
 /// \return The received message payload.
 template <typename MESSAGE_T, typename SENDER_T>
+    requires detail::Value_receive_supported_or_use_receive_owned<MESSAGE_T>
 MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id);
 
 ///\brief Receive an independently owned, complete generated message frame.

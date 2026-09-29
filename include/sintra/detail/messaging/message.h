@@ -576,6 +576,38 @@ struct ring_payload_traits<Message<T, RT, ID, EXPORTER>>
 namespace detail
 {
 
+// Plain fixed fields follow the public payload contract. Repository-owned
+// message elements may specialize this trait when their value is self-contained.
+template <typename T>
+struct fixed_message_field
+    : std::bool_constant<std::is_trivial_v<T> && std::is_standard_layout_v<T>>
+{};
+
+template <typename... Fields>
+using fixed_message_fields = std::bool_constant<
+    (fixed_message_field<std::remove_cv_t<std::remove_all_extents_t<Fields>>>::value && ...)>;
+
+template <typename T, typename = void>
+struct value_message_body_supported : fixed_message_fields<T> {};
+
+template <typename T>
+struct value_message_body_supported<T,
+    std::void_t<decltype(T::sintra_value_receive_fields(std::declval<T&>()))>>
+    : decltype(T::sintra_value_receive_fields(std::declval<T&>()))
+{};
+
+template <typename T>
+struct value_receive_supported : std::true_type {};
+
+template <typename T, typename RT, type_id_type ID, typename EXPORTER>
+struct value_receive_supported<Message<T, RT, ID, EXPORTER>>
+    : value_message_body_supported<T>
+{};
+
+template <typename T>
+concept Value_receive_supported_or_use_receive_owned =
+    value_receive_supported<std::remove_cv_t<T>>::value;
+
 template <typename T>
 struct owned_message_supported : std::false_type {};
 
@@ -676,23 +708,54 @@ Owned_message<T> copy_message_frame(const T& message)
 #define VA_NARGS_CALL_OVERLOAD(name, ...) \
     VA_NARGS_GLUE_(VA_NARGS_OVERLOAD_MACRO_(name, VA_NARGS_COUNT_MAX16_(__VA_ARGS__)),(__VA_ARGS__))
 
+#define SINTRA_EXPAND_BINDINGS(...) __VA_ARGS__
+// Static metadata is instantiated only by value-receive checks. It adds no
+// storage and does not change the serialized body or its aggregate construction.
+#define SINTRA_VALUE_RECEIVE_FIELDS(v, bindings, ...) \
+    template <typename Body = v> \
+    static auto sintra_value_receive_fields(Body& body) \
+    { \
+        if constexpr (std::is_empty_v<Body>) { \
+            return std::true_type{}; \
+        } \
+        else { \
+            auto& [SINTRA_EXPAND_BINDINGS bindings] = body; \
+            return sintra::detail::fixed_message_fields<__VA_ARGS__>{}; \
+        } \
+    }
+
 /* overloads */
-#define VA_DEFINE_STRUCT_1( v)                                  struct v { };
-#define VA_DEFINE_STRUCT_2( v,a)                                struct v { a; };
-#define VA_DEFINE_STRUCT_3( v,a,b)                              struct v { a;b; };
-#define VA_DEFINE_STRUCT_4( v,a,b,c)                            struct v { a;b;c; };
-#define VA_DEFINE_STRUCT_5( v,a,b,c,d)                          struct v { a;b;c;d; };
-#define VA_DEFINE_STRUCT_6( v,a,b,c,d,e)                        struct v { a;b;c;d;e; };
-#define VA_DEFINE_STRUCT_7( v,a,b,c,d,e,f)                      struct v { a;b;c;d;e;f; };
-#define VA_DEFINE_STRUCT_8( v,a,b,c,d,e,f,g)                    struct v { a;b;c;d;e;f;g; };
-#define VA_DEFINE_STRUCT_9( v,a,b,c,d,e,f,g,h)                  struct v { a;b;c;d;e;f;g;h; };
-#define VA_DEFINE_STRUCT_10(v,a,b,c,d,e,f,g,h,i)                struct v { a;b;c;d;e;f;g;h;i; };
-#define VA_DEFINE_STRUCT_11(v,a,b,c,d,e,f,g,h,i,j)              struct v { a;b;c;d;e;f;g;h;i;j; };
-#define VA_DEFINE_STRUCT_12(v,a,b,c,d,e,f,g,h,i,j,k)            struct v { a;b;c;d;e;f;g;h;i;j;k; };
-#define VA_DEFINE_STRUCT_13(v,a,b,c,d,e,f,g,h,i,j,k,l)          struct v { a;b;c;d;e;f;g;h;i;j;k;l; };
-#define VA_DEFINE_STRUCT_14(v,a,b,c,d,e,f,g,h,i,j,k,l,m)        struct v { a;b;c;d;e;f;g;h;i;j;k;l;m; };
-#define VA_DEFINE_STRUCT_15(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n)      struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n; };
-#define VA_DEFINE_STRUCT_16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o)    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n;o; };
+#define VA_DEFINE_STRUCT_1(v) struct v {};
+#define VA_DEFINE_STRUCT_2(v,a) \
+    struct v { a; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0), decltype(f0)) };
+#define VA_DEFINE_STRUCT_3(v,a,b) \
+    struct v { a;b; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1), decltype(f0),decltype(f1)) };
+#define VA_DEFINE_STRUCT_4(v,a,b,c) \
+    struct v { a;b;c; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2), decltype(f0),decltype(f1),decltype(f2)) };
+#define VA_DEFINE_STRUCT_5(v,a,b,c,d) \
+    struct v { a;b;c;d; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3), decltype(f0),decltype(f1),decltype(f2),decltype(f3)) };
+#define VA_DEFINE_STRUCT_6(v,a,b,c,d,e) \
+    struct v { a;b;c;d;e; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4)) };
+#define VA_DEFINE_STRUCT_7(v,a,b,c,d,e,f) \
+    struct v { a;b;c;d;e;f; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5)) };
+#define VA_DEFINE_STRUCT_8(v,a,b,c,d,e,f,g) \
+    struct v { a;b;c;d;e;f;g; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6)) };
+#define VA_DEFINE_STRUCT_9(v,a,b,c,d,e,f,g,h) \
+    struct v { a;b;c;d;e;f;g;h; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7)) };
+#define VA_DEFINE_STRUCT_10(v,a,b,c,d,e,f,g,h,i) \
+    struct v { a;b;c;d;e;f;g;h;i; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7,f8), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7),decltype(f8)) };
+#define VA_DEFINE_STRUCT_11(v,a,b,c,d,e,f,g,h,i,j) \
+    struct v { a;b;c;d;e;f;g;h;i;j; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7,f8,f9), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7),decltype(f8),decltype(f9)) };
+#define VA_DEFINE_STRUCT_12(v,a,b,c,d,e,f,g,h,i,j,k) \
+    struct v { a;b;c;d;e;f;g;h;i;j;k; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7),decltype(f8),decltype(f9),decltype(f10)) };
+#define VA_DEFINE_STRUCT_13(v,a,b,c,d,e,f,g,h,i,j,k,l) \
+    struct v { a;b;c;d;e;f;g;h;i;j;k;l; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7),decltype(f8),decltype(f9),decltype(f10),decltype(f11)) };
+#define VA_DEFINE_STRUCT_14(v,a,b,c,d,e,f,g,h,i,j,k,l,m) \
+    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7),decltype(f8),decltype(f9),decltype(f10),decltype(f11),decltype(f12)) };
+#define VA_DEFINE_STRUCT_15(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n) \
+    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7),decltype(f8),decltype(f9),decltype(f10),decltype(f11),decltype(f12),decltype(f13)) };
+#define VA_DEFINE_STRUCT_16(v,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o) \
+    struct v { a;b;c;d;e;f;g;h;i;j;k;l;m;n;o; SINTRA_VALUE_RECEIVE_FIELDS(v, (f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14), decltype(f0),decltype(f1),decltype(f2),decltype(f3),decltype(f4),decltype(f5),decltype(f6),decltype(f7),decltype(f8),decltype(f9),decltype(f10),decltype(f11),decltype(f12),decltype(f13),decltype(f14)) };
 
 /* reusable macro */
 #define DEFINE_STRUCT_(...) VA_NARGS_CALL_OVERLOAD(VA_DEFINE_STRUCT_, __VA_ARGS__)

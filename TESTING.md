@@ -135,6 +135,20 @@ python3 run_tests.py --build-dir ../build --config Release
 python3 run_tests.py --build-dir ../build --config Debug
 ```
 
+### By-value receive compile contract
+
+`receive_value_contract_test` compiles ordinary owning values and supported
+fixed generated messages, including initialized fields and
+`Resolvable_instance_id`. Its compile-time checks verify that both receive overloads reject generated
+variable-field messages. Its optional negative cases instantiate real receive calls.
+Compile that source without linking, defining `SINTRA_RECEIVE_REJECT_CASE`
+to each value from 1 through 6. Each compilation must fail with
+a diagnostic naming `Value_receive_supported_or_use_receive_owned`.
+A compiler or include setup failure is not a passing negative result. Use the
+same C++20 toolchain and include paths as the normal test target, and the
+required build queue for local compiler invocations. Without this definition,
+the source is a normal test target and must compile successfully.
+
 ### Multi-process teardown helpers
 
 Tests that end with the ordinary "all participants reach the same top-level

@@ -89,9 +89,10 @@ Threading and lifecycle:
 - Variable-buffer fields (`message_string`, `typed_variable_buffer<T>`)
   reference that frame's trailing data. Convert them into owning values within
   a valid const-reference handler before it returns if they must outlive it.
-  Generated variable-field values returned by [`receive`](receive.md) have
-  detached, unsafe descriptors; their payload lifetime is not the receive
-  scope. See that reference for the deferred ownership limitation.
+  For an independently owned complete message use [`receive_owned`](receive.md).
+  By-value `receive` rejects generated variable-field messages at compile time;
+  the supported fixed-field classification comes from the field types without
+  user annotations.
 
 Failures:
 

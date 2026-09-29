@@ -35,8 +35,8 @@ application references into the ring.
 The [dispatch-buffer decision](#retaining-the-shared-dispatch-buffer) below
 records why a fixed-size receive fast path is not pending implementation.
 The [variable-field ownership contract](deferred_work.md#owning-values-for-variable-field-receivet)
-uses `receive_owned<T>()` for an independent complete frame. The existing
-by-value `receive<T>()` does not own generated variable-field payloads.
+uses `receive_owned<T>()` for an independent complete frame. By-value
+`receive<T>()` rejects generated variable-field messages at compile time.
 
 **3. The coordinator is trusted infrastructure (the owner's kernel analogy).**
 Sintra is a user-space library and the coordinator has no special privileges.
@@ -272,7 +272,7 @@ the descriptors from their payload. The owner subsequently selected
 `receive_owned<T>()`, a smart pointer owning the complete frame copied from
 dispatch storage. Its lifetime is independent of other handlers and later
 reads; moving the pointer preserves the frame and offsets. The by-value
-`receive<T>()` remains unsuitable for generated variable-field messages.
+`receive<T>()` rejects generated variable-field messages at compile time.
 
 A proposed internal type trait would select a fixed-size reader path and
 copy directly from the ring into the waiting receive's result. Fixed size

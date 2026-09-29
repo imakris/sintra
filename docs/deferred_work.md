@@ -53,11 +53,9 @@ Ordinary decoded
 values such as `receive<std::string>()` and complete fixed-size values are
 distinct from generated `SINTRA_MESSAGE` objects containing `message_string`
 or other `typed_variable_buffer` fields. Those fields are self-relative wire
-descriptors, not independent payload owners. `receive<T>()` copies/moves the
-message object through its callback, optional storage and return value;
-it does not relocate or own the trailing payload. Accessing such a returned
-descriptor is unsafe even before the next message is processed. Copying its
-fields after return is not a repair.
+descriptors, not independent payload owners. The by-value `receive<T>()` now
+rejects generated messages whose fields do not meet the supported fixed-field contract, including these descriptor fields.
+The compile-time diagnostic directs callers to `receive_owned<T>()`.
 
 Applications should use `receive_owned<T>()` for generated messages with
 variable fields, receive ordinary owning value types where applicable, or
@@ -68,8 +66,8 @@ application-owned values before the callback returns. The
 The owned API provides independent lifetime across return, pointer moves,
 and later reads, while preserving exactly one copy out of the ring into
 dispatch storage. Local copying/deserialization into owning results is
-acceptable. The existing by-value `receive<T>()` has not changed; automatically
-mapping a generated descriptor-bearing type to a decoded owning value is not
+acceptable. By-value receive remains available for supported fixed messages
+and ordinary owning values; automatically mapping a generated descriptor-bearing type to a decoded owning value is not
 part of the delivered API or scheduled work.
 
 **Settled dispatch decision (2026-09-29):** retain the reusable dispatch
