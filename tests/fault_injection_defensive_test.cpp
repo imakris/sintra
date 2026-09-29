@@ -154,7 +154,7 @@ bool test_align_up_size_overflow()
 bool test_message_ring_rejects_misaligned_frame_length()
 {
     const auto directory =
-        sintra::test::unique_scratch_directory("fault_injection_misaligned_message_frame");
+        sintra::test::unique_scratch_directory("fault_injection_misaligned_message_frame", true);
     struct Cleanup
     {
         std::filesystem::path directory;

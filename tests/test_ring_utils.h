@@ -22,7 +22,7 @@ struct Temp_ring_dir
 
     explicit Temp_ring_dir(const std::string& hint)
     {
-        path = unique_scratch_directory(hint);
+        path = unique_scratch_directory(hint, true);
     }
 
     ~Temp_ring_dir()

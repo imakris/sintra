@@ -13,6 +13,9 @@
 #include <limits>
 #include <thread>
 #include <cerrno>
+#include <system_error>
+
+#include <sintra/detail/ipc/private_resources.h>
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -232,7 +235,8 @@ inline std::filesystem::path scratch_subdirectory(std::string_view name)
     return directory;
 }
 
-inline std::filesystem::path unique_scratch_directory(std::string_view prefix)
+inline std::filesystem::path unique_scratch_directory(
+    std::string_view prefix, bool private_directory = false)
 {
     static std::atomic<std::uint64_t> counter{0};
 
@@ -245,7 +249,15 @@ inline std::filesystem::path unique_scratch_directory(std::string_view prefix)
     oss << hint << '_' << ticks << '_' << sequence;
 
     auto directory = scratch_subdirectory("runs") / oss.str();
-    std::filesystem::create_directories(directory);
+    if (private_directory) {
+        if (!sintra::detail::create_private_directory(directory)) {
+            throw std::filesystem::filesystem_error("create private test directory", directory,
+                std::make_error_code(std::errc::permission_denied));
+        }
+    }
+    else {
+        std::filesystem::create_directories(directory);
+    }
     return directory;
 }
 
