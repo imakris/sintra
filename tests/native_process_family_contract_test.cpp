@@ -246,9 +246,10 @@ int run_host(int argc, char* argv[], const std::string& binary, const fs::path& 
     std::_Exit(2);
 }
 
-bool wait_family_empty(const sintra::Managed_child_native_change_signal& changes)
+bool wait_family_empty(
+    const sintra::Managed_child_native_change_signal& changes,
+    Clock::time_point deadline = Clock::now() + 8s)
 {
-    const auto deadline = Clock::now() + 8s;
     while (Clock::now() < deadline) {
         const auto generation = changes.generation();
         const auto status = sintra::native_family_status();
@@ -308,6 +309,17 @@ int run_owner(int argc, char* argv[], const std::string& binary, const fs::path&
     const int leaf = read_pid(directory / "leaf");
     const auto leaf_stamp = sintra::query_process_start_stamp(static_cast<uint32_t>(leaf));
     valid &= check(leaf_stamp.has_value(), "independent exact descendant identity");
+#ifdef _WIN32
+    // Retain the original descendant identity through job termination and PID reuse.
+    HANDLE leaf_process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, leaf);
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    const bool leaf_times = leaf_process && GetProcessTimes(leaf_process, &creation, &exit, &kernel, &user);
+    ULARGE_INTEGER retained_stamp{};
+    retained_stamp.LowPart  = creation.dwLowDateTime;
+    retained_stamp.HighPart = creation.dwHighDateTime;
+    valid &= check(leaf_times && leaf_stamp && retained_stamp.QuadPart == *leaf_stamp,
+        "retain waitable handle for the exact original descendant");
+#endif
     mark(directory / "ready");
     valid &= check(await_file(directory / "close", Clock::now() + 12s), "fixture global close received");
 #ifndef _WIN32
@@ -420,10 +432,22 @@ int run_owner(int argc, char* argv[], const std::string& binary, const fs::path&
     }
     valid &= check(sintra::request_native_family_termination(Clock::now() + 6s),
         "bounded whole-family force request admitted");
-    valid &= check(wait_family_empty(changes), "iterative exact adoption kill reap establishes empty");
+    const auto family_deadline = Clock::now() + 8s;
+    valid &= check(wait_family_empty(changes, family_deadline), "iterative exact adoption kill reap establishes empty");
+#ifdef _WIN32
+    // Job active-process accounting can reach zero before process teardown signals
+    // its handle. Wait for that separate native exit observation without reopening a PID.
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(family_deadline - Clock::now());
+    const DWORD leaf_wait = leaf_process
+        ? WaitForSingleObject(leaf_process, static_cast<DWORD>(std::max<int64_t>(0, remaining.count())))
+        : WAIT_FAILED;
+    valid &= check(leaf_wait == WAIT_OBJECT_0, "original detached descendant has completed native exit");
+    if (leaf_process) {
+        CloseHandle(leaf_process);
+    }
+#else
     valid &= check(leaf_stamp && !sintra::test::managed_child::exact_process_is_live(leaf, *leaf_stamp),
         "original detached descendant no longer exists");
-#ifndef _WIN32
     siginfo_t info{};
     valid &= check(waitid(P_ALL, 0, &info, WEXITED | WNOHANG | WNOWAIT | __WALL) < 0 && errno == ECHILD,
         "independent kernel ECHILD confirms complete reaping");
