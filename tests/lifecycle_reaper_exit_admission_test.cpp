@@ -170,9 +170,32 @@ Native_wait_path native_wait_path(HMODULE module,
     return {nt_wait, wait_ex, lock, create, module};
 }
 
+Native_wait_path native_wait_path()
+{
+    const auto create_address = reinterpret_cast<DWORD64>(&pthread_create);
+    const auto lock_address = reinterpret_cast<DWORD64>(&pthread_mutex_lock);
+    HMODULE linked_module = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(create_address), &linked_module))
+    {
+        const auto create = winpthreads_function_range(linked_module, create_address);
+        const auto lock = winpthreads_function_range(linked_module, lock_address);
+        if (create.begin && lock.begin) {
+            return native_wait_path(linked_module, create, lock);
+        }
+    }
+    // Auto-imported function addresses can name thunks without unwind records.
+    // Exports give the DLL's code addresses without decoding those thunks.
+    const HMODULE module = GetModuleHandleA("libwinpthread-1.dll");
+    return native_wait_path(module,
+        native_function_range(module, "pthread_create"),
+        native_function_range(module, "pthread_mutex_lock"));
+}
+
 // In the source-audited winpthreads creation path, pop_pthread_mem locks
 // mtx_pthr_locked, which pthread-key cleanup holds. Require its private caller
-// between the exported lock and create frames in one suspended stack.
+// between the lock and create frames in one suspended stack.
 bool blocked_in_native_creation_lock(HANDLE thread, HANDLE process,
     const Native_wait_path& path,
     std::array<DWORD64, 32>& last_stack, unsigned& last_count)
@@ -230,10 +253,7 @@ bool native_creation_waits_on_cleanup(DWORD admitting_thread_id,
     const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
         THREAD_QUERY_INFORMATION, FALSE, admitting_thread_id);
     const HANDLE process = GetCurrentProcess();
-    const HMODULE winpthreads = GetModuleHandleA("libwinpthread-1.dll");
-    const auto create = native_function_range(winpthreads, "pthread_create");
-    const auto lock = native_function_range(winpthreads, "pthread_mutex_lock");
-    const auto path = native_wait_path(winpthreads, create, lock);
+    const auto path = native_wait_path();
     const bool ready = thread && path.nt_wait.begin &&
         SymInitialize(process, nullptr, TRUE);
     if (!check(ready, "native stack inspection initialized")) {
