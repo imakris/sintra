@@ -375,8 +375,17 @@ inline int system_pipe2(int pipefd[2], int flags)
 #endif
 }
 
+inline std::mutex& posix_pipe_fork_mutex()
+{
+    static std::mutex gate;
+    return gate;
+}
+
 inline int call_pipe2(int pipefd[2], int flags)
 {
+    // On systems without pipe2, another thread must not fork between pipe()
+    // and setting FD_CLOEXEC. Cover status, signal and lifeline pipes alike.
+    std::lock_guard<std::mutex> lock(posix_pipe_fork_mutex());
     if (auto override = pipe2_override().load()) {
         return override(pipefd, flags);
     }
@@ -1107,11 +1116,20 @@ Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options
         }
     }
 
+    std::unique_lock<std::mutex> fork_lock(posix_pipe_fork_mutex());
     pid_t child_pid = -1;
     do {
         child_pid = ::fork();
     }
     while (child_pid == -1 && errno == EINTR);
+    if (child_pid == 0) {
+        // Only exec/_exit follow in the child. Never operate on the inherited
+        // std::mutex, including by destroying an owning lock wrapper.
+        (void)fork_lock.release();
+    }
+    else {
+        fork_lock.unlock();
+    }
     if (child_pid == -1) {
         if (ready_pipe[0] >= 0) { close(ready_pipe[0]); }
         if (ready_pipe[1] >= 0) { close(ready_pipe[1]); }

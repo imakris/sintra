@@ -1,12 +1,14 @@
 #include "sintra/detail/utility.h"
 
 #include "test_utils.h"
+#include "exact_child_test_support.h"
 
 #include <iostream>
 
 #ifndef _WIN32
 
 #include <chrono>
+#include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
@@ -400,10 +402,131 @@ bool spawn_detached_sets_env_overrides()
     return sintra::test::assert_true_errno(matched, k_failure_prefix, "env override value mismatch");
 }
 
+std::atomic_bool pipe_created{false};
+std::atomic_bool finish_pipe_creation{false};
+std::atomic_uint pipe_calls{0};
+
+int paused_pipe_creation(int pipefd[2], int flags)
+{
+    if (pipe_calls.fetch_add(1) != 0) {
+        return sintra::detail::system_pipe2(pipefd, flags);
+    }
+    // Force the macOS pipe()+fcntl() window on every POSIX test host.
+    if (::pipe(pipefd) != 0) {
+        return -1;
+    }
+    pipe_created.store(true, std::memory_order_release);
+    while (!finish_pipe_creation.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    for (int i = 0; i != 2; ++i) {
+        if (::fcntl(pipefd[i], F_SETFD, FD_CLOEXEC) == -1) {
+            const int saved_errno = errno;
+            ::close(pipefd[0]);
+            ::close(pipefd[1]);
+            pipefd[0] = pipefd[1] = -1;
+            errno = saved_errno;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+bool wait_for_flag(const std::atomic_bool& flag, std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!flag.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return flag.load(std::memory_order_acquire);
+}
+
+bool concurrent_spawn_does_not_inherit_status_pipe(const char* binary)
+{
+    using namespace std::chrono_literals;
+    namespace test = sintra::test;
+    const auto directory = test::unique_scratch_directory("spawn_pipe_race");
+    const auto release = directory / "release";
+    const auto first_ready = directory / "first_ready";
+    const auto second_ready = directory / "second_ready";
+    const auto release_string = release.string();
+    const auto first_ready_string = first_ready.string();
+    const auto second_ready_string = second_ready.string();
+    const char* const first_args[] = {
+        binary, "--pipe-race-child", first_ready_string.c_str(),
+        release_string.c_str(), nullptr};
+    const char* const second_args[] = {
+        binary, "--pipe-race-child", second_ready_string.c_str(),
+        release_string.c_str(), nullptr};
+    test::Exact_child first(2s);
+    test::Exact_child second(2s);
+    std::atomic_bool first_done{false};
+    std::atomic_bool second_done{false};
+    bool first_spawned = false;
+    bool second_spawned = false;
+    pipe_created.store(false);
+    finish_pipe_creation.store(false);
+    pipe_calls.store(0);
+    Override_guard override(Override_guard::Kind::Pipe2,
+        reinterpret_cast<void*>(paused_pipe_creation));
+    std::thread first_launcher([&] {
+        first_spawned = first.spawn(binary, first_args);
+        first_done.store(true, std::memory_order_release);
+    });
+    const bool entered = wait_for_flag(pipe_created, 2s);
+    std::thread second_launcher([&] {
+        second_spawned = second.spawn(binary, second_args);
+        second_done.store(true, std::memory_order_release);
+    });
+    // The competing spawn may serialize behind the unfinished pipe creation.
+    // Give an unguarded fork the opportunity to exec, then release either path.
+    const bool competitor_finished_during_pause = wait_for_flag(second_done, 250ms);
+    finish_pipe_creation.store(true, std::memory_order_release);
+    const bool handshakes_finished = wait_for_flag(first_done, 2s) &&
+        wait_for_flag(second_done, 2s);
+    const bool children_alive = handshakes_finished && first_spawned &&
+        second_spawned && test::wait_for_file(first_ready, 2s) &&
+        test::wait_for_file(second_ready, 2s) &&
+        first.poll() == test::Exact_child_state::running &&
+        second.poll() == test::Exact_child_state::running;
+
+    // Record the oracle before allowing either child to close inherited FDs.
+    bool ok = test::assert_true(entered && children_alive, k_failure_prefix,
+        "concurrent spawn handshakes must finish while both children remain alive");
+    if (!ok) {
+        std::cerr << k_failure_prefix << "competing exec handshake during pipe pause: "
+            << competitor_finished_during_pause << '\n';
+    }
+    test::write_lines(release, {"release"});
+    first_launcher.join();
+    second_launcher.join();
+    for (auto* child : {&first, &second}) {
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (child->poll() == test::Exact_child_state::running &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        std::string diagnostic;
+        if (!child->exited_with_code(0) || !child->settle_observed_exit(diagnostic)) {
+            ok = false;
+            (void)child->terminate_and_settle(diagnostic);
+        }
+    }
+    std::filesystem::remove_all(directory);
+    return ok;
+}
+
 } // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
+    if (argc == 4 && std::string_view(argv[1]) == "--pipe-race-child") {
+        sintra::test::write_lines(argv[2], {"ready"});
+        return sintra::test::wait_for_file(argv[3], std::chrono::seconds(10)) ? 0 : 1;
+    }
     bool ok = true;
     ok &= spawn_should_fail_due_to_fd_exhaustion();
     ok &= spawn_should_fail_when_pipe2_injected_failure();
@@ -412,6 +535,7 @@ int main()
     ok &= spawn_fails_when_grandchild_cannot_report_readiness();
     ok &= spawn_reports_exec_failure();
     ok &= spawn_detached_sets_env_overrides();
+    ok &= concurrent_spawn_does_not_inherit_status_pipe(argv[0]);
     return ok ? 0 : 1;
 }
 
