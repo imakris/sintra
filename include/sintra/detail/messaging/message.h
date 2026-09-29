@@ -515,10 +515,12 @@ struct Message: public Message_prefix, public T
     }
 
 
-    template<
-        typename... Args, typename = void,
-        typename = enable_if_t< !args_require_varbuffer<Args...> >
-    >
+    // Exclude copy/move arguments before inspecting field serialization. The
+    // serializer does not accept a Message itself as a constructor field.
+    template<typename... Args>
+        requires (!(sizeof...(Args) == 1 &&
+                    (std::is_same_v<Message, std::remove_cvref_t<Args>> && ...)) &&
+                  !args_require_varbuffer<Args...>)
     Message(Args&& ...args)
     :
         Message_prefix{
@@ -532,10 +534,10 @@ struct Message: public Message_prefix, public T
     }
 
 
-    template<
-        typename... Args,
-        typename = enable_if_t< args_require_varbuffer<Args...> >
-    >
+    template<typename... Args>
+        requires (!(sizeof...(Args) == 1 &&
+                    (std::is_same_v<Message, std::remove_cvref_t<Args>> && ...)) &&
+                  args_require_varbuffer<Args...>)
     Message(Args&& ...args)
     :
         Message_prefix{

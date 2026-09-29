@@ -2,6 +2,7 @@
 
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -84,6 +85,12 @@ void accepted_owned_calls(sintra::Typed_instance_id<Receive_types> sender)
 // templates without starting a runtime or waiting for messages.
 [[maybe_unused]] void accepted_calls(sintra::Typed_instance_id<Receive_types> sender)
 {
+    Receive_types::Fixed original(73u);
+    const Receive_types::Fixed& source = original;
+    [[maybe_unused]] Receive_types::Fixed const_copy(source);
+    [[maybe_unused]] Receive_types::Fixed mutable_copy(original);
+    [[maybe_unused]] Receive_types::Fixed moved(std::move(original));
+
     accepted_value_calls<int>(sender);
     accepted_value_calls<std::string>(sender);
     accepted_value_calls<std::vector<int>>(sender);

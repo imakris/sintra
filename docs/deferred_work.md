@@ -41,7 +41,7 @@ marker protocol or API shape is adopted here.
 
 ### Owning values for variable-field `receive<T>()`
 
-**State: owned-frame API delivered; by-value descriptor limitation remains.**
+**State: closed; owned-frame API and unsafe by-value rejection delivered.**
 The owner reopened this bounded work on 2026-09-29 and selected
 `receive_owned<T>()`: a typed unique pointer owning the complete frame,
 including the trailing payload. Moving the pointer preserves the frame's
@@ -49,12 +49,12 @@ address; destruction frees the allocation. No ring or dispatch changes are
 needed. This is an owned serialized message, not an automatically decoded
 application object.
 
-Ordinary decoded
-values such as `receive<std::string>()` and complete fixed-size values are
+Ordinary decoded values such as `receive<std::string>()` and complete fixed-size values are
 distinct from generated `SINTRA_MESSAGE` objects containing `message_string`
 or other `typed_variable_buffer` fields. Those fields are self-relative wire
 descriptors, not independent payload owners. The by-value `receive<T>()` now
-rejects generated messages whose fields do not meet the supported fixed-field contract, including these descriptor fields.
+rejects generated messages whose fields do not meet the supported fixed-field
+contract, including these descriptor fields.
 The compile-time diagnostic directs callers to `receive_owned<T>()`.
 
 Applications should use `receive_owned<T>()` for generated messages with
@@ -67,8 +67,15 @@ The owned API provides independent lifetime across return, pointer moves,
 and later reads, while preserving exactly one copy out of the ring into
 dispatch storage. Local copying/deserialization into owning results is
 acceptable. By-value receive remains available for supported fixed messages
-and ordinary owning values; automatically mapping a generated descriptor-bearing type to a decoded owning value is not
-part of the delivered API or scheduled work.
+and ordinary owning values. Automatically mapping a generated descriptor-bearing
+type to a decoded owning value is an unadopted optional extension, not a remaining
+ownership defect or scheduled work.
+
+The Clang constructor-selection failure found by macOS CI is corrected:
+copy/move candidates are excluded from field serialization before its traits
+are instantiated. Focused Clang and MSVC gates pass. As of this 2026-09-29
+update, native macOS confirmation of the correction remains pending in CI;
+this records the delivered fix, not a claim that CI is green.
 
 **Settled dispatch decision (2026-09-29):** retain the reusable dispatch
 buffer, which gives multiple matching handlers a stable frame after ring
