@@ -54,6 +54,8 @@ struct Scenario {
     std::atomic<unsigned> witness_starts{0};
     std::atomic<unsigned> short_handoffs{0};
     unsigned release_poll = 130;
+    const char* recovery_failure = nullptr;
+    std::chrono::steady_clock::time_point deadline{};
 };
 
 Scenario* g_scenario = nullptr;
@@ -102,6 +104,12 @@ void event_hook(const void* address, spinlock_event event)
     }
 
     if (event == spinlock_event::poll) {
+        if (scenario->recovery_failure &&
+            std::chrono::steady_clock::now() >= scenario->deadline) {
+            std::fprintf(stderr, "spinlock_recovery_test: recovery watchdog: %s\n",
+                scenario->recovery_failure);
+            std::_Exit(1);
+        }
         const unsigned poll = ++scenario->polls;
         if (scenario->mode == Schedule::short_holds && poll % 20 == 0 &&
             poll < scenario->release_poll)
@@ -360,6 +368,8 @@ bool run_dead_owner_recovery(uint64_t owner, const char* message)
     scenario.lock = &lock;
     scenario.mode = Schedule::still_cpu;
     scenario.release_poll = 0;
+    scenario.recovery_failure = message;
+    scenario.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     Hook_scope hooks(scenario);
     lock.lock();
     const uint64_t takeover_mark = uint64_t(1) <<
@@ -414,10 +424,11 @@ bool run_abort_child(const char* program, const char* mode, const char* owner)
         child.terminate_and_settle(diagnostic);
         return expect(false, "abort child exceeded watchdog");
     }
-    const bool aborted = expected_abort(child);
+    const bool passed = std::string_view(owner) == "self"
+        ? expected_abort(child) : child.exited_with_code(0);
     std::string diagnostic;
     const bool settled = child.settle_observed_exit(diagnostic);
-    return expect(aborted && settled, "child did not abort on continuous live hold");
+    return expect(passed && settled, "child violated confirmed/unknown owner stall behavior");
 }
 
 int fake_abort_mode(std::string_view owner_arg, Schedule mode)
@@ -433,10 +444,20 @@ int fake_abort_mode(std::string_view owner_arg, Schedule mode)
     Scenario scenario;
     scenario.lock = &lock;
     scenario.mode = mode;
-    scenario.release_poll = 0; // An unchanged live hold must cause abort.
+    scenario.release_poll = owner_arg == "self" ? 0 : 10;
     Hook_scope hooks(scenario);
+    if (owner_arg != "self") {
+        sintra::set_log_callback([](sintra::log_level, const char*, void*) {
+            std::fprintf(stderr, "UNKNOWN diagnostic invoked application callback\n");
+            std::_Exit(2);
+        });
+    }
     lock.lock();
-    return 1;
+    const bool excluded = scenario.polls >= scenario.release_poll &&
+        (scenario.seen_events.load() &
+            (uint64_t(1) << static_cast<unsigned>(spinlock_event::after_final_generation))) != 0;
+    lock.unlock();
+    return owner_arg != "self" && excluded ? 0 : 1;
 }
 
 #ifdef _WIN32
@@ -491,9 +512,7 @@ bool windows_liveness_regressions()
         return false;
     }
     const uint32_t pid = child.pid();
-    detail::set_debug_pause_active(true);
     const bool live_preserved = run_windows_liveness_schedule(pid, false);
-    detail::set_debug_pause_active(false);
     if (!live_preserved) {
         return false;
     }

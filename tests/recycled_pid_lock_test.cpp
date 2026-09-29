@@ -22,6 +22,9 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #endif
 
 #define private public
@@ -233,9 +236,9 @@ int wait_for_child(pid_t child)
 
 // A fork child must not record ownership under its parent's token: an earlier
 // child with its PID would then look like itself.
-void fork_child_draws_own_instance()
+void fork_child_draws_own_instance(bool bypass_atfork = false)
 {
-    (void)self_instance();
+    const auto parent_instance = self_instance();
     void* memory = ::mmap(
         nullptr,
         sizeof(Fork_shared),
@@ -247,10 +250,21 @@ void fork_child_draws_own_instance()
     auto* shared = new (memory) Fork_shared();
     shared->lock.lock();
 
-    const pid_t child = ::fork();
+    pid_t child;
+#if defined(__linux__)
+    child = bypass_atfork
+        ? static_cast<pid_t>(::syscall(SYS_clone, SIGCHLD, nullptr, nullptr, nullptr, 0))
+        : ::fork();
+#else
+    child = ::fork();
+#endif
     require(child >= 0, "fork failed");
     if (child == 0) {
-        const int instance_status = check_fork_child_instance();
+        const int instance_status = bypass_atfork
+            ? (sintra::detail::cached_process_instance().load() == parent_instance &&
+               sintra::detail::process_instance_pid(self_instance()) ==
+                   static_cast<uint32_t>(::getpid()) ? 0 : 6)
+            : check_fork_child_instance();
         if (instance_status != 0) {
             ::_exit(instance_status);
         }
@@ -310,6 +324,10 @@ int main()
 #ifndef _WIN32
     fork_child_draws_own_instance();
     std::puts("PASS fork_child_draws_own_instance");
+#if defined(__linux__)
+    fork_child_draws_own_instance(true);
+    std::puts("PASS raw_clone_child_draws_own_instance");
+#endif
     fork_grandchild_draws_own_instance();
     std::puts("PASS fork_grandchild_draws_own_instance");
 #endif

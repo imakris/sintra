@@ -128,6 +128,12 @@ exited. An owner with the observer's own instance is held by the observer's
 process, through whichever mapping, and keeps excluding. A token collision
 fails safe, as ownership by the observer's process.
 
+The atfork handler clears the cached instance in ordinary fork children. A
+PID mismatch also redraws it for immediate children created through `_Fork`
+or raw process creation that bypasses that handler. This does not detect a
+descendant that never used Sintra and later receives the cached ancestor's
+PID; that inherited-instance ABA remains unresolved.
+
 The shared spinlock's live-stall diagnostic requires an unchanged odd
 generation and owner across a baseline and later OS-reported waiter thread-CPU
 samples. It aborts when their direct difference reaches two seconds, the owner
@@ -139,6 +145,13 @@ process-instance death evidence and an owner-word CAS; time never licenses a
 takeover. A holder stopped between its acquisition CAS and odd mark, or between
 its even mark and release store, may escape live-stall diagnosis while stopped.
 Those publication gaps are permitted misses; death remains recoverable.
+
+Only an owner matching the waiter's own process instance is confirmed LIVE
+for this diagnostic. A foreign PID without a recorded start stamp cannot
+confirm the recorded incarnation, even when that PID is live. After the same
+CPU threshold and final witness checks, such a waiter writes one diagnostic
+to stderr per lock call and continues waiting; it neither aborts nor takes
+over on that evidence. This diagnostic bypasses application log callbacks.
 
 The generation witness assumes its observed modification history does not
 advance by a full 2^64 cycle. A full repetition can hide intervening holds and

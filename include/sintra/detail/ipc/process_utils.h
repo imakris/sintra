@@ -400,10 +400,14 @@ inline uint64_t current_process_instance()
         register_process_instance_fork_handler();
 #endif
     auto& cached = cached_process_instance();
+    const uint32_t pid = get_current_pid();
     uint64_t instance = cached.load(std::memory_order_acquire);
-    while (instance == 0) {
+    // _Fork and raw process creation can bypass pthread_atfork. A different
+    // PID requires a fresh instance, even when the inherited cache is nonzero.
+    // This cannot detect an unused descendant receiving the cached ancestor PID.
+    while (instance == 0 || process_instance_pid(instance) != pid) {
         const uint64_t drawn =
-            (static_cast<uint64_t>(get_current_pid()) << 32) | draw_process_instance_token();
+            (static_cast<uint64_t>(pid) << 32) | draw_process_instance_token();
         if (cached.compare_exchange_strong(
                 instance, drawn, std::memory_order_acq_rel, std::memory_order_acquire))
         {

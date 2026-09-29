@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <thread>
 
 #if defined(_WIN32)
@@ -166,6 +167,7 @@ struct alignas(16) spinlock
         const uint64_t self = detail::current_process_instance();
         auto next_poll = std::chrono::steady_clock::now();
         witness_t witness{};
+        bool reported_unknown = false;
         size_t spin_count = 0;
 
         while (true) {
@@ -212,16 +214,11 @@ struct alignas(16) spinlock
 
             SINTRA_SPINLOCK_HOOK(before_liveness);
             const uint32_t owner_pid = detail::process_instance_pid(witness.owner);
-#ifdef _WIN32
-            const bool live = witness.owner == self ||
-                (owner_pid != detail::process_instance_pid(self) &&
-                    detail::probe_process_liveness(owner_pid) == detail::Process_liveness::LIVE);
-#else
-            const bool live = witness.owner == self ||
-                (owner_pid != detail::process_instance_pid(self) && is_process_alive(owner_pid));
-#endif
+            // A foreign PID can have been reused. Without a published start
+            // stamp, only our own exact instance confirms a live owner.
+            const bool live = witness.owner == self;
             SINTRA_SPINLOCK_HOOK(after_liveness);
-            if (!live || detail::is_debug_pause_active()) {
+            if (detail::is_debug_pause_active()) {
                 witness.active = false;
                 continue;
             }
@@ -234,7 +231,16 @@ struct alignas(16) spinlock
                 m_words.generation.load(std::memory_order_acquire);
             SINTRA_SPINLOCK_HOOK(after_final_generation);
             if (final_owner == witness.owner && final_generation == witness.generation) {
-                report_live_owner_stall(owner_pid, elapsed_cpu_ns);
+                if (live) {
+                    report_live_owner_stall(owner_pid, elapsed_cpu_ns);
+                }
+                if (!reported_unknown) {
+                    reported_unknown = true;
+                    // Do not invoke an application log callback from this wait.
+                    std::fprintf(stderr, "[sintra][spinlock] Owner PID %u incarnation "
+                        "cannot be confirmed after sustained waiter CPU; continuing "
+                        "to wait without taking over the shared spinlock.\n", owner_pid);
+                }
             }
             witness.active = false;
         }
