@@ -24,14 +24,7 @@ struct Ping { int value; };
 bool disposition_is_ignored(int sig)
 {
 #ifdef _WIN32
-#ifdef SIG_GET
     return std::signal(sig, SIG_GET) == SIG_IGN;
-#else
-    // C signal() has no portable read-only query on this CRT. The raise and
-    // following coordinator barrier exercise the retained disposition.
-    (void)sig;
-    return true;
-#endif
 #else
     struct sigaction current {};
     return ::sigaction(sig, nullptr, &current) == 0 && current.sa_handler == SIG_IGN;

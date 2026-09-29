@@ -1,9 +1,9 @@
 //
 // Sintra RPC log-callback stall test
 //
-// The log callback is user code and may block. While it runs, Sintra must not
-// hold a lock that other threads spin on: a shared spinlock hold that lasts
-// longer than the 2 s live-owner timeout aborts the process.
+// The log callback is user code and may block. Concurrent RPC service and
+// shutdown refusal must continue while it runs. The shared spinlock's live-owner
+// stall diagnostic measures waiter thread CPU, not callback wall time.
 //
 // Rejection: the coordinator process hosts Stall_service, and two children call
 // into it, so each child's request ring has its own reader thread there. One
@@ -41,8 +41,8 @@ constexpr const char*      k_service_name       = "rpc_log_callback_stall_servic
 constexpr std::string_view k_rejection_warning  = "Received RPC for unknown message type";
 constexpr std::string_view k_shutdown_warning   = "Transceiver shutdown is waiting for";
 
-// The block outlasts the spinlock's 2 s live-owner timeout, and lasts until a
-// concurrent call was served during it, up to the limit.
+// The block lasts at least 3 s of wall time and until a concurrent call is
+// served during it, up to the limit.
 constexpr auto k_callback_block       = std::chrono::seconds(3);
 constexpr auto k_callback_block_limit = std::chrono::seconds(15);
 constexpr auto k_call_limit           = std::chrono::seconds(25);

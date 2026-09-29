@@ -1777,10 +1777,11 @@ struct Ring:
         return encoded & 0x07;
     }
 
-    // Memory ordering is protocol-specific. Reader slot transitions and the ring
-    // spinlock use the default sequentially consistent operations. Diagnostic
-    // counters use relaxed operations. Shutdown/initialization state that gates
-    // access to other shared fields uses explicit acquire/release operations.
+    // Memory ordering is protocol-specific. Reader slot transitions use default
+    // sequentially consistent operations. The ring spinlock uses explicit
+    // relaxed, acquire, release, and acq_rel operations. Diagnostic counters use
+    // relaxed operations. Shutdown/initialization state that gates access to
+    // other shared fields uses explicit acquire/release operations.
 
     // Helper: pad to a cache line to reduce false sharing in Control arrays.
     struct cache_line_sized_t
