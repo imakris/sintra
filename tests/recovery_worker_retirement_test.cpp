@@ -209,8 +209,16 @@ int run_root(int argc, char* argv[], const fs::path& directory)
                 "body completion precedes post-join publication");
             lock.unlock();
 #ifdef _WIN32
-            valid &= check(!runner_thread_retained(completed_runners[custom_call]),
-                "post-join publication releases the runner kernel object");
+            // The OS can retain its last thread-object reference briefly after
+            // join. Wait for that release without admitting any further work.
+            const auto release_deadline = std::chrono::steady_clock::now() + 2s;
+            bool retained = runner_thread_retained(completed_runners[custom_call]);
+            while (retained && std::chrono::steady_clock::now() < release_deadline) {
+                std::this_thread::sleep_for(5ms);
+                retained = runner_thread_retained(completed_runners[custom_call]);
+            }
+            valid &= check(!retained,
+                "joined runner kernel object is released within two seconds");
 #endif
         }
         // Keep custom runner A live while the next crash uses default recovery.
