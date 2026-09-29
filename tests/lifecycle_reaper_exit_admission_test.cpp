@@ -5,7 +5,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #if defined(__MINGW32__)
@@ -146,6 +148,7 @@ struct Native_wait_path
     Native_function_range lock;
     Native_function_range create;
     HMODULE winpthreads = nullptr;
+    DWORD64 module_end = 0;
 };
 
 Native_function_range winpthreads_function_range(HMODULE module, DWORD64 address)
@@ -167,7 +170,11 @@ Native_wait_path native_wait_path(HMODULE module,
     if (!nt_wait.begin || !wait_ex.begin || !lock.begin || !create.begin) {
         return {};
     }
-    return {nt_wait, wait_ex, lock, create, module};
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        reinterpret_cast<const char*>(module) + dos->e_lfanew);
+    return {nt_wait, wait_ex, lock, create, module,
+        reinterpret_cast<DWORD64>(module) + nt->OptionalHeader.SizeOfImage};
 }
 
 Native_wait_path native_wait_path()
@@ -232,10 +239,17 @@ bool blocked_in_native_creation_lock(HANDLE thread, HANDLE process,
                 path.lock.contains(last_stack[i]) &&
                 path.create.contains(last_stack[i + 2]))
             {
-                const auto caller = winpthreads_function_range(
-                    path.winpthreads, last_stack[i + 1]);
-                if (caller.begin && caller.begin != path.lock.begin &&
-                    caller.begin != path.create.begin)
+                const auto address = last_stack[i + 1];
+                const auto base = SymGetModuleBase64(process, address);
+                const auto* unwind = static_cast<const RUNTIME_FUNCTION*>(
+                    SymFunctionTableAccess64(process, address));
+                if (base == reinterpret_cast<DWORD64>(path.winpthreads) &&
+                    address < path.module_end && unwind &&
+                    base + unwind->BeginAddress <= address &&
+                    address < base + unwind->EndAddress &&
+                    base + unwind->EndAddress <= path.module_end &&
+                    base + unwind->BeginAddress != path.lock.begin &&
+                    base + unwind->BeginAddress != path.create.begin)
                 {
                     matched = true;
                     break;
@@ -247,20 +261,36 @@ bool blocked_in_native_creation_lock(HANDLE thread, HANDLE process,
     return matched;
 }
 
-bool native_creation_waits_on_cleanup(DWORD admitting_thread_id,
-    DWORD cleanup_thread_id)
+constexpr const char* k_inspector_flag = "--native-stack-inspector";
+
+int inspect_native_stack(char* argv[])
 {
+    const auto number = [&](unsigned index) {
+        return std::strtoull(argv[index], nullptr, 10);
+    };
+    const DWORD process_id = static_cast<DWORD>(number(2));
+    const DWORD admitting_thread_id = static_cast<DWORD>(number(3));
+    const HANDLE start = reinterpret_cast<HANDLE>(number(4));
+    const HANDLE suspended = reinterpret_cast<HANDLE>(number(5));
+    const bool force_timeout = number(6) != 0;
+    Native_wait_path path{{number(7), number(8)}, {number(9), number(10)},
+        {number(11), number(12)}, {number(13), number(14)},
+        reinterpret_cast<HMODULE>(number(15)), number(16)};
     const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
         THREAD_QUERY_INFORMATION, FALSE, admitting_thread_id);
-    const HANDLE process = GetCurrentProcess();
-    const auto path = native_wait_path();
-    const bool ready = thread && path.nt_wait.begin &&
-        SymInitialize(process, nullptr, TRUE);
-    if (!check(ready, "native stack inspection initialized")) {
-        if (thread) {
-            CloseHandle(thread);
+    const HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+        FALSE, process_id);
+    if (!thread || !process || !SymInitialize(process, nullptr, TRUE) ||
+        WaitForSingleObject(start, 10000) != WAIT_OBJECT_0)
+    {
+        return 2;
+    }
+    if (force_timeout) {
+        if (SuspendThread(thread) == DWORD(-1)) {
+            return 3;
         }
-        return false;
+        SetEvent(suspended);
+        Sleep(INFINITE);
     }
     bool observed = false;
     std::array<DWORD64, 32> last_stack{};
@@ -277,12 +307,101 @@ bool native_creation_waits_on_cleanup(DWORD admitting_thread_id,
     CloseHandle(thread);
     if (!observed) {
         std::fprintf(stderr, "native stack admitting=%lu cleanup=%lu count=%u\n",
-            admitting_thread_id, cleanup_thread_id, last_count);
+            admitting_thread_id, DWORD(0), last_count);
         for (unsigned i = 0; i < last_count; ++i) {
             std::fprintf(stderr, "frame %u: %llx\n", i,
                 static_cast<unsigned long long>(last_stack[i]));
         }
     }
+    CloseHandle(process);
+    return observed ? 0 : 1;
+}
+
+bool run_native_inspector(DWORD admitting_thread_id, const Native_wait_path& path,
+    bool force_timeout)
+{
+    // Only this helper suspends the target. The parent retains the target handle
+    // and can repair one outstanding suspension after any helper exit.
+    const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, admitting_thread_id);
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    const HANDLE start = CreateEventA(&security, TRUE, FALSE, nullptr);
+    const HANDLE suspended = CreateEventA(&security, TRUE, FALSE, nullptr);
+    char executable[32768]{};
+    const DWORD length = GetModuleFileNameA(nullptr, executable, sizeof(executable));
+    bool started = false;
+    bool timed_out = false;
+    bool confirmed_suspended = false;
+    DWORD exit_code = 1;
+    DWORD previous_suspend_count = DWORD(-1);
+    if (thread && start && suspended && length && length < sizeof(executable)) {
+        std::string command = std::string("\"") + executable + "\" " + k_inspector_flag;
+        const std::array<DWORD64, 15> values{{GetCurrentProcessId(), admitting_thread_id,
+            reinterpret_cast<DWORD64>(start), reinterpret_cast<DWORD64>(suspended),
+            force_timeout ? 1u : 0u, path.nt_wait.begin, path.nt_wait.end,
+            path.wait_ex.begin, path.wait_ex.end, path.lock.begin, path.lock.end,
+            path.create.begin, path.create.end,
+            reinterpret_cast<DWORD64>(path.winpthreads), path.module_end}};
+        for (const auto value : values) {
+            command += " " + std::to_string(value);
+        }
+        STARTUPINFOA startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION helper{};
+        started = CreateProcessA(executable, command.data(), nullptr, nullptr, TRUE,
+            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &helper) != 0;
+        if (started) {
+            const HANDLE waits[]{suspended, helper.hProcess};
+            // From start until ResumeThread, make only native calls: the target
+            // may be suspended while it owns any parent-process runtime lock.
+            SetEvent(start);
+            if (force_timeout) {
+                confirmed_suspended = WaitForMultipleObjects(2, waits, FALSE, 10000) ==
+                    WAIT_OBJECT_0;
+            }
+            const DWORD result = WaitForSingleObject(helper.hProcess,
+                force_timeout && confirmed_suspended ? 50 : 15000);
+            timed_out = result == WAIT_TIMEOUT;
+            if (result != WAIT_OBJECT_0) {
+                TerminateProcess(helper.hProcess, 124);
+            }
+            WaitForSingleObject(helper.hProcess, INFINITE);
+            GetExitCodeProcess(helper.hProcess, &exit_code);
+            previous_suspend_count = ResumeThread(thread);
+            CloseHandle(helper.hThread);
+            CloseHandle(helper.hProcess);
+        }
+    }
+    if (thread) {
+        CloseHandle(thread);
+    }
+    if (start) {
+        CloseHandle(start);
+    }
+    if (suspended) {
+        CloseHandle(suspended);
+    }
+    if (force_timeout) {
+        const bool repaired = started && confirmed_suspended && timed_out &&
+            exit_code == 124 && previous_suspend_count == 1;
+        if (repaired) {
+            std::fprintf(stderr, "NATIVE_INSPECTOR_TIMEOUT_REPAIRED: admitting=%lu\n",
+                admitting_thread_id);
+        }
+        return check(repaired, "timed-out inspector is reaped before target resumes");
+    }
+    return check(started && !timed_out && exit_code == 0 && previous_suspend_count == 0,
+        "external native stack inspection completes");
+}
+
+bool native_creation_waits_on_cleanup(DWORD admitting_thread_id,
+    DWORD cleanup_thread_id)
+{
+    const auto path = native_wait_path();
+    if (!check(path.nt_wait.begin != 0, "native function ranges initialized")) {
+        return false;
+    }
+    const bool repaired = run_native_inspector(admitting_thread_id, path, true);
+    const bool observed = repaired && run_native_inspector(admitting_thread_id, path, false);
     if (observed) {
         std::fprintf(stderr,
             "NATIVE_LOCK_WAIT: admitting=%lu NtWaitForSingleObject -> "
@@ -481,6 +600,11 @@ bool concurrent_posix_key_cleanups_admit(Phase& phase)
 
 int main(int argc, char* argv[])
 {
+#if defined(__MINGW32__)
+    if (argc == 17 && std::strcmp(argv[1], k_inspector_flag) == 0) {
+        return inspect_native_stack(argv);
+    }
+#endif
     // The Python test runner is the external process watchdog: it terminates
     // a hung case after --timeout 30 and reports the missing acknowledgement.
     sintra::init(argc, argv);
