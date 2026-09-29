@@ -11,7 +11,9 @@ These rules are the ones most often violated:
   adding executors, inbox queues or admission control, as fixes.
 - **Only what was lost may fail.** An eviction or death must never fail an RPC,
   fence or barrier that had no message in the lost range.
-- **Exactly one copy out of the ring.** A double copy is a defect.
+- **Exactly one copy out of the ring into stable dispatch storage.** Local
+  copies/deserialization into independently owned results are acceptable;
+  see the dispatch-buffer decision in the design principles.
 - **The coordinator is trusted infrastructure** (a kernel analogy only: Sintra
   is a user-space library and the coordinator has no privileges). Its stalls
   and bugs are not defended against; application code hosted in the

@@ -57,10 +57,20 @@ callback into application-owned values before the callback returns. The
 [receive reference](reference/receive.md) records this boundary.
 
 The deferred requirement is independent value lifetime across return,
-copy/move and later reads, while preserving exactly one copy out of the ring.
-A mandatory wrapper, changed return type, blanket second frame copy or new
-wire representation has not been adopted. This ownership work was explicitly
-separated from the eviction protocol.
+copy/move and later reads, while preserving exactly one copy out of the ring
+into dispatch storage. The owner subsequently confirmed that local copies or
+deserialization into independently owned results are acceptable. No particular
+ownership implementation, wrapper, changed return type or wire representation
+has been adopted. This ownership work remains separate from the eviction
+protocol and deferred.
+
+**Settled dispatch decision (2026-09-29):** retain the reusable dispatch
+buffer, which gives multiple matching handlers a stable frame after ring
+copy protection is released. Eliminating it for fixed-size `receive<T>()`
+is not pending work: it would introduce lifetime coordination for other
+handlers merely to avoid a local copy. See the self-contained
+[decision and rationale](design_principles.md#retaining-the-shared-dispatch-buffer).
+This conclusion does not resolve the variable-descriptor defect above.
 
 ## Identity and process-creation residuals
 

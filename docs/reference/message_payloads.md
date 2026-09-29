@@ -116,14 +116,15 @@ Contract:
   the message into a freshly constructed `T`. It requires that the
   element type `T::value_type` is trivially copyable.
 - The data referenced by a variable-buffer field is stored inline at the
-  end of the message, immediately after the body. Lifetime is bounded by
-  the surrounding message; once the handler returns or the
-  [`sintra::receive`](receive.md) scope ends, the reader may reuse its
-  dispatch frame storage.
-- Copy variable-buffer fields out before any subsequent message
-  processing if they must outlive the current handler or `receive`
-  scope. Conversion to `T` (for example `std::string s = msg.text;`) is
-  the standard way to do this.
+  end of the message, immediately after the body. Access it through a valid
+  const-reference callback; the reader may reuse its dispatch frame after
+  dispatch completes.
+- Convert variable-buffer fields into owning values before that callback
+  returns if they must outlive it. Conversion to `T` (for example
+  `std::string s = msg.text;`) is the standard way to do this. A generated
+  variable-field message returned by [`sintra::receive`](receive.md) does
+  not own its payload and its detached descriptors are unsafe even before
+  the next dispatch; copying fields after return is not a repair.
 - Element alignment is enforced by `typed_variable_buffer<T>` so that
   `data_address()` is suitable for direct access.
 - Maildrop overloads accept C strings, string literals, fixed arrays,

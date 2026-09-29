@@ -87,8 +87,11 @@ Threading and lifecycle:
   sending process. A Sintra reader thread copies each complete frame into
   reader-owned storage and passes it by reference to slot handlers.
 - Variable-buffer fields (`message_string`, `typed_variable_buffer<T>`)
-  reference that frame's trailing data. Copy them out before the handler returns or the
-  receive scope ends if they must outlive that point.
+  reference that frame's trailing data. Convert them into owning values within
+  a valid const-reference handler before it returns if they must outlive it.
+  Generated variable-field values returned by [`receive`](receive.md) have
+  detached, unsafe descriptors; their payload lifetime is not the receive
+  scope. See that reference for the deferred ownership limitation.
 
 Failures:
 

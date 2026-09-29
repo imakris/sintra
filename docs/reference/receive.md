@@ -74,6 +74,14 @@ transceiver instance.
 
 ## Notes
 
+- The reader copies the complete frame into reusable dispatch storage before
+  invoking matching handlers. A receive slot is one such handler; its result
+  must have an independent lifetime. Local copies/deserialization from that
+  storage are acceptable and do not extend ring copy protection. Retaining
+  this shared dispatch buffer is a [settled design decision](../design_principles.md#retaining-the-shared-dispatch-buffer),
+  including for fixed-size payloads. This is not a fix for the generated
+  variable-field limitation documented above.
+
 - Apply timeouts externally by signalling from another thread that
   emits the awaited message type. `receive` does not expose a deadline
   parameter.
