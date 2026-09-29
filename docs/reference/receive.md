@@ -10,6 +10,13 @@ MESSAGE_T sintra::receive();
 
 template <typename MESSAGE_T, typename SENDER_T>
 MESSAGE_T sintra::receive(sintra::Typed_instance_id<SENDER_T> sender_id);
+
+template <typename MESSAGE_T>
+sintra::Owned_message<MESSAGE_T> sintra::receive_owned();
+
+template <typename MESSAGE_T, typename SENDER_T>
+sintra::Owned_message<MESSAGE_T> sintra::receive_owned(
+    sintra::Typed_instance_id<SENDER_T> sender_id);
 ```
 
 Description: Block the calling control thread until a message with the
@@ -31,10 +38,18 @@ transceiver instance.
 
 - A value of type `MESSAGE_T`, holding the body of the first matching
   message.
+- `receive_owned` returns `Owned_message<MESSAGE_T>`, a `std::unique_ptr`
+  with a deleter for the complete aligned message allocation. It supports
+  generated `sintra::Message` types with
+  trivially copyable bodies and `void` return types, including messages with
+  `message_string` and `typed_variable_buffer` fields. Ordinary value types
+  such as `std::string` use `receive`, not `receive_owned`.
 
 ## Throws
 
 - Does not throw on a normal completion.
+- `receive_owned` propagates allocation or frame-copy errors to its calling
+  thread after removing the temporary slot.
 - Calling from a request-reader thread is a programmer error. In debug
   builds the function aborts with a diagnostic; in release builds the
   call deadlocks.
@@ -66,9 +81,16 @@ transceiver instance.
   variable-buffer fields do not acquire ownership of their trailing payload.
   Their self-relative descriptors are invalid when detached by the value
   copies inside `receive`; copying fields after return is not safe. Use
-  ordinary owning value types (such as `std::string`) where applicable, or
-  decode fields into owning values within a valid const-reference callback.
-  See [the deferred ownership repair](../deferred_work.md#owning-values-for-variable-field-receivet).
+  `receive_owned<T>()` for these generated messages, ordinary owning value
+  types (such as `std::string`) where applicable, or decode fields into owning
+  values within a valid const-reference callback.
+- `receive_owned` retains the fixed object and variable payload together in
+  an independent allocation. Move the smart pointer to transfer ownership;
+  the message stays at the same address. Its descriptor fields remain valid
+  until that owner is reset or destroyed, including across further receives
+  and runtime shutdown. Copying or moving `*message` by value does not transfer
+  the trailing payload. Convert a field to its ordinary owning container if
+  it must outlive the message owner.
 - The internal slot is removed automatically before the function
   returns. No deactivation by the caller is required.
 
@@ -79,8 +101,8 @@ transceiver instance.
   must have an independent lifetime. Local copies/deserialization from that
   storage are acceptable and do not extend ring copy protection. Retaining
   this shared dispatch buffer is a [settled design decision](../design_principles.md#retaining-the-shared-dispatch-buffer),
-  including for fixed-size payloads. This is not a fix for the generated
-  variable-field limitation documented above.
+  including for fixed-size payloads. `receive_owned` makes a local owning copy
+  from that dispatch frame; it does not change the reader or ring protocol.
 
 - Apply timeouts externally by signalling from another thread that
   emits the awaited message type. `receive` does not expose a deadline
@@ -98,6 +120,19 @@ int receiver_process(sintra::instance_id_type sender_a_id)
     // use msg.value, msg.score
     return 0;
 }
+```
+
+For a generated message with a variable field:
+
+```cpp
+struct Status_bus : sintra::Derived_transceiver<Status_bus>
+{
+    SINTRA_MESSAGE(Status, sintra::message_string text);
+};
+
+auto message = sintra::receive_owned<Status_bus::Status>();
+std::string text = message->text;
+auto retained = std::move(message); // frame address and field offsets stay valid
 ```
 
 ## Example source

@@ -2104,6 +2104,58 @@ MESSAGE_T receive()
     return receive<MESSAGE_T, void>(Typed_instance_id<void>(any_local_or_remote));
 }
 
+template <typename MESSAGE_T, typename SENDER_T>
+Owned_message<MESSAGE_T> receive_owned(Typed_instance_id<SENDER_T> sender_id)
+{
+    static_assert(detail::owned_message_supported<MESSAGE_T>::value,
+        "receive_owned<T>() requires a Sintra Message with a trivially copyable body and void return type.");
+#ifndef NDEBUG
+    if (tl_is_req_thread) {
+        Log_stream(log_level::error)
+            << "receive_owned<T>() called from a message handler thread. "
+            << "This will deadlock. Use a control thread or defer work.\n";
+        detail::debug_aware_abort();
+    }
+#endif
+
+    std::condition_variable cv;
+    std::mutex mtx;
+    Owned_message<MESSAGE_T> result;
+    std::exception_ptr error;
+    bool completed = false;
+    auto deactivator = activate_slot(
+        [&](const MESSAGE_T& message) {
+            std::lock_guard<std::mutex> lock(mtx);
+            if (completed) {
+                return;
+            }
+            try {
+                result = detail::copy_message_frame(message);
+            }
+            catch (...) {
+                error = std::current_exception();
+            }
+            completed = true;
+            cv.notify_one();
+        }, sender_id);
+
+    std::unique_lock<std::mutex> lock(mtx);
+    cv.wait(lock, [&] { return completed; });
+    lock.unlock();
+    // Drain callbacks before either returning the frame or rethrowing an error.
+    deactivator();
+    if (error) {
+        std::rethrow_exception(error);
+    }
+    return result;
+}
+
+template <typename MESSAGE_T>
+Owned_message<MESSAGE_T> receive_owned()
+{
+    return receive_owned<MESSAGE_T, void>(Typed_instance_id<void>(any_local_or_remote));
+}
+
 inline void enable_recovery()
 {
     if (!s_mproc) {

@@ -109,6 +109,8 @@ process_reader_service_dispatch_policy_test              1
 process_reader_stop_ownership_test                       1
 process_identity_test                                   1
 receive_test                                            20
+receive_owned_test                                       1
+receive_owned_header_only_test                           1
 reader_thread_fault_contract_test                        1
 recovery_policy_test                                     1
 recovery_runner_thread_test                              1

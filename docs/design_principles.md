@@ -34,8 +34,9 @@ application references into the ring.
 
 The [dispatch-buffer decision](#retaining-the-shared-dispatch-buffer) below
 records why a fixed-size receive fast path is not pending implementation.
-The [variable-field ownership defect](deferred_work.md#owning-values-for-variable-field-receivet)
-remains deferred; accepting a local copy does not fix it or select a new API.
+The [variable-field ownership contract](deferred_work.md#owning-values-for-variable-field-receivet)
+uses `receive_owned<T>()` for an independent complete frame. The existing
+by-value `receive<T>()` does not own generated variable-field payloads.
 
 **3. The coordinator is trusted infrastructure (the owner's kernel analogy).**
 Sintra is a user-space library and the coordinator has no special privileges.
@@ -267,8 +268,11 @@ An independent receive result can require a local copy/deserialization from
 that buffer. Its representation need not match the wire layout. Such work
 does not extend ring copy protection. For generated messages with
 self-relative variable descriptors, copying only the fixed object separates
-the descriptors from their payload; that existing defect still needs an
-ownership repair if the deferred work is reopened.
+the descriptors from their payload. The owner subsequently selected
+`receive_owned<T>()`, a smart pointer owning the complete frame copied from
+dispatch storage. Its lifetime is independent of other handlers and later
+reads; moving the pointer preserves the frame and offsets. The by-value
+`receive<T>()` remains unsuitable for generated variable-field messages.
 
 A proposed internal type trait would select a fixed-size reader path and
 copy directly from the ring into the waiting receive's result. Fixed size
@@ -276,9 +280,9 @@ alone does not resolve the other handlers' need for the same stable frame.
 Using result storage for dispatch would require coordinating its lifetime
 with all those handlers; selecting a different reading function does not
 remove that obligation. Eliminating this local copy does not justify that
-additional ownership machinery. Caller-supplied buffers, placement new,
-owning frame handles, and a circular dispatch buffer were discussion ideas,
-not adopted APIs or scheduled work.
+additional ownership machinery. Caller-supplied receive buffers and a circular
+dispatch buffer remain discussion ideas, not adopted APIs or scheduled work.
+The separately adopted owned-frame API retains the shared dispatch buffer.
 
 Do not reopen dispatch-buffer elimination solely because a payload is fixed
 size or a local owning copy exists. Reconsider only with a concrete measured

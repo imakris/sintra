@@ -125,6 +125,10 @@ Contract:
   variable-field message returned by [`sintra::receive`](receive.md) does
   not own its payload and its detached descriptors are unsafe even before
   the next dispatch; copying fields after return is not a repair.
+- Use `receive_owned<Message>()` to retain a generated message's complete
+  frame in a smart pointer. The fixed object and payload remain together;
+  move the pointer, not the message value. Its fields remain usable until
+  that owner is reset or destroyed.
 - Element alignment is enforced by `typed_variable_buffer<T>` so that
   `data_address()` is suitable for direct access.
 - Maildrop overloads accept C strings, string literals, fixed arrays,

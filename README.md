@@ -284,6 +284,11 @@ sintra::console() << "value=" << msg.value << '\n';
 ```
 
 Note: call `receive<T>()` from main/control threads only; do not call it from a message handler.
+
+For a generated message containing `message_string` or other variable-buffer
+fields, use `receive_owned<Message>()`. It returns a typed unique pointer that
+owns the complete frame; access fields with `message->field` and move the
+pointer to transfer ownership. See [receiving messages](docs/reference/receive.md).
 Debug builds abort if this is violated.
 
 ### Export a transceiver method for RPC

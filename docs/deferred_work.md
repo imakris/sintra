@@ -41,7 +41,15 @@ marker protocol or API shape is adopted here.
 
 ### Owning values for variable-field `receive<T>()`
 
-**State: current limitation; ownership repair deferred.** Ordinary decoded
+**State: owned-frame API delivered; by-value descriptor limitation remains.**
+The owner reopened this bounded work on 2026-09-29 and selected
+`receive_owned<T>()`: a typed unique pointer owning the complete frame,
+including the trailing payload. Moving the pointer preserves the frame's
+address; destruction frees the allocation. No ring or dispatch changes are
+needed. This is an owned serialized message, not an automatically decoded
+application object.
+
+Ordinary decoded
 values such as `receive<std::string>()` and complete fixed-size values are
 distinct from generated `SINTRA_MESSAGE` objects containing `message_string`
 or other `typed_variable_buffer` fields. Those fields are self-relative wire
@@ -51,18 +59,18 @@ it does not relocate or own the trailing payload. Accessing such a returned
 descriptor is unsafe even before the next message is processed. Copying its
 fields after return is not a repair.
 
-Current applications should receive ordinary owning value types where
-applicable, or decode variable fields from a valid const-reference message
-callback into application-owned values before the callback returns. The
+Applications should use `receive_owned<T>()` for generated messages with
+variable fields, receive ordinary owning value types where applicable, or
+decode variable fields from a valid const-reference message callback into
+application-owned values before the callback returns. The
 [receive reference](reference/receive.md) records this boundary.
 
-The deferred requirement is independent value lifetime across return,
-copy/move and later reads, while preserving exactly one copy out of the ring
-into dispatch storage. The owner subsequently confirmed that local copies or
-deserialization into independently owned results are acceptable. No particular
-ownership implementation, wrapper, changed return type or wire representation
-has been adopted. This ownership work remains separate from the eviction
-protocol and deferred.
+The owned API provides independent lifetime across return, pointer moves,
+and later reads, while preserving exactly one copy out of the ring into
+dispatch storage. Local copying/deserialization into owning results is
+acceptable. The existing by-value `receive<T>()` has not changed; automatically
+mapping a generated descriptor-bearing type to a decoded owning value is not
+part of the delivered API or scheduled work.
 
 **Settled dispatch decision (2026-09-29):** retain the reusable dispatch
 buffer, which gives multiple matching handlers a stable frame after ring
@@ -70,7 +78,7 @@ copy protection is released. Eliminating it for fixed-size `receive<T>()`
 is not pending work: it would introduce lifetime coordination for other
 handlers merely to avoid a local copy. See the self-contained
 [decision and rationale](design_principles.md#retaining-the-shared-dispatch-buffer).
-This conclusion does not resolve the variable-descriptor defect above.
+The owned-frame API addresses retention without reopening that architecture.
 
 ## Identity and process-creation residuals
 

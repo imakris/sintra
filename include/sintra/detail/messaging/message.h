@@ -18,6 +18,7 @@
 #include <format>
 #include <functional>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -571,6 +572,66 @@ struct ring_payload_traits<Message<T, RT, ID, EXPORTER>>
 {
     static constexpr bool allow_nontrivial = true;
 };
+
+namespace detail
+{
+
+template <typename T>
+struct owned_message_supported : std::false_type {};
+
+template <typename T, typename RT, type_id_type ID, typename EXPORTER>
+struct owned_message_supported<Message<T, RT, ID, EXPORTER>>
+    : std::bool_constant<std::is_trivially_copyable_v<T> && std::is_void_v<RT>>
+{};
+
+template <typename T>
+struct Message_frame_deleter
+{
+    void operator()(T* message) const noexcept
+    {
+        message->~T();
+        ::operator delete(message, std::align_val_t(message_frame_alignment));
+    }
+};
+
+} // namespace detail
+
+// Moving the owner does not relocate the frame or its self-relative fields.
+template <typename T>
+using Owned_message = std::unique_ptr<T, detail::Message_frame_deleter<T>>;
+
+namespace detail
+{
+
+template <typename T>
+Owned_message<T> copy_message_frame(const T& message)
+{
+    static_assert(owned_message_supported<T>::value,
+        "receive_owned<T>() requires a Sintra Message with a trivially copyable body and void return type.");
+    const size_t frame_size = message.bytes_to_next_message;
+    if (frame_size < sizeof(T) || frame_size >= message_frame_size_limit ||
+        frame_size % message_frame_alignment != 0)
+    {
+        throw corrupted_message_exception("Invalid owned message frame size.");
+    }
+
+    void* storage = ::operator new(frame_size, std::align_val_t(message_frame_alignment));
+    T* copy;
+    try {
+        // Message has a non-trivial destructor: begin its lifetime explicitly.
+        copy = new (storage) T(message);
+    }
+    catch (...) {
+        ::operator delete(storage, std::align_val_t(message_frame_alignment));
+        throw;
+    }
+    Owned_message<T> result(copy);
+    std::memcpy(reinterpret_cast<char*>(copy) + sizeof(T),
+        reinterpret_cast<const char*>(&message) + sizeof(T), frame_size - sizeof(T));
+    return result;
+}
+
+} // namespace detail
 
 
   //\       //\       //\       //\       //\       //\       //\       //

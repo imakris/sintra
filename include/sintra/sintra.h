@@ -291,10 +291,10 @@ void deactivate_all_slots();
 ///          responsible for dispatching, causing a deadlock.  Use this only
 ///          from main process threads (e.g., inside process entry functions).
 ///
-/// \note MESSAGE_T should be a trivial, standard-layout type (POD).  Messages
-///       containing variable-length fields (message_string, variable_buffer)
-///       are copied by value; ensure the returned data is used before any
-///       subsequent message processing that might invalidate ring memory.
+/// \note Generated messages containing variable-buffer descriptors must use
+///       receive_owned<MESSAGE_T>(); copying their fixed object by value does
+///       not retain their payload. Ordinary owning values such as std::string
+///       continue to use receive<MESSAGE_T>().
 ///
 /// \tparam MESSAGE_T The message type to wait for (must be copy-constructible).
 /// \return The received message payload.
@@ -309,6 +309,23 @@ MESSAGE_T receive();
 /// \return The received message payload.
 template <typename MESSAGE_T, typename SENDER_T>
 MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id);
+
+///\brief Receive an independently owned, complete generated message frame.
+///
+/// T must be a Sintra Message with a trivially copyable body and void return
+/// type. The result is a unique_ptr with a frame-aware deleter. Its variable
+/// fields remain valid until the owner is reset or destroyed; move the pointer,
+/// not the pointed-to message. To retain an individual field independently,
+/// convert it to its owning value (for example, std::string text = msg->text).
+///
+/// Like receive(), call only from a control thread. The temporary slot is
+/// deactivated before return. Allocation errors propagate to the caller.
+template <typename MESSAGE_T>
+Owned_message<MESSAGE_T> receive_owned();
+
+///\brief Receive an owned frame from the specified sender.
+template <typename MESSAGE_T, typename SENDER_T>
+Owned_message<MESSAGE_T> receive_owned(Typed_instance_id<SENDER_T> sender_id);
 
 
 ///\brief Enable automatic recovery for the current managed process.
