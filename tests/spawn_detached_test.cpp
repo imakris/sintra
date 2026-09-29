@@ -18,6 +18,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -402,13 +403,77 @@ bool spawn_detached_sets_env_overrides()
     return sintra::test::assert_true_errno(matched, k_failure_prefix, "env override value mismatch");
 }
 
+int inherited_fd_to_close = -1;
+bool failed_child_reaped = false;
+
+ssize_t close_inherited_fd_after_ready(int fd, const void* data, size_t size)
+{
+    // Inject a child-side setup failure after parent validation. The parent's
+    // borrowed descriptor remains valid because this hook runs after fork.
+    if (inherited_fd_to_close >= 0) {
+        ::close(inherited_fd_to_close);
+        inherited_fd_to_close = -1;
+    }
+    return ::write(fd, data, size);
+}
+
+pid_t observe_failed_child_reap(pid_t pid, int* status, int flags)
+{
+    const pid_t result = ::waitpid(pid, status, flags);
+    if (result == pid && WIFEXITED(*status)) {
+        failed_child_reaped = true;
+    }
+    return result;
+}
+
+bool inherited_fd_setup_failure_is_reported_and_reaped()
+{
+    int pipefd[2];
+    if (sintra::detail::call_pipe2(pipefd, O_CLOEXEC) != 0) {
+        return false;
+    }
+    const char* args[] = {"/bin/true", nullptr};
+    sintra::Spawn_detached_options options;
+    options.prog = args[0];
+    options.argv = args;
+    options.inherited_fds.push_back(pipefd[0]);
+    inherited_fd_to_close = pipefd[0];
+    failed_child_reaped = false;
+    Override_guard write_guard(Override_guard::Kind::Write,
+        reinterpret_cast<void*>(close_inherited_fd_after_ready));
+    Override_guard wait_guard(Override_guard::Kind::Waitpid,
+        reinterpret_cast<void*>(observe_failed_child_reap));
+    const auto result = sintra::detail::spawn_detached_with_result(options);
+    const bool parent_retained_reader = ::fcntl(pipefd[0], F_GETFD) == FD_CLOEXEC;
+    ::close(pipefd[0]);
+    ::close(pipefd[1]);
+    inherited_fd_to_close = -1;
+    return sintra::test::assert_true(!result.created() &&
+        result.error.value() == EBADF && failed_child_reaped && parent_retained_reader,
+        k_failure_prefix, "inherited-fd setup failure must report EBADF and reap its child");
+}
+
 std::atomic_bool pipe_created{false};
 std::atomic_bool finish_pipe_creation{false};
 std::atomic_uint pipe_calls{0};
+std::atomic_uint before_fork_calls{0};
+std::atomic_bool competitor_at_fork{false};
+std::atomic_bool release_competitor{false};
+
+void pause_competitor_before_fork()
+{
+    if (before_fork_calls.fetch_add(1) != 0) {
+        return;
+    }
+    competitor_at_fork.store(true, std::memory_order_release);
+    while (!release_competitor.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
 
 int paused_pipe_creation(int pipefd[2], int flags)
 {
-    if (pipe_calls.fetch_add(1) != 0) {
+    if (pipe_calls.fetch_add(1) != 1) {
         return sintra::detail::system_pipe2(pipefd, flags);
     }
     // Force the macOS pipe()+fcntl() window on every POSIX test host.
@@ -471,17 +536,28 @@ bool concurrent_spawn_does_not_inherit_status_pipe(const char* binary)
     pipe_calls.store(0);
     Override_guard override(Override_guard::Kind::Pipe2,
         reinterpret_cast<void*>(paused_pipe_creation));
+    before_fork_calls.store(0);
+    competitor_at_fork.store(false);
+    release_competitor.store(false);
+    const auto previous_hook =
+        sintra::detail::spawn_detached_before_fork_override().exchange(
+            pause_competitor_before_fork);
+    // B has already created its status pipe before A enters raw pipe creation.
+    // Its next operation is the fork gate, so pipe creation cannot mask a
+    // missing fork guard.
+    std::thread second_launcher([&] {
+        second_spawned = second.spawn(binary, second_args);
+        second_done.store(true, std::memory_order_release);
+    });
+    const bool positioned = wait_for_flag(competitor_at_fork, 2s);
     std::thread first_launcher([&] {
         first_spawned = first.spawn(binary, first_args);
         first_done.store(true, std::memory_order_release);
     });
     const bool entered = wait_for_flag(pipe_created, 2s);
-    std::thread second_launcher([&] {
-        second_spawned = second.spawn(binary, second_args);
-        second_done.store(true, std::memory_order_release);
-    });
-    // The competing spawn may serialize behind the unfinished pipe creation.
-    // Give an unguarded fork the opportunity to exec, then release either path.
+    release_competitor.store(true, std::memory_order_release);
+    // Without the fork guard B execs with A's unfinished status writer. A's
+    // handshake then stalls while B remains alive, failing the oracle below.
     const bool competitor_finished_during_pause = wait_for_flag(second_done, 250ms);
     finish_pipe_creation.store(true, std::memory_order_release);
     const bool handshakes_finished = wait_for_flag(first_done, 2s) &&
@@ -493,7 +569,7 @@ bool concurrent_spawn_does_not_inherit_status_pipe(const char* binary)
         second.poll() == test::Exact_child_state::running;
 
     // Record the oracle before allowing either child to close inherited FDs.
-    bool ok = test::assert_true(entered && children_alive, k_failure_prefix,
+    bool ok = test::assert_true(positioned && entered && children_alive, k_failure_prefix,
         "concurrent spawn handshakes must finish while both children remain alive");
     if (!ok) {
         std::cerr << k_failure_prefix << "competing exec handshake during pipe pause: "
@@ -502,6 +578,7 @@ bool concurrent_spawn_does_not_inherit_status_pipe(const char* binary)
     test::write_lines(release, {"release"});
     first_launcher.join();
     second_launcher.join();
+    sintra::detail::spawn_detached_before_fork_override().store(previous_hook);
     for (auto* child : {&first, &second}) {
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (child->poll() == test::Exact_child_state::running &&
@@ -535,6 +612,7 @@ int main(int argc, char* argv[])
     ok &= spawn_fails_when_grandchild_cannot_report_readiness();
     ok &= spawn_reports_exec_failure();
     ok &= spawn_detached_sets_env_overrides();
+    ok &= inherited_fd_setup_failure_is_reported_and_reaped();
     ok &= concurrent_spawn_does_not_inherit_status_pipe(argv[0]);
     return ok ? 0 : 1;
 }

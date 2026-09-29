@@ -191,6 +191,11 @@ struct Spawn_detached_options
     std::vector<HANDLE>        inherit_handles;
     HANDLE*                    child_process_handle_out = nullptr;
     HANDLE                     native_family_job = nullptr;
+#else
+    // Borrowed descriptors whose CLOEXEC flag is cleared only in the child.
+    // Keep them open and unchanged until spawn returns. Other descriptors retain
+    // their existing inheritance behavior; this is not a descriptor allowlist.
+    std::vector<int>            inherited_fds;
 #endif
 };
 
@@ -274,6 +279,12 @@ inline std::atomic<spawn_detached_exec_handshake_fn>&
 spawn_detached_exec_handshake_override()
 {
     static std::atomic<spawn_detached_exec_handshake_fn> fn{nullptr};
+    return fn;
+}
+
+inline std::atomic<void(*)()>& spawn_detached_before_fork_override()
+{
+    static std::atomic<void(*)()> fn{nullptr};
     return fn;
 }
 
@@ -1095,6 +1106,14 @@ Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options
         emit_spawn_detached_debug(info);
     };
 
+    // Validate before allocating internal descriptors: a closed caller fd must
+    // never accidentally name the newly allocated status pipe.
+    for (int fd : options.inherited_fds) {
+        if (fcntl_retry(fd, F_GETFD) == -1) {
+            return {};
+        }
+    }
+
     int ready_pipe[2] = {-1, -1};
     while (true) {
         if (call_pipe2(ready_pipe, O_CLOEXEC) == 0) {
@@ -1116,6 +1135,11 @@ Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options
         }
     }
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto fn = spawn_detached_before_fork_override().load()) {
+        fn();
+    }
+#endif
     std::unique_lock<std::mutex> fork_lock(posix_pipe_fork_mutex());
     pid_t child_pid = -1;
     do {
@@ -1159,6 +1183,20 @@ Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options
                 close(ready_pipe[1]);
             }
             ::_exit(EXIT_FAILURE);
+        }
+
+        // The ready marker has been sent, so setup failures use the same
+        // second integer as exec failure. Parent descriptors stay unchanged.
+        for (int fd : options.inherited_fds) {
+            const int fd_flags = fcntl_retry(fd, F_GETFD);
+            if (fd_flags == -1 ||
+                fcntl_retry(fd, F_SETFD, fd_flags & ~FD_CLOEXEC) == -1)
+            {
+                const int setup_errno = errno;
+                write_fully(ready_pipe[1], &setup_errno, sizeof(setup_errno));
+                ::close(ready_pipe[1]);
+                ::_exit(EXIT_FAILURE);
+            }
         }
 
         if (exec_envp) {

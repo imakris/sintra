@@ -32,8 +32,17 @@ BOOL WINAPI observed_create_pipe(
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <string_view>
 #include <thread>
+#ifndef _WIN32
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#endif
 
 namespace {
 
@@ -72,13 +81,129 @@ bool check_pipe_inheritance()
     close(read_fd);
     close(write_fd);
     const bool valid = read_flags >= 0 && write_flags >= 0 &&
-        !(read_flags & FD_CLOEXEC) && (write_flags & FD_CLOEXEC);
+        (read_flags & FD_CLOEXEC) && (write_flags & FD_CLOEXEC);
 #endif
     if (!valid) {
         std::fprintf(stderr, "Lifeline writer must remain noninheritable from creation\n");
     }
     return valid;
 }
+
+#ifndef _WIN32
+bool wait_for_spawned_helper(const sintra::detail::Spawn_detached_result& result);
+
+int inspect_inherited_reader(int argc, char* argv[])
+{
+    if (argc != 6) {
+        return 2;
+    }
+    const int fd = std::stoi(argv[2]);
+    struct stat info{};
+    const bool same_pipe = ::fstat(fd, &info) == 0 &&
+        static_cast<unsigned long long>(info.st_dev) == std::stoull(argv[3]) &&
+        static_cast<unsigned long long>(info.st_ino) == std::stoull(argv[4]);
+    if (std::string_view(argv[5]) == "absent") {
+        return same_pipe ? 3 : 0;
+    }
+    if (std::string_view(argv[5]) == "adopt") {
+        sintra::s_lifeline_handle_value = argv[2];
+        sintra::start_lifeline_watcher(sintra::Lifetime_policy{}, true);
+        const char* child_args[] = {argv[0], "--inspect-reader", argv[2],
+            argv[3], argv[4], "absent", nullptr};
+        sintra::Spawn_detached_options options;
+        options.prog = argv[0];
+        options.argv = child_args;
+        const int flags = ::fcntl(fd, F_GETFD);
+        const bool descendant_clean = wait_for_spawned_helper(
+            sintra::detail::spawn_detached_with_result(options));
+        return same_pipe && flags >= 0 && (flags & FD_CLOEXEC) && descendant_clean ? 0 : 5;
+    }
+    char marker = 0;
+    return same_pipe && ::read(fd, &marker, 1) == 1 && marker == 'L' ? 0 : 4;
+}
+
+bool wait_for_spawned_helper(const sintra::detail::Spawn_detached_result& result)
+{
+    if (!result.created()) {
+        return false;
+    }
+    int status = result.wait_status;
+    if (result.state == sintra::detail::Spawn_detached_result::State::created_reaped) {
+        return result.wait_status_available && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const pid_t waited = ::waitpid(result.pid, &status, WNOHANG);
+        if (waited == result.pid) {
+            return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        }
+        if (waited == -1 && errno != EINTR) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ::kill(result.pid, SIGKILL);
+    while (::waitpid(result.pid, &status, 0) == -1 && errno == EINTR) {}
+    return false;
+}
+
+unsigned invalid_fd_pipe_allocations = 0;
+
+int count_invalid_fd_pipe_allocations(int pipefd[2], int flags)
+{
+    ++invalid_fd_pipe_allocations;
+    return sintra::detail::system_pipe2(pipefd, flags);
+}
+
+bool check_exec_inheritance(const char* binary)
+{
+    int reader = -1;
+    int writer = -1;
+    int error = 0;
+    if (!sintra::create_lifeline_pipe(reader, writer, &error)) {
+        return false;
+    }
+    struct stat info{};
+    bool ok = ::fstat(reader, &info) == 0;
+    const std::string fd_text = std::to_string(reader);
+    const std::string device = std::to_string(static_cast<unsigned long long>(info.st_dev));
+    const std::string inode = std::to_string(static_cast<unsigned long long>(info.st_ino));
+    const char* args[] = {binary, "--inspect-reader", fd_text.c_str(),
+        device.c_str(), inode.c_str(), "absent", nullptr};
+    sintra::Spawn_detached_options options;
+    options.prog = binary;
+    options.argv = args;
+    // Keep the lifeline open while an unrelated child execs. Descriptor numbers
+    // can be reused by the loader; device/inode identifies the actual pipe.
+    ok &= wait_for_spawned_helper(sintra::detail::spawn_detached_with_result(options));
+    args[5] = "present";
+    options.inherited_fds.push_back(reader);
+    ok &= ::write(writer, "L", 1) == 1;
+    ok &= wait_for_spawned_helper(sintra::detail::spawn_detached_with_result(options));
+    args[5] = "adopt";
+    ok &= wait_for_spawned_helper(sintra::detail::spawn_detached_with_result(options));
+    const int parent_flags = ::fcntl(reader, F_GETFD);
+    ok &= parent_flags >= 0 && (parent_flags & FD_CLOEXEC) != 0;
+    ::close(reader);
+    ::close(writer);
+    // These closed slots are precisely where an internal status pipe would be
+    // allocated if validation happened too late.
+    invalid_fd_pipe_allocations = 0;
+    const auto previous_pipe_hook = sintra::testing::set_pipe2_override(
+        count_invalid_fd_pipe_allocations);
+    const auto invalid = sintra::detail::spawn_detached_with_result(options);
+    sintra::testing::set_pipe2_override(previous_pipe_hook);
+    if (invalid.created()) {
+        (void)wait_for_spawned_helper(invalid);
+    }
+    ok &= !invalid.created() && invalid.pid <= 0 && invalid.error.value() == EBADF &&
+        invalid_fd_pipe_allocations == 0;
+    if (!ok) {
+        std::fprintf(stderr, "Lifeline exec inheritance or invalid-fd rejection failed\n");
+    }
+    return ok;
+}
+#endif
 
 bool check_shutdown_lifetime(int argc, char* argv[])
 {
@@ -123,6 +248,14 @@ bool check_shutdown_lifetime(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
+#ifndef _WIN32
+    if (argc > 1 && std::string_view(argv[1]) == "--inspect-reader") {
+        return inspect_inherited_reader(argc, argv);
+    }
+    if (!check_exec_inheritance(argv[0])) {
+        return 1;
+    }
+#endif
     const bool shutdown_only = argc > 1 && std::string_view(argv[1]) == "--shutdown-only";
     if (!shutdown_only && !check_pipe_inheritance()) {
         return 1;

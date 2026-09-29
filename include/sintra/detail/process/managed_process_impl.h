@@ -1378,6 +1378,12 @@ inline namespace process_lifetime_detail {
             [=]{ lifeline_watch_loop(handle, timeout_ms, exit_code); })).detach();
 #else
         const int fd = static_cast<int>(parsed);
+        const int flags = detail::fcntl_retry(fd, F_GETFD);
+        if (flags == -1 || detail::fcntl_retry(fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
+            log_lifeline_message(detail::log_level::error,
+                "[sintra] Failed to make adopted lifeline noninheritable\n");
+            lifeline_hard_exit(policy.hard_exit_code);
+        }
         std::thread(detail::Exception_boundary{"lifeline_watch"}.wrap(
             [=]{ lifeline_watch_loop(fd, timeout_ms, exit_code); })).detach();
 #endif
@@ -1444,16 +1450,6 @@ inline namespace process_lifetime_detail {
             if (error_out) {
                 *error_out = errno;
             }
-            return false;
-        }
-
-        int flags = detail::fcntl_retry(pipefd[0], F_GETFD);
-        if (flags == -1 || detail::fcntl_retry(pipefd[0], F_SETFD, flags & ~FD_CLOEXEC) == -1) {
-            if (error_out) {
-                *error_out = errno;
-            }
-            ::close(pipefd[0]);
-            ::close(pipefd[1]);
             return false;
         }
 
@@ -6200,6 +6196,7 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         else {
             const int lifeline_read_fd = static_cast<int>(
                 launch_attempt.lifeline_read_endpoint());
+            spawn_options.inherited_fds.push_back(lifeline_read_fd);
             const std::string handle_value = std::to_string(lifeline_read_fd);
 
             // Add lifeline arguments (inserted into args, not env)
