@@ -38,31 +38,6 @@ void configure_temp_directory(const std::filesystem::path& path)
 #endif
 }
 
-void emit_stale_run_directory(
-    const std::filesystem::path&   base,
-    std::uint32_t                  index)
-{
-    auto dir = base / ("stale_run_" + std::to_string(index));
-    sintra::test::require_true(sintra::detail::create_private_directory(dir),
-        "ring_cleanup_stress: ", "create private stale run directory");
-
-    sintra::run_marker_record_t record{};
-    record.pid                  = 100000u + index; // Very unlikely to collide with a real PID
-    record.start_stamp          = static_cast<std::uint64_t>(index + 1);
-    record.created_monotonic_ns = sintra::monotonic_now_ns();
-    record.recovery_occurrence  = index;
-
-    if (!sintra::write_run_marker(dir, record)) {
-        std::fprintf(stderr,
-            "ring_cleanup_stress: failed to create run marker %u\n",
-            index);
-    }
-
-    if ((index & 1u) != 0u) {
-        sintra::mark_run_directory_for_cleanup(dir);
-    }
-}
-
 std::uint32_t count_subdirectories(const std::filesystem::path& base)
 {
     std::uint32_t count = 0;
@@ -88,97 +63,30 @@ int main(int argc, char* argv[])
 
     configure_temp_directory(temp_root);
 
+    constexpr std::uint32_t stale_runs = 80;
+    for (std::uint32_t i = 0; i < stale_runs; ++i) {
+        const auto directory = sintra::detail::private_swarm_root(i + 1,
 #ifndef _WIN32
-#if defined(__linux__)
-    const auto domain = sintra::detail::current_private_cleanup_domain();
-    if (!domain) {
-        sintra::init(argc, argv);
-        sintra::detail::finalize();
-        return 0;
-    }
-    const auto child = ::fork();
-    sintra::test::require_true(child >= 0, "ring_cleanup_stress: ",
-        "fork stale marker owner");
-    if (child == 0) { ::_exit(0); }
-    int status = 0;
-    sintra::test::require_true(::waitpid(child, &status, 0) == child && WIFEXITED(status),
-        "ring_cleanup_stress: ", "reap stale marker owner");
-    constexpr std::uint32_t k_stale_runs = 48;
-    for (std::uint32_t i = 0; i < k_stale_runs; ++i) {
-        const auto directory = sintra::detail::private_swarm_root(i + 1);
+            true
+#else
+            false
+#endif
+        );
         sintra::test::require_true(
             sintra::detail::create_private_swarm_directory_exclusive(directory) ==
                 sintra::detail::private_swarm_create_result::created,
             "ring_cleanup_stress: ", "create direct private swarm directory");
-        sintra::detail::publish_private_cleanup_domain(directory);
+#ifdef _WIN32
         sintra::run_marker_record_t record{};
-        record.pid = static_cast<std::uint32_t>(child);
+        record.pid = 0; // Explicit cleanup marker; no coordinator identity remains.
         sintra::test::require_true(sintra::write_run_marker(directory, record),
-            "ring_cleanup_stress: ", "publish stale marker");
+            "ring_cleanup_stress: ", "publish cleanup marker");
+        sintra::mark_run_directory_for_cleanup(directory);
+#endif
     }
     sintra::init(argc, argv);
     sintra::detail::finalize();
     sintra::test::require_true(count_subdirectories(temp_root) == 0,
-        "ring_cleanup_stress: ", "stale direct swarm directories removed");
-#else
-    sintra::init(argc, argv);
-    sintra::detail::finalize();
-#endif
+        "ring_cleanup_stress: ", "all stale direct swarm directories removed");
     return 0;
-#else
-    const auto sintra_base = sintra::detail::private_swarm_root();
-    sintra::test::require_true(sintra::detail::create_private_directory(sintra_base),
-        "ring_cleanup_stress: ", "create private swarm root");
-
-    constexpr std::uint32_t k_initial_stale_runs = 48;
-    for (std::uint32_t i = 0; i < k_initial_stale_runs; ++i) {
-        emit_stale_run_directory(sintra_base, i);
-    }
-
-    std::uint32_t initial = count_subdirectories(sintra_base);
-    if (initial < k_initial_stale_runs) {
-        std::fprintf(stderr,
-            "ring_cleanup_stress: expected %u initial directories, saw %u\n",
-            k_initial_stale_runs,
-            initial);
-        return 1;
-    }
-
-    constexpr std::uint32_t k_iterations = 24;
-    std::uint32_t           leftover     = initial;
-
-    for (std::uint32_t iter = 0; iter < k_iterations; ++iter) {
-        sintra::init(argc, argv);
-        sintra::detail::finalize();
-
-        leftover = count_subdirectories(sintra_base);
-        if (leftover == 0) {
-            break;
-        }
-
-        // Give the filesystem a moment on slower hosts.
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-
-    if (leftover != 0) {
-        std::fprintf(stderr,
-            "ring_cleanup_stress: leftover directories after cleanup: %u\n",
-            leftover);
-        return 1;
-    }
-
-    // Run a few extra init/finalize cycles to ensure directories stay clean.
-    for (std::uint32_t iter = 0; iter < 8; ++iter) {
-        sintra::init(argc, argv);
-        sintra::detail::finalize();
-        if (count_subdirectories(sintra_base) != 0) {
-            std::fprintf(stderr,
-                "ring_cleanup_stress: directories reappeared on cycle %u\n",
-                iter);
-            return 1;
-        }
-    }
-
-    return 0;
-#endif
 }

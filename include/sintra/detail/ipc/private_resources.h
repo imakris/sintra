@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <stdexcept>
 #include <system_error>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -193,28 +195,107 @@ inline bool private_directory_owned(const std::filesystem::path& directory) noex
 #endif
 }
 
+struct Private_directory_identity
+{
+    bool valid = false;
+    std::uint64_t device = 0;
+    std::uint64_t inode = 0;
+
+    Private_directory_identity() = default;
+    explicit Private_directory_identity(const std::filesystem::path& path) noexcept
+    {
+#ifdef _WIN32
+        const auto handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) { return; }
+        BY_HANDLE_FILE_INFORMATION info{};
+        valid = GetFileInformationByHandle(handle, &info) &&
+            (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
+        device = info.dwVolumeSerialNumber;
+        inode = (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+        CloseHandle(handle);
+#else
+        struct stat info{};
+        valid = ::lstat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+        device = info.st_dev;
+        inode = info.st_ino;
+#endif
+    }
+
+    bool matches(const Private_directory_identity& now) const noexcept
+    {
+        return valid && now.valid && device == now.device && inode == now.inode;
+    }
+
+    void remove_empty(const std::filesystem::path& path, bool lease_protocol = false) const noexcept
+    {
+        if (!matches(Private_directory_identity(path))) { return; }
+#ifdef _WIN32
+        (void)lease_protocol;
+        (void)RemoveDirectoryW(path.c_str());
+#else
+        if (!lease_protocol) { (void)::rmdir(path.c_str()); return; }
+        int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0 && errno == EACCES) {
+            struct stat status{};
+            if (::lstat(path.c_str(), &status) == 0 && status.st_uid == ::geteuid() &&
+                matches(Private_directory_identity(path)))
+            {
+                // A restrictive umask can remove owner access. Restore only
+                // owner permissions so rollback can acquire the inode lock.
+                if (::chmod(path.c_str(), 0700) == 0) {
+                    fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                }
+            }
+        }
+        if (fd < 0) { return; }
+        struct stat opened{};
+        if (::flock(fd, LOCK_EX | LOCK_NB) == 0 && ::fstat(fd, &opened) == 0 &&
+            device == static_cast<std::uint64_t>(opened.st_dev) &&
+            inode == static_cast<std::uint64_t>(opened.st_ino) &&
+            matches(Private_directory_identity(path)))
+        {
+            (void)::rmdir(path.c_str());
+        }
+        ::close(fd);
+#endif
+    }
+};
+
 inline bool create_private_directory(const std::filesystem::path& directory)
 {
+    bool created = false;
 #ifdef _WIN32
     Private_security security(true);
-    if (!CreateDirectoryW(directory.c_str(), security.attributes()) &&
+    created = CreateDirectoryW(directory.c_str(), security.attributes()) != 0;
+    if (!created &&
         GetLastError() != ERROR_ALREADY_EXISTS)
     {
         return false;
     }
 #else
-    if (mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
+    created = mkdir(directory.c_str(), 0700) == 0;
+    if (!created && errno != EEXIST) {
         return false;
     }
 #endif
+    const Private_directory_identity created_identity(directory);
     // Never adopt another account's directory, a link, or a permissive leftover.
-    return private_directory_owned(directory);
+    if (private_directory_owned(directory)) {
+        return true;
+    }
+    // Only an empty entry created by this attempt may be rolled back. Existing
+    // entries, including collisions owned by another account, stay untouched.
+    if (created) { created_identity.remove_empty(directory); }
+    return false;
 }
 
 #ifdef _WIN32
-inline std::filesystem::path private_swarm_root()
+inline std::filesystem::path private_swarm_root(std::uint64_t swarm_id = 0, bool lease = false)
 #else
-inline std::filesystem::path private_swarm_root(std::uint64_t swarm_id)
+inline std::filesystem::path private_swarm_root(std::uint64_t swarm_id, bool lease = false)
 #endif
 {
 #ifdef _WIN32
@@ -228,19 +309,25 @@ inline std::filesystem::path private_swarm_root(std::uint64_t swarm_id)
     for (DWORD i = 0, length = GetLengthSid(user.sid()); i < length; ++i) {
         digest = (digest ^ sid[i]) * 0x100000001b3ull;
     }
-    char component[24];
-    std::snprintf(component, sizeof(component), "sintra-%016llx",
-        static_cast<unsigned long long>(digest));
+    (void)lease;
+    char component[48];
+    if (swarm_id == 0) {
+        std::snprintf(component, sizeof(component), "sintra-%016llx",
+            static_cast<unsigned long long>(digest));
+    }
+    else {
+        std::snprintf(component, sizeof(component), "sintra-%016llx-%016llx",
+            static_cast<unsigned long long>(digest), static_cast<unsigned long long>(swarm_id));
+    }
 #else
     char component[48];
-    std::snprintf(component, sizeof(component), "sintra-%llu-%016llx",
+    std::snprintf(component, sizeof(component), lease ? "sintra-l1-%llu-%016llx" : "sintra-%llu-%016llx",
         static_cast<unsigned long long>(geteuid()),
         static_cast<unsigned long long>(swarm_id));
 #endif
     return std::filesystem::temp_directory_path() / component;
 }
 
-#ifndef _WIN32
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 inline std::uint64_t (*draw_private_swarm_id_for_test)() = nullptr;
 #endif
@@ -253,6 +340,17 @@ inline std::uint64_t draw_private_swarm_id()
     }
 #endif
     std::uint64_t id = 0;
+#ifdef _WIN32
+    using Random_fn = BOOLEAN (APIENTRY*)(PVOID, ULONG);
+    const auto module = LoadLibraryW(L"advapi32.dll");
+    const auto random = module ? reinterpret_cast<Random_fn>(
+        GetProcAddress(module, "SystemFunction036")) : nullptr;
+    const bool ok = random && random(&id, sizeof(id));
+    if (module) { FreeLibrary(module); }
+    if (!ok) {
+        throw std::runtime_error("Sintra could not draw a random swarm identifier.");
+    }
+#else
     const int random = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (random < 0) {
         throw std::system_error(errno, std::system_category(), "open /dev/urandom");
@@ -273,27 +371,47 @@ inline std::uint64_t draw_private_swarm_id()
         remaining -= static_cast<std::size_t>(count);
     }
     ::close(random);
+#endif
     return id;
 }
 
 enum class private_swarm_create_result { created, collision, failed };
 
 inline private_swarm_create_result create_private_swarm_directory_exclusive(
-    const std::filesystem::path& directory)
+    const std::filesystem::path& directory, Private_directory_identity* identity = nullptr,
+    bool lease_protocol = false)
 {
+#ifdef _WIN32
+    Private_security security(true);
+    if (!CreateDirectoryW(directory.c_str(), security.attributes())) {
+        return GetLastError() == ERROR_ALREADY_EXISTS ? private_swarm_create_result::collision :
+            private_swarm_create_result::failed;
+    }
+#else
     if (::mkdir(directory.c_str(), 0700) != 0) {
         return errno == EEXIST ? private_swarm_create_result::collision :
             private_swarm_create_result::failed;
     }
-    return private_directory_owned(directory) ? private_swarm_create_result::created :
-        private_swarm_create_result::failed;
-}
 #endif
+    const Private_directory_identity created_identity(directory);
+    if (private_directory_owned(directory) &&
+        created_identity.matches(Private_directory_identity(directory)))
+    {
+        if (identity) { *identity = created_identity; }
+        return private_swarm_create_result::created;
+    }
+    if (!created_identity.matches(Private_directory_identity(directory))) {
+        return private_swarm_create_result::collision;
+    }
+    created_identity.remove_empty(directory, lease_protocol);
+    return private_swarm_create_result::failed;
+}
 
 // The directory is owner-only. A direct POSIX swarm root also needs a trusted
 // temporary parent, with sticky protection when other accounts can write it.
 // Never recurse through links or remove files whose ownership is unverified.
-inline bool remove_private_directory_tree(const std::filesystem::path& directory) noexcept
+inline bool remove_private_directory_tree(const std::filesystem::path& directory,
+    bool remove_root = true) noexcept
 try
 {
     if (!private_directory_owned(directory)) {
@@ -312,10 +430,57 @@ try
             return false;
         }
     }
-    return !ec && std::filesystem::remove(directory, ec);
+    return !ec && (!remove_root || std::filesystem::remove(directory, ec));
 }
 catch (...) {
     return false;
 }
+
+#ifdef _WIN32
+// Pin the exact root name during classification and removal. Other opens must
+// share delete access; another deleting/renaming handle cannot coexist.
+class Private_directory_removal
+{
+public:
+    explicit Private_directory_removal(const std::filesystem::path& directory,
+        const Private_directory_identity* expected = nullptr) : m_directory(directory)
+    {
+        m_handle = CreateFileW(directory.c_str(), DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (m_handle == INVALID_HANDLE_VALUE) { return; }
+        bool owned = false;
+        try { owned = private_object_owned(m_handle); }
+        catch (...) { CloseHandle(m_handle); m_handle = INVALID_HANDLE_VALUE; throw; }
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(m_handle, &info) ||
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !owned ||
+            (expected && (!expected->valid || expected->device != info.dwVolumeSerialNumber ||
+                expected->inode != ((static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow))))
+        {
+            CloseHandle(m_handle);
+            m_handle = INVALID_HANDLE_VALUE;
+        }
+    }
+    Private_directory_removal(const Private_directory_removal&) = delete;
+    Private_directory_removal& operator=(const Private_directory_removal&) = delete;
+    ~Private_directory_removal()
+    {
+        if (valid()) { CloseHandle(m_handle); }
+    }
+    bool valid() const noexcept { return m_handle != INVALID_HANDLE_VALUE; }
+    bool remove()
+    {
+        if (!valid() || !remove_private_directory_tree(m_directory, false)) { return false; }
+        FILE_DISPOSITION_INFO disposition{TRUE};
+        return SetFileInformationByHandle(m_handle, FileDispositionInfo,
+            &disposition, sizeof(disposition)) != 0;
+    }
+private:
+    std::filesystem::path m_directory;
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+};
+#endif
 
 } // namespace sintra::detail

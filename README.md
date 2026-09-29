@@ -487,33 +487,46 @@ Low-level lifecycle escape hatches and shutdown internals are documented in
 
 ### Local account and IPC resources
 
-Managed swarm participants run under the same operating-system account. Sintra
-uses a private per-account directory under the operating system's temporary
-directory on Windows (`sintra-<16-digit hash of the user SID>`, which keeps ring
-paths short). On POSIX, each coordinator creates a direct owner-only directory
-named `sintra-<effective uid>-<16-digit random swarm id>` in the temporary
-directory. Its swarm id comes from operating-system random bytes; a name
-collision causes a new id to be drawn. Joining processes use that exact id and
-require the directory to exist already.
+Managed swarm participants run under the same operating-system account. Each
+coordinator creates a direct owner-only directory in the operating system's
+temporary directory, using an operating-system random swarm identifier. Name
+collisions cause another identifier to be drawn. Windows names include a short
+hash of the account SID; POSIX names include the effective uid. Joining
+processes use the exact swarm identifier and require its directory to exist.
 Use a trusted temporary-directory location: the system default or a parent
-directory that other accounts cannot replace or alter.
+that other accounts cannot replace or alter. A shared writable POSIX temporary
+parent must have the sticky bit set.
 
-Session directories are owner-only. Backing files and lifecycle markers use
-current-user Windows ACLs or POSIX mode `0600`; named Windows semaphores also
-use current-user ACLs. Creation and attachment reject permissive resources and
-links, and cleanup skips entries whose private ownership cannot be verified.
-This does not isolate mutually untrusted processes within the same account.
+The filesystem must preserve and report account ownership and private
+permissions: POSIX directories have mode `0700`, files have no group/other
+permissions, and Windows objects use current-user ACLs. Storage that cannot
+provide these properties is rejected; select a suitable temporary location
+with the operating system's temporary-directory configuration. Creation rolls
+back a newly created empty directory if privacy validation fails. Existing
+entries are never adopted unless they meet the policy. Links and entries whose
+ownership cannot be verified are excluded from cleanup. This does not isolate
+mutually untrusted processes within the same account.
 
-On Linux, stale POSIX directories are scavenged only when an optional private
-cleanup-domain record proves that the candidate and cleaner share the same boot,
-PID namespace, and time namespace. Missing, unreadable, or malformed records,
-and unavailable namespace metadata, leave the directory in place. On other
-POSIX systems, Sintra leaves crash residue for explicit operator cleanup.
-Normal shutdown removes
-its own directory. The former `sintra-<effective uid>` directories are not
-scanned or migrated; an older Sintra build also does not scan the new direct
-directories. A crash during an uncertain cleanup domain can therefore leave a
-private directory behind.
+On POSIX filesystems supporting directory `flock`, the coordinator holds a
+kernel lifetime lock on its `sintra-l1-<uid>-<random id>` directory. Stale cleanup
+acquires that same lock and verifies the directory inode before deletion. It
+works independently of process and time namespaces and requires no procfs
+metadata. Ordinary fork children close inherited lease descriptors; a raw fork
+that bypasses atfork callbacks can conservatively delay cleanup until the
+inherited descriptor closes, the child execs, or the child exits. It cannot
+cause premature deletion. Normal shutdown removes its own directory while
+holding the lease.
+
+When directory locking is unsupported or unavailable, POSIX startup uses
+the distinct `sintra-<uid>-<random id>` policy. Normal shutdown still removes its own directory.
+Crash residue requires explicit operator cleanup while directory locks remain
+unavailable. Existing no-lease directories on a filesystem with working locks
+can be scavenged with matching Linux boot, PID-namespace and time-namespace
+records and native process absence evidence; unavailable evidence preserves
+them. Failure to establish the optional locking capability selects that fallback;
+ownership or privacy validation failures still reject startup. Older no-lease directories are never interpreted as
+lifetime-locked directories. The former fixed per-account roots are not
+migrated or scavenged by the direct-root cleanup path.
 
 All participants must use the same directory policy together. Existing sessions
 under the former shared `sintra` directory are not migrated or scavenged, and

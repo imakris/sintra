@@ -1641,6 +1641,11 @@ public:
 
     uint64_t                            m_swarm_id;
     string                              m_directory;
+    detail::Private_directory_identity  m_directory_identity;
+#ifndef _WIN32
+    detail::Private_directory_lease      m_directory_lease;
+    bool                                m_uses_directory_lease = false;
+#endif
 
     inline
     string obtain_swarm_directory(bool coordinator_is_local);

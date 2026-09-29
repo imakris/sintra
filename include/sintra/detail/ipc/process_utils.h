@@ -23,6 +23,7 @@
 #include "../time_utils.h"
 #include "platform_defs.h"
 #include "file_utils.h"
+#include "private_directory_lease.h"
 
 #ifdef _WIN32
   #include "../sintra_windows.h"
@@ -33,6 +34,7 @@
   #include <pthread.h>
   #include <signal.h>
   #include <sys/stat.h>
+  #include <sys/file.h>
   #include <sys/types.h>
   #include <unistd.h>
 
@@ -1246,7 +1248,8 @@ inline void (*s_swarm_directory_scan_started)(const std::filesystem::path& base_
 inline void cleanup_stale_swarm_directories(
     const std::filesystem::path&   base_dir,
     uint32_t                       current_pid,
-    uint64_t                       current_start_stamp)
+    uint64_t                       current_start_stamp,
+    bool                           direct = false)
 {
 #ifndef _WIN32
     // Per-account roots are no longer used on POSIX. Their markers have no
@@ -1254,10 +1257,11 @@ inline void cleanup_stale_swarm_directories(
     (void)base_dir;
     (void)current_pid;
     (void)current_start_stamp;
+    (void)direct;
     return;
 #else
     std::error_code ec;
-    if (!detail::private_directory_owned(base_dir)) {
+    if (!direct && !detail::private_directory_owned(base_dir)) {
         return;
     }
 
@@ -1293,12 +1297,27 @@ inline void cleanup_stale_swarm_directories(
     }
 #endif
 
-    for (std::filesystem::directory_iterator it(base_dir, ec); !ec && it != std::filesystem::directory_iterator(); ++it) {
-        if (!detail::private_directory_owned(it->path())) {
+    std::vector<std::filesystem::path> directories;
+    const auto prefix = detail::private_swarm_root().filename().string() + '-';
+    for (std::filesystem::directory_iterator it(base_dir, ec);
+         !ec && it != std::filesystem::directory_iterator(); it.increment(ec))
+    {
+        const auto name = it->path().filename().string();
+        if (direct && (name.size() != prefix.size() + 16 ||
+            name.compare(0, prefix.size(), prefix) != 0 ||
+            name.find_first_not_of("0123456789abcdef", prefix.size()) != std::string::npos))
+        {
+            continue;
+        }
+        directories.push_back(it->path());
+    }
+    if (ec) { return; }
+    for (const auto& dir_path : directories) {
+        detail::Private_directory_removal removal(dir_path);
+        if (!removal.valid()) {
             continue;
         }
 
-        const auto& dir_path     = it->path();
         const auto  marker_path  = run_marker_path(dir_path);
         const auto  cleanup_path = run_marker_cleanup_path(dir_path);
 
@@ -1371,7 +1390,7 @@ inline void cleanup_stale_swarm_directories(
             mark_run_directory_for_cleanup(dir_path);
         }
 
-        (void)detail::remove_private_directory_tree(dir_path);
+        (void)removal.remove();
     }
 #endif
 }
@@ -1566,9 +1585,9 @@ inline bool read_private_file_at(int directory, const char* name, std::string& c
     return true;
 }
 
-inline bool private_swarm_name(const std::string& name)
+inline bool private_swarm_name(const std::string& name, bool lease = false)
 {
-    const auto prefix = "sintra-" + std::to_string(geteuid()) + '-';
+    const auto prefix = std::string(lease ? "sintra-l1-" : "sintra-") + std::to_string(geteuid()) + '-';
     if (name.size() != prefix.size() + 16 || name.compare(0, prefix.size(), prefix) != 0) {
         return false;
     }
@@ -1626,10 +1645,6 @@ inline bool remove_private_directory_tree_at(
         if (child == "." || child == "..") {
             continue;
         }
-        if (children.size() == 1024) {
-            safe = false;
-            break;
-        }
         children.push_back(child);
     }
     for (const auto& child : children) {
@@ -1670,9 +1685,6 @@ inline bool remove_private_directory_tree_at(
 inline void cleanup_stale_private_swarms(const std::filesystem::path& temp_directory)
 {
     const auto current_domain = detail::current_private_cleanup_domain();
-    if (!current_domain) {
-        return;
-    }
     const int temp_fd = ::open(temp_directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (temp_fd < 0) {
         return;
@@ -1694,19 +1706,24 @@ inline void cleanup_stale_private_swarms(const std::filesystem::path& temp_direc
         ::close(temp_fd);
         return;
     }
-    std::size_t visited = 0;
-    std::size_t candidates = 0;
-    while (visited++ < 1024 && candidates < 64) {
+    std::vector<std::string> names;
+    bool complete = true;
+    for (;;) {
         errno = 0;
         const auto* entry = ::readdir(entries);
         if (!entry) {
+            complete = errno == 0;
             break;
         }
-        const std::string name = entry->d_name;
-        if (!detail::private_swarm_name(name)) {
+        names.emplace_back(entry->d_name);
+    }
+    ::closedir(entries);
+    if (!complete) { ::close(temp_fd); return; }
+    for (const auto& name : names) {
+        const bool lease = detail::private_swarm_name(name, true);
+        if (!lease && (!current_domain || !detail::private_swarm_name(name))) {
             continue;
         }
-        ++candidates;
         const int swarm_fd = ::openat(temp_fd, name.c_str(),
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (swarm_fd < 0) {
@@ -1716,10 +1733,25 @@ inline void cleanup_stale_private_swarms(const std::filesystem::path& temp_direc
             ::close(swarm_fd);
             continue;
         }
-#if defined(__linux__)
         // A normal coordinator teardown takes this same inode lock. Keeping
         // it through rmdir prevents a removed name from being reused between
         // the final identity check and unlinkat.
+        if (lease && ::flock(swarm_fd, LOCK_EX | LOCK_NB) != 0) {
+            ::close(swarm_fd);
+            continue;
+        }
+        const auto path = temp_directory / name;
+        if (lease) {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+            if (detail::before_private_swarm_removal_for_test) {
+                detail::before_private_swarm_removal_for_test(path);
+            }
+#endif
+            (void)detail::remove_private_directory_tree_at(temp_fd, name.c_str(), 0, swarm_fd);
+            ::close(swarm_fd);
+            continue;
+        }
+#if defined(__linux__)
         if (::flock(swarm_fd, LOCK_EX | LOCK_NB) != 0) {
             ::close(swarm_fd);
             continue;
@@ -1736,7 +1768,6 @@ inline void cleanup_stale_private_swarms(const std::filesystem::path& temp_direc
         // The directory is owner-only, and a writable temp parent is sticky.
         // Other accounts cannot replace this entry between the handle check
         // and the marker read; same-account processes share Sintra's trust.
-        const auto path = temp_directory / name;
         const auto marker = run_marker_path(path);
         const auto cleanup = run_marker_cleanup_path(path);
         if (!detail::private_file_path_owned(marker) && !detail::private_file_path_owned(cleanup)) {
@@ -1771,13 +1802,48 @@ inline void cleanup_stale_private_swarms(const std::filesystem::path& temp_direc
         }
         ::close(swarm_fd);
     }
-    ::closedir(entries);
     ::close(temp_fd);
 }
 #endif
 
-inline void cleanup_owned_swarm_directory(const std::filesystem::path& directory)
+inline void cleanup_owned_swarm_directory(const std::filesystem::path& directory,
+    int retained_lease = -1, bool locks_unavailable = false,
+    const detail::Private_directory_identity* expected = nullptr)
 {
+#ifndef _WIN32
+    if (locks_unavailable) {
+        const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) { return; }
+        struct stat status{};
+        const bool matches = expected && expected->valid && ::fstat(fd, &status) == 0 &&
+            expected->device == static_cast<std::uint64_t>(status.st_dev) &&
+            expected->inode == static_cast<std::uint64_t>(status.st_ino);
+        if (matches) {
+            const int parent = ::open(directory.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (parent >= 0) {
+                (void)detail::remove_private_directory_tree_at(parent, directory.filename().c_str(), 0, fd);
+                ::close(parent);
+            }
+        }
+        ::close(fd);
+        return;
+    }
+    if (retained_lease >= 0) {
+        const int parent = ::open(directory.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (parent >= 0) {
+            (void)detail::remove_private_directory_tree_at(parent,
+                directory.filename().c_str(), 0, retained_lease);
+            ::close(parent);
+        }
+        return;
+    }
+#else
+    (void)retained_lease;
+    (void)locks_unavailable;
+    detail::Private_directory_removal removal(directory, expected);
+    if (removal.valid()) { (void)removal.remove(); }
+    return;
+#endif
 #if defined(__linux__)
     const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {

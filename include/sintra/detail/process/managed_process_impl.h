@@ -2959,7 +2959,17 @@ Managed_process::~Managed_process()
         delete s_coord;
         s_coord = 0;
 
-        cleanup_owned_swarm_directory(std::filesystem::path(m_directory));
+#ifndef _WIN32
+        if (m_pid == get_current_pid() &&
+            (!m_uses_directory_lease || m_directory_lease.owned_handle() >= 0))
+        {
+            cleanup_owned_swarm_directory(std::filesystem::path(m_directory),
+                m_directory_lease.owned_handle(), !m_uses_directory_lease, &m_directory_identity);
+        }
+        m_directory_lease.close();
+#else
+        cleanup_owned_swarm_directory(std::filesystem::path(m_directory), -1, false, &m_directory_identity);
+#endif
     }
 
 #ifndef _WIN32
@@ -3430,7 +3440,9 @@ void Managed_process::init(int argc, const char* const* argv)
 
     if (coordinator_is_local) {
 #ifndef _WIN32
-        detail::publish_private_cleanup_domain(std::filesystem::path(m_directory));
+        if (!m_uses_directory_lease) {
+            detail::publish_private_cleanup_domain(std::filesystem::path(m_directory));
+        }
 #endif
         run_marker_record_t run_marker{};
         run_marker.pid                  = static_cast<uint32_t>(m_pid);
@@ -6771,59 +6783,97 @@ void Managed_process::override_communication_state_for_test(Communication_state 
 inline
 std::string Managed_process::obtain_swarm_directory(bool coordinator_is_local)
 {
-#ifdef _WIN32
-    (void)coordinator_is_local;
-    const auto sintra_directory = detail::private_swarm_root();
-    const auto directory_error = std::make_error_code(std::errc::permission_denied);
-    if (!detail::create_private_directory(sintra_directory)) {
-        throw std::filesystem::filesystem_error(
-            "access to a working directory failed", sintra_directory, directory_error);
-    }
-
-    cleanup_stale_swarm_directories(
-        sintra_directory,
-        static_cast<uint32_t>(m_pid),
-        m_process_start_stamp);
-
-    std::stringstream stream;
-    stream << std::hex << m_swarm_id;
-    const std::filesystem::path swarm_directory = sintra_directory / stream.str();
-    if (!detail::create_private_directory(swarm_directory)) {
-        throw std::filesystem::filesystem_error(
-            "access to a working directory failed", swarm_directory, directory_error);
-    }
-
-    return swarm_directory.string();
-#else
     const auto directory_error = std::make_error_code(std::errc::permission_denied);
     if (!coordinator_is_local) {
-        const auto swarm_directory = detail::private_swarm_root(m_swarm_id);
-        if (m_swarm_id == 0 || !detail::private_directory_owned(swarm_directory)) {
-            throw std::filesystem::filesystem_error(
-                "access to a working directory failed", swarm_directory, directory_error);
+        const auto ordinary = detail::private_swarm_root(m_swarm_id);
+#ifndef _WIN32
+        const auto leased = detail::private_swarm_root(m_swarm_id, true);
+        const bool has_ordinary = detail::private_directory_owned(ordinary);
+        const bool has_leased = detail::private_directory_owned(leased);
+        if (m_swarm_id != 0 && has_ordinary != has_leased) {
+            return (has_leased ? leased : ordinary).string();
         }
-        return swarm_directory.string();
+#else
+        if (m_swarm_id != 0 && detail::private_directory_owned(ordinary)) {
+            return ordinary.string();
+        }
+#endif
+        throw std::filesystem::filesystem_error(
+            "Sintra working directory is missing, ambiguous, or not private", ordinary, directory_error);
     }
 
     const auto temp_directory = std::filesystem::temp_directory_path();
+#ifdef _WIN32
+    cleanup_stale_swarm_directories(temp_directory,
+        static_cast<uint32_t>(m_pid), m_process_start_stamp, true);
+#else
     cleanup_stale_private_swarms(temp_directory);
+    bool use_lease = detail::private_directory_leases_supported(temp_directory);
+#endif
+    const auto occupied = [](const std::filesystem::path& path) {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(path, error);
+        return (error && error != std::errc::no_such_file_or_directory) ||
+            status.type() != std::filesystem::file_type::not_found;
+    };
     for (unsigned attempt = 0; attempt < 64; ++attempt) {
         const auto candidate = detail::draw_private_swarm_id();
         if (candidate == 0) { continue; }
-        const auto swarm_directory = detail::private_swarm_root(candidate);
-        switch (detail::create_private_swarm_directory_exclusive(swarm_directory)) {
-            case detail::private_swarm_create_result::collision:
-                continue;
-            case detail::private_swarm_create_result::failed:
-                throw std::filesystem::filesystem_error(
-                    "access to a working directory failed", swarm_directory, directory_error);
-            case detail::private_swarm_create_result::created:
-                m_swarm_id = candidate;
-                return swarm_directory.string();
+        const auto ordinary = detail::private_swarm_root(candidate);
+#ifndef _WIN32
+        const auto leased = detail::private_swarm_root(candidate, true);
+        if (occupied(ordinary) || occupied(leased)) { continue; }
+        const auto swarm_directory = use_lease ? leased : ordinary;
+#else
+        const auto swarm_directory = ordinary;
+#endif
+        detail::Private_directory_identity allocated_identity;
+        const auto creation = detail::create_private_swarm_directory_exclusive(swarm_directory,
+            &allocated_identity,
+#ifndef _WIN32
+            use_lease
+#else
+            false
+#endif
+        );
+        if (creation == detail::private_swarm_create_result::collision) { continue; }
+        if (creation == detail::private_swarm_create_result::failed) {
+            throw std::filesystem::filesystem_error(
+                "Sintra temporary storage must support private account ownership and permissions",
+                swarm_directory, directory_error);
         }
+#ifndef _WIN32
+        if (use_lease) {
+            const auto result = m_directory_lease.acquire(swarm_directory, &allocated_identity);
+            if (result != detail::Directory_lease_result::acquired) {
+                // Failed acquisition never authorizes unlinking a lease name:
+                // another cleaner or creator may own that inode now.
+                if (result == detail::Directory_lease_result::retry) { continue; }
+                if (result == detail::Directory_lease_result::unavailable) {
+                    use_lease = false;
+                    continue;
+                }
+                throw std::filesystem::filesystem_error(
+                    "Sintra could not lock its working directory", swarm_directory, directory_error);
+            }
+        }
+        // A creator using the other policy can race the initial collision check.
+        // Neither protocol is published until this second check succeeds.
+        if (occupied(use_lease ? ordinary : leased)) {
+            if (use_lease) {
+                cleanup_owned_swarm_directory(swarm_directory, m_directory_lease.owned_handle());
+                m_directory_lease.close();
+            }
+            else { allocated_identity.remove_empty(swarm_directory); }
+            continue;
+        }
+        m_uses_directory_lease = use_lease;
+#endif
+        m_directory_identity = allocated_identity;
+        m_swarm_id = candidate;
+        return swarm_directory.string();
     }
     throw std::runtime_error("Sintra could not allocate a unique private swarm directory.");
-#endif
 }
 
 // Calls f when the specified transceiver becomes available.
