@@ -788,7 +788,8 @@ std::string get_base_filename(const string& prefix, uint64_t id, uint32_t occurr
 struct Message_ring_R: Ring_R<char>
 {
     Message_ring_R(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0):
-        Ring_R(directory, get_base_filename(prefix, id, occurrence), message_ring_size),
+        Ring_R(directory, get_base_filename(prefix, id, occurrence), message_ring_size,
+            0, detail::ring_directory_policy::private_existing_directory),
         m_id(id),
         m_channel(prefix)
     {}
@@ -971,7 +972,8 @@ private:
 struct Message_ring_W: public Ring_W<char>
 {
     Message_ring_W(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0) :
-        Ring_W(directory, get_base_filename(prefix, id, occurrence), message_ring_size),
+        Ring_W(directory, get_base_filename(prefix, id, occurrence), message_ring_size,
+            detail::ring_directory_policy::private_existing_directory),
         m_id(id)
     {}
 

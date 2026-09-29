@@ -63,6 +63,24 @@ public:
         open_impl(filename, mode, links);
     }
 
+#if !defined(_WIN32)
+    // Takes ownership of an already opened file, for directory-relative IPC opens.
+    file_mapping(int fd, map_mode_t mode)
+    {
+        struct stat st{};
+        if (fd == -1 || ::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            if (fd != -1) {
+                ::close(fd);
+            }
+            throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                "file_mapping: invalid native file");
+        }
+        m_fd = fd;
+        m_size = static_cast<size_type>(st.st_size);
+        m_mode = mode;
+    }
+#endif
+
     file_mapping(file_mapping&& other) noexcept
     {
         *this = std::move(other);

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdio>
 #include <fstream>
+#include <string_view>
 
 #ifdef _WIN32
 #include <aclapi.h>
@@ -253,6 +254,113 @@ void test_managed_session(int argc, char* argv[])
     std::printf("MANAGED_PRIVATE files=%zu\n", files);
 }
 
+void test_missing_managed_ring_directory(const std::filesystem::path& directory)
+{
+    const auto capacity = sintra::aligned_capacity<uint32_t>(128);
+    const auto generic = directory / "generic_missing_directory";
+    {
+        sintra::Ring_W<uint32_t> writer(generic.string(), "generic_ring", capacity);
+        require(std::filesystem::is_directory(generic),
+            "generic ring still creates a caller directory");
+    }
+
+    const auto missing = directory / "missing_managed_directory";
+    bool rejected = false;
+    try {
+        sintra::Ring_W<uint32_t> writer(missing.string(), "managed_ring", capacity,
+            sintra::detail::ring_directory_policy::private_existing_directory);
+    }
+    catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
+    require(rejected && !std::filesystem::exists(missing),
+        "managed ring cannot recreate a missing private directory");
+
+#ifndef _WIN32
+    // A permissive umask must not turn an unexpectedly recreated swarm directory
+    // into a world-accessible IPC enclosure. Exercise each publication stage.
+    const mode_t old_umask = umask(0);
+    for (std::string_view stage : {"anchor", "data", "control"}) {
+        const auto session = directory / ("lost_" + std::string(stage));
+        const auto foreign = directory / ("foreign_" + std::string(stage));
+        require(sintra::detail::create_private_directory(session), "create session fixture");
+        require(sintra::detail::create_private_directory(foreign), "create foreign fixture");
+        bool removed = false;
+        sintra::detail::before_private_ring_create_for_test = [&](const auto& path) {
+            const std::string name = path.filename().string();
+            const bool target = (stage == "anchor" && name.find("_lifecycle.tmp.") != std::string::npos) ||
+                (stage == "data" && name == "managed_ring") ||
+                (stage == "control" && name.find("_control.tmp.") != std::string::npos);
+            if (!removed && target) {
+                removed = true;
+                std::error_code ec;
+                std::filesystem::remove_all(session, ec);
+                require(!ec, "remove session during ring publication");
+                std::filesystem::create_directory_symlink(foreign, session, ec);
+                require(!ec, "replace lost pathname with foreign directory link");
+            }
+        };
+        rejected = false;
+        try {
+            sintra::Ring_W<uint32_t> writer(session.string(), "managed_ring", capacity,
+                sintra::detail::ring_directory_policy::private_existing_directory);
+        }
+        catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
+        sintra::detail::before_private_ring_create_for_test = {};
+        require(removed && rejected, "loss at selected managed publication stage fails");
+        require(std::filesystem::is_empty(foreign), "no backing file reaches replacement link target");
+        require(std::filesystem::remove(session), "remove replacement directory link");
+        rejected = false;
+        try {
+            sintra::Ring_R<uint32_t> reader(session.string(), "managed_ring", capacity, 0,
+                sintra::detail::ring_directory_policy::private_existing_directory);
+        }
+        catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
+        require(rejected && !std::filesystem::exists(session),
+            "later managed admission cannot recreate lost session");
+
+        require(sintra::detail::create_private_directory(session), "restore private session");
+        {
+            sintra::Ring_W<uint32_t> writer(session.string(), "managed_ring", capacity,
+                sintra::detail::ring_directory_policy::private_existing_directory);
+        }
+        require(!std::filesystem::exists(session / "managed_ring") &&
+            !std::filesystem::exists(session / "managed_ring_control"),
+            "final ring detachment removes data and control");
+        require(sintra::detail::remove_private_directory_tree(session),
+            "clean restored private session and anchor");
+        require(sintra::detail::remove_private_directory_tree(foreign),
+            "clean foreign fixture");
+    }
+
+    const auto staged_session = directory / "lost_after_staging";
+    const auto staged_foreign = directory / "foreign_after_staging";
+    require(sintra::detail::create_private_directory(staged_session),
+        "create staging-loss session");
+    require(sintra::detail::create_private_directory(staged_foreign),
+        "create staging-loss replacement target");
+    sintra::detail::before_private_ring_publish_for_test = [&](const auto& target) {
+        if (target.filename() != "managed_ring_lifecycle") { return; }
+        std::error_code ec;
+        std::filesystem::remove_all(staged_session, ec);
+        require(!ec, "remove session after anchor staging");
+        std::filesystem::create_directory_symlink(staged_foreign, staged_session, ec);
+        require(!ec, "replace staged session pathname with foreign link");
+    };
+    rejected = false;
+    try {
+        sintra::Ring_W<uint32_t> writer(staged_session.string(), "managed_ring", capacity,
+            sintra::detail::ring_directory_policy::private_existing_directory);
+    }
+    catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
+    sintra::detail::before_private_ring_publish_for_test = {};
+    require(rejected && std::filesystem::is_empty(staged_foreign),
+        "staged anchor cannot publish through replacement directory link");
+    require(std::filesystem::remove(staged_session), "remove staging-loss link");
+    require(sintra::detail::remove_private_directory_tree(staged_foreign),
+        "clean staging-loss target");
+    umask(old_umask);
+#endif
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -264,6 +372,7 @@ int main(int argc, char* argv[])
     std::printf("PRIVATE_IPC file=%d semaphore=%d\n", file_private, semaphore_private);
     test_attachment_policy(directory);
     test_cleanup_policy(directory);
+    test_missing_managed_ring_directory(directory);
     test_managed_session(argc, argv);
     return file_private && semaphore_private ? 0 : 1;
 }

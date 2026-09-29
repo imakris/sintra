@@ -563,6 +563,222 @@ inline constexpr uint64_t k_ring_lifecycle_anchor_fingerprint = fnv1a_64({
 
 } // namespace detail
 
+// Managed rings use the already-created private swarm directory. A held
+// directory identity keeps publication in that directory even if its pathname
+// disappears. Ordinary Ring_W/Ring_R callers retain their directory contract.
+inline bool create_ring_backing_file(
+    const std::string& path, size_t size, const std::string* directory);
+
+namespace detail {
+
+enum class ring_directory_policy { caller_directory, private_existing_directory };
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline std::function<void(const fs::path&)> before_private_ring_create_for_test;
+inline std::function<void(const fs::path&)> before_private_ring_publish_for_test;
+#endif
+
+class ring_directory
+{
+public:
+    ring_directory(const std::string& path, ring_directory_policy policy)
+    : m_path(path), m_private(policy == ring_directory_policy::private_existing_directory)
+    {
+        if (!m_private) {
+            return;
+        }
+#ifdef _WIN32
+        // Deny delete sharing so the verified directory cannot be renamed or
+        // replaced while Windows path-based file operations use it.
+        m_handle = ::CreateFileW(fs::path(path).c_str(),
+            READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (m_handle == INVALID_HANDLE_VALUE) {
+            throw ring_acquisition_failure_exception("Private ring directory is unavailable.");
+        }
+        BY_HANDLE_FILE_INFORMATION info{};
+        bool owned = false;
+        try {
+            owned = ::GetFileInformationByHandle(m_handle, &info) &&
+                (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                private_object_owned(m_handle);
+        }
+        catch (...) {}
+        if (!owned) {
+            ::CloseHandle(m_handle);
+            m_handle = INVALID_HANDLE_VALUE;
+            throw ring_acquisition_failure_exception("Ring directory is not private to this account.");
+        }
+#else
+        // The private parent excludes other accounts. Relative operations stay
+        // on this directory identity if its pathname is lost or replaced.
+        m_fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (m_fd == -1 || !private_directory_owned(path)) {
+            if (m_fd != -1) {
+                ::close(m_fd);
+                m_fd = -1;
+            }
+            throw ring_acquisition_failure_exception("Private ring directory is unavailable.");
+        }
+        struct stat opened{}, named{};
+        if (::fstat(m_fd, &opened) != 0 || ::lstat(path.c_str(), &named) != 0 ||
+            opened.st_dev != named.st_dev || opened.st_ino != named.st_ino)
+        {
+            ::close(m_fd);
+            m_fd = -1;
+            throw ring_acquisition_failure_exception("Private ring directory changed during acquisition.");
+        }
+#endif
+    }
+
+    ring_directory(const ring_directory&) = delete;
+    ring_directory& operator=(const ring_directory&) = delete;
+
+    ~ring_directory()
+    {
+#ifdef _WIN32
+        if (m_handle != INVALID_HANDLE_VALUE) { ::CloseHandle(m_handle); }
+#else
+        if (m_fd != -1) { ::close(m_fd); }
+#endif
+    }
+
+    bool named_directory_still_owned() const noexcept
+    {
+        if (!m_private) { return true; }
+#ifdef _WIN32
+        return private_directory_owned(m_path);
+#else
+        struct stat opened{}, named{};
+        return ::fstat(m_fd, &opened) == 0 && ::lstat(m_path.c_str(), &named) == 0 &&
+            opened.st_dev == named.st_dev && opened.st_ino == named.st_ino &&
+            private_directory_owned(m_path);
+#endif
+    }
+
+    bool create(const fs::path& path, size_t size, bool ensure_directory = true) const
+    {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (m_private && before_private_ring_create_for_test) {
+            before_private_ring_create_for_test(path);
+        }
+#endif
+        if (!named_directory_still_owned()) { return false; }
+        if (!m_private) {
+            return create_ring_backing_file(path.string(), size,
+                ensure_directory ? &m_path : nullptr);
+        }
+        native_file_handle file = invalid_file();
+        try {
+#ifdef _WIN32
+            file = create_new_file(path.string().c_str());
+#else
+            file = ::openat(m_fd, path.filename().c_str(),
+                O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
+#endif
+            if (file == invalid_file()) { return false; }
+#ifdef NDEBUG
+            const bool written = truncate_file(file, size);
+#else
+            const char* pattern = "UNINITIALIZED";
+            const size_t pattern_size = std::strlen(pattern);
+            std::unique_ptr<char[]> bytes(new char[size]);
+            for (size_t i = 0; i < size; ++i) { bytes[i] = pattern[i % pattern_size]; }
+            const bool written = write_file(file, bytes.get(), size);
+#endif
+            const bool closed = close_file(file);
+            file = invalid_file();
+            if (!written || !closed || !named_directory_still_owned()) {
+                (void)remove(path);
+                return false;
+            }
+            return true;
+        }
+        catch (...) {
+            if (file != invalid_file()) {
+                (void)close_file(file);
+                (void)remove(path);
+            }
+            return false;
+        }
+    }
+
+    ipc::file_mapping open(const fs::path& path, ipc::map_mode_t mode) const
+    {
+        if (!named_directory_still_owned()) {
+            throw ring_acquisition_failure_exception("Private ring directory disappeared.");
+        }
+#ifdef _WIN32
+        return open_private_file(path, mode);
+#else
+        if (!m_private) { return open_private_file(path, mode); }
+        const int flags = (mode == ipc::read_write ? O_RDWR : O_RDONLY) |
+            O_NOFOLLOW | O_CLOEXEC;
+        int fd = ::openat(m_fd, path.filename().c_str(), flags);
+        if (fd == -1) {
+            throw ring_acquisition_failure_exception("Ring backing file is unavailable.");
+        }
+        ipc::file_mapping file(fd, mode);
+        if (!private_file_owned(file.native_handle())) {
+            throw ring_acquisition_failure_exception("Ring backing file is not private to this account.");
+        }
+        return file;
+#endif
+    }
+
+    publish_file_result publish(const fs::path& source, const fs::path& target) const
+    {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (m_private && before_private_ring_publish_for_test) {
+            before_private_ring_publish_for_test(target);
+        }
+#endif
+        if (!named_directory_still_owned()) { return publish_file_result::failed; }
+#ifdef _WIN32
+        return publish_file_if_absent(source, target);
+#else
+        if (!m_private) { return publish_file_if_absent(source, target); }
+        int rc;
+        do {
+            rc = ::linkat(m_fd, source.filename().c_str(), m_fd, target.filename().c_str(), 0);
+        } while (rc != 0 && errno == EINTR);
+        if (rc == 0) {
+            if (named_directory_still_owned()) { return publish_file_result::published; }
+            (void)remove(target);
+            return publish_file_result::failed;
+        }
+        return errno == EEXIST ? publish_file_result::already_exists : publish_file_result::failed;
+#endif
+    }
+
+    bool remove(const fs::path& path) const noexcept
+    {
+#ifdef _WIN32
+        std::error_code ec;
+        return fs::remove(path, ec);
+#else
+        if (!m_private) {
+            std::error_code ec;
+            return fs::remove(path, ec);
+        }
+        return ::unlinkat(m_fd, path.filename().c_str(), 0) == 0;
+#endif
+    }
+
+private:
+    const std::string m_path;
+    const bool m_private;
+#ifdef _WIN32
+    HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+    int m_fd = -1;
+#endif
+};
+
+} // namespace detail
+
 inline bool create_ring_backing_file(
     const std::string& path,
     size_t             size,
@@ -624,14 +840,15 @@ inline fs::path make_ring_publish_temp_path(const fs::path& final_path)
 template <typename SharedObject, typename Initializer>
 publish_file_result publish_initialized_ring_file(
     const fs::path&    final_path,
-    const std::string* directory,
-    Initializer&&      initialize)
+    const ring_directory& directory,
+    Initializer&&      initialize,
+    bool              ensure_directory = true)
 {
     fs::path temp_path;
     for (int attempt = 0; attempt < 16; ++attempt) {
         temp_path = make_ring_publish_temp_path(final_path);
 
-        if (create_ring_backing_file(temp_path.string(), sizeof(SharedObject), directory)) {
+        if (directory.create(temp_path, sizeof(SharedObject), ensure_directory)) {
             break;
         }
         temp_path.clear();
@@ -642,8 +859,7 @@ publish_file_result publish_initialized_ring_file(
     }
 
     auto remove_temp = [&]() noexcept {
-        std::error_code ec;
-        (void)fs::remove(temp_path, ec);
+        (void)directory.remove(temp_path);
     };
 
     bool object_constructed = false;
@@ -653,7 +869,7 @@ publish_file_result publish_initialized_ring_file(
         }
 
         try {
-            auto temp_file = open_private_file(temp_path, ipc::read_write);
+            auto temp_file = directory.open(temp_path, ipc::read_write);
             ipc::mapped_region temp_region(temp_file, ipc::read_write, 0, 0);
             auto* object = static_cast<SharedObject*>(temp_region.data());
             object->~SharedObject();
@@ -665,7 +881,7 @@ publish_file_result publish_initialized_ring_file(
 
     try {
         {
-            auto temp_file = open_private_file(temp_path, ipc::read_write);
+            auto temp_file = directory.open(temp_path, ipc::read_write);
             ipc::mapped_region temp_region(temp_file, ipc::read_write, 0, 0);
             auto* object = static_cast<SharedObject*>(temp_region.data());
 
@@ -677,7 +893,7 @@ publish_file_result publish_initialized_ring_file(
             temp_file.flush_file();
         }
 
-        const auto published = publish_file_if_absent(temp_path, final_path);
+        const auto published = directory.publish(temp_path, final_path);
         if (published != publish_file_result::published) {
             destroy_temp_object();
         }
@@ -807,7 +1023,9 @@ class Ring_lifecycle_guard_base
 protected:
     Ring_lifecycle_guard_base(
         const std::string& directory,
-        const std::string& data_filename)
+        const std::string& data_filename,
+        detail::ring_directory_policy policy)
+    : m_ring_directory(directory, policy)
     {
         m_lifecycle_directory        = directory + "/";
         m_lifecycle_data_filename    = m_lifecycle_directory + data_filename;
@@ -835,7 +1053,8 @@ protected:
             throw ring_acquisition_failure_exception();
         }
 
-        if (!detail::private_file_path_owned(m_lifecycle_anchor_filename)) {
+        if (!m_ring_directory.named_directory_still_owned() ||
+            !detail::private_file_path_owned(m_lifecycle_anchor_filename)) {
             throw ring_acquisition_failure_exception("Ring lifecycle anchor is not private to this account.");
         }
 
@@ -1176,13 +1395,11 @@ private:
 
     bool remove_ring_files() const noexcept
     {
-        std::error_code ec;
         if (detail::private_file_path_owned(m_lifecycle_control_filename)) {
-            (void)fs::remove(fs::path(m_lifecycle_control_filename), ec);
+            (void)m_ring_directory.remove(fs::path(m_lifecycle_control_filename));
         }
-        ec.clear();
         if (detail::private_file_path_owned(m_lifecycle_data_filename)) {
-            (void)fs::remove(fs::path(m_lifecycle_data_filename), ec);
+            (void)m_ring_directory.remove(fs::path(m_lifecycle_data_filename));
         }
         return ring_files_absent();
     }
@@ -1191,7 +1408,7 @@ private:
     {
         return detail::publish_initialized_ring_file<Anchor>(
             fs::path(m_lifecycle_anchor_filename),
-            &m_lifecycle_directory,
+            m_ring_directory,
             [](Anchor& anchor) {
                 anchor.abi_fingerprint.store(
                     detail::k_ring_lifecycle_anchor_fingerprint,
@@ -1202,7 +1419,7 @@ private:
     bool attach_anchor()
     {
         try {
-            auto fm_anchor = detail::open_private_file(m_lifecycle_anchor_filename, ipc::read_write);
+            auto fm_anchor = m_ring_directory.open(m_lifecycle_anchor_filename, ipc::read_write);
             m_anchor_region = std::make_unique<ipc::mapped_region>(
                 fm_anchor,
                 ipc::read_write,
@@ -1222,6 +1439,9 @@ private:
         m_anchor = nullptr;
     }
 
+protected:
+    detail::ring_directory              m_ring_directory;
+private:
     std::unique_ptr<ipc::mapped_region> m_anchor_region;
     std::string                         m_lifecycle_directory;
     std::string                         m_lifecycle_data_filename;
@@ -1366,13 +1586,14 @@ struct Ring_data
     Ring_data(
         const std::string& directory,
         const std::string& data_filename,
-        const size_t       num_elements)
+        const size_t       num_elements,
+        detail::ring_directory_policy policy)
     :
+        m_data_directory(directory, policy),
         m_num_elements(num_elements),
         m_data_region_size(num_elements * sizeof(T))
     {
-        m_directory     = directory + "/";
-        m_data_filename = m_directory + data_filename;
+        m_data_filename = directory + "/" + data_filename;
 
         fs::path pr(m_data_filename);
 
@@ -1395,8 +1616,7 @@ struct Ring_data
         m_data_region_0.reset();
 
         if (m_remove_files_on_destruction) {
-            std::error_code ec;
-            (void)fs::remove(fs::path(m_data_filename), ec);
+            (void)m_data_directory.remove(fs::path(m_data_filename));
         }
     }
 
@@ -1408,7 +1628,7 @@ private:
     // Create the backing data file (filled with a debug pattern in !NDEBUG).
     bool create()
     {
-        return create_ring_backing_file(m_data_filename, m_data_region_size, &m_directory);
+        return m_data_directory.create(fs::path(m_data_filename), m_data_region_size);
     }
 
     /**
@@ -1432,9 +1652,9 @@ private:
         assert(!m_data_region_0 && !m_data_region_1 && m_data == nullptr);
 
         try {
-            if (fs::file_size(m_data_filename) != m_data_region_size) {
-                return false; // size mismatch => refuse to map
-            }
+            auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
+            auto file = m_data_directory.open(m_data_filename, data_rights);
+            if (file.size() != m_data_region_size) { return false; }
 
             // NOTE: On Windows, the "page size" for mapping purposes is the allocation granularity.
             size_t page_size = system_page_size();
@@ -1442,9 +1662,6 @@ private:
             // Enforce the "multiple of page/granularity" constraint explicitly.
             assert((m_data_region_size % page_size) == 0 &&
                 "Ring size (bytes) must be multiple of mapping granularity");
-
-            auto data_rights = READ_ONLY_DATA ? ipc::read_only : ipc::read_write;
-            auto file = detail::open_private_file(m_data_filename, data_rights);
 
             // Unified retry logic for all platforms.
             // When multiple threads in the same process try to map the same file simultaneously,
@@ -1559,9 +1776,9 @@ private:
         }
     }
 
+    detail::ring_directory               m_data_directory;
     std::unique_ptr<ipc::mapped_region>    m_data_region_0;
     std::unique_ptr<ipc::mapped_region>    m_data_region_1;
-    std::string                            m_directory;
 
 protected:
 
@@ -2335,10 +2552,11 @@ struct Ring:
     Ring(
         const std::string& directory,
         const std::string& data_filename,
-        size_t             num_elements)
+        size_t             num_elements,
+        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory)
     :
-        lifecycle_base(directory, data_filename),
-        Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements)
+        lifecycle_base(directory, data_filename, policy),
+        Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements, policy)
     {
         detail::maybe_pause_after_ring_data_attach_for_test(this->m_data_filename);
 
@@ -2424,8 +2642,7 @@ struct Ring:
         m_control_region = nullptr;
 
         if (this->m_remove_files_on_destruction) {
-            std::error_code ec;
-            (void)fs::remove(fs::path(m_control_filename), ec);
+            (void)this->m_ring_directory.remove(fs::path(m_control_filename));
         }
     }
 
@@ -2463,12 +2680,12 @@ private:
     {
         return detail::publish_initialized_ring_file<Control>(
             fs::path(m_control_filename),
-            nullptr,
+            this->m_ring_directory,
             [](Control& control) {
                 control.abi_fingerprint.store(
                     detail::k_ring_abi_fingerprint,
                     std::memory_order_release);
-            });
+            }, false);
     }
 
     // Map the control file read-write.
@@ -2477,11 +2694,8 @@ private:
         assert(m_control_region == nullptr);
 
         try {
-            if (fs::file_size(m_control_filename) != sizeof(Control)) {
-                return false;
-            }
-
-            auto fm_control = detail::open_private_file(m_control_filename, ipc::read_write);
+            auto fm_control = this->m_ring_directory.open(m_control_filename, ipc::read_write);
+            if (fm_control.size() != sizeof(Control)) { return false; }
             m_control_region = new ipc::mapped_region(fm_control, ipc::read_write, 0, 0);
             m_control = (Control*)m_control_region->data();
 
@@ -2595,9 +2809,10 @@ struct Ring_R : Ring<T, true>
         const std::string& directory,
         const std::string& data_filename,
         size_t             num_elements,
-        size_t             max_trailing_elements = 0)
+        size_t             max_trailing_elements = 0,
+        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory)
     :
-        Ring<T, true>::Ring(directory, data_filename, num_elements),
+        Ring<T, true>::Ring(directory, data_filename, num_elements, policy),
         m_max_trailing_elements(max_trailing_elements),
         c(*this->m_control)
     {
@@ -3441,9 +3656,10 @@ struct Ring_W : Ring<T, false>
     Ring_W(
         const std::string& directory,
         const std::string& data_filename,
-        size_t             num_elements)
+        size_t             num_elements,
+        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory)
     :
-        Ring<T, false>::Ring(directory, data_filename, num_elements),
+        Ring<T, false>::Ring(directory, data_filename, num_elements, policy),
         c(*this->m_control)
     {
         // Single writer across processes
