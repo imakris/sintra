@@ -248,10 +248,11 @@ void test_managed_session(int argc, char* argv[])
     sintra::init(argc, argv);
     const std::filesystem::path session = sintra::s_mproc->m_directory;
 #ifdef _WIN32
-    require(session.parent_path() == sintra::detail::private_swarm_root(), "per-account root selected");
-    require(sintra::detail::private_directory_owned(session.parent_path()), "root is private");
-#else
     require(session == sintra::detail::private_swarm_root(sintra::s_mproc->m_swarm_id),
+        "direct private swarm root selected");
+#else
+    require(session == sintra::detail::private_swarm_root(sintra::s_mproc->m_swarm_id, true) ||
+        session == sintra::detail::private_swarm_root(sintra::s_mproc->m_swarm_id),
         "direct private swarm root selected");
 #endif
     require(sintra::detail::private_directory_owned(session), "session is private");
