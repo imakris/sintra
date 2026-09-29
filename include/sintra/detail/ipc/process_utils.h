@@ -187,29 +187,57 @@ inline int read_freebsd_process_record(uint32_t pid, freebsd_process_record_t& r
 
 } // namespace detail
 
+#ifdef _WIN32
+namespace detail {
+
+enum class Process_liveness { DEAD, LIVE, UNKNOWN };
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline decltype(&::OpenProcess) process_identity_open_process = ::OpenProcess;
+inline decltype(&::WaitForSingleObject) process_identity_wait_for_single_object = ::WaitForSingleObject;
+#endif
+
+// A waitable handle distinguishes a running process from a signaled one even
+// when its exit code is STILL_ACTIVE (259). Lookup and wait errors are not
+// evidence that the PID has exited.
+inline Process_liveness probe_process_liveness(uint32_t pid)
+{
+    if (pid == 0) {
+        return Process_liveness::DEAD;
+    }
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    HANDLE process = process_identity_open_process(SYNCHRONIZE, FALSE, pid);
+#else
+    HANDLE process = ::OpenProcess(SYNCHRONIZE, FALSE, pid);
+#endif
+    if (!process) {
+        return ::GetLastError() == ERROR_INVALID_PARAMETER
+            ? Process_liveness::DEAD : Process_liveness::UNKNOWN;
+    }
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    const DWORD observed = process_identity_wait_for_single_object(process, 0);
+#else
+    const DWORD observed = ::WaitForSingleObject(process, 0);
+#endif
+    ::CloseHandle(process);
+    if (observed == WAIT_OBJECT_0) {
+        return Process_liveness::DEAD;
+    }
+    if (observed == WAIT_TIMEOUT) {
+        return Process_liveness::LIVE;
+    }
+    return Process_liveness::UNKNOWN;
+}
+
+} // namespace detail
+#endif
+
 inline bool is_process_alive(uint32_t pid)
 {
 #ifdef _WIN32
-    if (pid == 0) {
-        return false;
-    }
-
-    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!h) {
-        const DWORD err = ::GetLastError();
-        if (err == ERROR_ACCESS_DENIED) {
-            return true;
-        }
-        return false;
-    }
-
-    DWORD code  = 0;
-    bool  alive = false;
-    if (::GetExitCodeProcess(h, &code)) {
-        alive = (code == STILL_ACTIVE);
-    }
-    ::CloseHandle(h);
-    return alive;
+    // Public bool callers may use this for cleanup, where an unproven death
+    // must preserve the process's resources.
+    return detail::probe_process_liveness(pid) != detail::Process_liveness::DEAD;
 #else
     if (!pid) {
         return false;
@@ -388,7 +416,11 @@ inline bool process_instance_has_exited(uint64_t recorded, uint64_t self)
     if (pid == process_instance_pid(self)) {
         return recorded != self;
     }
+#ifdef _WIN32
+    return probe_process_liveness(pid) == Process_liveness::DEAD;
+#else
     return !is_process_alive(pid);
+#endif
 }
 
 } // namespace detail
@@ -561,9 +593,7 @@ namespace detail {
 using process_identity_probe_hook_t = process_identity_result_t (*)(const process_incarnation_t&);
 inline process_identity_probe_hook_t process_identity_probe_hook = nullptr;
 #ifdef _WIN32
-inline decltype(&::OpenProcess) process_identity_open_process = ::OpenProcess;
 inline decltype(&::GetProcessTimes) process_identity_get_process_times = ::GetProcessTimes;
-inline decltype(&::WaitForSingleObject) process_identity_wait_for_single_object = ::WaitForSingleObject;
 #else
 inline int (*process_identity_kill)(pid_t, int) = ::kill;
 #if defined(__APPLE__)

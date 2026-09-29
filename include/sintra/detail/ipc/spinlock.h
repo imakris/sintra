@@ -212,8 +212,14 @@ struct alignas(16) spinlock
 
             SINTRA_SPINLOCK_HOOK(before_liveness);
             const uint32_t owner_pid = detail::process_instance_pid(witness.owner);
+#ifdef _WIN32
+            const bool live = witness.owner == self ||
+                (owner_pid != detail::process_instance_pid(self) &&
+                    detail::probe_process_liveness(owner_pid) == detail::Process_liveness::LIVE);
+#else
             const bool live = witness.owner == self ||
                 (owner_pid != detail::process_instance_pid(self) && is_process_alive(owner_pid));
+#endif
             SINTRA_SPINLOCK_HOOK(after_liveness);
             if (!live || detail::is_debug_pause_active()) {
                 witness.active = false;

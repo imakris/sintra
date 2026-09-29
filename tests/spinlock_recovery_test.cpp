@@ -16,6 +16,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include "windows_liveness_child.h"
 #endif
 
 namespace {
@@ -438,10 +439,95 @@ int fake_abort_mode(std::string_view owner_arg, Schedule mode)
     return 1;
 }
 
+#ifdef _WIN32
+DWORD injected_liveness_error = ERROR_ACCESS_DENIED;
+
+HANDLE WINAPI fail_liveness_open(DWORD access, BOOL inherit, DWORD)
+{
+    if (access != SYNCHRONIZE || inherit) {
+        std::fprintf(stderr, "spinlock liveness requested unexpected process rights\n");
+        std::exit(1);
+    }
+    ::SetLastError(injected_liveness_error);
+    return nullptr;
+}
+
+DWORD WINAPI fail_liveness_wait(HANDLE, DWORD timeout)
+{
+    if (timeout != 0) {
+        std::fprintf(stderr, "spinlock liveness wait must be nonblocking\n");
+        std::exit(1);
+    }
+    ::SetLastError(injected_liveness_error);
+    return WAIT_FAILED;
+}
+
+bool run_windows_liveness_schedule(uint32_t pid, bool expect_recovery)
+{
+    sintra::spinlock lock;
+    lock.test_install_owner(owner_instance(pid, 1), 1);
+    Scenario scenario;
+    scenario.lock = &lock;
+    scenario.mode = Schedule::single_jump;
+    scenario.release_poll = 10;
+    Hook_scope hooks(scenario);
+    lock.lock();
+    const bool observed = expect_recovery
+        ? scenario.polls.load() < scenario.release_poll
+        : scenario.polls.load() >= scenario.release_poll &&
+            (scenario.seen_events.load() &
+                (uint64_t(1) << static_cast<unsigned>(spinlock_event::before_liveness))) != 0;
+    lock.unlock();
+    return expect(observed, expect_recovery
+        ? "signaled exit-259 owner was not recovered"
+        : "live or UNKNOWN owner lost exclusion or bypassed stall liveness check");
+}
+
+bool windows_liveness_regressions()
+{
+    namespace detail = sintra::detail;
+    sintra::test::Windows_liveness_child child(L"--liveness-child");
+    if (!expect(child.valid(), "could not launch live spinlock owner fixture")) {
+        return false;
+    }
+    const uint32_t pid = child.pid();
+    detail::set_debug_pause_active(true);
+    const bool live_preserved = run_windows_liveness_schedule(pid, false);
+    detail::set_debug_pause_active(false);
+    if (!live_preserved) {
+        return false;
+    }
+    for (const DWORD error : {ERROR_ACCESS_DENIED, ERROR_NOT_ENOUGH_MEMORY, ERROR_INVALID_HANDLE}) {
+        injected_liveness_error = error;
+        detail::process_identity_open_process = fail_liveness_open;
+        const bool preserved = run_windows_liveness_schedule(pid, false);
+        detail::process_identity_open_process = ::OpenProcess;
+        if (!preserved) {
+            return false;
+        }
+    }
+    injected_liveness_error = ERROR_INVALID_HANDLE;
+    detail::process_identity_wait_for_single_object = fail_liveness_wait;
+    const bool preserved = run_windows_liveness_schedule(pid, false);
+    detail::process_identity_wait_for_single_object = ::WaitForSingleObject;
+    if (!preserved) {
+        return false;
+    }
+    return expect(child.terminate(259), "exit-259 spinlock owner did not signal") &&
+        run_windows_liveness_schedule(pid, true);
+}
+#endif
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    if (argc == 2 && std::string_view(argv[1]) == "--liveness-child") {
+        ::Sleep(INFINITE);
+        return 1;
+    }
+#endif
     if (argc == 3 && std::string_view(argv[1]) == "--fake-abort-exact") {
         return fake_abort_mode(argv[2], Schedule::exact_boundary);
     }
@@ -457,6 +543,11 @@ int main(int argc, char* argv[])
     if (!expect(dead_pid != 0, "could not find an absent PID")) {
         return 1;
     }
+#ifdef _WIN32
+    if (!windows_liveness_regressions()) {
+        return 1;
+    }
+#endif
     if (!run_dead_owner_recovery(owner_instance(dead_pid),
             "absent PID owner was not recovered and freshly marked")) {
         return 1;

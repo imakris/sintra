@@ -13,6 +13,9 @@
 using namespace std::chrono_literals;
 
 #include "test_utils.h"
+#ifdef _WIN32
+#include "windows_liveness_child.h"
+#endif
 
 #include "sintra/detail/ipc/mutex.h"
 
@@ -200,10 +203,140 @@ void run_owner_generation_recovery_red_gate()
         "owner-generation recovery red gate failed");
 }
 
+#ifdef _WIN32
+DWORD injected_liveness_error = ERROR_ACCESS_DENIED;
+
+HANDLE WINAPI fail_liveness_open(DWORD access, BOOL inherit, DWORD)
+{
+    if (access != SYNCHRONIZE || inherit) {
+        std::cerr << "mutex liveness requested unexpected process rights" << std::endl;
+        std::exit(1);
+    }
+    SetLastError(injected_liveness_error);
+    return nullptr;
+}
+
+DWORD WINAPI fail_liveness_wait(HANDLE, DWORD timeout)
+{
+    if (timeout != 0) {
+        std::cerr << "mutex liveness wait must be nonblocking" << std::endl;
+        std::exit(1);
+    }
+    SetLastError(injected_liveness_error);
+    return WAIT_FAILED;
+}
+
+void run_windows_liveness_recovery()
+{
+    namespace detail = sintra::detail;
+    sintra::test::Windows_liveness_child child(L"--liveness-child");
+    sintra::test::expect(child.valid(), k_failure_prefix,
+        "could not launch live mutex owner fixture");
+    const auto pid = static_cast<uint32_t>(child.pid());
+    const auto stamp = sintra::query_process_start_stamp(pid);
+    sintra::test::expect(stamp.has_value(), k_failure_prefix,
+        "live mutex owner must have a start stamp");
+    const Owner_fixture owner{pid, 17u, *stamp, 1u};
+    const auto owner_word = make_owner_token(pid, 17u);
+
+    {
+        Test_mutex mutex;
+        mutex.test_install_owner_fixture(owner);
+        sintra::test::expect(!mutex.try_lock_for(10ms) && mutex.test_owner_token() == owner_word,
+            k_failure_prefix, "a live foreign owner must keep excluding");
+    }
+
+    // A valid start-stamp mismatch remains independent death evidence.
+    {
+        Test_mutex mutex;
+        mutex.test_install_owner_fixture({pid, 17u, *stamp + 1u, 1u});
+        const bool acquired = mutex.try_lock();
+        sintra::test::expect(acquired, k_failure_prefix,
+            "a different owner creation stamp must still permit recovery");
+        if (acquired) {
+            mutex.unlock();
+        }
+    }
+
+    for (const DWORD error : {ERROR_ACCESS_DENIED, ERROR_NOT_ENOUGH_MEMORY, ERROR_INVALID_HANDLE}) {
+        injected_liveness_error = error;
+        detail::process_identity_open_process = fail_liveness_open;
+        Test_mutex mutex;
+        mutex.test_install_owner_fixture(owner);
+        const bool acquired = mutex.try_lock_for(10ms);
+        detail::process_identity_open_process = ::OpenProcess;
+        sintra::test::expect(!acquired && mutex.test_owner_token() == owner_word,
+            k_failure_prefix, "OpenProcess error must preserve mutex exclusion");
+
+        detail::process_identity_open_process = fail_liveness_open;
+        Test_mutex gated;
+        const auto gate = (uint64_t(pid) << 32u) | 1u;
+        gated.test_install_owner_fixture({0, 0, 0, 0, gate});
+        const bool passed_gate = gated.try_lock_for(10ms);
+        detail::process_identity_open_process = ::OpenProcess;
+        sintra::test::expect(!passed_gate,
+            k_failure_prefix, "OpenProcess error must preserve recovery gate exclusion");
+    }
+
+    // An uncertain PID check does not veto an independently verified
+    // creation-stamp mismatch for the mutex owner.
+    injected_liveness_error = ERROR_ACCESS_DENIED;
+    detail::process_identity_open_process = fail_liveness_open;
+    Test_mutex reused_pid;
+    reused_pid.test_install_owner_fixture({pid, 17u, *stamp + 1u, 1u});
+    const bool recovered_mismatch = reused_pid.try_lock();
+    detail::process_identity_open_process = ::OpenProcess;
+    sintra::test::expect(recovered_mismatch, k_failure_prefix,
+        "valid owner-stamp mismatch must recover despite uncertain PID probe");
+    if (recovered_mismatch) {
+        reused_pid.unlock();
+    }
+
+    injected_liveness_error = ERROR_INVALID_HANDLE;
+    detail::process_identity_wait_for_single_object = fail_liveness_wait;
+    Test_mutex unknown_wait;
+    unknown_wait.test_install_owner_fixture(owner);
+    const bool acquired_on_wait_error = unknown_wait.try_lock_for(10ms);
+    detail::process_identity_wait_for_single_object = ::WaitForSingleObject;
+    sintra::test::expect(!acquired_on_wait_error && unknown_wait.test_owner_token() == owner_word,
+        k_failure_prefix, "wait error must preserve mutex exclusion");
+    detail::process_identity_wait_for_single_object = fail_liveness_wait;
+    Test_mutex wait_gated;
+    const auto gate = (uint64_t(pid) << 32u) | 1u;
+    wait_gated.test_install_owner_fixture({0, 0, 0, 0, gate});
+    const bool passed_wait_gate = wait_gated.try_lock_for(10ms);
+    detail::process_identity_wait_for_single_object = ::WaitForSingleObject;
+    sintra::test::expect(!passed_wait_gate, k_failure_prefix,
+        "wait error must preserve recovery gate exclusion");
+
+    sintra::test::expect(child.terminate(259), k_failure_prefix,
+        "exit-259 mutex owner did not signal");
+    {
+        Test_mutex mutex;
+        mutex.test_install_owner_fixture(owner);
+        const bool recovered = mutex.try_lock();
+        sintra::test::expect(recovered, k_failure_prefix,
+            "signaled owner with exit code 259 must be recovered");
+        if (recovered) {
+            mutex.unlock();
+        }
+    }
+}
+#endif
+
 } // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    if (argc == 2 && std::string_view(argv[1]) == "--liveness-child") {
+        ::Sleep(INFINITE);
+        return 1;
+    }
+#else
+    (void)argc;
+    (void)argv;
+#endif
     Test_mutex mtx;
 
     // Fresh mutex should be acquirable via try_lock.
@@ -401,6 +534,10 @@ int main()
     recovery.unlock();
 
     run_owner_generation_recovery_red_gate();
+
+#ifdef _WIN32
+    run_windows_liveness_recovery();
+#endif
 
     return 0;
 }

@@ -139,7 +139,15 @@ private:
 void retained_exit_259()
 {
     Child_process child;
+    require(sintra::detail::probe_process_liveness(child.pid()) ==
+        sintra::detail::Process_liveness::LIVE,
+        "a running process must classify LIVE");
     child.terminate(259);
+    require(sintra::detail::probe_process_liveness(child.pid()) ==
+        sintra::detail::Process_liveness::DEAD,
+        "a signaled process with exit code STILL_ACTIVE must classify DEAD");
+    require(!sintra::is_process_alive(child.pid()),
+        "the public liveness check must not mistake exit code 259 for a running process");
     require(sintra::probe_process_identity({child.pid(), child.stamp()}).status == Process_identity_status::DEAD,
         "a retained signaled process with exit code 259 must be DEAD");
 }
@@ -193,6 +201,50 @@ DWORD WINAPI fail_wait(HANDLE process, DWORD timeout)
     observed_handle = process;
     ::SetLastError(injected_error);
     return WAIT_FAILED;
+}
+
+HANDLE WINAPI fail_liveness_open(DWORD access, BOOL inherit, DWORD)
+{
+    require(access == SYNCHRONIZE && !inherit,
+        "PID liveness must request wait rights without inheritance");
+    ::SetLastError(injected_error);
+    return nullptr;
+}
+
+void pid_liveness_errors()
+{
+    namespace detail = sintra::detail;
+    const auto self = detail::current_process_instance();
+    const auto foreign = (uint64_t(sintra::get_current_pid() + 1) << 32u) | 1u;
+    detail::process_identity_open_process = fail_liveness_open;
+    for (const DWORD error : {ERROR_ACCESS_DENIED, ERROR_NOT_ENOUGH_MEMORY, ERROR_INVALID_HANDLE}) {
+        injected_error = error;
+        require(detail::probe_process_liveness(sintra::get_current_pid()) ==
+            detail::Process_liveness::UNKNOWN,
+            "nonabsence OpenProcess errors must classify UNKNOWN");
+        require(sintra::is_process_alive(sintra::get_current_pid()),
+            "public bool liveness must preserve resources on UNKNOWN");
+        require(!detail::process_instance_has_exited(foreign, self),
+            "UNKNOWN must not prove a foreign lock owner exited");
+    }
+    injected_error = ERROR_INVALID_PARAMETER;
+    require(detail::probe_process_liveness(sintra::get_current_pid()) ==
+        detail::Process_liveness::DEAD,
+        "native PID absence must classify DEAD");
+    detail::process_identity_open_process = ::OpenProcess;
+
+    injected_error = ERROR_INVALID_HANDLE;
+    detail::process_identity_wait_for_single_object = fail_wait;
+    require(detail::probe_process_liveness(sintra::get_current_pid()) ==
+        detail::Process_liveness::UNKNOWN,
+        "wait failure must classify UNKNOWN");
+    DWORD flags = 0;
+    require(!::GetHandleInformation(observed_handle, &flags) && ::GetLastError() == ERROR_INVALID_HANDLE,
+        "wait failure must close its held process handle");
+    detail::process_identity_wait_for_single_object = ::WaitForSingleObject;
+    require(detail::probe_process_liveness(sintra::get_current_pid()) ==
+        detail::Process_liveness::LIVE,
+        "UNKNOWN must not be cached as a durable PID liveness result");
 }
 
 void native_errors()
@@ -746,6 +798,7 @@ int main(int argc, char** argv)
         {"invalid_identity", invalid_identity},
 #ifdef _WIN32
         {"retained_exit_259", retained_exit_259},
+        {"pid_liveness_errors", pid_liveness_errors},
         {"native_errors", native_errors},
 #else
         {"exited_process", exited_process},

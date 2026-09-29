@@ -33,7 +33,7 @@ processes. The platform utilities defined in `platform_defs.h` and
   - get_current_pid()
   - get_current_tid()
   - detail::current_process_instance()
-  - is_process_alive(uint32_t)
+  - is_process_alive(uint32_t), or detail::probe_process_liveness on Windows
   - query_process_start_stamp(uint32_t)
   - current_process_start_stamp()
 No explicit initialization routine is required.
@@ -286,7 +286,12 @@ private:
         if (pid == process_instance_pid(self_instance)) {
             return m_owner_instance.load(std::memory_order_acquire) != self_instance;
         }
+#ifdef _WIN32
+        return probe_process_liveness(pid) == Process_liveness::DEAD ||
+            owner_generation_is_stale(owner, stored_stamp);
+#else
         return !is_process_alive(pid) || owner_generation_is_stale(owner, stored_stamp);
+#endif
     }
 
     bool try_acquire_unowned_when_no_recovery(owner_token self)
