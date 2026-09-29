@@ -397,7 +397,7 @@ bool stale_directory_cleanup_runs()
         (!test_root || test_root[0] == '\0');
     return !preserve_without_test_root;
 #else
-    return true;
+    return false;
 #endif
 }
 
@@ -509,6 +509,7 @@ void test_process_utility_helpers()
 // process holding the PID exits.
 void test_stale_directory_start_stamp()
 {
+    if (!stale_directory_cleanup_runs()) { return; }
 #if defined(__FreeBSD__)
     constexpr bool k_mismatch_is_stale = false;
 #else

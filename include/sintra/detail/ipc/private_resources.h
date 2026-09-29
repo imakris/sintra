@@ -211,7 +211,11 @@ inline bool create_private_directory(const std::filesystem::path& directory)
     return private_directory_owned(directory);
 }
 
+#ifdef _WIN32
 inline std::filesystem::path private_swarm_root()
+#else
+inline std::filesystem::path private_swarm_root(std::uint64_t swarm_id)
+#endif
 {
 #ifdef _WIN32
     // Name the account by a 64-bit FNV-1a digest of its SID. A domain SID
@@ -228,12 +232,66 @@ inline std::filesystem::path private_swarm_root()
     std::snprintf(component, sizeof(component), "sintra-%016llx",
         static_cast<unsigned long long>(digest));
 #else
-    const auto component = "sintra-" + std::to_string(geteuid());
+    char component[48];
+    std::snprintf(component, sizeof(component), "sintra-%llu-%016llx",
+        static_cast<unsigned long long>(geteuid()),
+        static_cast<unsigned long long>(swarm_id));
 #endif
     return std::filesystem::temp_directory_path() / component;
 }
 
-// The caller owns a private parent, so other accounts cannot replace its entries.
+#ifndef _WIN32
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline std::uint64_t (*draw_private_swarm_id_for_test)() = nullptr;
+#endif
+
+inline std::uint64_t draw_private_swarm_id()
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (draw_private_swarm_id_for_test) {
+        return draw_private_swarm_id_for_test();
+    }
+#endif
+    std::uint64_t id = 0;
+    const int random = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (random < 0) {
+        throw std::system_error(errno, std::system_category(), "open /dev/urandom");
+    }
+    auto* bytes = reinterpret_cast<unsigned char*>(&id);
+    std::size_t remaining = sizeof(id);
+    while (remaining != 0) {
+        const auto count = ::read(random, bytes, remaining);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            const int error = count == 0 ? EIO : errno;
+            ::close(random);
+            throw std::system_error(error, std::system_category(), "read /dev/urandom");
+        }
+        bytes += count;
+        remaining -= static_cast<std::size_t>(count);
+    }
+    ::close(random);
+    return id;
+}
+
+enum class private_swarm_create_result { created, collision, failed };
+
+inline private_swarm_create_result create_private_swarm_directory_exclusive(
+    const std::filesystem::path& directory)
+{
+    if (::mkdir(directory.c_str(), 0700) != 0) {
+        return errno == EEXIST ? private_swarm_create_result::collision :
+            private_swarm_create_result::failed;
+    }
+    return private_directory_owned(directory) ? private_swarm_create_result::created :
+        private_swarm_create_result::failed;
+}
+#endif
+
+// The directory is owner-only. A direct POSIX swarm root also needs a trusted
+// temporary parent, with sticky protection when other accounts can write it.
 // Never recurse through links or remove files whose ownership is unverified.
 inline bool remove_private_directory_tree(const std::filesystem::path& directory) noexcept
 try

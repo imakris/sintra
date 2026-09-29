@@ -4,18 +4,21 @@
 #pragma once
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #include "../time_utils.h"
 #include "platform_defs.h"
@@ -25,6 +28,7 @@
   #include "../sintra_windows.h"
 #else
   #include <cerrno>
+  #include <dirent.h>
   #include <fcntl.h>
   #include <pthread.h>
   #include <signal.h>
@@ -33,6 +37,7 @@
   #include <unistd.h>
 
   #if defined(__linux__)
+    #include <sys/file.h>
     #include <sys/syscall.h>
   #endif
 
@@ -1239,6 +1244,14 @@ inline void cleanup_stale_swarm_directories(
     uint32_t                       current_pid,
     uint64_t                       current_start_stamp)
 {
+#ifndef _WIN32
+    // Per-account roots are no longer used on POSIX. Their markers have no
+    // cleanup domain, so a PID lookup cannot safely classify them.
+    (void)base_dir;
+    (void)current_pid;
+    (void)current_start_stamp;
+    return;
+#else
     std::error_code ec;
     if (!detail::private_directory_owned(base_dir)) {
         return;
@@ -1356,6 +1369,446 @@ inline void cleanup_stale_swarm_directories(
 
         (void)detail::remove_private_directory_tree(dir_path);
     }
+#endif
+}
+
+#ifndef _WIN32
+namespace detail {
+
+struct Cleanup_domain
+{
+    std::string         boot_id;
+    process_namespace_t pid;
+    process_namespace_t time;
+};
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline std::optional<Cleanup_domain> (*private_cleanup_domain_for_test)() = nullptr;
+inline void (*before_private_swarm_removal_for_test)(const std::filesystem::path&) = nullptr;
+inline void (*before_owned_swarm_lock_for_test)(const std::filesystem::path&) = nullptr;
+#endif
+
+inline std::optional<Cleanup_domain> current_private_cleanup_domain()
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (private_cleanup_domain_for_test) {
+        return private_cleanup_domain_for_test();
+    }
+#endif
+#if defined(__linux__)
+    std::ifstream boot_file("/proc/sys/kernel/random/boot_id");
+    std::string boot_id;
+    if (!std::getline(boot_file, boot_id) || boot_id.size() != 36) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < boot_id.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (boot_id[i] != '-') {
+                return std::nullopt;
+            }
+        }
+        else if (!std::isxdigit(static_cast<unsigned char>(boot_id[i]))) {
+            return std::nullopt;
+        }
+    }
+    const auto read_namespace = [](const char* path) {
+        struct stat status{};
+        // ENOENT also occurs when procfs is masked. It never proves that the
+        // kernel lacks this namespace feature.
+        return ::stat(path, &status) == 0 && S_ISREG(status.st_mode)
+            ? process_namespace_t{Process_metadata_state::VALID,
+                  static_cast<uint64_t>(status.st_dev), static_cast<uint64_t>(status.st_ino)}
+            : process_namespace_t{};
+    };
+    Cleanup_domain domain{boot_id,
+        read_namespace("/proc/self/ns/pid"), read_namespace("/proc/self/ns/time")};
+    if (domain.pid.state == Process_metadata_state::UNKNOWN ||
+        domain.time.state == Process_metadata_state::UNKNOWN)
+    {
+        return std::nullopt;
+    }
+    return domain;
+#else
+    return std::nullopt;
+#endif
+}
+
+inline std::string private_cleanup_domain_contents(const Cleanup_domain& domain)
+{
+    auto namespace_value = [](const process_namespace_t& value) {
+        if (value.state == Process_metadata_state::ABSENT) {
+            return std::string("absent");
+        }
+        return std::to_string(value.device) + ':' + std::to_string(value.inode);
+    };
+    return "sintra-cleanup-domain=1\nboot=" + domain.boot_id + "\npid=" +
+        namespace_value(domain.pid) + "\ntime=" + namespace_value(domain.time) + '\n';
+}
+
+inline std::optional<Cleanup_domain> parse_private_cleanup_domain(const std::string& contents)
+{
+    std::istringstream input(contents);
+    std::string version, boot, pid, time, trailing;
+        if (!std::getline(input, version) || version != "sintra-cleanup-domain=1" ||
+        !std::getline(input, boot) || boot.rfind("boot=", 0) != 0 ||
+        !std::getline(input, pid) || pid.rfind("pid=", 0) != 0 ||
+        !std::getline(input, time) || time.rfind("time=", 0) != 0 ||
+        std::getline(input, trailing))
+    {
+        return std::nullopt;
+    }
+    const auto parse_namespace = [](const std::string& text) -> std::optional<process_namespace_t> {
+        if (text == "absent") {
+            return process_namespace_t{Process_metadata_state::ABSENT, 0, 0};
+        }
+        const auto separator = text.find(':');
+        if (separator == std::string::npos || text.find(':', separator + 1) != std::string::npos) {
+            return std::nullopt;
+        }
+        try {
+            std::size_t first = 0, second = 0;
+            const auto device = std::stoull(text.substr(0, separator), &first);
+            const auto inode = std::stoull(text.substr(separator + 1), &second);
+            if (first != separator || second != text.size() - separator - 1 ||
+                device == 0 || inode == 0)
+            {
+                return std::nullopt;
+            }
+            if (std::to_string(device) + ':' + std::to_string(inode) != text) {
+                return std::nullopt;
+            }
+            return process_namespace_t{Process_metadata_state::VALID, device, inode};
+        }
+        catch (...) {
+            return std::nullopt;
+        }
+    };
+    const auto parsed_pid = parse_namespace(pid.substr(4));
+    const auto parsed_time = parse_namespace(time.substr(5));
+    if (!parsed_pid || !parsed_time || boot.size() != 41) {
+        return std::nullopt;
+    }
+    const auto boot_id = boot.substr(5);
+    for (std::size_t i = 0; i < boot_id.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (boot_id[i] != '-') {
+                return std::nullopt;
+            }
+        }
+        else if (!std::isxdigit(static_cast<unsigned char>(boot_id[i]))) {
+            return std::nullopt;
+        }
+    }
+    return Cleanup_domain{boot_id, *parsed_pid, *parsed_time};
+}
+
+inline bool same_private_cleanup_domain(const Cleanup_domain& a, const Cleanup_domain& b)
+{
+    return a.boot_id == b.boot_id &&
+        a.pid.state == b.pid.state && a.pid.device == b.pid.device && a.pid.inode == b.pid.inode &&
+        a.time.state == b.time.state && a.time.device == b.time.device && a.time.inode == b.time.inode;
+}
+
+inline constexpr const char* private_cleanup_domain_filename() { return "sintra_cleanup_domain"; }
+
+inline void publish_private_cleanup_domain(const std::filesystem::path& directory)
+{
+    if (const auto domain = current_private_cleanup_domain()) {
+        (void)publish_private_file(directory / private_cleanup_domain_filename(),
+            private_cleanup_domain_contents(*domain));
+    }
+}
+
+inline bool private_directory_handle_owned(int fd)
+{
+    struct stat status{};
+    return ::fstat(fd, &status) == 0 && S_ISDIR(status.st_mode) &&
+        status.st_uid == geteuid() && (status.st_mode & 0777) == 0700;
+}
+
+inline bool read_private_file_at(int directory, const char* name, std::string& contents)
+{
+    const int fd = ::openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return false;
+    }
+    if (!private_file_owned(fd)) {
+        ::close(fd);
+        return false;
+    }
+    char buffer[4096];
+    std::size_t size = 0;
+    while (size < sizeof(buffer)) {
+        const auto read_count = ::read(fd, buffer + size, sizeof(buffer) - size);
+        if (read_count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (read_count < 0) {
+            ::close(fd);
+            return false;
+        }
+        if (read_count == 0) {
+            break;
+        }
+        size += static_cast<std::size_t>(read_count);
+    }
+    char extra = 0;
+    const bool overflow = size == sizeof(buffer) && ::read(fd, &extra, 1) != 0;
+    ::close(fd);
+    if (overflow) {
+        return false;
+    }
+    contents.assign(buffer, size);
+    return true;
+}
+
+inline bool private_swarm_name(const std::string& name)
+{
+    const auto prefix = "sintra-" + std::to_string(geteuid()) + '-';
+    if (name.size() != prefix.size() + 16 || name.compare(0, prefix.size(), prefix) != 0) {
+        return false;
+    }
+    bool nonzero = false;
+    for (std::size_t i = prefix.size(); i < name.size(); ++i) {
+        const char digit = name[i];
+        if (!(digit >= '0' && digit <= '9') && !(digit >= 'a' && digit <= 'f')) {
+            return false;
+        }
+        nonzero |= digit != '0';
+    }
+    return nonzero;
+}
+
+inline bool remove_private_directory_tree_at(
+    int parent_fd, const char* name, unsigned depth = 0, int expected_fd = -1)
+{
+    if (depth > 4) {
+        return false;
+    }
+    const int fd = ::openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return false;
+    }
+    struct stat directory_status{};
+    if (!private_directory_handle_owned(fd) || ::fstat(fd, &directory_status) != 0) {
+        ::close(fd);
+        return false;
+    }
+    if (expected_fd >= 0) {
+        struct stat expected_status{};
+        if (::fstat(expected_fd, &expected_status) != 0 ||
+            expected_status.st_dev != directory_status.st_dev ||
+            expected_status.st_ino != directory_status.st_ino)
+        {
+            ::close(fd);
+            return false;
+        }
+    }
+    DIR* entries = ::fdopendir(fd);
+    if (!entries) {
+        ::close(fd);
+        return false;
+    }
+    bool safe = true;
+    std::vector<std::string> children;
+    while (safe) {
+        errno = 0;
+        const auto* entry = ::readdir(entries);
+        if (!entry) {
+            safe = errno == 0;
+            break;
+        }
+        const std::string child = entry->d_name;
+        if (child == "." || child == "..") {
+            continue;
+        }
+        if (children.size() == 1024) {
+            safe = false;
+            break;
+        }
+        children.push_back(child);
+    }
+    for (const auto& child : children) {
+        if (!safe) {
+            break;
+        }
+        struct stat status{};
+        if (::fstatat(fd, child.c_str(), &status, AT_SYMLINK_NOFOLLOW) != 0) {
+            safe = false;
+        }
+        else
+        if (S_ISDIR(status.st_mode)) {
+            safe = remove_private_directory_tree_at(fd, child.c_str(), depth + 1);
+        }
+        else
+        if (S_ISREG(status.st_mode) && status.st_uid == geteuid() &&
+            (status.st_mode & 0077) == 0)
+        {
+            safe = ::unlinkat(fd, child.c_str(), 0) == 0;
+        }
+        else {
+            safe = false;
+        }
+    }
+    ::closedir(entries);
+    if (!safe) {
+        return false;
+    }
+    struct stat named_status{};
+    return ::fstatat(parent_fd, name, &named_status, AT_SYMLINK_NOFOLLOW) == 0 &&
+        named_status.st_dev == directory_status.st_dev &&
+        named_status.st_ino == directory_status.st_ino &&
+        ::unlinkat(parent_fd, name, AT_REMOVEDIR) == 0;
+}
+
+} // namespace detail
+
+inline void cleanup_stale_private_swarms(const std::filesystem::path& temp_directory)
+{
+    const auto current_domain = detail::current_private_cleanup_domain();
+    if (!current_domain) {
+        return;
+    }
+    const int temp_fd = ::open(temp_directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (temp_fd < 0) {
+        return;
+    }
+    struct stat temp_status{};
+    if (::fstat(temp_fd, &temp_status) != 0 ||
+        (temp_status.st_uid != 0 && temp_status.st_uid != geteuid()) ||
+        ((temp_status.st_mode & 0022) && !(temp_status.st_mode & 01000)))
+    {
+        ::close(temp_fd);
+        return;
+    }
+    const int scan_fd = ::dup(temp_fd);
+    DIR* entries = scan_fd < 0 ? nullptr : ::fdopendir(scan_fd);
+    if (!entries) {
+        if (scan_fd >= 0) {
+            ::close(scan_fd);
+        }
+        ::close(temp_fd);
+        return;
+    }
+    std::size_t visited = 0;
+    std::size_t candidates = 0;
+    while (visited++ < 1024 && candidates < 64) {
+        errno = 0;
+        const auto* entry = ::readdir(entries);
+        if (!entry) {
+            break;
+        }
+        const std::string name = entry->d_name;
+        if (!detail::private_swarm_name(name)) {
+            continue;
+        }
+        ++candidates;
+        const int swarm_fd = ::openat(temp_fd, name.c_str(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (swarm_fd < 0) {
+            continue;
+        }
+        if (!detail::private_directory_handle_owned(swarm_fd)) {
+            ::close(swarm_fd);
+            continue;
+        }
+#if defined(__linux__)
+        // A normal coordinator teardown takes this same inode lock. Keeping
+        // it through rmdir prevents a removed name from being reused between
+        // the final identity check and unlinkat.
+        if (::flock(swarm_fd, LOCK_EX | LOCK_NB) != 0) {
+            ::close(swarm_fd);
+            continue;
+        }
+#endif
+        std::string contents;
+        const bool read_domain = detail::read_private_file_at(
+            swarm_fd, detail::private_cleanup_domain_filename(), contents);
+        const auto stored_domain = read_domain ? detail::parse_private_cleanup_domain(contents) : std::nullopt;
+        if (!stored_domain || !detail::same_private_cleanup_domain(*stored_domain, *current_domain)) {
+            ::close(swarm_fd);
+            continue;
+        }
+        // The directory is owner-only, and a writable temp parent is sticky.
+        // Other accounts cannot replace this entry between the handle check
+        // and the marker read; same-account processes share Sintra's trust.
+        const auto path = temp_directory / name;
+        const auto marker = run_marker_path(path);
+        const auto cleanup = run_marker_cleanup_path(path);
+        if (!detail::private_file_path_owned(marker) && !detail::private_file_path_owned(cleanup)) {
+            ::close(swarm_fd);
+            continue;
+        }
+        bool read_succeeded = false;
+        const bool has_cleanup = detail::private_file_path_owned(cleanup);
+        const auto record = read_run_marker(has_cleanup ? cleanup : marker, &read_succeeded);
+        if (!read_succeeded) {
+            ::close(swarm_fd);
+            continue;
+        }
+        bool stale = has_cleanup || !record;
+        if (record && !stale) {
+            // A native absence lookup uses the cleaner's PID namespace. A
+            // procfs record may be mounted for an ancestor namespace, so it
+            // cannot establish a different incarnation for this cleanup.
+            if (static_cast<uint64_t>(record->pid) <=
+                static_cast<uint64_t>(std::numeric_limits<pid_t>::max()))
+            {
+                stale = ::kill(static_cast<pid_t>(record->pid), 0) != 0 && errno == ESRCH;
+            }
+        }
+        if (stale) {
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+            if (detail::before_private_swarm_removal_for_test) {
+                detail::before_private_swarm_removal_for_test(path);
+            }
+#endif
+            (void)detail::remove_private_directory_tree_at(temp_fd, name.c_str(), 0, swarm_fd);
+        }
+        ::close(swarm_fd);
+    }
+    ::closedir(entries);
+    ::close(temp_fd);
+}
+#endif
+
+inline void cleanup_owned_swarm_directory(const std::filesystem::path& directory)
+{
+#if defined(__linux__)
+    const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return;
+    }
+    if (!detail::private_directory_handle_owned(fd)) {
+        ::close(fd);
+        return;
+    }
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (detail::before_owned_swarm_lock_for_test) {
+        detail::before_owned_swarm_lock_for_test(directory);
+    }
+#endif
+    int lock_result = 0;
+    do {
+        lock_result = ::flock(fd, LOCK_EX);
+    }
+    while (lock_result != 0 && errno == EINTR);
+    struct stat opened_status{};
+    struct stat named_status{};
+    const bool same_directory = lock_result == 0 &&
+        ::fstat(fd, &opened_status) == 0 &&
+        ::lstat(directory.c_str(), &named_status) == 0 &&
+        opened_status.st_dev == named_status.st_dev &&
+        opened_status.st_ino == named_status.st_ino;
+    if (same_directory) {
+        mark_run_directory_for_cleanup(directory);
+        (void)detail::remove_private_directory_tree(directory);
+    }
+    ::close(fd);
+#else
+    mark_run_directory_for_cleanup(directory);
+    (void)detail::remove_private_directory_tree(directory);
+#endif
 }
 
 } // namespace sintra

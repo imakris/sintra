@@ -489,8 +489,12 @@ Low-level lifecycle escape hatches and shutdown internals are documented in
 
 Managed swarm participants run under the same operating-system account. Sintra
 uses a private per-account directory under the operating system's temporary
-directory (`sintra-<16-digit hash of the user SID>` on Windows, which keeps ring
-paths short, and `sintra-<effective uid>` on POSIX).
+directory on Windows (`sintra-<16-digit hash of the user SID>`, which keeps ring
+paths short). On POSIX, each coordinator creates a direct owner-only directory
+named `sintra-<effective uid>-<16-digit random swarm id>` in the temporary
+directory. Its swarm id comes from operating-system random bytes; a name
+collision causes a new id to be drawn. Joining processes use that exact id and
+require the directory to exist already.
 Use a trusted temporary-directory location: the system default or a parent
 directory that other accounts cannot replace or alter.
 
@@ -500,7 +504,18 @@ use current-user ACLs. Creation and attachment reject permissive resources and
 links, and cleanup skips entries whose private ownership cannot be verified.
 This does not isolate mutually untrusted processes within the same account.
 
-All participants must use the new directory policy together. Existing sessions
+On Linux, stale POSIX directories are scavenged only when an optional private
+cleanup-domain record proves that the candidate and cleaner share the same boot,
+PID namespace, and time namespace. Missing, unreadable, or malformed records,
+and unavailable namespace metadata, leave the directory in place. On other
+POSIX systems, Sintra leaves crash residue for explicit operator cleanup.
+Normal shutdown removes
+its own directory. The former `sintra-<effective uid>` directories are not
+scanned or migrated; an older Sintra build also does not scan the new direct
+directories. A crash during an uncertain cleanup domain can therefore leave a
+private directory behind.
+
+All participants must use the same directory policy together. Existing sessions
 under the former shared `sintra` directory are not migrated or scavenged, and
 old permissive ring files are rejected. The shared-memory ABI is unchanged by
 this permission policy. The generic `sintra::ipc::file_mapping` keeps caller

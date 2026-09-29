@@ -2963,10 +2963,7 @@ Managed_process::~Managed_process()
         delete s_coord;
         s_coord = 0;
 
-        mark_run_directory_for_cleanup(std::filesystem::path(m_directory));
-
-        // removes the swarm directory
-        detail::remove_private_directory_tree(m_directory);
+        cleanup_owned_swarm_directory(std::filesystem::path(m_directory));
     }
 
 #ifndef _WIN32
@@ -3389,9 +3386,11 @@ void Managed_process::init(int argc, const char* const* argv)
     if (swarm_id_arg.empty()) {
         s_mproc_id = m_instance_id = make_process_instance_id();
 
+#ifdef _WIN32
         m_swarm_id = std::chrono::duration_cast<std::chrono::nanoseconds>(
             m_time_instantiated.time_since_epoch()
         ).count();
+#endif
         coordinator_is_local = true;
 
         // The coordinator has no branch entry. Its branch index remains at the
@@ -3428,12 +3427,15 @@ void Managed_process::init(int argc, const char* const* argv)
     if (!coordinator_is_local) {
         start_lifeline_watcher(Lifetime_policy{}, external_attach_token_arg.empty());
     }
-    m_directory = obtain_swarm_directory();
+    m_directory = obtain_swarm_directory(coordinator_is_local);
 
     const auto        abi_path    = std::filesystem::path(m_directory) / detail::abi_marker_filename();
     const std::string current_abi = detail::abi_token();
 
     if (coordinator_is_local) {
+#ifndef _WIN32
+        detail::publish_private_cleanup_domain(std::filesystem::path(m_directory));
+#endif
         run_marker_record_t run_marker{};
         run_marker.pid                  = static_cast<uint32_t>(m_pid);
         run_marker.start_stamp          = m_process_start_stamp;
@@ -6770,8 +6772,10 @@ void Managed_process::override_communication_state_for_test(Communication_state 
  //////////////////////////////////////////////////////////////////////////
 
 inline
-std::string Managed_process::obtain_swarm_directory()
+std::string Managed_process::obtain_swarm_directory(bool coordinator_is_local)
 {
+#ifdef _WIN32
+    (void)coordinator_is_local;
     const auto sintra_directory = detail::private_swarm_root();
     const auto directory_error = std::make_error_code(std::errc::permission_denied);
     if (!detail::create_private_directory(sintra_directory)) {
@@ -6793,6 +6797,36 @@ std::string Managed_process::obtain_swarm_directory()
     }
 
     return swarm_directory.string();
+#else
+    const auto directory_error = std::make_error_code(std::errc::permission_denied);
+    if (!coordinator_is_local) {
+        const auto swarm_directory = detail::private_swarm_root(m_swarm_id);
+        if (m_swarm_id == 0 || !detail::private_directory_owned(swarm_directory)) {
+            throw std::filesystem::filesystem_error(
+                "access to a working directory failed", swarm_directory, directory_error);
+        }
+        return swarm_directory.string();
+    }
+
+    const auto temp_directory = std::filesystem::temp_directory_path();
+    cleanup_stale_private_swarms(temp_directory);
+    for (unsigned attempt = 0; attempt < 64; ++attempt) {
+        const auto candidate = detail::draw_private_swarm_id();
+        if (candidate == 0) { continue; }
+        const auto swarm_directory = detail::private_swarm_root(candidate);
+        switch (detail::create_private_swarm_directory_exclusive(swarm_directory)) {
+            case detail::private_swarm_create_result::collision:
+                continue;
+            case detail::private_swarm_create_result::failed:
+                throw std::filesystem::filesystem_error(
+                    "access to a working directory failed", swarm_directory, directory_error);
+            case detail::private_swarm_create_result::created:
+                m_swarm_id = candidate;
+                return swarm_directory.string();
+        }
+    }
+    throw std::runtime_error("Sintra could not allocate a unique private swarm directory.");
+#endif
 }
 
 // Calls f when the specified transceiver becomes available.

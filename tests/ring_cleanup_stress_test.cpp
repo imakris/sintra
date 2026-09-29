@@ -1,10 +1,8 @@
 //
 // Sintra Ring Cleanup Stress Test
 //
-// This test repeatedly initializes and finalizes Sintra while seeding the
-// coordinator scratch directory with dozens of synthetic stale run markers.
-// It exercises the cleanup logic introduced in PR #611 by ensuring that
-// obsolete swarm directories are pruned before each run.
+// Seeds stale run markers, then initializes a coordinator to exercise its
+// platform cleanup policy and normal directory teardown.
 //
 
 #include <sintra/sintra.h>
@@ -20,6 +18,11 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -85,6 +88,44 @@ int main(int argc, char* argv[])
 
     configure_temp_directory(temp_root);
 
+#ifndef _WIN32
+#if defined(__linux__)
+    const auto domain = sintra::detail::current_private_cleanup_domain();
+    if (!domain) {
+        sintra::init(argc, argv);
+        sintra::detail::finalize();
+        return 0;
+    }
+    const auto child = ::fork();
+    sintra::test::require_true(child >= 0, "ring_cleanup_stress: ",
+        "fork stale marker owner");
+    if (child == 0) { ::_exit(0); }
+    int status = 0;
+    sintra::test::require_true(::waitpid(child, &status, 0) == child && WIFEXITED(status),
+        "ring_cleanup_stress: ", "reap stale marker owner");
+    constexpr std::uint32_t k_stale_runs = 48;
+    for (std::uint32_t i = 0; i < k_stale_runs; ++i) {
+        const auto directory = sintra::detail::private_swarm_root(i + 1);
+        sintra::test::require_true(
+            sintra::detail::create_private_swarm_directory_exclusive(directory) ==
+                sintra::detail::private_swarm_create_result::created,
+            "ring_cleanup_stress: ", "create direct private swarm directory");
+        sintra::detail::publish_private_cleanup_domain(directory);
+        sintra::run_marker_record_t record{};
+        record.pid = static_cast<std::uint32_t>(child);
+        sintra::test::require_true(sintra::write_run_marker(directory, record),
+            "ring_cleanup_stress: ", "publish stale marker");
+    }
+    sintra::init(argc, argv);
+    sintra::detail::finalize();
+    sintra::test::require_true(count_subdirectories(temp_root) == 0,
+        "ring_cleanup_stress: ", "stale direct swarm directories removed");
+#else
+    sintra::init(argc, argv);
+    sintra::detail::finalize();
+#endif
+    return 0;
+#else
     const auto sintra_base = sintra::detail::private_swarm_root();
     sintra::test::require_true(sintra::detail::create_private_directory(sintra_base),
         "ring_cleanup_stress: ", "create private swarm root");
@@ -139,4 +180,5 @@ int main(int argc, char* argv[])
     }
 
     return 0;
+#endif
 }

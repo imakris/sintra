@@ -1643,7 +1643,7 @@ public:
     string                              m_directory;
 
     inline
-    string obtain_swarm_directory();
+    string obtain_swarm_directory(bool coordinator_is_local);
 
     function<int()>                     m_entry_function = [] { return 0; };
 

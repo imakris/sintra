@@ -208,6 +208,13 @@ void test_cleanup_policy(const std::filesystem::path& directory)
         sintra::current_process_start_stamp().value_or(0));
     require(std::filesystem::exists(stale), "never scavenge an untrusted root");
     set_fixture_private(root, true, true);
+#ifndef _WIN32
+    // POSIX no longer scans directories under the former per-account root.
+    set_fixture_private(retained, true, true);
+    set_fixture_private(sintra::run_marker_path(mixed), true);
+    require(sintra::detail::remove_private_directory_tree(root), "remove owned fixtures");
+    return;
+#endif
 
     const auto target = directory / "link_target";
     require(sintra::detail::create_private_directory(target), "create owned link target");
@@ -240,8 +247,13 @@ void test_managed_session(int argc, char* argv[])
 {
     sintra::init(argc, argv);
     const std::filesystem::path session = sintra::s_mproc->m_directory;
+#ifdef _WIN32
     require(session.parent_path() == sintra::detail::private_swarm_root(), "per-account root selected");
     require(sintra::detail::private_directory_owned(session.parent_path()), "root is private");
+#else
+    require(session == sintra::detail::private_swarm_root(sintra::s_mproc->m_swarm_id),
+        "direct private swarm root selected");
+#endif
     require(sintra::detail::private_directory_owned(session), "session is private");
     size_t files = 0;
     for (const auto& entry : std::filesystem::directory_iterator(session)) {
