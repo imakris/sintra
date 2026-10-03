@@ -14,7 +14,9 @@ TEST_TIMEOUT_OVERRIDES = {
     "recovery_test_release": 120.0,
     "barrier_complex_choreography_test": 120.0,
     "barrier_pathological_choreography_test": 120.0,
-    "barrier_processing_fence_backlog_test": 90.0,
+    # Retained native macOS binaries complete this 64-round fixture in 93-97s;
+    # allow headroom for normal completion and collective teardown.
+    "barrier_processing_fence_backlog_test": 120.0 if sys.platform == "darwin" else 90.0,
     "barrier_stress_test": 120.0,
     "barrier_drain_and_unpublish_test_debug": 75.0,
     "barrier_drain_and_unpublish_test_release": 75.0,

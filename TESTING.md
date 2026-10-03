@@ -363,10 +363,18 @@ Each sub-test inherits the iteration count from the parent entry.
 Default timeout is 5 seconds per test run. Some tests override this:
 
 - `recovery_test`: 120 seconds (tests crash recovery, which is slow)
-- `barrier_processing_fence_backlog_test`: 90 seconds (runs 64 internal backlog rounds)
+- `barrier_processing_fence_backlog_test`: 120 seconds on macOS, 90 seconds elsewhere
+  (runs 64 internal backlog rounds)
 - `lifecycle_reaper_contract_test`: 20 seconds (includes a 5-second shared-fate watchdog)
 
-Override globally with `--timeout`:
+The [native macOS completion diagnostic](https://github.com/imakris/sintra/actions/runs/37126983600)
+reused the binaries from `6aca68f1` and passed two runs per configuration in
+92.66-96.56 seconds, completing all 64 rounds and 1,024 messages with normal
+teardown. The macOS limit leaves time for that workload to finish. These runs
+do not establish why it took longer than earlier builds.
+
+`--timeout` raises the global minimum; a larger value also takes precedence
+over a test-specific limit:
 
 ```bash
 python3 run_tests.py --timeout 60 --build-dir ../build --config Release
