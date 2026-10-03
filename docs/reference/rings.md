@@ -83,6 +83,12 @@ struct Ring_W {
     Ring_diagnostics get_diagnostics() const noexcept;
 };
 
+enum class Ring_wait_hint
+{
+    ADAPTIVE,
+    BLOCKING
+};
+
 template <typename T>
 struct Ring_R {
     Ring_R(const std::string& directory,
@@ -94,7 +100,8 @@ struct Ring_R {
     Range<T> start_reading(size_t num_trailing_elements);
     void     done_reading();
     sequence_counter_type reading_sequence() const;
-    const Range<T> wait_for_new_data();
+    const Range<T> wait_for_new_data(
+        Ring_wait_hint wait_hint = Ring_wait_hint::ADAPTIVE);
     void done_reading_new_data();
 
     Ring_diagnostics get_diagnostics() const noexcept;
@@ -247,6 +254,22 @@ Contract:
   and returns the newly readable range. Pair every non-empty result with
   `done_reading_new_data()` before the next wait or read operation so the
   reader guard can migrate across octiles.
+- Its optional `Ring_wait_hint` affects waiting only. `ADAPTIVE` is the
+  default and uses the configured fast spin and precision sleeps before
+  parking on a semaphore. `BLOCKING` skips those two phases for that call:
+  `reader.wait_for_new_data(Ring_wait_hint::BLOCKING)`. Both return already
+  available data immediately and preserve delivery order, stop/unblock
+  handling, and the blocking path's periodic watchdog checks. The hint does
+  not select recipients or suppress publication wakeups.
+- Managed messaging starts with `BLOCKING` and selects adaptive waiting
+  only for useful traffic. Useful traffic anywhere in a drained batch
+  keeps its next wait adaptive; an unrelated last frame does not cancel that
+  decision. An empty-ring observation consumes the decision, so a later
+  unrelated-only burst can park without renewing an earlier polling period.
+  Local requests and replies count as useful even if their target or handler
+  has gone away. Broadcasts count conservatively, except for the originating
+  process excluded by `any_remote`; local-only events count on their origin's
+  ring. The coordinator retains adaptive waiting for its validated traffic.
 - `Ring_R_snapshot` enforces that pairing by RAII. `make_snapshot(reader,
   args...)` throws on failure (typically
   `ring_reader_evicted_exception`); `try_snapshot_e(reader, args...)`

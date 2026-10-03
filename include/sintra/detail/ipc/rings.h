@@ -189,6 +189,13 @@ namespace fs  = std::filesystem;
 
 using sequence_counter_type = uint64_t;
 
+// Per-call waiting preference; published data and wakeup ordering are unchanged.
+enum class Ring_wait_hint
+{
+    ADAPTIVE,
+    BLOCKING
+};
+
 namespace detail {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 namespace test_hooks {
@@ -196,6 +203,8 @@ using Ring_guard_callback = void (*)(const char*, const std::atomic<uint64_t>*, 
 inline std::atomic<Ring_guard_callback> s_ring_guard_operation{nullptr};
 using Ring_wait_callback = void (*)(int);
 inline std::atomic<Ring_wait_callback> s_ring_wait_prepared{nullptr};
+using Ring_wait_started_callback = void (*)(Ring_wait_hint);
+inline std::atomic<Ring_wait_started_callback> s_ring_wait_started{nullptr};
 }
 #endif
 
@@ -3036,10 +3045,19 @@ struct Ring_R : Ring<T, true>
      *
      * SHUTDOWN BEHAVIOR: If m_stopping is set, returns an empty range immediately
      * without blocking. This allows reader threads to exit gracefully during shutdown.
+     * BLOCKING skips the initial spin and precision sleeps for this call only.
      */
-    const Range<T> wait_for_new_data()
+    const Range<T> wait_for_new_data(Ring_wait_hint wait_hint = Ring_wait_hint::ADAPTIVE)
     {
         constexpr auto blocking_wait_watchdog = std::chrono::milliseconds(50);
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (auto callback = detail::test_hooks::s_ring_wait_started.load(
+                std::memory_order_acquire))
+        {
+            callback(wait_hint);
+        }
+#endif
 
         auto produce_range = [&]() -> Range<T> {
             Local_read_lock read_lock(m_reading_lock);
@@ -3103,7 +3121,7 @@ struct Ring_R : Ring<T, true>
             return m_reading_sequence->load() == c.leading_sequence;
         };
 
-        bool stay_in_blocking_phase = false;
+        bool stay_in_blocking_phase = wait_hint == Ring_wait_hint::BLOCKING;
         while (true) {
             bool blocking_wait_timed_out = false;
             if (m_stopping) {

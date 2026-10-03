@@ -877,6 +877,7 @@ void Process_message_reader::request_reader_function()
 
     publish_request_progress(m_in_req_c->get_message_reading_sequence());
 
+    auto next_wait_hint = Ring_wait_hint::BLOCKING;
     while (true) {
         const State reader_state = m_reader_state.load();
         if (reader_state == READER_STOPPING) {
@@ -889,7 +890,7 @@ void Process_message_reader::request_reader_function()
         // request reader. The reply reader thread is responsible for popping
         // tokens when the *reply* reading sequence reaches them.
 
-        Message_prefix* m = m_in_req_c->fetch_message();
+        Message_prefix* m = m_in_req_c->fetch_message(&next_wait_hint);
         s_tl_current_message = m;
         if (m == nullptr) {
             break;
@@ -899,11 +900,19 @@ void Process_message_reader::request_reader_function()
             continue;
         }
 
+        // The coordinator's relay and service obligations make its traffic useful.
+        if (s_coord) {
+            next_wait_hint = Ring_wait_hint::ADAPTIVE;
+        }
+
         if (is_local_instance(m->receiver_instance_id)) {
             if (m->receiver_instance_id == any_local) {
                 // Local event: only handle on the originating process ring.
                 const bool reading_local_ring =
                     has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c);
+                if (reading_local_ring) {
+                    next_wait_hint = Ring_wait_hint::ADAPTIVE;
+                }
                 if (reading_local_ring &&
                     ((reader_state == READER_NORMAL) ||
                         detail::Reader_service_dispatch_policy::allow_event(
@@ -916,6 +925,8 @@ void Process_message_reader::request_reader_function()
                 }
             }
             else {
+                // Missing targets still require an unavailable-target reply.
+                next_wait_hint = Ring_wait_hint::ADAPTIVE;
                 // If the coordinator is local and this request targets a *service* instance
                 // (e.g., Coordinator), relay it to the coordinator's ring and *skip* local
                 // dispatch to avoid double-processing (local dispatch + relay).
@@ -1013,6 +1024,12 @@ void Process_message_reader::request_reader_function()
         if (m->receiver_instance_id >= any_remote) {
 
             // this is an interprocess event message.
+            const bool sender_is_local = is_local(m->sender_instance_id);
+            const bool skip_local_sender =
+                (m->receiver_instance_id == any_remote) && sender_is_local;
+            if (!skip_local_sender) {
+                next_wait_hint = Ring_wait_hint::ADAPTIVE;
+            }
 
             if ((reader_state == READER_NORMAL) ||
                 detail::Reader_service_dispatch_policy::allow_event(
@@ -1024,9 +1041,6 @@ void Process_message_reader::request_reader_function()
                 // In that case, skip local event handling here and let the relayed
                 // copy be handled when reading the coordinator's ring.
                 const bool coordinator_reading_remote = (s_coord && !has_same_mapping(*m_in_req_c, *s_mproc->m_out_req_c));
-                const bool sender_is_local = is_local(m->sender_instance_id);
-                const bool skip_local_sender =
-                    (m->receiver_instance_id == any_remote) && sender_is_local;
 
                 if (!coordinator_reading_remote && !skip_local_sender) {
                     dispatch_event_handlers(
@@ -1164,6 +1178,7 @@ void Process_message_reader::reply_reader_function()
 
     publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
 
+    auto next_wait_hint = Ring_wait_hint::BLOCKING;
     while (true) {
         const State reader_state = m_reader_state.load();
         if (reader_state == READER_STOPPING) {
@@ -1192,7 +1207,7 @@ void Process_message_reader::reply_reader_function()
             }
         }
 
-        Message_prefix* m = m_in_rep_c->fetch_message();
+        Message_prefix* m = m_in_rep_c->fetch_message(&next_wait_hint);
         s_tl_current_message = m;
 
         if (m == nullptr) {
@@ -1201,6 +1216,10 @@ void Process_message_reader::reply_reader_function()
         if (!validate_reply_message(*m, m_in_rep_c->m_id, *this)) {
             publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
             continue;
+        }
+
+        if (s_coord || is_local_instance(m->receiver_instance_id)) {
+            next_wait_hint = Ring_wait_hint::ADAPTIVE;
         }
 
         if (is_local_instance(m->receiver_instance_id)) {

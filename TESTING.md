@@ -149,6 +149,39 @@ same C++20 toolchain and include paths as the normal test target, and the
 required build queue for local compiler invocations. Without this definition,
 the source is a normal test target and must compile successfully.
 
+### Ring wait hints and optional measurement
+
+`ring_wait_hint_test` runs a brief correctness check in the normal suite. It
+covers default and explicit wait policies, ordered delivery, publication racing
+with reader parking, stop/unblock/final writer close, hint lifetime across
+immediately available message ranges, and managed routing. The managed case
+checks a mixed batch containing local work followed by unrelated targeted
+traffic, and a leaf that receives no calls. Policy assertions use test hooks
+and committed sequence positions rather than CPU or latency thresholds.
+
+The same executable has an optional longer raw-ring benchmark. The normal
+runner supplies no benchmark flag and does not run this mode:
+
+```bash
+build/tests/sintra_ring_wait_hint_test --benchmark --seconds 10 --readers 8
+```
+
+On Windows, add `.exe` and use the configuration subdirectory when the build
+layout includes one. The benchmark compares adaptive and blocking waits with
+five publications per second. It reports ordered delivery, elapsed time, total
+reader thread CPU time when available, Windows execution cycles when available,
+and receive latency. It fails only for delivery or setup errors; performance
+numbers have no pass/fail threshold. `--seconds` accepts 1 through 120 and
+`--readers` accepts 1 through 64; the defaults are 10 seconds and 8 readers.
+
+CPU time can be too coarsely accounted to show this workload. A zero time
+counter does not establish zero activity. Execution cycles are activity evidence
+and must not be converted to elapsed time; frequency and scheduling can affect
+comparisons. Run optimized builds with the same compiler, configuration and
+workload when comparing changes. This mode measures raw ring readers. Measuring
+managed swarm behavior additionally requires an application workload that uses
+the normal messaging path, including target delivery and uninvolved processes.
+
 ### Multi-process teardown helpers
 
 Tests that end with the ordinary "all participants reach the same top-level

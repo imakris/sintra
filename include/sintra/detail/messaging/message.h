@@ -936,7 +936,9 @@ struct Message_ring_R: Ring_R<char>
 
     // The returned complete frame is owned by this reader until the next fetch.
     // If there is no message to read, this blocks without holding the copy gate.
-    Message_prefix* fetch_message()
+    // A supplied hint accumulates across readable ranges until an empty-ring
+    // observation consumes it; unhinted callers retain adaptive waiting.
+    Message_prefix* fetch_message(Ring_wait_hint* next_wait_hint = nullptr)
     {
         if (!m_reading) {
             start_reading();
@@ -948,7 +950,14 @@ struct Message_ring_R: Ring_R<char>
                 done_reading_new_data();
                 report_eviction(reading_sequence());
 
-                auto range = wait_for_new_data();
+                auto wait_hint = Ring_wait_hint::ADAPTIVE;
+                if (next_wait_hint) {
+                    wait_hint = *next_wait_hint;
+                    if (reading_sequence() == get_leading_sequence()) {
+                        *next_wait_hint = Ring_wait_hint::BLOCKING;
+                    }
+                }
+                auto range = wait_for_new_data(wait_hint);
                 const auto available = range.begin ? size_t(range.end - range.begin) : 0;
                 report_eviction(reading_sequence() - available);
                 if (!range.begin) {
