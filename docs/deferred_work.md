@@ -39,6 +39,17 @@ progress, and attribution of barrier loss facts. Its mechanics must be
 reconciled with subsequent code changes before reuse. No particular journal,
 marker protocol or API shape is adopted here.
 
+### Writer-death delivery and the parked-reader watchdog
+
+**State: owner decisions taken on 2026-10-05; design revision 3 and
+implementation deferred, to be taken up as their own effort.** A crashed
+writer's committed messages are to be delivered, and wake-up notification is
+to survive a poster's death so that the 50 ms parked-reader timeout can be
+removed. Today delivery of a dead writer's last messages depends on timing.
+The decisions, settled contract, open design items, stages and review
+protocol are in the
+[writer-death and watchdog plan](writer_death_and_wait_watchdog_plan.md).
+
 ### Owning values for variable-field `receive<T>()`
 
 **State: closed; owned-frame API and unsafe by-value rejection delivered.**

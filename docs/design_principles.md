@@ -190,6 +190,18 @@ schemes. Sintra supports ARM64: macOS on Apple Silicon.
 **9. Messages after a gap are still delivered.**
 A reader that lost an interval continues with the messages that follow.
 
+Owner decision, 2026-10-05 (decided, not implemented): **a crashed writer's
+committed messages are delivered.** A message is committed once its writer
+has published it to the ring. A process's transport ends only at its writer's
+own close, at its exact native death (principle 6), or at a definitive
+cancellation before any writer can start. A process's own unpublication, and
+any retirement, only record intent and never discard committed messages.
+Retiring a live process waits for its writer to close or to be terminated.
+This covers processes other than the coordinator, whose death remains swarm
+death (principle 3). The
+[writer-death and watchdog plan](writer_death_and_wait_watchdog_plan.md) is
+the canonical record and lists what remains to be designed.
+
 ## Adopted design direction (under review, not implemented)
 
 This covers live-reader eviction and reader death. Design notes are
