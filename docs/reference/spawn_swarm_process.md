@@ -228,16 +228,19 @@ Contract:
   wait-status classification reports `unavailable` while retaining that native
   bit pattern.
 - On Windows a child that dies from a hardware fault reports the OS exception
-  code as its `native_status`, for example `0xC0000005` for an access violation,
-  and `SIGABRT` or `SIGTRAP` report `3`. `SIGINT` and `SIGTERM` report `1`. The
-  exact code is not a contract: where no exception record is available, which
-  means a software `raise()` or a CRT that does not publish one, Sintra falls
-  back to one representative status per signal, which names the fault's class
-  rather than its cause. Test for a non-zero status rather than for a particular
-  value. `status_kind` remains `exited` in all of these cases, as described
-  above, so it is not a crash indicator; for crash provenance use the
-  coordinator's [lifecycle handler](lifecycle_hooks.md), whose `reason::crash`
-  events carry the signal number.
+  code as its `native_status`, for example `0xC0000005` for an access violation.
+  When Sintra's handler ends an aborting child, `SIGABRT` reports `0xC0000409`,
+  the status a default release UCRT `abort()` ends with; a `SIGABRT` handler
+  installed before Sintra's can end it with another status, such as `3`.
+  `SIGTRAP` reports `3`, and `SIGINT` and `SIGTERM` report `1`. The exact code
+  is not a contract: where no exception record is available, which means a
+  software `raise()` or a CRT that does not publish one, Sintra falls back to
+  one representative status per signal, which names the fault's class rather
+  than its cause. Test for a non-zero status rather than for a particular value.
+  `status_kind` remains `exited` in all of these cases, as described above, so
+  it is not a crash indicator; for crash provenance use the coordinator's
+  [lifecycle handler](lifecycle_hooks.md), whose `reason::crash` events carry
+  the signal number.
 
 Threading and lifecycle:
 

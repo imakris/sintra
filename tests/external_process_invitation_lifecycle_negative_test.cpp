@@ -367,10 +367,12 @@ bool wait_for_expected_exit(
             }
             else {
 #ifdef _WIN32
-                // Sintra terminates with 1 when it owns the end of the chain;
-                // the harness's disabled debug-pause handler re-raises to UCRT's 3.
+                // Sintra terminates an abort with 0xC0000409 when it owns the
+                // end of the chain; the harness's disabled debug-pause handler
+                // re-raises to UCRT's 3.
                 expected_status =
-                    child.exited_with_code(1) || child.exited_with_code(3) ||
+                    child.exited_with_code(0xC0000409u) ||
+                    child.exited_with_code(3) ||
                     child.exited_with_code(EXCEPTION_ACCESS_VIOLATION);
 #else
                 expected_status = child.exited_from_signal(SIGABRT);

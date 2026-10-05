@@ -36,10 +36,12 @@
   protocol. All processes in a swarm must use binaries built against the same
   Sintra ring ABI.
 - Windows fatal-signal exit statuses changed. A hardware fault now exits with the
-  OS exception code, for example `0xC0000005`, instead of `1`, and `SIGABRT` and
-  `SIGTRAP` exit with `3`. `SIGINT` and `SIGTERM` still exit with `1`. Code that
-  compared a managed child's Windows exit status against `1` must test for a
-  non-zero status instead; the exact code is not a contract.
+  OS exception code, for example `0xC0000005`, instead of `1`. When Sintra's
+  handler ends the process, `SIGABRT` exits with `0xC0000409`, the status a
+  default release UCRT `abort()` ends with, and `SIGTRAP` exits with `3`.
+  `SIGINT` and `SIGTERM` still exit with `1`. Code that compared a managed
+  child's Windows exit status against `1` must test for a non-zero status
+  instead; the exact code is not a contract.
 - `SINTRA_HAS_SEH` selects the Windows per-thread fault guard. It defaults to `1`
   for MSVC and clang-cl and `0` elsewhere; clang targeting `*-w64-windows-gnu`
   must opt in with `-DSINTRA_HAS_SEH=1 -fms-extensions`, and MinGW GCC builds keep

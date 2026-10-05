@@ -812,6 +812,10 @@ inline namespace process_lifetime_detail {
     // exception record's own code instead, and reach this only where no record
     // was published: a software raise(), or a CRT that does not publish one.
     // Callers must test for a non-zero status, not for a particular one.
+    //
+    // SIGABRT takes the status a default release UCRT abort() ends with when no
+    // handler intercepts it: __fastfail(FAST_FAIL_FATAL_APP_EXIT). The 3 that
+    // raise() exits with for a defaulted signal is an ordinary exit code.
 
     inline unsigned windows_signal_exit_status(int sig) noexcept
     {
@@ -819,7 +823,7 @@ inline namespace process_lifetime_detail {
             case SIGSEGV: return 0xC0000005u;   // STATUS_ACCESS_VIOLATION
             case SIGILL:  return 0xC000001Du;   // STATUS_ILLEGAL_INSTRUCTION
             case SIGFPE:  return 0xC000008Eu;   // STATUS_FLOAT_DIVIDE_BY_ZERO
-            case SIGABRT: return 3u;            // UCRT abort() convention
+            case SIGABRT: return 0xC0000409u;   // fast fail (STATUS_STACK_BUFFER_OVERRUN)
 #ifdef SIGTRAP
             case SIGTRAP: return 3u;
 #endif
