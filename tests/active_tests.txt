@@ -121,6 +121,7 @@ recovery_worker_retirement_test                         10
 recycled_pid_lock_test                                  10
 rendezvous_barrier_error_paths_test                      5
 ring_abi_fingerprint_test                                5
+ring_crash_safe_wakeup_test                              1
 ring_cleanup_stress_test                               100
 ring_control_first_attach_process_test                  10
 ring_helpers_test                                        5

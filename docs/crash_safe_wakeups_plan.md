@@ -4,10 +4,30 @@
 
 Reopened by the owner on 2026-10-09. This is the active wakeup workstream of
 [the writer-death and watchdog plan](writer_death_and_wait_watchdog_plan.md).
-The first slice is adopted after independent Astra xhigh, Sol 6.1 xhigh and
-Claude Sonnet 5.5 xhigh reviews found no remaining blockers. The full wakeup
-objective and its native-death continuation remain open. No production
-behavior has changed and no tests have run at this planning checkpoint.
+The first-slice direction was reviewed by Astra xhigh, Sol 6.1 xhigh and
+Claude Sonnet 5.5 xhigh. Its implementation candidate is in the separate
+`work/crash-safe-wakeups-20261009` worktree. The pre-review candidate passed
+the focused Windows and Linux/WSL Debug and Release local gates. Current
+reviews then identified two concrete implementation blockers. The corrected
+candidate passed all 84 renewed focused runtime executions, 12 isolated
+Windows regression executions and all four seven-target builds. The source
+and all 28 selected binaries remained unchanged across the renewed runtime
+gates. Required Opus 5.5 and Sonnet 5.5 reviews could not run because their API
+quota was exhausted; no source review occurred in those attempts.
+Completed follow-ups from participating Astra and Sol 6.1 reviewers found no
+remaining source blockers; they provide continuity evidence, not independent
+acceptance. The completed eligible gpt-5.6-sol xhigh review found no source
+blocker but recorded an evidence-package inconsistency blocker. That verdict
+remains preserved; the valid current runtime results do not turn it into a
+clean verdict. A matching source/evidence package and an actual qualifying
+clean pre-push review are required even for a draft. Additional Sol review
+does not substitute for the mandated Astra/Opus design-adoption requirements.
+Mandatory design adoption, implementation acceptance, hosted platform CI and
+merge gates remain open.
+Earlier provisional passes and
+deliberately failing intermediate candidates are historical evidence, not
+acceptance of this candidate. The full wakeup objective and its native-death
+continuation remain open.
 
 The objective is that a poster dying at any instruction cannot permanently
 strand a surviving reader or prevent a later stop. Ultimately, a parked
@@ -52,7 +72,7 @@ These citations were checked at `34017b49`. Paths below are under
 | Crash notification still directly unpublishes. That path can stop readers and discard unread frames. | `process/managed_process_impl.h:3588`; `process/coordinator_impl.h:1606` |
 | Active-target filtering already exists, separately from runtime selection. | `CMakeLists.txt:147`; `tests/CMakeLists.txt:59`; `TESTING.md:32` |
 
-## Adopted first slice: replay-safe notification
+## Candidate first slice: replay-safe notification
 
 This slice fixes ring notification itself while production retains the
 watchdog. It does not alter process retirement, RPC cancellation or wire
@@ -89,6 +109,74 @@ Use the existing semaphore backends and lock ownership. Do not introduce a
 second notification queue, an executor, a timer or a polling fallback.
 Ordinary implementation details, including checked backend error plumbing,
 belong to implementation and its review.
+
+## First-slice implementation checkpoint
+
+The source candidate uses a checked binary backend post and removes the two
+shared reason flags. A flush attempts every outstanding registration once;
+if any attempt fails, it retains the whole registration stack for harmless
+replay. The publication path returns its captured committed sequence and
+releases local writer ownership before reporting errors directly to stderr.
+It cannot turn a notification failure into async-request rollback or a second
+reply through a messaging caller's exception handler. Stop, close, global
+unblock and writer-acquisition replay use the same checked posting boundary.
+Generic counting-semaphore behavior is unchanged.
+
+Reader admission checks quiescent reset and pins the Windows object before
+publishing an active lifetime slot. Failed same-reader cleanup retains a local
+reset obligation; re-registration must discharge it before publishing another
+sleeping registration. The staged fixture now leaves and observes an actual
+token at that failed-cleanup seam, then checks reset before that same reader's
+next registration. Its explicit raw-owner replay rejects returned backend
+errors. The normal roster adds only this fixture; the ABI fixture expects
+layout revision 6 and rejects revision 5.
+
+The frozen containment checkpoint and earlier raw evidence remain under
+`C:\plms\varinomics\_agent_reports\sintra_crash_safe_wakeups_20261009\`.
+The checkpoint records causal failures on the instrumented baseline,
+provisional crash-gap passes, and request/reply failures from an intentionally
+throwing intermediate post boundary. None was a gate of the final contained
+candidate.
+
+The resumed Windows Debug and Release builds of all seven focused targets
+reported `FBuild: OK:`. Their first runtime attempt exposed a close-fixture
+oracle error: `close_post_failure` returned an empty range with no pending
+registration, but the fixture required the stopping flag on that first wake.
+An isolated diagnostic reproduced those exact terms in both configurations.
+The fixture now permits its established next-call close observation, as its
+other close scenario already did, while separately requiring registration
+cleanup. It passed three isolated runs per configuration after the correction;
+production bytes were unchanged. The corrected complete Windows focused
+schedule then passed 17 executions per configuration, including three complete
+crash-fixture runs and ten counting-semaphore runs. Each of the four selected
+IPC preservation cases also passed in both configurations: 42 requested
+executions passed on Windows. The same schedule and selected IPC cases passed
+on WSL Ubuntu 24.04 with GNU 13.3 in Debug and Release. All seven selected
+targets built in both local platforms/configurations, and all 84 requested
+runtime executions passed on the frozen production and corrected fixture
+bytes of the pre-review candidate.
+
+Current Astra and Sol 6.1 reviews identified two source blockers beyond that
+runtime coverage: the Debug non-tail cleanup diagnostic invoked application
+logging under the posting lock, and Windows cache/key allocations occurred
+outside the checked handle helper's exception boundary. The new isolated
+regressions reproduced the callback deadlock in Debug and allocation-path
+failure in both Windows configurations. The corrected source preserves the
+non-tail counter without calling application logging, and contains the whole
+Windows handle lookup with checked `ENOMEM` and handle cleanup. Both new
+regression selectors passed three isolated runs per Windows configuration
+(12 executions total). The seven selected targets also built successfully in
+Windows and WSL Debug and Release. The current fixed candidate then passed all
+84 renewed focused runtime executions across those four configurations,
+including the new platform-applicable regressions in each complete crash
+fixture run. Source and all 28 selected executables matched before and after;
+no rebuild was needed. Completed Astra/Sol continuity follow-ups found no
+remaining source blockers. The eligible Sol 5.6 review's evidence-package
+blocker remains recorded; a matching package and qualifying clean independent
+pre-push verdict are required.
+Hosted platform CI and current implementation acceptance remain open.
+The production 50 ms watchdog and the native-death continuation remain pending
+their own completion gates.
 
 ## Continuation needed for complete crash-safe wakes
 
@@ -194,7 +282,7 @@ kernel timeout. Tests with the watchdog disabled are the direct oracle for
 this slice. Any later rescue detector must observe kernel timeout separately
 from token consumption; ordinary idle timeout is not a rescue.
 
-Next action: implement the reviewed first slice, starting with baseline
-fault-injection failures, then run its focused gates. Continue toward the
-full objective; report any
+Next action: build and exercise the frozen first-slice candidate through the
+focused gates, resolve concrete failures, then obtain its independent
+implementation reviews. Continue toward the full objective; report any
 unavailable review or platform gate by its actual limitation.

@@ -205,6 +205,7 @@ using Ring_wait_callback = void (*)(int);
 inline std::atomic<Ring_wait_callback> s_ring_wait_prepared{nullptr};
 using Ring_wait_started_callback = void (*)(Ring_wait_hint);
 inline std::atomic<Ring_wait_started_callback> s_ring_wait_started{nullptr};
+inline std::atomic<bool> s_ring_wait_watchdog_enabled{true};
 }
 #endif
 
@@ -522,7 +523,9 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // spinlocks and ownership mutex as process instances.
 // Revision 5 gives the spinlock's second word generation semantics instead of
 // a wall-clock progress stamp. Old controls cannot be safely attached.
-inline constexpr uint64_t k_ring_abi_layout_revision = 5;
+// Revision 6 replaces the shared notification flags with a binary backend token
+// and retains each sleeping registration until its checked post succeeds.
+inline constexpr uint64_t k_ring_abi_layout_revision = 6;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_sintra_ring_abi_version,
@@ -1463,111 +1466,95 @@ private:
     bool                                m_lifecycle_acquire_complete   = false;
 };
 
+namespace detail {
+
+inline void report_ring_wakeup_error(
+    const char* operation,
+    const void* control,
+    int index,
+    const std::error_code& error,
+    const char* ring = nullptr) noexcept
+{
+    if (!error) {
+        return;
+    }
+    // A message caller can still hold its RPC mutex here. Diagnostics must
+    // neither allocate nor invoke an application logging callback.
+    std::fprintf(stderr,
+        "[sintra][ring] %s: ring=%s control=%p reader=%d backend=%s:%d\n",
+        operation, ring ? ring : "<control mapping>", control, index,
+        error.category().name(), error.value());
+    std::fflush(stderr);
+}
+
+} // namespace detail
+
 // A binary semaphore tailored for the ring's reader wakeup policy.
 class sintra_ring_semaphore
 {
 public:
     enum class wait_result
     {
-        ordered,
-        unordered,
+        signaled,
         timeout
     };
 
-    sintra_ring_semaphore() = default;
+    sintra_ring_semaphore() noexcept
+    {
+        m_impl.init_named(0, nullptr, 1);
+    }
+
+    ~sintra_ring_semaphore()
+    {
+        m_impl.destroy();
+    }
+
     sintra_ring_semaphore(const sintra_ring_semaphore&) = delete;
     sintra_ring_semaphore& operator=(const sintra_ring_semaphore&) = delete;
 
-    // Wakes all readers in an ordered fashion (used by writer after publishing).
-    void post_ordered()
+    void prepare_wait()
     {
-        m_impl.post_ordered();
+        if (!m_impl.prepare_local_handle()) {
+            throw std::system_error(errno, std::generic_category(), "Sintra ring wakeup acquisition");
+        }
     }
 
-    // Wakes a single reader in an unordered fashion (used by local unblocks).
-    void post_unordered()
+    std::error_code post() noexcept
     {
-        m_impl.post_unordered();
+        detail::ipc_wakeup_operation_for_test("ring_post_before_backend", this);
+        return m_impl.post_binary();
     }
 
-    // Wait returns true if the wakeup was unordered and no ordered post happened since.
-    bool wait()
+    void wait()
     {
-        return m_impl.wait();
+        if (!m_impl.wait()) {
+            throw std::system_error(errno, std::generic_category(), "Sintra ring wakeup wait");
+        }
     }
 
     wait_result wait_for(std::chrono::nanoseconds timeout)
     {
-        return m_impl.wait_for(timeout);
+        if (m_impl.try_wait_for(timeout)) {
+            return wait_result::signaled;
+        }
+        if (errno == ETIMEDOUT) {
+            return wait_result::timeout;
+        }
+        throw std::system_error(errno, std::generic_category(), "Sintra ring wakeup wait");
     }
 
     // Caller excludes posters and owns the reader slot. No live wait may remain.
-    void reset_quiescent() noexcept
+    std::error_code reset_quiescent() noexcept
     {
-        m_impl.reset_quiescent();
-    }
-
-    void release_local_handle() noexcept
-    {
-        m_impl.release_local_handle();
+        detail::ipc_wakeup_operation_for_test("ring_reset_before_backend", this);
+        while (m_impl.try_wait_existing()) {}
+        return {errno, std::generic_category()};
     }
 
 private:
-    struct impl : detail::interprocess_semaphore
-    {
-        impl() : detail::interprocess_semaphore(0) {}
-
-        void post_ordered()
-        {
-            if (unordered) {
-                unordered = false;
-            }
-            else
-            if (!posted.test_and_set()) {
-                this->post();
-            }
-        }
-
-        void post_unordered()
-        {
-            if (!posted.test_and_set()) {
-                unordered = true;
-                this->post();
-            }
-        }
-
-        bool wait()
-        {
-            detail::interprocess_semaphore::wait();
-            posted.clear();
-            return unordered.exchange(false);
-        }
-
-        wait_result wait_for(std::chrono::nanoseconds timeout)
-        {
-            if (!detail::interprocess_semaphore::try_wait_for(timeout)) {
-                return wait_result::timeout;
-            }
-            posted.clear();
-            return unordered.exchange(false) ? wait_result::unordered : wait_result::ordered;
-        }
-
-        void reset_quiescent() noexcept
-        {
-            if (posted.test()) {
-                while (detail::interprocess_semaphore::try_wait()) {}
-            }
-            posted.clear();
-            unordered = false;
-        }
-
-        std::atomic_flag   posted = ATOMIC_FLAG_INIT;
-        std::atomic<bool>  unordered{false};
-    };
-
     // Constructed before the control file is published. A reader dying during
     // its first wait cannot strand a process-shared lazy-initialization gate.
-    impl m_impl;
+    detail::ips_backend m_impl;
 };
 
  //////////////////////////////////////////////////////////////////////////
@@ -2217,31 +2204,15 @@ struct Ring:
             return false;
         }
 
-        template <typename F>
-        void drain(F&& fn)
-        {
-            while (!empty()) {
-                const int value = pop_or(-1);
-                if (value >= 0) {
-                    fn(value);
-                }
-            }
-        }
-
         int& operator[](int index) { return arr[index]; }
         const int& operator[](int index) const { return arr[index]; }
 
 #ifndef NDEBUG
         static inline std::atomic<uint64_t> s_non_tail_removals{0};
 
-        void note_non_tail_removal(int value)
+        void note_non_tail_removal(int /*value*/)
         {
-            const auto removal_count = s_non_tail_removals.fetch_add(1) + 1;
-            if (removal_count == 1) {
-                Log_stream(log_level::debug)
-                    << "[sintra][ring] Index_stack non-tail removal; "
-                    << "out-of-order wakeups detected (value=" << value << ").\n";
-            }
+            s_non_tail_removals.fetch_add(1);
         }
 #else
         void note_non_tail_removal(int /*value*/) {}
@@ -2488,13 +2459,6 @@ struct Ring:
             return count;
         }
 
-        void release_local_semaphores()
-        {
-            for (auto& sem : dirty_semaphores) {
-                sem.release_local_handle();
-            }
-        }
-
         // Only one writer may hold this across processes. Its own dead-owner
         // recovery is the only way a crashed writer's ownership is reclaimed.
         detail::interprocess_mutex           ownership_mutex;
@@ -2508,23 +2472,74 @@ struct Ring:
         // Reader slots that are blocking or about to block, awaiting a post.
         Index_stack<max_process_index>       sleeping_stack;
 
-        void flush_wakeups()
+        struct Wakeup_errors
         {
-            sleeping_stack.drain([&]( int idx) { dirty_semaphores[idx].post_ordered(); });
+            struct Entry
+            {
+                int index;
+                std::error_code error;
+            };
+
+            // No heap allocation and no array initialization on successful
+            // publication. The bounded storage is populated only on error.
+            std::optional<std::array<Entry, max_process_index>> entries;
+            size_t count = 0;
+
+            void add(int index, std::error_code error) noexcept
+            {
+                if (!entries) {
+                    entries.emplace();
+                }
+                (*entries)[count++] = {index, error};
+            }
+
+            void report(const void* control, const char* ring, const char* operation) const noexcept
+            {
+                for (size_t i = 0; i != count; ++i) {
+                    const auto& entry = (*entries)[i];
+                    detail::report_ring_wakeup_error(operation, control, entry.index, entry.error, ring);
+                }
+            }
+        };
+
+        Wakeup_errors flush_wakeups() noexcept
+        {
+            Wakeup_errors errors;
+            for (int i = sleeping_stack.size() - 1; i >= 0; --i) {
+                const int index = sleeping_stack[i];
+                detail::ipc_wakeup_operation_for_test("ring_flush_before_post", this);
+                const auto error = dirty_semaphores[index].post();
+                if (error) {
+                    errors.add(index, error);
+                }
+                detail::ipc_wakeup_operation_for_test("ring_flush_after_post", this);
+            }
+            // Keep the whole stack after any failure: every reader got one
+            // attempt, and successful posts tolerate replay. Clearing one count
+            // after all posts avoids crashable non-tail array compaction here.
+            if (errors.count == 0) {
+                sleeping_stack.clear();
+            }
+            return errors;
         }
 
         // Caller owns the slot (or has confirmed its owner died), and no live
         // waiter remains. Slot transfer takes rs_stack_spinlock before this lock.
-        void clear_reader_wakeup(int index)
+        std::error_code clear_reader_wakeup(int index)
         {
             spinlock::locker lock(m_spinlock);
-            clear_reader_wakeup_unlocked(index);
+            return clear_reader_wakeup_unlocked(index);
         }
 
-        void clear_reader_wakeup_unlocked(int index)
+        std::error_code clear_reader_wakeup_unlocked(int index)
         {
+            // There is no live waiter here. Its registration is obsolete even
+            // if draining fails; admission must independently prove an empty
+            // token before publishing another owner of this lifetime slot.
             sleeping_stack.remove_value(index);
-            dirty_semaphores[index].reset_quiescent();
+            const auto error = dirty_semaphores[index].reset_quiescent();
+            detail::report_ring_wakeup_error("quiescent reset failed; token state unknown", this, index, error);
+            return error;
         }
 
         // Guards wakeup registration, posting and quiescent token cleanup.
@@ -2636,7 +2651,6 @@ struct Ring:
         detail::maybe_mark_after_ring_release_lock_for_test(this->m_data_filename);
 
         if (m_control) {
-            m_control->release_local_semaphores();
             // The lifecycle anchor attachment table, not num_attached, decides
             // final cleanup. num_attached is only a diagnostic mirror.
             if (this->release_lifecycle_attachment(*m_control)) {
@@ -2845,10 +2859,21 @@ struct Ring_R : Ring<T, true>
                     detail::ring_guard_operation_for_test(
                         "slot_acquired", &c.read_access, uint8_t(m_rs_index));
 
-                    // Mark our slot as ACTIVE while the spinlock is still held so the
-                    // scavenger cannot reclaim it before we publish the ownership.
                     auto& slot = c.reading_sequences[m_rs_index].data;
-                    c.clear_reader_wakeup(m_rs_index);
+                    try {
+                        if (const auto error = c.clear_reader_wakeup(m_rs_index)) {
+                            throw std::system_error(error, "Sintra ring wakeup admission reset");
+                        }
+                        // Keep a Windows handle for the reader's lifetime before
+                        // any poster can see this slot. Failed pinning must not
+                        // publish a reader that could lose its kernel token.
+                        c.dirty_semaphores[m_rs_index].prepare_wait();
+                    }
+                    catch (...) {
+                        c.free_rs_stack.push(m_rs_index);
+                        m_rs_index = -1;
+                        throw;
+                    }
                     c.clear_slot_guard(
                         m_rs_index,
                         Ring<T, true>::Control::Slot_read_access_release::unpaired);
@@ -3192,31 +3217,43 @@ struct Ring_R : Ring<T, true>
                     return Range<T>{};
                 }
 
-                c.m_spinlock.lock();
-                m_sleepy_index = -1;
-                if (sequences_equal()) {
-                    if (m_stopping) {
-                        c.m_spinlock.unlock();
-                        return Range<T>{};
-                    }
-                    m_sleepy_index = m_rs_index;
-                    c.sleeping_stack.push(m_rs_index);
-                }
-                const auto unblock_sequence_after = c.global_unblock_sequence.load();
-                if (unblock_sequence_after != m_seen_unblock_sequence) {
-                    m_seen_unblock_sequence = unblock_sequence_after;
-                    const int sleepy = m_sleepy_index;
-                    if (sleepy >= 0) {
-                        c.clear_reader_wakeup_unlocked(sleepy);
+                detail::ipc_wakeup_operation_for_test("ring_wait_before_register", &c);
+                bool unblocked = false;
+                {
+                    spinlock::locker lock(c.m_spinlock);
+                    // A failed cleanup leaves the existing local index as a
+                    // reset obligation, but no obsolete shared registration.
+                    const int previous = m_sleepy_index;
+                    if (previous >= 0) {
+                        if (const auto error = c.clear_reader_wakeup_unlocked(previous)) {
+                            throw std::system_error(error, "Sintra ring wakeup re-registration reset");
+                        }
                         m_sleepy_index = -1;
                     }
-                    c.m_spinlock.unlock();
+                    if (sequences_equal()) {
+                        if (m_stopping || c.writer_closed.load(std::memory_order_acquire)) {
+                            m_stopping = true;
+                            return Range<T>{};
+                        }
+                        c.sleeping_stack.push(m_rs_index);
+                        m_sleepy_index = m_rs_index;
+                    }
+                    const auto unblock_sequence_after = c.global_unblock_sequence.load();
+                    if (unblock_sequence_after != m_seen_unblock_sequence) {
+                        m_seen_unblock_sequence = unblock_sequence_after;
+                        const int sleepy = m_sleepy_index;
+                        if (sleepy >= 0 && !c.clear_reader_wakeup_unlocked(sleepy)) {
+                            m_sleepy_index = -1;
+                        }
+                        unblocked = true;
+                    }
+                }
+                if (unblocked) {
                     if (!sequences_equal()) {
                         return produce_range();
                     }
                     return Range<T>{};
                 }
-                c.m_spinlock.unlock();
 
                 int sleepy_index = m_sleepy_index;
                 if (sleepy_index >= 0) {
@@ -3228,9 +3265,9 @@ struct Ring_R : Ring<T, true>
                         ~Wakeup_cleanup()
                         {
                             spinlock::locker lock(control.m_spinlock);
-                            const int current = index.exchange(-1);
-                            if (current >= 0) {
-                                control.clear_reader_wakeup_unlocked(current);
+                            const int current = index;
+                            if (current >= 0 && !control.clear_reader_wakeup_unlocked(current)) {
+                                index = -1;
                             }
                         }
                     } cleanup{c, m_sleepy_index};
@@ -3246,8 +3283,17 @@ struct Ring_R : Ring<T, true>
                         return Range<T>{};
                     }
 
-                    const auto wait_status =
-                        c.dirty_semaphores[sleepy_index].wait_for(blocking_wait_watchdog);
+                    auto wait_status = sintra_ring_semaphore::wait_result::signaled;
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+                    if (!detail::test_hooks::s_ring_wait_watchdog_enabled.load()) {
+                        c.dirty_semaphores[sleepy_index].wait();
+                    }
+                    else
+#endif
+                    {
+                        wait_status =
+                            c.dirty_semaphores[sleepy_index].wait_for(blocking_wait_watchdog);
+                    }
                     if (m_stopping) {
                         return Range<T>{};
                     }
@@ -3505,17 +3551,33 @@ public:
      */
     void unblock_local()
     {
-        spinlock::locker lock(c.m_spinlock);
-        int sleepy = m_sleepy_index;
-        if (sleepy >= 0) {
-            c.dirty_semaphores[sleepy].post_unordered();
+        std::error_code error;
+        int sleepy;
+        {
+            spinlock::locker lock(c.m_spinlock);
+            sleepy = m_sleepy_index;
+            if (sleepy >= 0) {
+                error = c.dirty_semaphores[sleepy].post();
+            }
         }
+        detail::report_ring_wakeup_error("local unblock notification failed; retry remains possible",
+            &c, sleepy, error, this->m_data_filename.c_str());
     }
 
     void request_stop()
     {
-        m_stopping = true;
-        unblock_local();
+        std::error_code error;
+        int sleepy;
+        {
+            spinlock::locker lock(c.m_spinlock);
+            m_stopping = true;
+            sleepy = m_sleepy_index;
+            if (sleepy >= 0) {
+                error = c.dirty_semaphores[sleepy].post();
+            }
+        }
+        detail::report_ring_wakeup_error("stop published; notification failed; retry remains possible",
+            &c, sleepy, error, this->m_data_filename.c_str());
     }
 
     bool try_rollback_unpaired_read_access(uint8_t octile)
@@ -3632,6 +3694,7 @@ protected:
     std::atomic<bool>                      m_reading_lock           = false;
 
 private:
+    // A nonnegative index also retains a failed quiescent reset obligation.
     std::atomic<int>                       m_sleepy_index           = -1;
     int                                    m_rs_index               = -1;
     std::atomic<bool>                      m_stopping               = false;
@@ -3691,10 +3754,21 @@ struct Ring_W : Ring<T, false>
         m_octile = octile_of_index(
             mod_u64(m_pending_new_sequence, this->m_num_elements),
             this->m_num_elements);
-        cancel_requests();
-        c.writer_closed.store(0, std::memory_order_release);
+        typename Ring<T, false>::Control::Wakeup_errors wakeup_errors;
+        try {
+            cancel_requests();
+            spinlock::locker lock(c.m_spinlock);
+            c.writer_closed.store(0, std::memory_order_release);
+            wakeup_errors = c.flush_wakeups();
+        }
+        catch (...) {
+            c.ownership_mutex.unlock();
+            throw;
+        }
         m_owner_pid  = get_current_pid();
         m_owner_tid  = get_current_tid();
+        wakeup_errors.report(&c, this->m_data_filename.c_str(),
+            "writer acquired; notification replay failed; registrations retained");
     }
 
     ~Ring_W()
@@ -3719,10 +3793,18 @@ struct Ring_W : Ring<T, false>
 
         // Resolve arbitration before closure so readers can release their guards.
         cancel_requests();
-        // Signal readers that no more data will arrive, then wake them.
-        c.writer_closed.store(1, std::memory_order_release);
-        unblock_global();
+        // A late registrant checks the close predicate under this same lock.
+        typename Ring<T, false>::Control::Wakeup_errors wakeup_errors;
+        {
+            spinlock::locker lock(c.m_spinlock);
+            c.writer_closed.store(1, std::memory_order_release);
+            detail::ipc_wakeup_operation_for_test("ring_close_published", &c);
+            c.global_unblock_sequence++;
+            wakeup_errors = c.flush_wakeups();
+        }
         c.ownership_mutex.unlock();
+        wakeup_errors.report(&c, this->m_data_filename.c_str(),
+            "close published; notification failed; registrations retained");
     }
 
     /**
@@ -3801,14 +3883,23 @@ struct Ring_W : Ring<T, false>
      */
     sequence_counter_type done_writing()
     {
+        const auto committed_sequence = m_pending_new_sequence;
+        typename Ring<T, false>::Control::Wakeup_errors wakeup_errors;
         {
+            struct Release_writer
+            {
+                std::atomic<uint32_t>& owner;
+                ~Release_writer() { owner = 0; }
+            } release{m_writing_thread_index};
             spinlock::locker lock(c.m_spinlock);
             assert(m_writing_thread_index == thread_index());
-            c.leading_sequence = m_pending_new_sequence;
-            c.flush_wakeups();
+            c.leading_sequence = committed_sequence;
+            detail::ipc_wakeup_operation_for_test("ring_commit_published", &c);
+            wakeup_errors = c.flush_wakeups();
         }
-        m_writing_thread_index = 0;
-        return m_pending_new_sequence;
+        wakeup_errors.report(&c, this->m_data_filename.c_str(),
+            "head committed; notification failed; registrations retained");
+        return committed_sequence;
     }
 
     /**
@@ -3817,10 +3908,15 @@ struct Ring_W : Ring<T, false>
      */
     void unblock_global()
     {
-        c.global_unblock_sequence++;
-
-        spinlock::locker lock(c.m_spinlock);
-        c.flush_wakeups();
+        typename Ring<T, false>::Control::Wakeup_errors wakeup_errors;
+        {
+            spinlock::locker lock(c.m_spinlock);
+            c.global_unblock_sequence++;
+            detail::ipc_wakeup_operation_for_test("ring_unblock_published", &c);
+            wakeup_errors = c.flush_wakeups();
+        }
+        wakeup_errors.report(&c, this->m_data_filename.c_str(),
+            "global unblock published; notification failed; registrations retained");
     }
 
     /**
