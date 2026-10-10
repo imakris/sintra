@@ -38,6 +38,20 @@ struct resource {
     char path[104];
 };
 
+/* Diagnostic kernel PID only: libc identity can remain stale after raw fork.
+ * syscall(2) is deprecated on Darwin; this fixture does not adopt it as a
+ * production interface or promise vendor compatibility.
+ */
+static pid_t native_pid(void) {
+    return (pid_t)syscall(SYS_getpid);
+}
+
+/* A failed identity read cannot authorize either fork branch. */
+static int fork_role(pid_t original, pid_t observed) {
+    if (original <= 0 || observed <= 0) return -1;
+    return observed != original ? 1 : 0;
+}
+
 static double monotonic_seconds(void) {
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
@@ -46,7 +60,18 @@ static double monotonic_seconds(void) {
 
 static void observation(const char *stage, long value, int error) {
     printf("{\"stage\":\"%s\",\"actual_pid\":%ld,\"return\":%ld,\"errno\":%d}\n",
-           stage, (long)getpid(), value, error);
+           stage, (long)native_pid(), value, error);
+    fflush(stdout);
+}
+
+static void join_wait_record(pid_t child, const char *phase, pid_t returned,
+                             int error, int status) {
+    int obtained = returned == child;
+    printf("{\"stage\":\"owned_child_wait\",\"child_pid\":%ld,\"phase\":\"%s\","
+           "\"return\":%ld,\"errno\":%d,\"status_obtained\":%s,\"raw_status\":",
+           (long)child, phase, (long)returned, error, obtained ? "true" : "false");
+    if (obtained) printf("%d", status); else fputs("null", stdout);
+    fputs("}\n", stdout);
     fflush(stdout);
 }
 
@@ -55,27 +80,45 @@ static int join_child(pid_t child, int *status) {
     const double deadline = now + 5;
     struct timespec pause = {0, 10000000};
     int clock_failed = now < 0;
+    int clock_error = clock_failed ? errno : 0;
+    int result = -1, final_error = 0, obtained = 0;
     for (unsigned attempts = 0; attempts < 500 && !clock_failed; ++attempts) {
-        pid_t done = waitpid(child, status, WNOHANG);
-        if (done == child) return 0;
-        if (done < 0 && errno != EINTR) return -1;
+        int observed_status = 0;
+        pid_t done = waitpid(child, &observed_status, WNOHANG);
+        int error = done < 0 ? errno : 0;
+        join_wait_record(child, "ordinary", done, error, observed_status);
+        if (done == child) { *status = observed_status; obtained = 1; result = 0; goto finished; }
+        if (done < 0 && error != EINTR) { final_error = error; goto finished; }
         now = monotonic_seconds();
-        if (now < 0) { clock_failed = 1; break; }
+        if (now < 0) { clock_failed = 1; clock_error = errno; break; }
         if (now >= deadline) break;
         nanosleep(&pause, NULL);
     }
-    if (clock_failed) observation("monotonic_clock_failed", -1, errno);
+    if (clock_failed) observation("monotonic_clock_failed", -1, clock_error);
     /* Still our unreaped exact child; no PID-name lookup or unrelated kill. */
     int killed = kill(child, SIGKILL);
-    observation("owned_child_deadline_kill", killed, killed < 0 ? errno : 0);
+    int kill_error = killed < 0 ? errno : 0;
+    observation("owned_child_deadline_kill", killed, kill_error);
     /* Finite attempts also bound cleanup when the diagnostic clock fails. */
     for (unsigned attempts = 0; attempts < 200; ++attempts) {
-        pid_t done = waitpid(child, status, WNOHANG);
-        if (done == child) return 1;
-        if (done < 0 && errno != EINTR) return -1;
+        int observed_status = 0;
+        pid_t done = waitpid(child, &observed_status, WNOHANG);
+        int error = done < 0 ? errno : 0;
+        join_wait_record(child, "deadline_cleanup", done, error, observed_status);
+        if (done == child) { *status = observed_status; obtained = 1; result = 1; goto finished; }
+        if (done < 0 && error != EINTR) { final_error = error; goto finished; }
         nanosleep(&pause, NULL);
     }
-    return -1;
+    final_error = ETIMEDOUT;
+finished:
+    printf("{\"stage\":\"owned_child_join_completed\",\"child_pid\":%ld,"
+           "\"join_return\":%d,\"errno\":%d,\"status_obtained\":%s,\"raw_status\":",
+           (long)child, result, final_error, obtained ? "true" : "false");
+    if (obtained) printf("%d", *status); else fputs("null", stdout);
+    fputs("}\n", stdout);
+    fflush(stdout);
+    errno = final_error;
+    return result;
 }
 
 static int close_resource(struct resource *r) {
@@ -144,7 +187,7 @@ static int prepare_resource(struct resource *r, const char *directory) {
     int looked = getsockopt(r->accepted, SOL_LOCAL, LOCAL_PEERPID, &peer, &peer_size);
     printf("{\"stage\":\"latest_peer_pid_accessor\",\"return\":%d,\"errno\":%d,"
            "\"peer_pid\":%ld,\"actual_pid\":%ld,\"occurrence_proof\":false}\n",
-           looked, looked < 0 ? errno : 0, (long)peer, (long)getpid());
+           looked, looked < 0 ? errno : 0, (long)peer, (long)native_pid());
     fflush(stdout);
     return 0;
 }
@@ -159,13 +202,15 @@ static int observe_native_exit(void) {
         alarm(8); /* diagnostic fixture bound, never native death evidence */
         char token;
         ssize_t got = read(release[0], &token, 1);
+        int error = got < 0 ? errno : 0;
+        observation("exit_subject_release_read", got, error);
         _exit(got == 1 ? 0 : 31);
     }
     close(release[0]);
     int queue = kqueue();
     if (queue < 0) {
         observation("kqueue", -1, errno);
-        close(release[1]); int status; join_child(child, &status); return 20;
+        close(release[1]); int status = 0; join_child(child, &status); return 20;
     }
     struct kevent change, event;
     EV_SET(&change, (uintptr_t)child, EVFILT_PROC, EV_ADD | EV_ENABLE,
@@ -174,7 +219,7 @@ static int observe_native_exit(void) {
     int installed = kevent(queue, &change, 1, NULL, 0, NULL);
     observation("install_note_exit", installed, installed < 0 ? errno : 0);
     if (installed < 0) {
-        close(release[1]); int status; join_child(child, &status); close(queue); return 20;
+        close(release[1]); int status = 0; join_child(child, &status); close(queue); return 20;
     }
     ssize_t released = write(release[1], "X", 1);
     close(release[1]);
@@ -193,8 +238,10 @@ static int observe_native_exit(void) {
     int status = 0;
     int joined = join_child(child, &status);
     printf("{\"stage\":\"original_consuming_wait\",\"join_return\":%d,"
-           "\"original_pid\":%ld,\"raw_status\":%d}\n",
-           joined, (long)child, status);
+           "\"original_pid\":%ld,\"status_obtained\":%s,\"raw_status\":",
+           joined, (long)child, joined >= 0 ? "true" : "false");
+    if (joined >= 0) printf("%d", status); else fputs("null", stdout);
+    fputs("}\n", stdout);
     fflush(stdout);
     close(queue); /* native filter retained through event capture and child join */
     return matched && released == 1 && joined == 0
@@ -267,7 +314,11 @@ int main(int argc, char **argv) {
             result = 23;
         }
     } else if (strcmp(which, "fork") == 0 || strcmp(which, "raw_fork") == 0) {
-        pid_t original = getpid();
+        pid_t original = native_pid();
+        if (original <= 0) {
+            observation("native_identity_before_fork_failed", original, errno);
+            close_resource(&r); return 20;
+        }
         errno = 0;
         long returned;
         if (strcmp(which, "raw_fork") == 0) {
@@ -281,24 +332,41 @@ int main(int argc, char **argv) {
             returned = fork();
         }
         if (returned < 0) { observation("fork_return", returned, errno); result = 20; }
-        else if (getpid() != original) {
-            /* Check native identity rather than Darwin raw-fork secondary return ABI. */
+        else {
+            pid_t observed = native_pid();
+            int identity_error = observed <= 0 ? errno : 0;
+            int role = fork_role(original, observed);
+            printf("{\"stage\":\"fork_native_identity\",\"original_pid\":%ld,"
+                   "\"native_pid\":%ld,\"libc_pid_diagnostic\":%ld,"
+                   "\"fork_return\":%ld,\"role\":%d,\"identity_errno\":%d}\n",
+                   (long)original, (long)observed, (long)getpid(), returned, role, identity_error);
+            fflush(stdout);
+            /* Unknown identity must not join or close a possibly absent guarded
+             * descriptor. The isolated driver owns process-group containment.
+             */
+            if (role < 0) _exit(20);
+            if (role == 1) {
+            /* Native identity selects the raw child independently of the
+             * generic syscall wrapper's fork secondary-return ABI. */
             errno = 0;
             int descriptor = fcntl(r.client, F_GETFD);
             int error = descriptor < 0 ? errno : 0;
             printf("{\"stage\":\"fork_child_descriptor\",\"original_pid\":%ld,"
                    "\"actual_pid\":%ld,\"return\":%d,\"errno\":%d}\n",
-                   (long)original, (long)getpid(), descriptor, error);
+                   (long)original, (long)native_pid(), descriptor, error);
             fflush(stdout);
             _exit(descriptor < 0 && error == EBADF ? 0 : 23);
         } else {
             int status = 0;
             int joined = join_child((pid_t)returned, &status);
             printf("{\"stage\":\"fork_child_consumed\",\"join_return\":%d,"
-                   "\"child_pid\":%ld,\"raw_status\":%d}\n",
-                   joined, returned, status);
+                   "\"child_pid\":%ld,\"status_obtained\":%s,\"raw_status\":",
+                   joined, returned, joined >= 0 ? "true" : "false");
+            if (joined >= 0) printf("%d", status); else fputs("null", stdout);
+            fputs("}\n", stdout);
             fflush(stdout);
             if (joined != 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) result = 22;
+            }
         }
     } else result = 64;
     if (close_resource(&r) != 0) result = 22;

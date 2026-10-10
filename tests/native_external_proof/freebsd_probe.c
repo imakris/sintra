@@ -145,7 +145,16 @@ static int child_record(int in_fd, int in_stage, long in_value, int in_error, in
     report.pid = getpid();
     report.value = in_value;
     report.flags = in_flags;
-    return pipe_write(in_fd, &report, sizeof(report));
+    /* stdout is already unbuffered in main; retain the native report even if
+     * its bounded report-pipe delivery subsequently fails. */
+    printf("{\"case\":\"child_report\",\"stage\":%d,\"caller_pid\":%ld,"
+        "\"return\":%ld,\"errno\":%d,\"flags\":%d}\n",
+        report.stage, (long)report.pid, report.value, report.error, report.flags);
+    int recorded = pipe_write(in_fd, &report, sizeof(report));
+    int error = recorded < 0 ? errno : 0;
+    if (recorded != 0) { call_record("child_report", "report_pipe_write", recorded, error); }
+    errno = error;
+    return recorded;
 }
 
 static int reap_pid(pid_t in_pid, int in_expected_exit)
@@ -158,10 +167,15 @@ static int reap_pid(pid_t in_pid, int in_expected_exit)
         int status = 0;
         pid_t waited = waitpid(in_pid, &status, WNOHANG);
         if (waited != 0) {
-            call_record("custody", "waitpid", waited, waited < 0 ? errno : 0);
-            printf("{\"case\":\"custody\",\"pid\":%ld,\"raw_status\":%d}\n", (long)in_pid, status);
-            if (waited != in_pid || !WIFEXITED(status) || WEXITSTATUS(status) != in_expected_exit) {
-                errno = ECHILD;
+            int wait_error = waited < 0 ? errno : 0;
+            int obtained = waited == in_pid;
+            call_record("custody", "waitpid", waited, wait_error);
+            printf("{\"case\":\"custody\",\"pid\":%ld,\"status_obtained\":%s,\"raw_status\":",
+                (long)in_pid, obtained ? "true" : "false");
+            if (obtained) { printf("%d", status); } else { fputs("null", stdout); }
+            fputs("}\n", stdout);
+            if (!obtained || !WIFEXITED(status) || WEXITSTATUS(status) != in_expected_exit) {
+                errno = wait_error ? wait_error : ECHILD;
                 return -1;
             }
             return 0;
@@ -330,6 +344,27 @@ static int receive_credentials(int in_fd, char in_byte, pid_t in_expected_pid)
     return 0;
 }
 
+static int receive_send_report(int in_fd, const char* in_call,
+    int in_stage, pid_t in_expected_pid, struct child_report* out_report)
+{
+    int received = pipe_read(in_fd, sizeof(*out_report), out_report);
+    int error = received < 0 ? errno : 0;
+    call_record("rfork", "send_report_read", received, error);
+    if (received != 0) { return -1; }
+    /* Emit the child syscall return before stage/value/credential validation. */
+    printf("{\"case\":\"rfork\",\"call\":\"%s\",\"caller_pid\":%ld,"
+        "\"return\":%ld,\"errno\":%d,\"reported_stage\":%d,\"expected_stage\":%d,"
+        "\"expected_pid\":%ld}\n", in_call, (long)out_report->pid,
+        out_report->value, out_report->error, out_report->stage, in_stage,
+        (long)in_expected_pid);
+    if (out_report->stage != in_stage || out_report->pid != in_expected_pid
+        || out_report->value != 1 || out_report->error != 0) {
+        errno = out_report->error ? out_report->error : EPROTO;
+        return -1;
+    }
+    return 0;
+}
+
 static void send_controlled_byte(int in_control_fd, int in_socket_fd, int in_report_fd, char in_byte, int in_stage)
 {
     char command;
@@ -431,13 +466,11 @@ static int rfork_case(void)
     int early = kevent(queue, NULL, 0, &early_event, 1, &no_wait);
     call_record("native_exit", "before_controlled_exit", early, early < 0 ? errno : 0);
     if (early != 0 || pipe_write(pipes[3], "A", 1) != 0
-        || receive_credentials(connection, 'A', original) != 0
-        || pipe_read(pipes[0], sizeof(report), &report) != 0
-        || report.stage != 5 || report.pid != original || report.value != 1 || report.error != 0) {
+        || receive_send_report(pipes[0], "original_send", 5, original, &report) != 0
+        || receive_credentials(connection, 'A', original) != 0) {
         call_record("rfork", "ARM_observation", -1, errno);
         goto finished;
     }
-    call_record("rfork", "original_send", report.value, report.error);
     if (pipe_write(pipes[3], "X", 1) != 0) { goto finished; }
     struct timespec exit_deadline = { .tv_sec = 5 };
     int exited = kevent(queue, NULL, 0, &retained_exit, 1, &exit_deadline);
@@ -452,14 +485,13 @@ static int rfork_case(void)
         goto finished;
     }
     /* Only native exit plus reaping precede this fresh descendant command. */
-    if (pipe_write(pipes[5], "C", 1) != 0 || receive_credentials(connection, 'C', descendant) != 0
-        || pipe_read(pipes[0], sizeof(report), &report) != 0
-        || report.stage != 6 || report.pid != descendant || report.value != 1 || report.error != 0
+    if (pipe_write(pipes[5], "C", 1) != 0
+        || receive_send_report(pipes[0], "descendant_send_after_original_exit", 6, descendant, &report) != 0
+        || receive_credentials(connection, 'C', descendant) != 0
         || descendant == original || reap_pid(descendant, 0) != 0) {
         call_record("rfork", "surviving_channel_observation", -1, errno);
         goto finished;
     }
-    call_record("rfork", "descendant_send_after_original_exit", report.value, report.error);
     printf("{\"case\":\"rfork\",\"status\":\"observed\",\"original_pid\":%ld,\"descendant_pid\":%ld,"
         "\"original_exit_fact_retained\":true,\"kqueue_retained_through_message\":true,"
         "\"pid_reuse_exercised\":false,\"sintra_process_word_exercised\":false}\n",
