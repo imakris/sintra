@@ -154,7 +154,7 @@ if(SINTRA_BUILD_BENCHMARKS)
 endif()
 
 if(SINTRA_BUILD_EXAMPLES AND SINTRA_BUILD_QT_EXAMPLES)
-    find_package(Qt6 COMPONENTS Core Widgets QUIET)
+    find_package(Qt6 6.12 COMPONENTS Core Widgets QUIET)
     if(TARGET Qt6::Widgets AND
        NOT TARGET vnm_qt_dispatch::vnm_qt_dispatch)
         include(FetchContent)
