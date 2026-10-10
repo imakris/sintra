@@ -14,7 +14,7 @@ set "QT_ROOT="
 if exist "%BUILD_DIR%\\CMakeCache.txt" (
     for /f "tokens=2 delims==" %%A in ('findstr /b /c:"CMAKE_PREFIX_PATH:UNINITIALIZED=" "%BUILD_DIR%\\CMakeCache.txt"') do set "QT_ROOT=%%A"
 )
-if not defined QT_ROOT set "QT_ROOT=C:\\Qt\\6.10.1\\msvc2022_64"
+if not defined QT_ROOT set "QT_ROOT=C:\\Qt\\6.12.0\\msvc2022_64"
 
 set "QT_BIN=%QT_ROOT%\\bin"
 set "QT_PLUGIN_PATH=%QT_ROOT%\\plugins"

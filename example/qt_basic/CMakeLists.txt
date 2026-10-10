@@ -3,7 +3,7 @@ if(NOT SINTRA_BUILD_QT_EXAMPLES)
     return()
 endif()
 
-find_package(Qt6 COMPONENTS Widgets QUIET)
+find_package(Qt6 6.12 COMPONENTS Widgets QUIET)
 if(NOT Qt6_FOUND)
     message(STATUS "Qt6 Widgets not found; skipping Qt examples.")
     return()
