@@ -5,25 +5,35 @@
 Reopened by the owner on 2026-10-09. This is the active wakeup workstream of
 [the writer-death and watchdog plan](writer_death_and_wait_watchdog_plan.md).
 The first-slice direction was reviewed by Astra xhigh, Sol 6.1 xhigh and
-Claude Sonnet 5.5 xhigh. Its implementation candidate is in the separate
-`work/crash-safe-wakeups-20261009` worktree. The pre-review candidate passed
-the focused Windows and Linux/WSL Debug and Release local gates. Current
-reviews then identified two concrete implementation blockers. The corrected
-candidate passed all 84 renewed focused runtime executions, 12 isolated
-Windows regression executions and all four seven-target builds. The source
-and all 28 selected binaries remained unchanged across the renewed runtime
-gates. Required Opus 5.5 and Sonnet 5.5 reviews could not run because their API
-quota was exhausted; no source review occurred in those attempts.
-Completed follow-ups from participating Astra and Sol 6.1 reviewers found no
-remaining source blockers; they provide continuity evidence, not independent
-acceptance. The completed eligible gpt-5.6-sol xhigh review found no source
-blocker but recorded an evidence-package inconsistency blocker. That verdict
-remains preserved; the valid current runtime results do not turn it into a
-clean verdict. A matching source/evidence package and an actual qualifying
-clean pre-push review are required even for a draft. Additional Sol review
-does not substitute for the mandated Astra/Opus design-adoption requirements.
-Mandatory design adoption, implementation acceptance, hosted platform CI and
-merge gates remain open.
+Claude Sonnet 5.5 xhigh. The first slice is on the separate
+`work/crash-safe-wakeups-20261009` branch: source commit `534d9dc3`, workflow
+setup `75fb974a`, draft PR 862; no master publication. The corrected candidate
+passed 84 focused runtime executions, 12 isolated Windows regressions and all
+four seven-target builds. Source and all 28 selected binaries remained unchanged
+across the renewed runtime gates. Astra/Sol follow-ups provide continuity
+evidence. The original eligible gpt-5.6-sol xhigh evidence-package blocker remains
+preserved historically; its matching-evidence follow-up cleared it and supplied
+the actual clean independent pre-push review. All five focused hosted jobs
+succeeded at `75fb974a`; MinGW supplied compilation coverage only.
+The owner-requested full-CI run at published `75fb974a` completed successfully:
+all six ordinary workflows and eleven jobs passed. This proves that published
+first slice; it does not accept the staged N1 native-recovery continuation.
+The full native-death objective and production 50 ms watchdog remain open.
+The [native notification plan](native_exit_notification_plan.md) is adopted
+for N1–N5 implementation after clean independent Astra xhigh and two Sol 6.1
+xhigh reviews. The owner authorized the second Sol review in place of
+quota-unavailable Claude. Its earlier denied launch remains historical evidence;
+the later actual review completed cleanly. Native implementation acceptance,
+N1–N5 completion and merge remain open.
+The exact B9 combined N1 repair was adopted after three fresh independent
+reviews found no design blockers. The r13 implementation review identified
+reachable constructor, resource-custody and mandatory-error defects. The staged
+candidate corrects those defects within the adopted repair and adds the missing
+causal fixtures. Final matching-source platform gates and eligible independent
+implementation acceptance remain open. Historical review and runtime failures
+are preserved separately from subsequent repair evidence. The authoritative
+design decision is
+`sintra_crash_safe_wakeups_20261009/n1_mutex_boundary_review_20261010/root_adoption_r9_b9.md`.
 Earlier provisional passes and
 deliberately failing intermediate candidates are historical evidence, not
 acceptance of this candidate. The full wakeup objective and its native-death
@@ -49,8 +59,8 @@ implementation slice; it is not completion of this objective.
 - Work on a separate branch and short-path worktree. Review the plan and
   major implementation changes with Astra xhigh, Sol 6.1 xhigh and Claude
   Sonnet 5.5 xhigh; report Claude unavailability if its credits prevent review.
-- Build and run a focused local and CI set. The owner's current instruction
-  supersedes the older plan's full-suite gates.
+- Validate fixes with focused local gates, then run full CI when the changes
+  are ready, as the owner requires. Keep pushes paced and handle failures.
 
 ## Verified baseline
 
@@ -171,14 +181,26 @@ Windows and WSL Debug and Release. The current fixed candidate then passed all
 including the new platform-applicable regressions in each complete crash
 fixture run. Source and all 28 selected executables matched before and after;
 no rebuild was needed. Completed Astra/Sol continuity follow-ups found no
-remaining source blockers. The eligible Sol 5.6 review's evidence-package
-blocker remains recorded; a matching package and qualifying clean independent
-pre-push verdict are required.
-Hosted platform CI and current implementation acceptance remain open.
+remaining source blockers. The original eligible Sol 5.6 evidence-package
+blocker remains preserved as historical evidence; its matching-evidence
+follow-up cleared that blocker and supplied the clean independent pre-push
+review. The corrected local 84/84 and 12 isolated passes remain valid.
+The first slice was committed on the work branch as `534d9dc3`; workflow setup
+is `75fb974a`, with draft PR 862. Nothing has been pushed to master.
+All five focused hosted jobs succeeded at `75fb974a`: Windows, Linux, macOS
+and FreeBSD runtime lanes, plus MinGW compilation only. The owner-requested
+full-CI run at that same published head completed successfully: all six ordinary
+workflows and eleven jobs passed. Those results validate the published first
+slice; they do not accept the staged N1 native-recovery implementation.
 The production 50 ms watchdog and the native-death continuation remain pending
 their own completion gates.
 
 ## Continuation needed for complete crash-safe wakes
+
+The adopted continuation is [native-death notification and untimed
+ring waits](native_exit_notification_plan.md). Its implementation and focused
+completion gates remain open. Its final batch removes the production reader watchdog after
+the native-owner gates; retaining the watchdog is not objective completion.
 
 Replayability does not execute a replay: if the last poster dies and no
 survivor touches the ring again, a parked reader still needs an owner to act.
@@ -282,7 +304,8 @@ kernel timeout. Tests with the watchdog disabled are the direct oracle for
 this slice. Any later rescue detector must observe kernel timeout separately
 from token consumption; ordinary idle timeout is not a rescue.
 
-Next action: build and exercise the frozen first-slice candidate through the
-focused gates, resolve concrete failures, then obtain its independent
-implementation reviews. Continue toward the full objective; report any
-unavailable review or platform gate by its actual limitation.
+Next action: finish the N1 implementation and causal gates, then obtain its
+independent implementation review and continue through N2–N5 in the
+[adopted native notification plan](native_exit_notification_plan.md), including
+production watchdog deletion. Design adoption does not establish implementation
+acceptance or completion. The full native objective remains open.

@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include "native_exit_authority.h"
+#include "observation.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -81,10 +84,10 @@ inline std::atomic<spinlock_event_callback> s_spinlock_event{nullptr};
 inline std::atomic<spinlock_cpu_callback> s_spinlock_cpu{nullptr};
 }
 
-inline void spinlock_event_for_test(const void* lock, test_hooks::spinlock_event event)
+inline void spinlock_event_for_test(const void* lock, test_hooks::spinlock_event event) noexcept
 {
     if (auto callback = test_hooks::s_spinlock_event.load(std::memory_order_acquire)) {
-        callback(lock, event);
+        observe_without_canceling("spinlock_event", [&] { callback(lock, event); });
     }
 }
 #define SINTRA_SPINLOCK_HOOK(event) \
@@ -97,7 +100,13 @@ inline bool read_spinlock_thread_cpu(spinlock_cpu_sample& sample) noexcept
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
-        return callback(sample);
+        try {
+            return callback(sample);
+        }
+        catch (...) {
+            defer_observation_failure("spinlock_cpu");
+            return false;
+        }
     }
 #endif
 #if defined(_WIN32)
@@ -153,16 +162,25 @@ struct alignas(16) spinlock
 {
     struct locker
     {
-        locker(spinlock& sl): m_sl(sl) { m_sl.lock(); }
-        ~locker() { m_sl.unlock(); }
+        locker(spinlock& sl, const detail::Native_exit_authority* authority = nullptr)
+        :
+            m_sl(sl), m_pid(uint32_t(get_current_pid()))
+        { m_sl.lock(authority); }
+        ~locker() noexcept
+        {
+            if (m_pid == uint32_t(get_current_pid())) {
+                m_sl.unlock();
+            }
+        }
         locker(const locker&) = delete;
         locker& operator=(const locker&) = delete;
         locker(locker&&) = delete;
         locker& operator=(locker&&) = delete;
         spinlock& m_sl;
+        uint32_t m_pid;
     };
 
-    void lock()
+    void lock(const detail::Native_exit_authority* authority = nullptr)
     {
         const uint64_t self = detail::current_process_instance();
         auto next_poll = std::chrono::steady_clock::now();
@@ -196,7 +214,7 @@ struct alignas(16) spinlock
             next_poll = now + k_owner_liveness_poll;
             SINTRA_SPINLOCK_HOOK(poll);
 
-            if (try_take_over_exited_owner(self)) {
+            if (try_take_over_exited_owner(self, authority)) {
                 return;
             }
             if (!witness.active) {
@@ -237,16 +255,16 @@ struct alignas(16) spinlock
                 if (!reported_unknown) {
                     reported_unknown = true;
                     // Do not invoke an application log callback from this wait.
-                    std::fprintf(stderr, "[sintra][spinlock] Owner PID %u incarnation "
-                        "cannot be confirmed after sustained waiter CPU; continuing "
-                        "to wait without taking over the shared spinlock.\n", owner_pid);
+                    detail::native_diagnostic("[sintra][spinlock] Owner PID ", owner_pid,
+                        " incarnation cannot be confirmed after sustained waiter CPU; "
+                        "continuing to wait without taking over the shared spinlock.\n");
                 }
             }
             witness.active = false;
         }
     }
 
-    void unlock()
+    void unlock() noexcept
     {
         SINTRA_SPINLOCK_HOOK(before_even_mark);
         m_words.generation.fetch_add(1, std::memory_order_acq_rel);
@@ -319,13 +337,17 @@ private:
         return true;
     }
 
-    bool try_take_over_exited_owner(uint64_t self)
+    bool try_take_over_exited_owner(uint64_t self, const detail::Native_exit_authority* authority)
     {
         const uint64_t owner = m_words.owner.load(std::memory_order_acquire);
-        if (owner == 0 || !detail::process_instance_has_exited(owner, self)) {
+        if (owner == 0 ||
+            !(authority ? authority->has_exited(owner) :
+                detail::process_instance_has_exited(owner, self)))
+        {
             return false;
         }
-        log_recovery(detail::process_instance_pid(owner));
+        detail::native_diagnostic("[sintra][spinlock] Exited owner PID ",
+            detail::process_instance_pid(owner), "; attempting shared-lock recovery.\n");
         SINTRA_SPINLOCK_HOOK(before_takeover_bump);
         m_words.generation.fetch_add(2, std::memory_order_acq_rel);
         SINTRA_SPINLOCK_HOOK(after_takeover_bump);
@@ -346,21 +368,13 @@ private:
         return true;
     }
 
-    void log_recovery(uint32_t owner) const
-    {
-        Log_stream(log_level::warning)
-            << "[sintra][spinlock] Owner PID " << owner
-            << " disappeared while holding a shared spinlock. Attempting to take over the lock.\n";
-    }
-
     [[noreturn]] void report_live_owner_stall(uint32_t owner, uint64_t elapsed_cpu_ns) const
     {
-        Log_stream(log_level::error)
-            << "[sintra][spinlock] Shared spinlock stuck after approximately "
-            << (double(elapsed_cpu_ns) / 1'000'000.0)
-            << " ms of OS-reported waiter thread CPU while owner PID " << owner
-            << " is still alive. Aborting to avoid corruption.\n";
-        detail::debug_aware_abort();
+        detail::native_diagnostic("[sintra][spinlock] Shared spinlock stuck after waiter CPU ns ",
+            elapsed_cpu_ns, "; ");
+        detail::native_diagnostic("owner PID ", owner,
+            " is still alive. Aborting to avoid corruption.\n");
+        detail::native_debug_aware_abort();
     }
 
     detail::spinlock_words m_words;

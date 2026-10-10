@@ -2,6 +2,8 @@
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
 #pragma once
+
+#include "observation.h"
 /*
 interprocess_semaphore.h
 
@@ -136,11 +138,11 @@ inline thread_local bool s_ipc_handle_allocation_failure = false;
 }
 #endif
 
-inline void ipc_wakeup_operation_for_test(const char* stage, const void* object)
+inline void ipc_wakeup_operation_for_test(const char* stage, const void* object) noexcept
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_ipc_wakeup_operation.load(std::memory_order_acquire)) {
-        callback(stage, object);
+        observe_without_canceling(stage, [&] { callback(stage, object); });
     }
 #else
     (void)stage;
