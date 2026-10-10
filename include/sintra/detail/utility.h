@@ -1178,7 +1178,10 @@ Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options
 
         int ready_status = 0;
         if (!write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
-            report_failure(spawn_detached_debug_info_t::Stage::CHILD_READY_PIPE_WRITE, errno, 0);
+            // This is the pre-exec child of a possibly multithreaded process:
+            // no inherited logger, test callback or allocating diagnostic.
+            detail::native_diagnostic("[sintra][spawn] Child ready-pipe write failed, errno ",
+                uint64_t(errno), "\n");
             if (ready_pipe[1] >= 0) {
                 close(ready_pipe[1]);
             }

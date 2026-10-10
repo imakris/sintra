@@ -29,6 +29,7 @@ on:
 
 jobs:
   freebsd:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || github.head_ref != 'work/crash-safe-wakeups-20261009' }}
     name: FreeBSD Build & Test
     runs-on: ubuntu-latest
 

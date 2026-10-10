@@ -1085,7 +1085,7 @@ TEST_CASE(test_inactive_guard_slot_does_not_block_read_access_recovery)
 
     ASSERT_EQ(0u, writer.c.count_guards_for_octile(new_octile));
 
-    writer.c.scavenge_orphans();
+    sintra::test::checked_scavenge_orphans(writer.c);
 
     ASSERT_EQ(uint8_t(0), slot.guard_token());
     ASSERT_EQ(uint64_t(0), writer.c.read_access.load() & range_mask);
@@ -1215,7 +1215,7 @@ TEST_CASE(test_dead_reader_cleanup_keeps_live_guard_count)
                 dead_reader_moved_guard,
                 guarded_octile));
 
-        control.scavenge_orphans();
+        sintra::test::checked_scavenge_orphans(control);
 
         ASSERT_EQ(1u, octile_count(control.read_access, guarded_octile));
         ASSERT_EQ(0u, octile_count(control.read_access, moved_octile));
@@ -1266,7 +1266,7 @@ TEST_CASE(test_writer_reclaims_count_left_by_dead_reader)
                 dead_reader_moved_guard,
                 guarded_octile));
 
-        control.scavenge_orphans();
+        sintra::test::checked_scavenge_orphans(control);
 
         ASSERT_EQ(2u, octile_count(control.read_access, guarded_octile));
         ASSERT_EQ(0u, octile_count(control.read_access, moved_octile));

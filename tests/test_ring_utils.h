@@ -37,6 +37,19 @@ struct Temp_ring_dir
     std::string str() const { return path.string(); }
 };
 
+// Direct control tests must check native reset failures after scavenging's
+// shared gates unwind, just as the production admission/reclamation callers do.
+template <typename Control>
+bool checked_scavenge_orphans(Control& control)
+{
+    typename Control::Wakeup_errors errors;
+    const bool freed = control.scavenge_orphans(errors);
+    if (errors.count != 0) {
+        throw std::system_error((*errors.entries)[0].error, "test reader scavenging reset");
+    }
+    return freed;
+}
+
 /// Calculate a suitable ring element count for tests.
 /// The result is guaranteed to be:
 ///   - A multiple of the system page size

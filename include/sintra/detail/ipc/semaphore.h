@@ -2,6 +2,8 @@
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
 #pragma once
+
+#include "observation.h"
 /*
 interprocess_semaphore.h
 
@@ -49,7 +51,7 @@ BUILD REQUIREMENTS
 
 ROBUSTNESS MODEL
 - Semaphores are ownerless counters. If a process crashes after wait(), the counter remains decremented; there is no "owner" to recover.
-- Windows (named semaphore): the kernel object persists independently of handle lifetimes; process termination does not roll back the count.
+- Windows (named semaphore): the kernel object and count persist while any process holds a handle; the last handle's closure destroys both.
 - POSIX (shared memory): the counter lives in shared memory visible to other processes and continues to reflect the current value.
 
 MEMORY & ORDERING
@@ -80,7 +82,10 @@ CAVEATS
 #include <cwchar>
 #include <functional>
 #include <limits>
+#include <new>
 #include <thread>
+#include <system_error>
+#include <utility>
 
 #include "../../shared_mutex.h"
 #include "../time_utils.h"
@@ -120,6 +125,30 @@ CAVEATS
 #endif
 
 namespace sintra { namespace detail {
+
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+namespace test_hooks {
+using Ipc_wakeup_callback = void (*)(const char*, const void*);
+inline std::atomic<Ipc_wakeup_callback> s_ipc_wakeup_operation{nullptr};
+inline thread_local int s_ipc_binary_post_error = 0;
+inline thread_local int s_ipc_binary_wake_error = 0;
+inline thread_local int s_ipc_prepare_error = 0;
+inline thread_local int s_ipc_reset_error = 0;
+inline thread_local bool s_ipc_handle_allocation_failure = false;
+}
+#endif
+
+inline void ipc_wakeup_operation_for_test(const char* stage, const void* object) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_ipc_wakeup_operation.load(std::memory_order_acquire)) {
+        observe_without_canceling(stage, [&] { callback(stage, object); });
+    }
+#else
+    (void)stage;
+    (void)object;
+#endif
+}
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free, "requires lock-free 32-bit atomic");
 static_assert(sizeof(std::atomic<uint32_t>) == 4, "Assume 4-byte object representation");
@@ -209,6 +238,10 @@ struct ips_backend
     bool wait() noexcept;
     bool try_wait_for(std::chrono::nanoseconds d) noexcept;
     void post(uint32_t n) noexcept;
+    // Ring-only binary operations. The backend must be initialized with max=1.
+    std::error_code post_binary() noexcept;
+    bool prepare_local_handle() noexcept;
+    bool try_wait_existing() noexcept;
     void destroy() noexcept;
 
     alignas(8) unsigned char storage[256]{}; // zero-initialized
@@ -296,60 +329,98 @@ static bool ips_win_copy_name(ips_backend& b, const wchar_t* s) noexcept
 // processes. This per-process cache intentionally keeps HANDLEs *out of shared memory*.
 // The shared object contains only the generated name/flags; each process lazily
 // opens/creates its own HANDLE and stores it here.
-static HANDLE ips_win_local_handle(ips_backend& b) noexcept
+static HANDLE ips_win_local_handle(
+    ips_backend& b,
+    bool create = true,
+    std::error_code* checked_error = nullptr) noexcept
 {
     auto& st = W(b);
     if (st.name[0] == L'\0') {
+        if (checked_error) {
+            *checked_error = {EINVAL, std::generic_category()};
+        }
         errno = EINVAL; return nullptr;
     }
 
-    auto& cache = ips_win_handles();
-    std::wstring key(st.name);
-
-    // FAST PATH: Read-only lock
-    {
-        std::shared_lock<shared_mutex> lock(cache.m);
-        auto it = cache.map.find(key);
-        if (it != cache.map.end()) {
-            return it->second;
+    HANDLE h = nullptr;
+    DWORD native_error = ERROR_SUCCESS;
+    int generic_error = EACCES;
+    try {
+        // Cache initialization, name preparation and lock acquisition are part
+        // of the checked operation, including its already-cached fast path.
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+        if (std::exchange(test_hooks::s_ipc_handle_allocation_failure, false)) {
+            ipc_wakeup_operation_for_test("semaphore_handle_allocation_failed", &b);
+            throw std::bad_alloc{};
         }
-    }
+#endif
+        auto& cache = ips_win_handles();
+        std::wstring key(st.name);
 
-    // SLOW PATH: Exclusive write lock
-    {
-        std::unique_lock<shared_mutex> lock(cache.m);
-
-        // Re-assign key from the canonical name to prevent a stale read from before the lock.
-        key.assign(st.name);
-
-        // Re-check the map with the canonical key in case another thread just created it.
-        auto it = cache.map.find(key);
-        if (it != cache.map.end()) {
-            return it->second;
+        // FAST PATH: Read-only lock
+        {
+            std::shared_lock<shared_mutex> lock(cache.m);
+            auto it = cache.map.find(key);
+            if (it != cache.map.end()) {
+                return it->second;
+            }
         }
 
-        // We are the first. Create (or open) the handle.
-        HANDLE h = nullptr;
-        try {
-            Private_security security;
-            h = CreateSemaphoreW(security.attributes(), (LONG)st.initial, (LONG)st.max, st.name);
+        // SLOW PATH: Exclusive write lock
+        {
+            std::unique_lock<shared_mutex> lock(cache.m);
+
+            // Re-assign from the canonical name after taking the lock.
+            key.assign(st.name);
+
+            auto it = cache.map.find(key);
+            if (it != cache.map.end()) {
+                return it->second;
+            }
+
+            // Reset of an unused ring slot must not create a kernel object.
+            if (create) {
+                Private_security security;
+                h = CreateSemaphoreW(security.attributes(), (LONG)st.initial, (LONG)st.max, st.name);
+            }
             if (!h) {
                 h = OpenSemaphoreW(READ_CONTROL | SYNCHRONIZE | SEMAPHORE_MODIFY_STATE,
                     FALSE, st.name);
+                if (!h) {
+                    native_error = GetLastError();
+                }
+                if (!h && !create && native_error == ERROR_FILE_NOT_FOUND) {
+                    errno = 0;
+                    return nullptr;
+                }
             }
             if (h && private_object_owned(h)) {
                 cache.map.emplace(std::move(key), h);
                 return h;
             }
+            if (h) {
+                native_error = ERROR_ACCESS_DENIED;
+            }
         }
-        catch (...) {
-        }
-        if (h) {
-            CloseHandle(h);
-        }
-        errno = EACCES;
-        return nullptr;
     }
+    catch (const std::bad_alloc&) {
+        generic_error = ENOMEM;
+        native_error = ERROR_SUCCESS;
+    }
+    catch (...) {
+        // A helper exception is not evidence of a GetLastError value.
+        native_error = ERROR_SUCCESS;
+    }
+    if (h) {
+        CloseHandle(h);
+    }
+    if (checked_error) {
+        *checked_error = native_error != ERROR_SUCCESS
+            ? std::error_code(static_cast<int>(native_error), std::system_category())
+            : std::error_code(generic_error, std::generic_category());
+    }
+    errno = generic_error;
+    return nullptr;
 }
 
 
@@ -443,10 +514,12 @@ inline void ips_backend::init_named(
 }
 
 // 3) Ensure name exists before opening/creating a handle
-static HANDLE ips_win_ensure_handle(ips_backend& b) noexcept // Return HANDLE
+static HANDLE ips_win_ensure_handle(
+    ips_backend& b,
+    std::error_code* checked_error = nullptr) noexcept
 {
     ips_win_ensure_ready(b);           // <-- guarantees st.name is set if autogen was intended
-    return ips_win_local_handle(b);
+    return ips_win_local_handle(b, true, checked_error);
 }
 
 // 4) Avoid double lookup in try_wait (similar in wait/try_wait_for)
@@ -477,6 +550,7 @@ inline bool ips_backend::wait() noexcept
         errno = EINVAL;
         return false;
     }
+    ipc_wakeup_operation_for_test("semaphore_before_wait", this);
     DWORD rc = WaitForSingleObject(h, INFINITE);
     if (rc == WAIT_OBJECT_0) {
         return true;
@@ -531,6 +605,65 @@ inline void ips_backend::post(uint32_t n) noexcept
         DWORD e = GetLastError();
         errno = (e == ERROR_TOO_MANY_POSTS) ? EOVERFLOW : EINVAL;
     }
+}
+
+inline bool ips_backend::prepare_local_handle() noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (const int error = std::exchange(test_hooks::s_ipc_prepare_error, 0)) {
+        errno = error;
+        return false;
+    }
+#endif
+    return ips_win_ensure_handle(*this) != nullptr;
+}
+
+inline bool ips_backend::try_wait_existing() noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (const int error = std::exchange(test_hooks::s_ipc_reset_error, 0)) {
+        ipc_wakeup_operation_for_test("semaphore_reset_failed", this);
+        errno = error;
+        return false;
+    }
+#endif
+    ips_win_ensure_ready(*this);
+    HANDLE handle = ips_win_local_handle(*this, false);
+    if (!handle) {
+        return false;
+    }
+    const DWORD result = WaitForSingleObject(handle, 0);
+    if (result == WAIT_OBJECT_0) {
+        return true;
+    }
+    errno = result == WAIT_TIMEOUT ? 0 : EINVAL;
+    return false;
+}
+
+inline std::error_code ips_backend::post_binary() noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (const int error = std::exchange(test_hooks::s_ipc_binary_post_error, 0)) {
+        ipc_wakeup_operation_for_test("semaphore_post_failed", this);
+        errno = error;
+        return {error, std::generic_category()};
+    }
+#endif
+    // An admitted live reader pins this object before publishing its slot.
+    // Creating an absent object can therefore only serve a slot with no live
+    // pinned reader; it cannot replace a live reader's notification object.
+    std::error_code error;
+    HANDLE handle = ips_win_ensure_handle(*this, &error);
+    if (!handle) {
+        return error;
+    }
+    if (ReleaseSemaphore(handle, 1, nullptr)) {
+        return {};
+    }
+    const DWORD native_error = GetLastError();
+    return native_error == ERROR_TOO_MANY_POSTS
+        ? std::error_code{}
+        : std::error_code(static_cast<int>(native_error), std::system_category());
 }
 
 inline void ips_backend::destroy() noexcept
@@ -673,29 +806,29 @@ static inline int posix_wait_equal_until(
 #endif
 }
 
-static inline void posix_wake_some(uint32_t* addr, int n) noexcept
+static inline bool posix_wake_some(uint32_t* addr, int n) noexcept
 {
 #if SINTRA_BACKEND_LINUX
     if (n < 0)       { n = 0;       }
     if (n > INT_MAX) { n = INT_MAX; }
-    (void)futex_wake((int*)addr, n);
+    return futex_wake((int*)addr, n) >= 0;
 #elif SINTRA_BACKEND_DARWIN
     // macOS provides wake-any (single waiter) and wake-all. Use wake-any when n==1 to
     // avoid thundering-herd wakeups; fall back to wake-all otherwise.
-    if (n == 1) {
-        (void)os_sync_wake_by_address_any((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-    }
-    else {
-        (void)os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-    }
+    const int result = n == 1
+        ? os_sync_wake_by_address_any((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED)
+        : os_sync_wake_by_address_all((void*)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+    // ENOENT means no native waiter is currently queued; the token remains.
+    return result >= 0 || errno == ENOENT;
 #elif SINTRA_BACKEND_FREEBSD
     if (n < 0) {
         n = INT_MAX; // wake all
     }
-    (void)umtx_wake(addr, n);
+    return umtx_wake(addr, n) == 0;
 #elif SINTRA_BACKEND_POLLING
     (void)addr; (void)n;
     // Polling backend doesn't need wakes - waiters poll the atomic counter
+    return true;
 #endif
 }
 
@@ -794,6 +927,7 @@ inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
             return false;
         }
         sem_trace_wait("wait_sleep", &c, cur, 0, deadline, now);
+        ipc_wakeup_operation_for_test("semaphore_before_wait", &c);
         int rc = posix_wait_equal_until(reinterpret_cast<uint32_t*>(&P(*this).count), 0u, deadline);
         if (rc == -1) {
             const int   err = errno;
@@ -834,11 +968,58 @@ inline void ips_backend::post(uint32_t n) noexcept
         const uint32_t next = v + n;
         if (c.compare_exchange_weak(v, next)) {
             sem_trace_post(&c, next - n, next, n);
+            ipc_wakeup_operation_for_test("semaphore_count_published", &c);
             break;
         }
     }
 
-    posix_wake_some(reinterpret_cast<uint32_t*>(&P(*this).count), (int)n);
+    (void)posix_wake_some(reinterpret_cast<uint32_t*>(&P(*this).count), (int)n);
+}
+
+inline bool ips_backend::prepare_local_handle() noexcept
+{
+    return true;
+}
+
+inline bool ips_backend::try_wait_existing() noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (const int error = std::exchange(test_hooks::s_ipc_reset_error, 0)) {
+        ipc_wakeup_operation_for_test("semaphore_reset_failed", &P(*this).count);
+        errno = error;
+        return false;
+    }
+#endif
+    errno = 0;
+    return try_wait();
+}
+
+inline std::error_code ips_backend::post_binary() noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (const int error = std::exchange(test_hooks::s_ipc_binary_post_error, 0)) {
+        ipc_wakeup_operation_for_test("semaphore_post_failed", &P(*this).count);
+        errno = error;
+        return {error, std::generic_category()};
+    }
+#endif
+    auto& count = P(*this).count;
+    const auto previous = count.exchange(1, std::memory_order_release);
+    sem_trace_post(&count, previous, 1, 1);
+    ipc_wakeup_operation_for_test("semaphore_count_published", &count);
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (const int error = std::exchange(test_hooks::s_ipc_binary_wake_error, 0)) {
+        ipc_wakeup_operation_for_test("semaphore_post_failed", &count);
+        errno = error;
+        return {error, std::generic_category()};
+    }
+#endif
+    // Even an existing token may belong to a poster that died before waking
+    // the kernel waiter. Every replay must perform the native wake again.
+    if (!posix_wake_some(reinterpret_cast<uint32_t*>(&count), 1)) {
+        return {errno, std::generic_category()};
+    }
+    return {};
 }
 
 inline void ips_backend::destroy() noexcept
