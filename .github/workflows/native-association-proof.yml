@@ -1,0 +1,45 @@
+name: Darwin native association capability
+
+on:
+  pull_request:
+    paths:
+      - 'tests/native_association_proof/**'
+      - 'tests/native_external_proof/run_native_probes.py'
+      - '.github/workflows/native-association-proof.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-association-proof-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  darwin:
+    name: Darwin audit capability - ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            architecture: arm64
+          - os: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - name: Checkout capability probe
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Validate source-derived receipt controls
+        run: python3 -B tests/native_association_proof/validate_driver_contract.py --output native-association-evidence/driver-contract-validation.json
+      - name: Capture SDK and actual native association outcomes
+        run: python3 -B tests/native_association_proof/run_darwin_audit_probe.py --hosted-ci --expected-arch '${{ matrix.architecture }}' --output native-association-evidence/result.json
+      - name: Preserve outcomes and public-header context
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-association-proof-${{ matrix.os }}
+          path: native-association-evidence/
+          if-no-files-found: error
+          retention-days: 14
