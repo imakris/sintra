@@ -4,6 +4,7 @@
 #pragma once
 
 #include "config.h"
+#include "debug_pause.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
