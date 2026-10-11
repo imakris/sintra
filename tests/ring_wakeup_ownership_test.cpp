@@ -233,7 +233,7 @@ bool dead_reader_capacity_is_recovered(const std::string& binary)
 
     // Ordered flushing used to discard all indices whose reader had died.
     writer.unblock_global();
-    writer.m_control->scavenge_orphans();
+    sintra::test::checked_scavenge_orphans(*writer.m_control);
     if (!writer.no_pending_wakeups()) {
         std::fprintf(stderr, "Dead reader left a wakeup for its successor\n");
         return false;

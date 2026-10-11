@@ -84,11 +84,11 @@ void acquisition_death_restores_capacity()
     cm::Test_child child(executable, {"--child-acquire", directory.str()});
     cm::wait_for_file(directory.path / "paused");
     child.terminate(0);
-    cm::require(control.scavenge_orphans(), "INACTIVE popped slot must report recovered capacity");
+    cm::require(sintra::test::checked_scavenge_orphans(control), "INACTIVE popped slot must report recovered capacity");
     cm::require(control.read_access == count_before, "inactive cleanup must preserve neighbor's owned count");
     cm::require(control.free_rs_stack.size() == sintra::max_process_index - 1,
         "death between pop and ACTIVE must restore the missing free entry");
-    cm::require(!control.scavenge_orphans(), "repeated inactive cleanup must not duplicate free entries");
+    cm::require(!sintra::test::checked_scavenge_orphans(control), "repeated inactive cleanup must not duplicate free entries");
     std::vector<std::unique_ptr<Reader>> readers;
     std::set<int> indices{neighbor.m_rs_index};
     for (int index = 1; index < sintra::max_process_index; ++index) {
@@ -424,7 +424,7 @@ void unrelated_unknown_and_incarnation_mismatch()
     {
         Held_copy copy(reader);
         sintra::detail::process_identity_probe_hook = unknown_identity;
-        control.scavenge_orphans();
+        sintra::test::checked_scavenge_orphans(control);
         // Force a scan for a different octile by installing an unpaired stale
         // count, an existing recoverable interrupted-guard state.
         const uint8_t free_octile = 1;
@@ -440,14 +440,14 @@ void unrelated_unknown_and_incarnation_mismatch()
     // differ, so the mismatch is UNKNOWN and the slot stays with its owner.
     const auto reader_state = slot.word.load();
     const auto counts = control.read_access.load();
-    cm::require(!control.scavenge_orphans(), "a live FreeBSD owner's stamp mismatch must reclaim nothing");
+    cm::require(!sintra::test::checked_scavenge_orphans(control), "a live FreeBSD owner's stamp mismatch must reclaim nothing");
     cm::require(slot.word == reader_state && control.read_access == counts &&
         neighbor_slot.word == neighbor_state && !control.free_rs_stack.contains(reader.m_rs_index),
         "a live FreeBSD owner's stamp mismatch must preserve its slot, guard and count");
     slot.owner_start_stamp.fetch_sub(1);
     reader.done_reading();
 #else
-    cm::require(control.scavenge_orphans(), "a changed incarnation must reclaim the obsolete slot");
+    cm::require(sintra::test::checked_scavenge_orphans(control), "a changed incarnation must reclaim the obsolete slot");
     cm::require(slot.status() == Writer::READER_STATE_INACTIVE &&
         neighbor_slot.word == neighbor_state &&
         cm::octile_count(control.read_access, neighbor_slot.load_state().guard_octile()) == 1,
@@ -482,7 +482,7 @@ void clock_step_preserves_copying_owner()
         fakes::Scoped_fakes injected;
         fakes::s_clock_step = 3600;
         observed = sintra::probe_process_identity(owner);
-        control.scavenge_orphans();
+        sintra::test::checked_scavenge_orphans(control);
     }
     cm::require(observed.status == sintra::Process_identity_status::LIVE && !observed.error,
         "a clock step must leave the live copying owner LIVE");

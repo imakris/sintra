@@ -112,6 +112,12 @@ foreach(FULL_TEST_PATH IN LISTS TEST_FILES)
     set(TARGET_NAME sintra_${TEST_NAME})
 
     add_executable(${TARGET_NAME} ${TEST_FILE})
+    if(TEST_NAME STREQUAL "ring_crash_safe_wakeup_test")
+        # No arguments executes every maintained selector, including the exact
+        # native-owner cases also run by the focused hosted wakeup workflow.
+        add_test(NAME ${TARGET_NAME} COMMAND $<TARGET_FILE:${TARGET_NAME}>)
+        set_tests_properties(${TARGET_NAME} PROPERTIES TIMEOUT 120 LABELS wakeups)
+    endif()
     if(TEST_NAME STREQUAL "lifecycle_header_only_test" OR
        TEST_NAME STREQUAL "fixed_rpc_registration_header_only_test" OR
        TEST_NAME STREQUAL "receive_owned_header_only_test" OR

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "observation.h"
+
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -207,7 +209,7 @@ inline decltype(&::WaitForSingleObject) process_identity_wait_for_single_object 
 // A waitable handle distinguishes a running process from a signaled one even
 // when its exit code is STILL_ACTIVE (259). Lookup and wait errors are not
 // evidence that the PID has exited.
-inline Process_liveness probe_process_liveness(uint32_t pid)
+inline Process_liveness probe_process_liveness(uint32_t pid) noexcept try
 {
     if (pid == 0) {
         return Process_liveness::DEAD;
@@ -221,12 +223,16 @@ inline Process_liveness probe_process_liveness(uint32_t pid)
         return ::GetLastError() == ERROR_INVALID_PARAMETER
             ? Process_liveness::DEAD : Process_liveness::UNKNOWN;
     }
+    struct Process_handle
+    {
+        HANDLE handle;
+        ~Process_handle() noexcept { ::CloseHandle(handle); }
+    } retained{process};
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     const DWORD observed = process_identity_wait_for_single_object(process, 0);
 #else
     const DWORD observed = ::WaitForSingleObject(process, 0);
 #endif
-    ::CloseHandle(process);
     if (observed == WAIT_OBJECT_0) {
         return Process_liveness::DEAD;
     }
@@ -235,11 +241,15 @@ inline Process_liveness probe_process_liveness(uint32_t pid)
     }
     return Process_liveness::UNKNOWN;
 }
+catch (...) {
+    defer_observation_failure("process_liveness");
+    return Process_liveness::UNKNOWN;
+}
 
 } // namespace detail
 #endif
 
-inline bool is_process_alive(uint32_t pid)
+inline bool is_process_alive(uint32_t pid) noexcept try
 {
 #ifdef _WIN32
     // Public bool callers may use this for cleanup, where an unproven death
@@ -327,6 +337,10 @@ inline bool is_process_alive(uint32_t pid)
 #endif
 #endif
 }
+catch (...) {
+    detail::defer_observation_failure("process_liveness");
+    return true;
+}
 
 namespace detail {
 
@@ -374,6 +388,11 @@ inline std::atomic<uint64_t>& cached_process_instance() noexcept
 }
 
 #ifndef _WIN32
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+namespace test_hooks {
+inline std::atomic<int> s_process_instance_fork_error{0};
+}
+#endif
 // A fork child copies its parent's instance, and so would the fork children
 // of a child that never used it; one of those can receive the parent's PID
 // after the parent exits. Every fork child therefore starts without one.
@@ -384,7 +403,12 @@ inline void forget_process_instance_in_fork_child() noexcept
 
 inline bool register_process_instance_fork_handler()
 {
-    const int error = ::pthread_atfork(nullptr, nullptr, forget_process_instance_in_fork_child);
+    int injected = 0;
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    injected = test_hooks::s_process_instance_fork_error.load();
+#endif
+    const int error = injected ? injected :
+        ::pthread_atfork(nullptr, nullptr, forget_process_instance_in_fork_child);
     if (error != 0) {
         throw std::system_error(error, std::system_category(), "pthread_atfork");
     }
@@ -436,7 +460,7 @@ inline bool process_instance_has_exited(uint64_t recorded, uint64_t self)
 
 } // namespace detail
 
-inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
+inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid) noexcept try
 {
 #ifdef _WIN32
     if (pid == 0) {
@@ -534,6 +558,10 @@ inline std::optional<uint64_t> query_process_start_stamp(uint32_t pid)
     (void)pid;
     return std::nullopt;
 #endif
+}
+catch (...) {
+    detail::defer_observation_failure("process_start_stamp");
+    return std::nullopt;
 }
 
 // Whether the start stamp observed for a live PID proves that the PID no longer
@@ -785,13 +813,17 @@ inline bool linux_procfs_shows_ancestor_namespace()
     if (fd < 0) {
         return false;
     }
+    struct Status_file
+    {
+        int fd;
+        ~Status_file() noexcept { ::close(fd); }
+    } retained{fd};
     std::string status;
     char buffer[4096];
     ssize_t size = 0;
     while ((size = ::read(fd, buffer, sizeof(buffer))) > 0) {
         status.append(buffer, static_cast<size_t>(size));
     }
-    ::close(fd);
 
     constexpr std::string_view k_label = "\nNStgid:";
     const auto label = status.find(k_label);
@@ -831,7 +863,7 @@ inline bool linux_record_coordinates_contradict(const process_namespaces_t& owne
 
 } // namespace detail
 
-inline std::optional<uint64_t> current_process_start_stamp()
+inline std::optional<uint64_t> current_process_start_stamp() noexcept try
 {
 #if defined(__linux__)
     // A self-resolving record describes this process in any procfs view.
@@ -844,10 +876,14 @@ inline std::optional<uint64_t> current_process_start_stamp()
     return query_process_start_stamp(get_current_pid());
 #endif
 }
+catch (...) {
+    detail::defer_observation_failure("current_process_start_stamp");
+    return std::nullopt;
+}
 
 // Captures this process's incarnation for one reader-slot acquisition. On
 // Linux its namespaces are read afresh, alongside the start stamp.
-inline std::optional<process_incarnation_t> current_process_incarnation()
+inline std::optional<process_incarnation_t> current_process_incarnation() noexcept try
 {
     const auto start_stamp = current_process_start_stamp();
     if (!start_stamp || *start_stamp == 0) {
@@ -858,6 +894,10 @@ inline std::optional<process_incarnation_t> current_process_incarnation()
     incarnation.namespaces = detail::current_linux_namespaces();
 #endif
     return incarnation;
+}
+catch (...) {
+    detail::defer_observation_failure("current_process_incarnation");
+    return std::nullopt;
 }
 
 namespace detail {
@@ -887,6 +927,11 @@ inline process_identity_result_t probe_process_identity_native(const process_inc
         }
         return unknown_process_identity(error);
     }
+    struct Process_handle
+    {
+        HANDLE handle;
+        ~Process_handle() noexcept { ::CloseHandle(handle); }
+    } retained{process};
 
     FILETIME creation{}, exit{}, kernel{}, user{};
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
@@ -896,7 +941,6 @@ inline process_identity_result_t probe_process_identity_native(const process_inc
 #endif
     if (!queried) {
         const DWORD error = ::GetLastError();
-        ::CloseHandle(process);
         return unknown_process_identity(error);
     }
 
@@ -904,7 +948,6 @@ inline process_identity_result_t probe_process_identity_native(const process_inc
     observed_stamp.LowPart = creation.dwLowDateTime;
     observed_stamp.HighPart = creation.dwHighDateTime;
     if (observed_stamp.QuadPart != start_stamp) {
-        ::CloseHandle(process);
         return {Process_identity_status::DEAD, {}};
     }
 
@@ -914,7 +957,6 @@ inline process_identity_result_t probe_process_identity_native(const process_inc
     const DWORD wait_result = ::WaitForSingleObject(process, 0);
 #endif
     const DWORD error = wait_result == WAIT_FAILED ? ::GetLastError() : ERROR_INVALID_DATA;
-    ::CloseHandle(process);
     if (wait_result == WAIT_OBJECT_0) {
         return {Process_identity_status::DEAD, {}};
     }
@@ -1018,7 +1060,7 @@ inline process_identity_result_t probe_process_identity_native(const process_inc
 
 } // namespace detail
 
-inline process_identity_result_t probe_process_identity(const process_incarnation_t& owner)
+inline process_identity_result_t probe_process_identity(const process_incarnation_t& owner) noexcept try
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (detail::process_identity_probe_hook) {
@@ -1026,6 +1068,10 @@ inline process_identity_result_t probe_process_identity(const process_incarnatio
     }
 #endif
     return detail::probe_process_identity_native(owner);
+}
+catch (...) {
+    detail::defer_observation_failure("process_identity");
+    return detail::unknown_process_identity(EIO);
 }
 
 struct run_marker_record_t

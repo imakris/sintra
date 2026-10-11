@@ -203,7 +203,7 @@ inline void marked_reader_death(const std::string& executable, const death_case_
             earlier_owner.start_stamp += 1;
             require(sintra::probe_process_identity(earlier_owner).status == Process_identity_status::DEAD,
                 "another incarnation's record must be DEAD within one time namespace");
-            control.scavenge_orphans();
+            sintra::test::checked_scavenge_orphans(control);
         }
         require(control.free_rs_stack.size() == sintra::max_process_index,
             "every reader slot from time namespace A must be released");
@@ -303,7 +303,7 @@ inline void marked_reader_death(const std::string& executable, const death_case_
     if (!progressed) {
         // A watchdog detects a failure; it never authorizes production reuse.
         neighbor.done_reading();
-        control.scavenge_orphans();
+        sintra::test::checked_scavenge_orphans(control);
     }
     writing.join();
     sintra::detail::test_hooks::s_ring_guard_operation = nullptr;

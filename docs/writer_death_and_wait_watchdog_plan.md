@@ -2,11 +2,28 @@
 
 ## Status
 
-**Deferred.** On 2026-10-05 the owner decided the contract below and chose
-to treat the work as its own effort, outside current development. No design
-revision has been adopted and no implementation is scheduled or authorized
-by this document. Before resuming, check every citation against the
-then-current code and complete the design review below.
+**Wakeup work reopened on 2026-10-09.** The owner requested implementation of
+crash-safe wakeups with focused local and CI tests, in a separate branch and
+worktree. The active scope and notification/finality boundary are in the
+[crash-safe wakeups plan](crash_safe_wakeups_plan.md). Its first notification
+slice's earlier design direction received the requested reviews; this does
+not establish current implementation acceptance. The implementation's latest
+source fixes passed all 84 renewed focused runtime executions, 12 isolated
+regression executions and four seven-target builds. Source and all 28 selected
+binaries remained unchanged during the renewed runtime gate. Completed
+Astra/Sol follow-ups found no remaining source blockers and supply continuity
+evidence only. The completed eligible Sol 5.6 review found no source blocker
+but recorded an evidence-package inconsistency blocker, which remains
+preserved. A matching package and an actual qualifying clean independent
+pre-push verdict are required, including for a draft. Additional Sol review
+does not substitute for mandatory Astra/Opus design adoption; adoption and
+merge gates remain open. Required Opus 5.5
+and Sonnet 5.5 reviews could not run because their API quota was exhausted.
+The native-death continuation remains open. The broader writer-death delivery
+refactor remains deferred except for dependencies established by that review.
+The contracts decided on 2026-10-05 still apply when lifecycle code is touched.
+The historical stages below provide context; their full-suite gates are
+superseded by the owner's focused-test instruction for this effort.
 
 Source citations (`file:line`) refer to headers under `include/sintra/detail/`
 at `c03e0d27`. Short names: `rings.h`, `semaphore.h`, `mutex.h`,
@@ -231,7 +248,7 @@ unaffected.
 |---|---|---|
 | S0 | Test-only watchdog switch; rescue detector based on registration and token state; supervisor helpers | No production change; existing suite green |
 | S1 | Seam tests that kill a writer at each gap, and contract tests | Expected failures fail on current code with the watchdog disabled; preservation tests pass |
-| S2a | Crash-safe notification (K6); raw-ring close on behalf; successor flush when a writer takes ownership; ABI bump | Seam tests for every gap pass with the watchdog disabled |
+| S2a | Crash-safe notification (K6), successor flush and ABI work now follow the [active wakeup plan](crash_safe_wakeups_plan.md); raw-ring close on behalf remains a separate finality dependency | Focused gates and explicit retry actors in the active plan; full native-death recovery remains its continuation |
 | S2b | Occurrence binding (K4); `W` in unpublication | A late reply cannot reach a successor's reused call id; a reply relayed before `W` wins over cancellation; a nonzero-occurrence caller of a coordinator-hosted object gets its reply |
 | S2c | Transport ending for managed children (the chosen boundary); crash notification becomes provenance | Kill a child at every stage, including before it publishes and after it commits its own unpublication: every committed frame is delivered, the unpublication follows them, and no stale name remains; a retirement is followed by death; lifecycle and recovery suites updated |
 | S2d | Native exit handles for external processes, ready before the first commit | A killed external process is drained like a child |

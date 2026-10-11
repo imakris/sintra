@@ -5,7 +5,8 @@
 On 2026-09-29 the owner chose to use the current Sintra for a product release
 and defer the developments below. This records that scope decision; it does
 not certify a particular application's release readiness. No implementation
-work on these tracks is scheduled or authorized by this document.
+work on these tracks is scheduled or authorized by this document. The owner
+subsequently reopened crash-safe wakeups on 2026-10-09, as recorded below.
 
 This inventory was checked against `9389e8fd`. Current API contracts remain in
 the [reference](reference/index.md), [architecture](architecture.md), and
@@ -41,8 +42,11 @@ marker protocol or API shape is adopted here.
 
 ### Writer-death delivery and the parked-reader watchdog
 
-**State: owner decisions taken on 2026-10-05; design revision 3 and
-implementation deferred, to be taken up as their own effort.** A crashed
+**State: crash-safe wakeups reopened on 2026-10-09; broader writer-death
+delivery remains deferred except for established wakeup dependencies.** The
+[active wakeup plan](crash_safe_wakeups_plan.md) stages replay-safe notification
+before native-death integration and timer removal, with focused local and CI
+gates. No wakeup fix is shipped by this status update. A crashed
 writer's committed messages are to be delivered, and wake-up notification is
 to survive a poster's death so that the 50 ms parked-reader timeout can be
 removed. Today delivery of a dead writer's last messages depends on timing.

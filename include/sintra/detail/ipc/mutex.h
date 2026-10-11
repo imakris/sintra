@@ -2,6 +2,10 @@
 // Licensed under the BSD 2-Clause License, see LICENSE.md file for details.
 
 #pragma once
+
+#include "native_exit_authority.h"
+#include "observation.h"
+#include "../debug_pause.h"
 /*
 interprocess_mutex.h
 
@@ -71,6 +75,25 @@ CAVEATS
 
 namespace sintra { namespace detail {
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+namespace test_hooks {
+using Mutex_callback = void (*)(const char*, const void*);
+inline std::atomic<Mutex_callback> s_mutex_operation{nullptr};
+}
+#endif
+
+inline void mutex_operation_for_test(const char* stage, const void* mutex)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_mutex_operation.load(std::memory_order_acquire)) {
+        callback(stage, mutex);
+    }
+#else
+    (void)stage;
+    (void)mutex;
+#endif
+}
+
 // The alignas(64) members intentionally request padding for cache-line isolation;
 // silence the MSVC padding warning for this type.
 #if defined(_MSC_VER)
@@ -111,16 +134,52 @@ public:
         return try_acquire(self, /*throw_on_recursive=*/false);
     }
 
+    enum class Owner_inspection { MATCHED, CHANGED, BUSY };
+
+    // Infrastructure-only bounded inspection. The publication gate excludes
+    // successor acquisition; neither mutex ownership nor its token is changed.
+    // The callback must not acquire this mutex or invoke application code.
+    template <typename F>
+    Owner_inspection inspect_owner_instance(
+        uint64_t expected_instance,
+        const Native_exit_authority& authority,
+        F&& inspect)
+    {
+        recover_token gate = 0;
+        if (!acquire_recovery_gate(gate, &authority)) {
+            return Owner_inspection::BUSY;
+        }
+        Gate_release release(*this, gate);
+
+        operation("mutex_inspection_gate_acquired", true);
+
+        const auto owner = m_owner.load(std::memory_order_acquire);
+        if (owner != k_unowned &&
+            m_owner_instance.load(std::memory_order_acquire) != expected_instance)
+        {
+            return Owner_inspection::CHANGED;
+        }
+        inspect();
+        return Owner_inspection::MATCHED;
+    }
+
 
     // Tries to acquire within a steady_clock-relative duration.
     // Uses adaptive spinning, then sleeps with exponential backoff capped and
     // clamped to the remaining time budget.
     bool try_lock_for(std::chrono::steady_clock::duration rel)
     {
+        bool acquired = false;
+        return try_lock_for_impl(rel, acquired);
+    }
+
+private:
+    bool try_lock_for_impl(std::chrono::steady_clock::duration rel, bool& acquired)
+    {
         const owner_token self = make_owner_token();
 
         // Fast attempt
-        if (try_acquire(self, /*throw_on_recursive=*/false))    { return true;  }
+        if (try_acquire(self, /*throw_on_recursive=*/false, &acquired)) { return true; }
         if (rel <= std::chrono::steady_clock::duration::zero()) { return false; }
 
         const auto deadline = std::chrono::steady_clock::now() + rel;
@@ -157,21 +216,77 @@ public:
                 }
             }
 
-            if (try_acquire(self, /*throw_on_recursive=*/false)) {
+            if (try_acquire(self, /*throw_on_recursive=*/false, &acquired)) {
                 return true;
             }
         }
     }
 
 
+public:
     // Steady-clock absolute deadline overload (preferred).
     bool try_lock_until(const std::chrono::time_point<std::chrono::steady_clock>& abs_time) noexcept
     {
-        const auto now = std::chrono::steady_clock::now();
-        if (abs_time <= now) {
-            return try_lock_for(std::chrono::steady_clock::duration::zero());
+        bool acquired = false;
+        try {
+            const auto now = std::chrono::steady_clock::now();
+            return try_lock_for_impl(abs_time <= now ?
+                std::chrono::steady_clock::duration::zero() : abs_time - now, acquired);
         }
-        return try_lock_for(abs_time - now);
+        catch (...) {
+            defer_observation_failure("mutex_timed_acquisition");
+            // A post-CAS probe cannot revoke this call's successful acquisition.
+            return acquired;
+        }
+    }
+
+    // Infrastructure custody is captured by the acquiring call, never inferred
+    // from a later owner reread. Instrumentation cannot cancel mandatory cleanup.
+    bool try_lock_cleanup(uint64_t& token, bool& acquired, std::error_code* error = nullptr) noexcept
+    {
+        acquired = false;
+        std::error_code failure;
+        try {
+            token = make_owner_token();
+            if (error) { error->clear(); }
+            return try_acquire(token, false, &acquired, true);
+        }
+        catch (const std::system_error& exception) { failure = exception.code(); }
+        catch (...) {
+            failure = std::make_error_code(std::errc::io_error);
+        }
+        // All inspection gates have unwound. Genuine failures are not test
+        // observations, and cannot disappear in production or cancel custody.
+        if (error) { *error = failure; }
+        else { native_diagnostic("[sintra][mutex] mandatory mutex acquisition error ",
+            uint64_t(failure.value()), "; original acquisition duty retained.\n"); }
+        return acquired;
+    }
+
+    void lock_cleanup(uint64_t& token) noexcept
+    {
+        bool acquired = false;
+        std::error_code last_error;
+        for (;;) {
+            std::error_code error;
+            const bool locked = try_lock_cleanup(token, acquired, &error);
+            if (error && error != last_error) {
+                native_diagnostic("[sintra][mutex] mandatory mutex acquisition error ",
+                    uint64_t(error.value()), "; original acquisition duty retained.\n");
+            }
+            last_error = error;
+            if (locked) { return; }
+            native_error_backoff();
+        }
+    }
+
+    bool unlock_owned(uint64_t token) noexcept
+    {
+        if (owner_pid(token) != uint32_t(get_current_pid())) {
+            return false;
+        }
+        auto expected = token;
+        return m_owner.compare_exchange_strong(expected, k_unowned);
     }
 
 
@@ -214,6 +329,16 @@ public:
     {
         return m_owner.load(std::memory_order_acquire);
     }
+
+    std::uint64_t test_gate_holder() const noexcept
+    {
+        return m_recovering.load(std::memory_order_acquire);
+    }
+
+    bool test_try_lock_throwing()
+    {
+        return try_acquire(make_owner_token(), /*throw_on_recursive=*/true);
+    }
 #endif
 
 private:
@@ -223,6 +348,35 @@ private:
 
     // Recovery coordination token: the gate holder's process instance.
     using recover_token = std::uint64_t;
+
+    class Gate_release
+    {
+    public:
+        Gate_release(interprocess_mutex& mutex, recover_token token) noexcept
+        :
+            m_mutex(mutex), m_token(token), m_pid(uint32_t(get_current_pid()))
+        {}
+        ~Gate_release() noexcept
+        {
+            if (m_pid == uint32_t(get_current_pid())) {
+                m_mutex.release_recovery_gate(m_token);
+            }
+        }
+    private:
+        interprocess_mutex& m_mutex;
+        recover_token m_token;
+        uint32_t m_pid;
+    };
+
+    void operation(const char* stage, bool contain)
+    {
+        if (contain) {
+            observe_without_canceling(stage, [&] { mutex_operation_for_test(stage, this); });
+        }
+        else {
+            mutex_operation_for_test(stage, this);
+        }
+    }
 
     // We require a lock-free 64-bit atomic for interprocess usage.
     static_assert(std::atomic<owner_token>::is_always_lock_free,
@@ -245,11 +399,16 @@ private:
     }
 
     // The owned token is this process instance.
-    bool acquire_recovery_gate(recover_token& owned_token)
+    bool acquire_recovery_gate(
+        recover_token& owned_token,
+        const Native_exit_authority* authority = nullptr)
     {
         owned_token = current_process_instance();
         recover_token holder = m_recovering.load(std::memory_order_acquire);
-        if (holder != 0 && process_instance_has_exited(holder, owned_token)) {
+        if (holder != 0 &&
+            (authority ? authority->has_exited(holder) :
+                process_instance_has_exited(holder, owned_token)))
+        {
             m_recovering.compare_exchange_strong(holder, static_cast<recover_token>(0));
         }
 
@@ -294,31 +453,31 @@ private:
 #endif
     }
 
-    bool try_acquire_unowned_when_no_recovery(owner_token self)
+    bool try_acquire_unowned_when_no_recovery(owner_token self, bool* acquired, bool contain)
     {
         recover_token gate = 0;
         if (!acquire_recovery_gate(gate)) {
             return false;
         }
+        Gate_release release(*this, gate);
 
         if (m_owner.load(std::memory_order_acquire) != k_unowned) {
-            release_recovery_gate(gate);
             return false;
         }
 
-        m_owner_start_stamp.store(0, std::memory_order_release);
-        m_owner_instance.store(0, std::memory_order_release);
-        owner_token expected = k_unowned;
-        if (!m_owner.compare_exchange_strong(expected, self)) {
-            release_recovery_gate(gate);
-            return false;
-        }
-
-        m_owner_start_stamp.store(
-            current_process_start_stamp().value_or(0),
-            std::memory_order_release);
+        // An occupied owner always has its complete tuple, including if the
+        // publisher exits immediately after CAS. Owner zero ignores this tuple.
+        m_owner_start_stamp.store(current_process_start_stamp().value_or(0), std::memory_order_release);
         m_owner_instance.store(gate, std::memory_order_release);
-        release_recovery_gate(gate);
+        owner_token expected = k_unowned;
+        operation("mutex_before_owner_cas", contain);
+        if (!m_owner.compare_exchange_strong(expected, self)) {
+            return false;
+        }
+        if (acquired) {
+            *acquired = true;
+        }
+        operation("mutex_after_owner_cas", contain);
         return true;
     }
 
@@ -336,17 +495,18 @@ private:
     }
 
     // Internal helper lets timed/try APIs avoid throwing on recursion.
-    bool try_acquire(owner_token self, bool throw_on_recursive)
+    bool try_acquire(
+        owner_token self, bool throw_on_recursive, bool* acquired = nullptr, bool contain = false)
     {
-        if (try_acquire_unowned_when_no_recovery(self)) {
+        if (try_acquire_unowned_when_no_recovery(self, acquired, contain)) {
             return true;
         }
 
         owner_token expected = m_owner.load(std::memory_order_acquire);
 
         // Recovery path: previous owner is gone (process crashed/exited).
-        if (expected != k_unowned && try_recover(expected)) {
-            if (try_acquire_unowned_when_no_recovery(self)) {
+        if (expected != k_unowned && try_recover(expected, contain)) {
+            if (try_acquire_unowned_when_no_recovery(self, acquired, contain)) {
                 return true;
             }
         }
@@ -355,17 +515,18 @@ private:
         // PID and TID recorded another instance; recovery takes its mutex, so
         // do not classify it as recursion.
         if (expected == self) {
-            const owner_token current_owner = m_owner.load(std::memory_order_acquire);
-            const recover_token current_recovering = m_recovering.load(std::memory_order_acquire);
-            if (current_recovering != 0 || current_owner != self) {
-                return false;
+            operation("mutex_recursion_after_owner_load", contain);
+            bool recursive = false;
+            {
+                recover_token gate = 0;
+                if (!acquire_recovery_gate(gate)) {
+                    return false;
+                }
+                Gate_release release(*this, gate);
+                recursive = m_owner.load(std::memory_order_acquire) == self &&
+                    m_owner_instance.load(std::memory_order_acquire) == gate;
             }
-
-            if (m_owner_instance.load(std::memory_order_acquire) != current_process_instance()) {
-                return false;
-            }
-
-            if (throw_on_recursive) {
+            if (recursive && throw_on_recursive) {
                 throw std::system_error(
                     std::make_error_code(std::errc::resource_deadlock_would_occur),
                     "interprocess_mutex: recursive lock detected");
@@ -377,7 +538,7 @@ private:
     }
 
     // Attempt robust recovery if the observed owner appears to be dead.
-    bool try_recover(owner_token observed_owner)
+    bool try_recover(owner_token observed_owner, bool contain)
     {
         if (observed_owner == k_unowned) {
             return false;
@@ -387,6 +548,8 @@ private:
         if (!acquire_recovery_gate(gate)) {
             return false; // someone else is (still) recovering
         }
+        Gate_release release(*this, gate);
+        operation("mutex_recovery_gate_acquired", contain);
 
         // We are the recoverer now.
         bool recovered = false;
@@ -401,21 +564,9 @@ private:
             const auto stored_stamp = m_owner_start_stamp.load(std::memory_order_acquire);
             if (owner_has_exited(observed_owner, stored_stamp, gate)) {
                 recovered = m_owner.compare_exchange_strong(current_owner, k_unowned);
-                if (recovered &&
-                    m_recovering.load(std::memory_order_acquire) == gate)
-                {
-                    auto stamp_to_clear = stored_stamp;
-                    m_owner_start_stamp.compare_exchange_strong(
-                        stamp_to_clear,
-                        static_cast<std::uint64_t>(0),
-                        std::memory_order_release,
-                        std::memory_order_acquire);
-                    m_owner_instance.store(0, std::memory_order_release);
-                }
             }
         }
 
-        release_recovery_gate(gate);
         return recovered;
     }
 

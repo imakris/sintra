@@ -1,0 +1,297 @@
+name: Focused crash-safe wakeups
+
+on:
+  push:
+    branches: [ 'work/crash-safe-wakeups-20261009' ]
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/focused-wakeups.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focused-wakeups-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Applied only to the disposable checkout, before active-target configuration.
+  SINTRA_WAKEUP_TESTS: |
+    ring_crash_safe_wakeup_test 3
+    ring_wakeup_ownership_test 1
+    ring_wait_hint_test 1
+    interprocess_semaphore_test 10
+    process_reader_stop_ownership_test 1
+    ring_abi_fingerprint_test 1
+  SINTRA_IPC_RING_CASES: |
+    test_writer_closed_delivers_final_payload_before_stop
+    test_replacement_writer_continues_unread_committed_data
+    test_wait_for_new_data
+    test_unblock_local_returns_empty
+
+jobs:
+  native:
+    name: Wakeups - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025-vs2026
+            build_dir: C:/b/scw
+          - os: ubuntu-latest
+            build_dir: build
+          - os: macos-15
+            build_dir: build
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Select wakeup tests
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          Path("tests/active_tests.txt").write_text(
+              os.environ["SINTRA_WAKEUP_TESTS"] + "ipc_rings_tests 1\n", encoding="utf-8")
+
+      - name: Locate Visual Studio 2026
+        if: runner.os == 'Windows'
+        id: visual_studio
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $instances = @(& $vswhere -version '[18.0,19.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json)
+          $instance = $instances | Where-Object { $_.isComplete -and $_.isLaunchable } | Select-Object -First 1
+          if (-not $instance) { throw 'A complete and launchable Visual Studio 2026 installation is required' }
+          Write-Host "Visual Studio $($instance.installationVersion): $($instance.installationPath)"
+          Write-Host "Installer restart pending: $($instance.isRebootRequired)"
+          foreach ($key in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Services\Pending'
+          )) { Write-Host "${key}: $(Test-Path -LiteralPath $key)" }
+          $session = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+          Write-Host "PendingFileRenameOperations: $($null -ne $session.PSObject.Properties['PendingFileRenameOperations'])"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "path=$($instance.installationPath)"
+
+      - name: Ensure native Windows debugger
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          function Find-NativeDebugger {
+            foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+              $candidate = Join-Path $root 'Windows Kits/10/Debuggers/x64/cdb.exe'
+              if (Test-Path -LiteralPath $candidate) { return $candidate }
+            }
+          }
+          $debugger = Find-NativeDebugger
+          if (-not $debugger) {
+            $installer = Join-Path $env:RUNNER_TEMP 'winsdksetup.exe'
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2376217' -OutFile $installer
+            $signature = Get-AuthenticodeSignature -FilePath $installer
+            if ($signature.Status -ne 'Valid' -or
+                $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') {
+              throw 'Windows SDK installer signature is not valid for Microsoft Corporation'
+            }
+            $installation = Start-Process -FilePath $installer -ArgumentList @(
+              '/features', 'OptionId.WindowsDesktopDebuggers', '/quiet', '/norestart'
+            ) -Wait -PassThru -WindowStyle Hidden
+            if ($installation.ExitCode -notin @(0, 3010, 1641)) {
+              throw "Windows debugger installation failed: $($installation.ExitCode)"
+            }
+            $debugger = Find-NativeDebugger
+          }
+          if (-not $debugger) { throw 'Native x64 CDB is required for Windows test diagnostics' }
+          & $debugger -version
+          if ($LASTEXITCODE -ne 0) { throw "CDB could not run: $LASTEXITCODE" }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path $debugger)
+
+      - name: Ensure Linux build and diagnostic tools
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1 || ! command -v gdb >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build gdb
+          fi
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+          gdb --version
+
+      - name: Ensure macOS build and diagnostic tools
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+          xcrun lldb --version
+
+      - name: Configure only the seven selected targets
+        if: runner.os != 'Windows'
+        run: |
+          cmake -G "Ninja Multi-Config" -S . -B '${{ matrix.build_dir }}' \
+            -DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_ACTIVE_TESTS_ONLY=ON \
+            -DSINTRA_BUILD_EXAMPLES=OFF -DSINTRA_BUILD_MANUAL_TESTS=OFF \
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded \
+            2>&1 | tee wakeup-configure.log
+
+      - name: Configure selected targets with MSVC v145 x64
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "${{ steps.visual_studio.outputs.path }}\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.51
+          if errorlevel 1 exit /b %errorlevel%
+          cmake -G "Ninja Multi-Config" -S . -B "${{ matrix.build_dir }}" -DCMAKE_CXX_COMPILER=cl.exe -DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_ACTIVE_TESTS_ONLY=ON -DSINTRA_BUILD_EXAMPLES=OFF -DSINTRA_BUILD_MANUAL_TESTS=OFF -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+          if errorlevel 1 exit /b %errorlevel%
+
+      - name: Verify MSVC compiler selection
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $compilerEntry = Select-String -LiteralPath '${{ matrix.build_dir }}/CMakeCache.txt' -Pattern '^CMAKE_CXX_COMPILER:[^=]+='
+          if (-not $compilerEntry) { throw 'CMAKE_CXX_COMPILER is missing from CMakeCache.txt' }
+          $compiler = $compilerEntry.Line.Split('=', 2)[1]
+          $installation = '${{ steps.visual_studio.outputs.path }}'.Replace('\', '/')
+          if (-not $compiler.Replace('\', '/').StartsWith("$installation/VC/Tools/MSVC/14.51.")) {
+            throw "Compiler is not the selected VS2026 v145 toolset: $compiler"
+          }
+          Write-Host "Verified compiler: $compiler"
+
+      - name: Build Debug and Release with two compiler jobs
+        if: runner.os != 'Windows'
+        run: |
+          cmake --build '${{ matrix.build_dir }}' --config Debug --parallel 2 2>&1 | tee wakeup-build-debug.log
+          cmake --build '${{ matrix.build_dir }}' --config Release --parallel 2 2>&1 | tee wakeup-build-release.log
+
+      - name: Build Debug and Release with MSVC v145 x64
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "${{ steps.visual_studio.outputs.path }}\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.51
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build "${{ matrix.build_dir }}" --config Debug --parallel 2
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build "${{ matrix.build_dir }}" --config Release --parallel 2
+          if errorlevel 1 exit /b %errorlevel%
+
+      - name: Run the complete focused repetition schedule
+        run: |
+          python - 2>&1 <<'PY' | tee wakeup-tests.log
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+          build_dir = Path(r"${{ matrix.build_dir }}").resolve()
+          Path("tests/active_tests.txt").write_text(os.environ["SINTRA_WAKEUP_TESTS"], encoding="utf-8")
+          subprocess.run([sys.executable, "tests/run_tests.py", "--build-dir", str(build_dir),
+                          "--config", "Debug,Release", "--timeout", "60", "--iteration-multiplier", "1"], check=True)
+          selectors = [argument for case in os.environ["SINTRA_IPC_RING_CASES"].split()
+                       for argument in ("--run", "unit:" + case)]
+          for config in ("Debug", "Release"):
+              executable = "sintra_ipc_rings_tests" + (".exe" if os.name == "nt" else "")
+              binary = build_dir / "tests" / config / executable
+              with tempfile.TemporaryDirectory(prefix="wakeup-", dir=build_dir) as scratch:
+                  subprocess.run([str(binary), "--unit-only", *selectors], cwd=scratch, timeout=60, check=True)
+          PY
+
+      - name: Preserve focused logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: wakeup-logs-${{ matrix.os }}
+          path: wakeup-*.log
+          retention-days: 7
+
+  freebsd:
+    name: Wakeups - FreeBSD
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Select wakeup tests
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          Path("tests/active_tests.txt").write_text(
+              os.environ["SINTRA_WAKEUP_TESTS"] + "ipc_rings_tests 1\n", encoding="utf-8")
+
+      - name: Build and test Debug and Release on FreeBSD 15.0
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.0'
+          cpu: 2
+          copyback: false
+          envs: 'SINTRA_WAKEUP_TESTS SINTRA_IPC_RING_CASES'
+          prepare: pkg install -y cmake ninja python gdb
+          run: |
+            set -eu
+            cmake -G "Ninja Multi-Config" -S . -B build \
+              -DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_ACTIVE_TESTS_ONLY=ON \
+              -DSINTRA_BUILD_EXAMPLES=OFF -DSINTRA_BUILD_MANUAL_TESTS=OFF
+            cmake --build build --config Debug --parallel 2
+            cmake --build build --config Release --parallel 2
+            python3 - <<'PY'
+            import os
+            import subprocess
+            import sys
+            import tempfile
+            from pathlib import Path
+            build_dir = Path("build").resolve()
+            Path("tests/active_tests.txt").write_text(os.environ["SINTRA_WAKEUP_TESTS"], encoding="utf-8")
+            subprocess.run([sys.executable, "tests/run_tests.py", "--build-dir", str(build_dir),
+                            "--config", "Debug,Release", "--timeout", "60", "--iteration-multiplier", "1"], check=True)
+            selectors = [argument for case in os.environ["SINTRA_IPC_RING_CASES"].split()
+                         for argument in ("--run", "unit:" + case)]
+            for config in ("Debug", "Release"):
+                binary = build_dir / "tests" / config / "sintra_ipc_rings_tests"
+                with tempfile.TemporaryDirectory(prefix="wakeup-", dir=build_dir) as scratch:
+                    subprocess.run([str(binary), "--unit-only", *selectors], cwd=scratch, timeout=60, check=True)
+            PY
+
+  mingw_compile:
+    name: Wakeups - MinGW compile
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Select wakeup targets
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          Path("tests/active_tests.txt").write_text(
+              os.environ["SINTRA_WAKEUP_TESTS"] + "ipc_rings_tests 1\n", encoding="utf-8")
+
+      - name: Configure the selected targets with MinGW
+        run: |
+          g++.exe --version
+          cmake -G "Ninja Multi-Config" -S . -B C:/b/scw-mingw -DCMAKE_CXX_COMPILER=g++.exe \
+            -DSINTRA_BUILD_TESTS=ON -DSINTRA_BUILD_ACTIVE_TESTS_ONLY=ON \
+            -DSINTRA_BUILD_EXAMPLES=OFF -DSINTRA_BUILD_MANUAL_TESTS=OFF
+
+      - name: Compile Debug and Release with two compiler jobs
+        run: |
+          cmake --build C:/b/scw-mingw --config Debug --parallel 2
+          cmake --build C:/b/scw-mingw --config Release --parallel 2

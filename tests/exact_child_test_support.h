@@ -99,6 +99,50 @@ public:
 
     int pid() const noexcept { return m_pid; }
 
+    // The armed parent's exact child authority stays retained through replay.
+    // A subsequent poll()/settle still consumes and records the final status.
+    Exact_child_state observe_exit_retained() const noexcept
+    {
+#ifdef _WIN32
+        if (!m_handle || m_handle == INVALID_HANDLE_VALUE) {
+            return Exact_child_state::error;
+        }
+        const DWORD result = WaitForSingleObject(m_handle, 0);
+        if (result == WAIT_OBJECT_0) {
+            return Exact_child_state::exited;
+        }
+        return result == WAIT_TIMEOUT ? Exact_child_state::running : Exact_child_state::error;
+#else
+        if (m_pid <= 0 || m_reaped) {
+            return Exact_child_state::error;
+        }
+        siginfo_t info{};
+        int result;
+        do {
+            result = ::waitid(P_PID, static_cast<id_t>(m_pid), &info, WEXITED | WNOHANG | WNOWAIT);
+        }
+        while (result == -1 && errno == EINTR);
+        if (result == -1) {
+            return Exact_child_state::error;
+        }
+        return info.si_pid == m_pid ? Exact_child_state::exited : Exact_child_state::running;
+#endif
+    }
+
+    bool terminate_retaining_authority() noexcept
+    {
+        if (observe_exit_retained() == Exact_child_state::exited) {
+            return true;
+        }
+#ifdef _WIN32
+        return m_handle && m_handle != INVALID_HANDLE_VALUE &&
+            TerminateProcess(m_handle, k_cleanup_exit_code);
+#else
+        return m_pid > 0 && !m_reaped &&
+            (::kill(static_cast<pid_t>(m_pid), SIGKILL) == 0 || errno == ESRCH);
+#endif
+    }
+
     Exact_child_state poll()
     {
 #ifdef _WIN32
