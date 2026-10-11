@@ -96,6 +96,13 @@ def case_completed(outcome, expected_case):
     return True
 
 
+def capability_completed(public_built, diagnostic_built, cases):
+    # Ordinary public-header evidence cannot stand in for the raw-fork case.
+    return (public_built is True and diagnostic_built is True
+            and set(cases) == {"fork", "raw_fork"}
+            and all(case_completed(row, case) for case, row in cases.items()))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hosted-ci", action="store_true")
@@ -122,8 +129,20 @@ def main():
                     "version": platform.version(), "architecture": platform.machine()},
         "deployment_target_requested": os.environ.get("MACOSX_DEPLOYMENT_TARGET"),
         "native_capability_gate_completed": False, "public_sdk_support_conclusion": "unproved",
+        "standard_header_compile_and_link": False,
+        "raw_fork_diagnostic_compile_and_link": False, "cases": {},
         "n3_acceptance": False, "pid_reuse_exercised": False,
         "sintra_process_word_exercised": False,
+        "raw_fork_trigger": {
+            "diagnostic_only": True,
+            "native_authority": False,
+            "sdk_selector_header": "sys/syscall.h",
+            "private_selector_exposure": "diagnostic_variant_only",
+            "prior_sdk_15_5_warning": "syscall() is unsupported",
+            "vendor_support_conclusion": "not_claimed",
+            "manual_private_prototype": False,
+            "hardcoded_syscall_number": False,
+        },
     }
     for path in (source / "darwin_audit_probe.c", Path(__file__).resolve(), shared):
         result["source_hashes"][str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -160,7 +179,8 @@ def main():
         sdk_root = Path(sdk["stdout"].strip())
         for relative in ("usr/include/bsm/libbsm.h", "usr/include/sys/appleapiopts.h",
                          "usr/include/mach/message.h", "usr/include/mach/mach_traps.h",
-                         "usr/include/sys/un.h"):
+                         "usr/include/sys/un.h", "usr/include/sys/syscall.h",
+                         "usr/include/unistd.h"):
             native_header = sdk_root / relative
             if not native_header.is_file():
                 result.setdefault("sdk_header_missing", []).append(relative)
@@ -170,24 +190,36 @@ def main():
             saved.write_bytes(body)
             result.setdefault("sdk_header_hashes", {})[relative] = hashlib.sha256(body).hexdigest()
         with tempfile.TemporaryDirectory(prefix="n3-audit-") as temporary:
-            binary = Path(temporary) / "darwin-audit-capability"
-            built = run(compiler_command([compiler, "-std=c11", "-Wall", "-Wextra",
-                        "-Werror=implicit-function-declaration", "-O0",
-                        "-arch", args.expected_arch, "-isysroot", str(sdk_root),
-                        str(source / "darwin_audit_probe.c"), "-lbsm", "-o", str(binary)]), 90)
-            result["standard_header_compile_and_link"] = (
-                built["returncode"] == 0 and not built["timed_out"] and not built["cleanup_error"])
-            if result["standard_header_compile_and_link"]:
-                run(["otool", "-hv", str(binary)])
-                run(["otool", "-l", str(binary)])
-                cases = {}
-                for case in ("fork", "raw_fork"):
-                    row = run([str(binary), case], 20)
-                    cases[case] = row
-                result["cases"] = cases
-                result["native_capability_gate_completed"] = all(case_completed(row, case) for case, row in cases.items())
-                status = 0 if result["native_capability_gate_completed"] else 1
+            cases = result["cases"]
+            builds = {}
+            for case, diagnostic in (("fork", False), ("raw_fork", True)):
+                binary = Path(temporary) / ("darwin-audit-" + case)
+                command = [compiler, "-std=c11", "-Wall", "-Wextra",
+                           "-Werror=implicit-function-declaration", "-O0",
+                           "-arch", args.expected_arch, "-isysroot", str(sdk_root)]
+                if diagnostic:
+                    command.append("-DN3_DIAGNOSTIC_RAW_FORK=1")
+                command += [str(source / "darwin_audit_probe.c"), "-lbsm", "-o", str(binary)]
+                built = run(compiler_command(command), 90)
+                builds[case] = (built["returncode"] == 0 and not built["timed_out"]
+                                and not built["cleanup_error"])
+                key = ("raw_fork_diagnostic_compile_and_link" if diagnostic
+                       else "standard_header_compile_and_link")
+                result[key] = builds[case]
+                if builds[case]:
+                    run(["otool", "-hv", str(binary)])
+                    run(["otool", "-l", str(binary)])
+                    cases[case] = run([str(binary), case], 20)
+            result["standard_header_compile_and_link"] = builds["fork"]
+            result["raw_fork_diagnostic_compile_and_link"] = builds["raw_fork"]
+            result["cases"] = cases
+        # Collection is complete only after temporary resources settle.
+        result["native_capability_gate_completed"] = capability_completed(
+            builds["fork"], builds["raw_fork"], cases)
+        status = 0 if result["native_capability_gate_completed"] else 1
     except Exception as error:
+        status = 1
+        result["native_capability_gate_completed"] = False
         result["gate_error"] = str(error)
     result["finished_utc"] = utc()
     result["status"] = ("native_capability_observed" if status == 0 else "native_gate_not_completed")

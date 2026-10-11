@@ -3,6 +3,14 @@
  * Raw syscall fork is diagnostic and makes no vendor support promise.
  */
 #include <sys/appleapiopts.h>
+/* Only the separately compiled diagnostic variant imports the SDK's syscall
+ * selectors. The SDK marks syscall() unsupported; this trigger is not native
+ * authority and supplies no public-API or vendor-compatibility conclusion.
+ * The public variant never includes this private selector header.
+ */
+#ifdef N3_DIAGNOSTIC_RAW_FORK
+#include <sys/syscall.h>
+#endif
 /* Default SDK feature macros may expose private declarations. Do not enable
  * those declarations merely to obtain a successful public decoder check.
  */
@@ -18,12 +26,14 @@
 #include <string.h>
 #include <sys/event.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __APPLE_API_PRIVATE
 #error "Private API declarations must remain disabled for this capability check"
+#endif
+#if defined(N3_DIAGNOSTIC_RAW_FORK) && !defined(SYS_fork)
+#error "Installed SDK raw-fork diagnostic selector is unavailable"
 #endif
 
 enum { arm_message = 1, ready_message, confirm_message, release_message };
@@ -84,6 +94,16 @@ static int native_mach_cleanup(const char *operation, kern_return_t returned)
     return returned == KERN_SUCCESS ? 0 : -1;
 }
 
+static void diagnostic_port(const char *stage, mach_port_t task, mach_port_t port, int slot)
+{
+    mach_port_type_t type = 0;
+    kern_return_t returned = mach_port_type(task, port, &type);
+    printf("{\"stage\":\"%s\",\"task_name\":%u,\"port_name\":%u,\"slot\":%d,"
+           "\"return\":%d,\"type\":%u}\n", stage, (unsigned)task, (unsigned)port,
+           slot, returned, (unsigned)type);
+    fflush(stdout);
+}
+
 static int same_identity(struct identity_t a, struct identity_t b)
 {
     return a.pid > 0 && a.pid == b.pid && a.version == b.version;
@@ -120,6 +140,9 @@ static int self_identity(struct identity_t *identity)
         observation("self_peer_token_invalid_pid", identity->pid, 0);
         return -1;
     }
+    printf("{\"stage\":\"self_projected_identity\",\"pid\":%ld,\"version\":%d,"
+           "\"libc_pid_diagnostic\":%ld}\n", (long)identity->pid, identity->version, (long)getpid());
+    fflush(stdout);
     return 0;
 }
 
@@ -159,6 +182,10 @@ static int send_message(mach_port_t destination, mach_port_t reply,
         message.destination.disposition = MACH_MSG_TYPE_MAKE_SEND;
         message.destination.type = MACH_MSG_PORT_DESCRIPTOR;
     }
+    printf("{\"stage\":\"message_send_destination\",\"message_stage\":%u,"
+           "\"destination\":%u,\"reply\":%u,\"sender_pid\":%ld}\n", stage,
+           (unsigned)destination, (unsigned)reply, (long)message.self.pid);
+    fflush(stdout);
     kern_return_t returned = mach_msg(&message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
         sizeof(message), 0, MACH_PORT_NULL, 3000, MACH_PORT_NULL);
     observation("mach_send", returned, 0);
@@ -168,6 +195,7 @@ static int send_message(mach_port_t destination, mach_port_t reply,
 static int receive_message(mach_port_t port, union receive_t *buffer,
                            struct identity_t *sender)
 {
+    observation("message_receive_port", port, 0);
     memset(buffer, 0, sizeof(*buffer));
     kern_return_t returned = mach_msg(&buffer->message.header,
         MACH_RCV_MSG | MACH_RCV_TIMEOUT | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
@@ -329,6 +357,12 @@ int main(int argc, char **argv)
         return 2;
     }
     int raw = strcmp(argv[1], "raw_fork") == 0;
+#ifndef N3_DIAGNOSTIC_RAW_FORK
+    if (raw) {
+        observation("raw_fork_trigger_not_built", -1, 0);
+        return 2;
+    }
+#endif
     struct identity_t original;
     if (self_identity(&original) != 0) {
         return 20;
@@ -339,6 +373,11 @@ int main(int argc, char **argv)
     mach_port_t data = MACH_PORT_NULL;
     mach_port_t arm_reply = MACH_PORT_NULL;
     mach_port_t confirm_reply = MACH_PORT_NULL;
+    mach_port_t saved_bootstrap = MACH_PORT_NULL;
+    int bootstrap_changed = 0;
+    mach_port_array_t saved_ports = NULL;
+    mach_msg_type_number_t saved_count = 0;
+    int registered_changed = 0;
     int queue = -1;
     pid_t child = -1;
     int result = 21;
@@ -350,13 +389,51 @@ int main(int argc, char **argv)
         observation("insert_control_send_right_failed", returned, 0);
         goto cleanup;
     }
-    returned = mach_ports_register(task, &control, 1);
+    if (!raw) {
+        returned = task_get_bootstrap_port(task, &saved_bootstrap);
+        observation("parent_saved_bootstrap_query", returned, 0);
+        if (returned != KERN_SUCCESS || !MACH_PORT_VALID(saved_bootstrap)) {
+            goto cleanup;
+        }
+        returned = task_set_bootstrap_port(task, control);
+        observation("parent_fixture_bootstrap_set", returned, 0);
+        if (returned != KERN_SUCCESS) {
+            goto cleanup;
+        }
+        bootstrap_changed = 1;
+    }
+    returned = mach_ports_lookup(task, &saved_ports, &saved_count);
+    observation("parent_saved_registered_lookup", returned, 0);
+    observation("parent_saved_registered_count", saved_count, 0);
+    if (returned != KERN_SUCCESS || saved_ports == NULL
+        || saved_count > MACH_PORTS_SLOTS_USED) {
+        goto cleanup;
+    }
+    mach_port_t registered[MACH_PORTS_SLOTS_USED] = {MACH_PORT_NULL};
+    for (mach_msg_type_number_t i = 0; i < saved_count; ++i) {
+        registered[i] = saved_ports[i];
+    }
+    if (MACH_PORT_VALID(registered[SERVICE_SLOT])) {
+        observation("fixture_service_slot_occupied", registered[SERVICE_SLOT], 0);
+        goto cleanup;
+    }
+    registered[SERVICE_SLOT] = control;
+    returned = mach_ports_register(task, registered, MACH_PORTS_SLOTS_USED);
     if (returned != KERN_SUCCESS) {
         observation("registered_control_port_failed", returned, 0);
         goto cleanup;
     }
+    registered_changed = 1;
+    diagnostic_port("parent_control_right", task, control, -1);
+    diagnostic_port("parent_task_reply_right", task, mig_get_reply_port(), -1);
+    observation("parent_cached_task_name", mach_task_self(), 0);
+    observation("parent_bootstrap_name", bootstrap_port, 0);
     errno = 0;
+#ifdef N3_DIAGNOSTIC_RAW_FORK
     long fork_return = raw ? syscall(SYS_fork) : fork();
+#else
+    long fork_return = fork();
+#endif
     if (fork_return < 0) {
         observation("fork_failed", fork_return, errno);
         goto cleanup;
@@ -371,24 +448,71 @@ int main(int argc, char **argv)
     if (current.pid != original.pid) {
         /* The parent-only observer queue is created after fork-role proof. */
         mach_port_t current_task = task_self_trap();
+        observation("child_fresh_task_name", current_task, 0);
+        observation("child_cached_task_name", mach_task_self(), 0);
+        observation("child_bootstrap_name", bootstrap_port, 0);
+        diagnostic_port("child_cached_reply_right", current_task, mig_get_reply_port(), -1);
+        if (raw) {
+            /* Diagnostic-only raw process creation skipped libSystem atfork.
+             * Use the SDK-exposed cache and MIG reply APIs, not private runtime
+             * entry points. Reject an unexpected live cached name before reset.
+             */
+            mach_port_t stale_reply = mig_get_reply_port();
+            mach_port_type_t stale_type = 0;
+            kern_return_t stale_status = mach_port_type(current_task, stale_reply, &stale_type);
+            observation("raw_cached_reply_pre_reset", stale_status, 0);
+            if (stale_status != KERN_INVALID_NAME) {
+                observation("raw_cached_reply_reset_not_safe_for_fixture", stale_status, 0);
+                _exit(20);
+            }
+            mach_task_self_ = current_task;
+            mig_dealloc_reply_port(stale_reply); /* SDK API is void. */
+            printf("{\"stage\":\"raw_public_reply_reset_attempted\",\"api_void\":true}\n");
+            fflush(stdout);
+            mach_port_t fresh_reply = mig_get_reply_port();
+            mach_port_type_t fresh_type = 0;
+            kern_return_t fresh_status = mach_port_type(current_task, fresh_reply, &fresh_type);
+            printf("{\"stage\":\"raw_fresh_reply_checked\",\"return\":%d,"
+                   "\"type\":%u,\"port_name\":%u}\n", fresh_status,
+                   (unsigned)fresh_type, (unsigned)fresh_reply);
+            fflush(stdout);
+            if (fresh_status != KERN_SUCCESS || (fresh_type & MACH_PORT_TYPE_RECEIVE) == 0) {
+                _exit(20);
+            }
+        }
         mach_port_array_t ports = NULL;
         mach_msg_type_number_t count = 0;
         returned = mach_ports_lookup(current_task, &ports, &count);
         observation("child_registered_port_lookup", returned, 0);
         observation("child_registered_port_count", count, 0);
+        if (returned == KERN_SUCCESS && ports != NULL) {
+            for (mach_msg_type_number_t i = 0; i < count; ++i) {
+                diagnostic_port("child_registered_right", current_task, ports[i], (int)i);
+            }
+        }
+        mach_port_t child_bootstrap = MACH_PORT_NULL;
         int child_result = 20;
-        if (returned == KERN_SUCCESS && ports != NULL && count >= 1
-            && MACH_PORT_VALID(ports[0]))
+        int selected_slot = raw ? SERVICE_SLOT : NAME_SERVER_SLOT;
+        if (!raw) {
+            kern_return_t bootstrap_result = task_get_bootstrap_port(current_task, &child_bootstrap);
+            observation("child_current_bootstrap_query", bootstrap_result, 0);
+            if (bootstrap_result == KERN_SUCCESS && MACH_PORT_VALID(child_bootstrap)) {
+                diagnostic_port("child_current_bootstrap_right", current_task, child_bootstrap, -1);
+                child_result = child_messages(current_task, child_bootstrap, original);
+            }
+        }
+        else if (returned == KERN_SUCCESS && ports != NULL
+            && count > (mach_msg_type_number_t)selected_slot
+            && MACH_PORT_VALID(ports[selected_slot]))
         {
-            int other_rights = 0;
-            for (mach_msg_type_number_t i = 1; i < count; ++i) {
-                if (MACH_PORT_VALID(ports[i])) {
-                    other_rights = 1;
-                }
-            }
-            if (!other_rights) {
-                child_result = child_messages(current_task, ports[0], original);
-            }
+            observation("child_selected_fixture_slot", selected_slot, 0);
+            child_result = child_messages(current_task, ports[selected_slot], original);
+        }
+        if (child_bootstrap != MACH_PORT_NULL
+            && native_mach_cleanup("cleanup_child_current_bootstrap_send",
+                    mach_port_deallocate(current_task, child_bootstrap)) != 0)
+        {
+            child_result = 21;
         }
         if (returned == KERN_SUCCESS && ports != NULL) {
             for (mach_msg_type_number_t i = 0; i < count; ++i) {
@@ -426,6 +550,7 @@ int main(int argc, char **argv)
     union receive_t received;
     struct identity_t armed;
     struct identity_t confirmed;
+    diagnostic_port("parent_waiting_control_right", task, control, -1);
     if (receive_message(control, &received, &armed) != 0) {
         goto cleanup;
     }
@@ -492,10 +617,39 @@ cleanup:
     {
         result = 21;
     }
-    if (native_mach_cleanup("cleanup_parent_registered_ports",
-            mach_ports_register(task, NULL, 0)) != 0)
+    if (bootstrap_changed
+        && native_mach_cleanup("cleanup_parent_restore_bootstrap",
+                task_set_bootstrap_port(task, saved_bootstrap)) != 0)
     {
         result = 21;
+    }
+    if (saved_bootstrap != MACH_PORT_NULL
+        && native_mach_cleanup("cleanup_parent_saved_bootstrap_send",
+                mach_port_deallocate(task, saved_bootstrap)) != 0)
+    {
+        result = 21;
+    }
+    if (registered_changed
+        && native_mach_cleanup("cleanup_parent_restore_registered_ports",
+            mach_ports_register(task, saved_ports, saved_count)) != 0)
+    {
+        result = 21;
+    }
+    if (saved_ports != NULL) {
+        for (mach_msg_type_number_t i = 0; i < saved_count; ++i) {
+            if (MACH_PORT_VALID(saved_ports[i])
+                && native_mach_cleanup("cleanup_parent_saved_registered_send",
+                    mach_port_deallocate(task, saved_ports[i])) != 0)
+            {
+                result = 21;
+            }
+        }
+        if (native_mach_cleanup("cleanup_parent_saved_lookup_vm",
+                vm_deallocate(task, (vm_address_t)saved_ports,
+                              saved_count * sizeof(*saved_ports))) != 0)
+        {
+            result = 21;
+        }
     }
     if (control != MACH_PORT_NULL
         && native_mach_cleanup("cleanup_parent_control_receive", mach_port_destroy(task, control)) != 0)
