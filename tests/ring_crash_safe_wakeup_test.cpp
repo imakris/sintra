@@ -463,6 +463,9 @@ constexpr wakeup_case_t k_cases[] = {
 #if defined(__linux__) && defined(MAP_SYNC) && defined(MAP_SHARED_VALIDATE) && defined(MAP_FIXED_NOREPLACE)
     {"data_native_mapping_failure_reuse", "", "construction", "", ""},
 #endif
+#if defined(__FreeBSD__) && defined(MAP_EXCL)
+    {"data_native_mapping_conflict_preservation", "", "construction", "", ""},
+#endif
 #if !defined(_WIN32)
     {"private_opened_fd_allocation_unwind", "", "construction", "", ""},
     {"data_second_mapping_allocation_unwind", "", "construction", "", ""},
@@ -2122,6 +2125,14 @@ int run_construction_case(const wakeup_case_t& test, const char* directory)
             MEMORY_BASIC_INFORMATION info{};
             require(VirtualQuery(s_failed_control_address, &info, sizeof(info)) == sizeof(info) &&
                 info.State == MEM_FREE, "ABI diagnostic allocation leaked its control view");
+#elif defined(__FreeBSD__) && defined(MAP_EXCL)
+            // FreeBSD mprotect permits unmapped holes; exclusive placement proves vacancy.
+            void* released = ::mmap(s_failed_control_address, s_failed_control_size, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_EXCL, -1, 0);
+            require(released == s_failed_control_address,
+                "ABI diagnostic allocation leaked its control mapping");
+            require(::munmap(released, s_failed_control_size) == 0,
+                "ABI diagnostic vacancy probe unmap failed");
 #else
             require(::mprotect(s_failed_control_address, s_failed_control_size, PROT_READ | PROT_WRITE) == -1 &&
                 errno == ENOMEM, "ABI diagnostic allocation leaked its control mapping");
@@ -2198,6 +2209,63 @@ int run_construction_case(const wakeup_case_t& test, const char* directory)
         return 0;
     }
 #if !defined(_WIN32)
+#if defined(__FreeBSD__) && defined(MAP_EXCL)
+    if (name == "data_native_mapping_conflict_preservation") {
+        s_mapping_bytes = elements * sizeof(uint32_t);
+        sintra::detail::s_ring_construction_operation = [](const char* stage, const void* object) {
+            if (std::string_view(stage) == "data_first_mapping") {
+                require(s_reused_mapping_count < 8, "unexpected additional native mapping attempt");
+                const auto* region = static_cast<const sintra::detail::ipc::mapped_region*>(object);
+                void* address = static_cast<char*>(const_cast<void*>(region->data())) + s_mapping_bytes;
+                void* replacement = MAP_FAILED;
+                std::thread reuser([&] {
+                    replacement = ::mmap(address, s_mapping_bytes, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_EXCL, -1, 0);
+                    if (replacement != MAP_FAILED) { *static_cast<uint32_t*>(replacement) = k_payload; }
+                });
+                reuser.join();
+                require(replacement == address, "could not occupy the second native mapping interval");
+                s_reused_mappings[s_reused_mapping_count++] = replacement;
+            }
+            if (std::string_view(stage) == "data_mapping_native_failed") {
+                // mmap(2) documents EINVAL; the kernel also reports ENOMEM for occupied ranges.
+                const int native_error = int(reinterpret_cast<intptr_t>(object));
+                require(native_error == EINVAL || native_error == ENOMEM,
+                    "native mapping fixture did not reach the occupied exact interval");
+                ++s_construction_faults;
+            }
+            if (std::string_view(stage) == "data_mapping_before_retry") {
+                require(s_construction_faults == s_reused_mapping_count,
+                    "occupied second interval did not cause a native mapping failure");
+                void* released = ::mmap(const_cast<void*>(object), s_mapping_bytes,
+                    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_EXCL, -1, 0);
+                require(released == object, "failed second mapping retained its acquired first interval");
+                require(::munmap(released, s_mapping_bytes) == 0, "released first interval unmap failed");
+            }
+        };
+        try { Probe_reader reader(path, k_ring_name, elements); }
+        catch (const sintra::ring_acquisition_failure_exception&) { failed = true; }
+        sintra::detail::s_ring_construction_operation = nullptr;
+        bool preserved = failed && s_construction_faults == 8 && s_reused_mapping_count == 8;
+        for (size_t i = 0; i < s_reused_mapping_count; ++i) {
+            const bool mapped = ::mprotect(s_reused_mappings[i], s_mapping_bytes, PROT_READ | PROT_WRITE) == 0;
+            preserved = preserved && mapped;
+            if (mapped) {
+                preserved = preserved && *static_cast<uint32_t*>(s_reused_mappings[i]) == k_payload;
+                require(::munmap(s_reused_mappings[i], s_mapping_bytes) == 0, "native conflict mapping unmap failed");
+            }
+        }
+        require(preserved, "failed exact mapping cleanup replaced or unmapped another thread's interval");
+        Probe_writer writer(path, k_ring_name, elements);
+        Probe_reader reader(path, k_ring_name, elements, 1);
+        writer.write_commit(k_payload);
+        const auto data = reader.start_reading(1);
+        require(data.end - data.begin == 1 && *data.begin == k_payload,
+            "native mapping conflict damaged later real admission or committed data");
+        reader.done_reading();
+        return 0;
+    }
+#endif
 #if defined(__linux__) && defined(MAP_SYNC) && defined(MAP_SHARED_VALIDATE) && defined(MAP_FIXED_NOREPLACE)
     if (name == "data_native_mapping_failure_reuse") {
         s_mapping_bytes = elements * sizeof(uint32_t);

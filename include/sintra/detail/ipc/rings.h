@@ -1797,11 +1797,13 @@ private:
                 assert((reinterpret_cast<uintptr_t>(ptr) % page_size) == 0 &&
                     "mmap(PROT_NONE) base not page-aligned?");
                 if (!reservation.release()) { return false; }
-#if defined(__linux__) && defined(MAP_FIXED_NOREPLACE)
                 // Exact placement without replacing an allocation that won the
                 // released span. A successful advisory hint can otherwise be
                 // relocated, including the second mapping of a large ring.
+#if defined(__linux__) && defined(MAP_FIXED_NOREPLACE)
                 map_extra_options |= MAP_FIXED_NOREPLACE;
+#elif defined(__FreeBSD__) && defined(MAP_EXCL)
+                map_extra_options |= MAP_FIXED | MAP_EXCL;
 #endif
 #ifdef MAP_NOSYNC
                 map_extra_options |= MAP_NOSYNC;
