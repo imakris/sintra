@@ -161,3 +161,4 @@ ignored_signal_lifecycle_test                            1
 native_process_family_prerequisite_contract_test         1
 managed_child_orderly_lifeline_contract_test              5
 managed_child_graceful_lifeline_contract_test             5
+untimed_semaphore_contract_test 1

@@ -21,7 +21,7 @@ SUPPORTED OS
 - Polling backend: automatic fallback on unsupported platforms.
 - Platform notes:
   * macOS: a single post wakes one waiter; multi-post wakes all and may over-wake.
-  * POSIX wait(): implemented via a very large relative wait on a monotonic clock; effectively "infinite".
+  * POSIX wait(): uses the native shared wait-on-address operation without a deadline.
   * Windows try_wait(): returns false when no token is available and does not set errno; timed waits set errno=ETIMEDOUT.
   * Polling backend: Atomic counter in shared memory with 1ms sleep between checks (std::this_thread::sleep_for).
 
@@ -40,8 +40,8 @@ NOTES
 - Instances are non-movable to avoid corrupting the POSIX shared counter. Copy is deleted as well.
 
 ERROR SEMANTICS
-- wait(): loops forever until acquired or unrecoverable backend error (errno == EINVAL);
-  never returns false in normal use
+- wait(): acquires a token or calls std::terminate() on a backend failure;
+  it never returns normally without acquisition
 - Timed waits: false on timeout or error. Check errno; ETIMEDOUT means timeout.
 - POSIX post: post(0) is a no-op; overflow sets errno=EOVERFLOW and does not wake.
 - Windows post: post(0) is a no-op.
@@ -81,6 +81,7 @@ CAVEATS
 #include <climits>
 #include <cwchar>
 #include <functional>
+#include <exception>
 #include <limits>
 #include <new>
 #include <thread>
@@ -726,6 +727,25 @@ static inline int posix_wait_result_common(int rc, int err, bool spurious_other)
     return spurious_other ?  0 : -2;
 }
 
+// Native wake or interruption only permits another token observation.
+static inline bool posix_wait_equal(uint32_t* addr, uint32_t expected) noexcept
+{
+#if SINTRA_BACKEND_DARWIN
+    const int rc = os_sync_wait_on_address(
+        (void*)addr, (uint64_t)expected, 4, OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+#elif SINTRA_BACKEND_LINUX
+    const int rc = futex_wait((int*)addr, (int)expected, nullptr);
+#elif SINTRA_BACKEND_FREEBSD
+    const int rc = umtx_wait_uint(addr, expected, nullptr);
+#elif SINTRA_BACKEND_POLLING
+    (void)addr;
+    (void)expected;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const int rc = 0;
+#endif
+    return rc >= 0 || errno == EINTR || errno == EAGAIN;
+}
+
 static inline int posix_wait_equal_until(
     uint32_t*  addr,
     uint32_t   expected,
@@ -893,11 +913,16 @@ inline bool ips_backend::try_wait() noexcept
 
 inline bool ips_backend::wait() noexcept
 {
-    if (try_wait()) {
-        return true;
+    auto& count = P(*this).count;
+    for (;;) {
+        if (try_wait()) {
+            return true;
+        }
+        ipc_wakeup_operation_for_test("semaphore_before_wait", &count);
+        if (!posix_wait_equal(reinterpret_cast<uint32_t*>(&count), 0u)) {
+            return false;
+        }
     }
-    // Use very large timeout for "infinite" wait
-    return try_wait_for(std::chrono::nanoseconds(1ULL<<60));
 }
 
 inline bool ips_backend::try_wait_for(std::chrono::nanoseconds d) noexcept
@@ -1054,14 +1079,11 @@ public:
     interprocess_semaphore(interprocess_semaphore&&) = delete;
     interprocess_semaphore& operator=(interprocess_semaphore&&) = delete;
 
-    // Blocks until the semaphore is acquired or an unrecoverable backend error occurs.
+    // Backend failure cannot be reported as acquisition through this void interface.
     void wait() noexcept
     {
-        while (!m_impl.wait()) {
-            if (errno == EINVAL) {
-                assert(!"errno == EINVAL in interprocess_semaphore::wait() [backend error]");
-                break;
-            }
+        if (!m_impl.wait()) {
+            std::terminate();
         }
     }
 
