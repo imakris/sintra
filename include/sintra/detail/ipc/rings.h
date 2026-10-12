@@ -3049,7 +3049,7 @@ struct Ring_R : Ring<T, true>
      */
     const Range<T> wait_for_new_data(Ring_wait_hint wait_hint = Ring_wait_hint::ADAPTIVE)
     {
-        constexpr auto blocking_wait_watchdog = std::chrono::milliseconds(50);
+        constexpr auto blocking_wait_watchdog = std::chrono::seconds(1);
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
         if (auto callback = detail::test_hooks::s_ring_wait_started.load(
