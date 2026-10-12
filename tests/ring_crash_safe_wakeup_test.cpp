@@ -587,6 +587,7 @@ void failure_hook(const char* stage, const void* object)
 
 void stop_from_log(sintra::log_level, const char*, void* reader)
 {
+    ++s_native_log_callbacks;
     std::fprintf(stderr, "application log callback requests reader stop\n");
     std::fflush(stderr);
     static_cast<Probe_reader*>(reader)->request_stop();
@@ -774,7 +775,7 @@ int run_checked_case(const wakeup_case_t& test, const char* directory)
         if (log_callback && i == 0) {
             sintra::set_log_callback(stop_from_log, reader.get());
         }
-        waiters.emplace_back([&, reader, i] {
+        waiters.emplace_back([&, reader] {
             tl_reader = true;
             try {
                 const auto range = reader->wait_for_new_data(sintra::Ring_wait_hint::BLOCKING);
@@ -794,9 +795,7 @@ int run_checked_case(const wakeup_case_t& test, const char* directory)
                 else {
                     const bool delivered = range.begin && range.end - range.begin == 1 &&
                         *range.begin == k_payload;
-                    const bool stopped = log_callback && i == 0 && range.begin == range.end &&
-                        reader->is_stopping();
-                    valid += delivered || stopped;
+                    valid += delivered;
                 }
                 ++completed;
             }
@@ -857,6 +856,7 @@ int run_checked_case(const wakeup_case_t& test, const char* directory)
     }
     if (log_callback) {
         sintra::set_log_callback(nullptr);
+        require(s_native_log_callbacks == 0, "wakeup error invoked an application log callback");
     }
     require(readers.front()->pending_count() == 0,
         "notification-only replay left a registration");
@@ -1270,6 +1270,13 @@ int run_recoverer_scenario(const std::string& binary, const wakeup_case_t& test,
         recoverer->observe_exit_retained() == Exact_child_state::exited &&
         (!second || second->observe_exit_retained() == Exact_child_state::exited),
         "native authority was released before replay and cleanup completed");
+    reader.reset();
+    notification.reset();
+    authority.reset();
+    std::string diagnostic;
+    if (second) { require(second->settle_observed_exit(diagnostic), diagnostic); }
+    require(recoverer->settle_observed_exit(diagnostic), diagnostic);
+    require(poster->settle_observed_exit(diagnostic), diagnostic);
     return 0;
 }
 
@@ -1288,33 +1295,39 @@ int run_request_scenario(const std::string& binary, const wakeup_case_t& test,
     auto record = std::make_shared<Native_record>(1, instance);
     auto notification = std::make_shared<Native_notification>(
         directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), record, authority);
-    Probe_reader reader(directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), 0,
-        sintra::detail::ring_directory_policy::caller_directory, notification);
-    reader.start_reading();
-    signal_file(s_directory / "start_post");
-    require(await([] { return fs::exists(s_directory / "poster_seam"); }), "writer did not publish REQUEST");
-    require(poster->terminate_retaining_authority() &&
-        await([&] { return poster->observe_exit_retained() == Exact_child_state::exited; }),
-        "cannot retain exact REQUEST writer death");
-    const auto head = reader.get_leading_sequence();
-    const auto counts = reader.guard_counts();
-    // prepare_write arbitrates at the reserved end before publishing the last
-    // element of the lap. The first element remains intact behind our guard.
-    require(head == sintra::test::pick_ring_elements<uint32_t>() - 1,
-        "REQUEST seam changed the committed head: " + std::to_string(head));
-    uint32_t owned = 0;
-    require(!reader.copy_committed_first(owned) && owned == 0,
-        "REQUEST did not exclude extraction before recovery");
-    if (recovery_enabled) {
-        require(notification->replay(1).state == Native_notification::Replay_state::COMPLETE,
-            "native owner could not settle dead REQUEST arbitration");
+    {
+        Probe_reader reader(directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), 0,
+            sintra::detail::ring_directory_policy::caller_directory, notification);
+        reader.start_reading();
+        signal_file(s_directory / "start_post");
+        require(await([] { return fs::exists(s_directory / "poster_seam"); }), "writer did not publish REQUEST");
+        require(poster->terminate_retaining_authority() &&
+            await([&] { return poster->observe_exit_retained() == Exact_child_state::exited; }),
+            "cannot retain exact REQUEST writer death");
+        const auto head = reader.get_leading_sequence();
+        const auto counts = reader.guard_counts();
+        // prepare_write arbitrates at the reserved end before publishing the last
+        // element of the lap. The first element remains intact behind our guard.
+        require(head == sintra::test::pick_ring_elements<uint32_t>() - 1,
+            "REQUEST seam changed the committed head: " + std::to_string(head));
+        uint32_t owned = 0;
+        require(!reader.copy_committed_first(owned) && owned == 0,
+            "REQUEST did not exclude extraction before recovery");
+        if (recovery_enabled) {
+            require(notification->replay(1).state == Native_notification::Replay_state::COMPLETE,
+                "native owner could not settle dead REQUEST arbitration");
+        }
+        require(reader.copy_committed_first(owned) && owned == k_payload,
+            "dead REQUEST stranded an intact committed frame");
+        require(reader.get_leading_sequence() == head && reader.guard_counts() == counts &&
+            !reader.consume_eviction_notification() && !reader.is_stopping(),
+            "REQUEST cleanup changed committed data, guard ownership or loss state");
+        reader.done_reading();
     }
-    require(reader.copy_committed_first(owned) && owned == k_payload,
-        "dead REQUEST stranded an intact committed frame");
-    require(reader.get_leading_sequence() == head && reader.guard_counts() == counts &&
-        !reader.consume_eviction_notification() && !reader.is_stopping(),
-        "REQUEST cleanup changed committed data, guard ownership or loss state");
-    reader.done_reading();
+    notification.reset();
+    authority.reset();
+    std::string diagnostic;
+    require(poster->settle_observed_exit(diagnostic), diagnostic);
     return 0;
 }
 
@@ -1474,6 +1487,10 @@ int run_exhausted_admission_case(const std::string& binary, const char* director
     sintra::detail::test_hooks::s_ipc_wakeup_operation = nullptr;
     require(writer.free_slots() == sintra::max_process_index && child->observe_exit_retained() == Exact_child_state::exited,
         "reused admission or repeated exact native observation lost retained custody");
+    notification.reset();
+    authority.reset();
+    std::string diagnostic;
+    require(child->settle_observed_exit(diagnostic), diagnostic);
     return 0;
 }
 
@@ -2113,13 +2130,27 @@ int run_construction_case(const wakeup_case_t& test, const char* directory)
                 s_fail_next_allocation = true;
             }
         };
-        try { Probe_reader reader(path, k_ring_name, elements); }
-        catch (const std::exception&) { failed = true; }
+        bool bad_alloc_observed = false;
+        try {
+            Probe_reader reader(path, k_ring_name, elements);
+        }
+        catch (const std::bad_alloc&) {
+            failed = true;
+            bad_alloc_observed = true;
+        }
+        catch (const std::exception&) {
+            failed = true;
+        }
+        const bool allocation_consumed = !s_fail_next_allocation;
         s_fail_next_allocation = false;
         sintra::detail::s_ring_construction_operation = nullptr;
         if (original_abi) { writer.replace_control_abi(original_abi); }
-        require(failed && s_construction_faults == (name == "data_first_mapping_allocation_unwind" ? 8u : 1u),
+        require(failed && allocation_consumed &&
+            s_construction_faults == (name == "data_first_mapping_allocation_unwind" ? 8u : 1u),
             "actual construction allocation failure did not unwind the requested resource interval");
+        if (name == "control_abi_diagnostic_allocation_unwind") {
+            require(bad_alloc_observed, "ABI diagnostic threw without propagating its allocation failure");
+        }
         if (s_failed_control_address) {
 #if defined(_WIN32)
             MEMORY_BASIC_INFORMATION info{};
@@ -2338,9 +2369,20 @@ int run_construction_case(const wakeup_case_t& test, const char* directory)
                 // A separate thread obtains the released first interval while
                 // the failure path still owns its remaining cleanup work.
                 std::thread reuser([object] {
+                    int options = MAP_PRIVATE | MAP_ANONYMOUS;
+#if defined(__linux__) && defined(MAP_FIXED_NOREPLACE)
+                    options |= MAP_FIXED_NOREPLACE;
+#elif defined(__FreeBSD__) && defined(MAP_EXCL)
+                    options |= MAP_FIXED | MAP_EXCL;
+#endif
                     void* replacement = ::mmap(const_cast<void*>(object), s_mapping_bytes,
-                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-                    require(replacement == object, "could not reuse the released mapping interval");
+                        PROT_READ | PROT_WRITE, options, -1, 0);
+                    if (replacement != object) {
+                        if (replacement != MAP_FAILED && ::munmap(replacement, s_mapping_bytes) != 0) {
+                            fixture_failure("relocated mapping vacancy probe unmap failed");
+                        }
+                        fixture_failure("could not reuse the first interval without replacing a mapping");
+                    }
                     *static_cast<uint32_t*>(replacement) = k_payload;
                     s_reused_mappings[s_reused_mapping_count++] = replacement;
                 });
@@ -2592,6 +2634,13 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
     std::unique_ptr<Writer> successor;
     const std::string_view retry = test.retry;
     std::shared_ptr<Probe_reader> late_reader;
+    const auto settle_poster = [&] {
+        // Release every authority user before consuming the exact terminal status.
+        late_reader.reset();
+        reader.reset();
+        notification.reset();
+        require(poster.settle_observed_exit(diagnostic), diagnostic);
+    };
     if (native_case) {
         require(notification->replay(2).state == Native_notification::Replay_state::REJECTED &&
             !notification->exited(), "wrong occurrence published a native death edge");
@@ -2630,6 +2679,7 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
                 "live successor payload was damaged by rejected predecessor replay");
             reader->request_stop();
             reader->done_reading();
+            settle_poster();
             return 0;
         }
         if (recovery_enabled) {
@@ -2879,6 +2929,7 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
         }
         require(poster.observe_exit_retained() == Exact_child_state::exited,
             "native child authority was consumed before replay and reader cleanup completed");
+        settle_poster();
     }
     return 0;
 }
