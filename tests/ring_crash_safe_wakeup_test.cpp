@@ -2102,6 +2102,9 @@ void set_fixture_environment(const char* name, const std::string& value)
 void* s_reused_mappings[8]{};
 size_t s_reused_mapping_count = 0;
 size_t s_mapping_bytes = 0;
+std::atomic<const void*> s_mapping_reuse_address{nullptr};
+std::atomic<bool> s_mapping_reuser_ready{false};
+std::atomic<bool> s_mapping_reuser_stopping{false};
 #endif
 
 int run_construction_case(const wakeup_case_t& test, const char* directory)
@@ -2360,39 +2363,58 @@ int run_construction_case(const wakeup_case_t& test, const char* directory)
     }
     if (name == "data_second_mapping_allocation_unwind") {
         s_mapping_bytes = elements * sizeof(uint32_t);
+        s_mapping_reuse_address.store(nullptr, std::memory_order_relaxed);
+        s_mapping_reuser_ready.store(false, std::memory_order_relaxed);
+        s_mapping_reuser_stopping.store(false, std::memory_order_relaxed);
+        // Finish thread startup before construction can release an interval.
+        // Creating the thread afterwards can map its stack into that vacancy.
+        std::thread reuser([] {
+            s_mapping_reuser_ready.store(true, std::memory_order_release);
+            while (!s_mapping_reuser_stopping.load(std::memory_order_acquire)) {
+                const void* object = s_mapping_reuse_address.load(std::memory_order_acquire);
+                if (!object) { std::this_thread::yield(); continue; }
+                int options = MAP_PRIVATE | MAP_ANONYMOUS;
+#if defined(__linux__) && defined(MAP_FIXED_NOREPLACE)
+                options |= MAP_FIXED_NOREPLACE;
+#elif defined(__FreeBSD__) && defined(MAP_EXCL)
+                options |= MAP_FIXED | MAP_EXCL;
+#endif
+                void* replacement = ::mmap(const_cast<void*>(object), s_mapping_bytes,
+                    PROT_READ | PROT_WRITE, options, -1, 0);
+                if (replacement != object) {
+                    if (replacement != MAP_FAILED && ::munmap(replacement, s_mapping_bytes) != 0) {
+                        fixture_failure("relocated mapping vacancy probe unmap failed");
+                    }
+                    fixture_failure("could not reuse the first interval without replacing a mapping");
+                }
+                *static_cast<uint32_t*>(replacement) = k_payload;
+                s_reused_mappings[s_reused_mapping_count++] = replacement;
+
+                s_mapping_reuse_address.store(nullptr, std::memory_order_release);
+            }
+        });
+        while (!s_mapping_reuser_ready.load(std::memory_order_acquire)) { std::this_thread::yield(); }
         sintra::detail::s_ring_construction_operation = [](const char* stage, const void* object) {
             if (std::string_view(stage) == "data_first_mapping") {
                 s_fail_next_allocation = true;
             }
             if (std::string_view(stage) == "data_mapping_before_retry") {
                 require(s_reused_mapping_count < 8, "unexpected additional mapping attempt");
-                // A separate thread obtains the released first interval while
+                // The existing worker obtains the released first interval while
                 // the failure path still owns its remaining cleanup work.
-                std::thread reuser([object] {
-                    int options = MAP_PRIVATE | MAP_ANONYMOUS;
-#if defined(__linux__) && defined(MAP_FIXED_NOREPLACE)
-                    options |= MAP_FIXED_NOREPLACE;
-#elif defined(__FreeBSD__) && defined(MAP_EXCL)
-                    options |= MAP_FIXED | MAP_EXCL;
-#endif
-                    void* replacement = ::mmap(const_cast<void*>(object), s_mapping_bytes,
-                        PROT_READ | PROT_WRITE, options, -1, 0);
-                    if (replacement != object) {
-                        if (replacement != MAP_FAILED && ::munmap(replacement, s_mapping_bytes) != 0) {
-                            fixture_failure("relocated mapping vacancy probe unmap failed");
-                        }
-                        fixture_failure("could not reuse the first interval without replacing a mapping");
-                    }
-                    *static_cast<uint32_t*>(replacement) = k_payload;
-                    s_reused_mappings[s_reused_mapping_count++] = replacement;
-                });
-                reuser.join();
+                s_mapping_reuse_address.store(object, std::memory_order_release);
+                while (s_mapping_reuse_address.load(std::memory_order_acquire)) { std::this_thread::yield(); }
             }
         };
+        std::exception_ptr construction_error;
         try { Probe_reader reader(path, k_ring_name, elements); }
         catch (const sintra::ring_acquisition_failure_exception&) { failed = true; }
+        catch (...) { construction_error = std::current_exception(); }
         sintra::detail::s_ring_construction_operation = nullptr;
         s_fail_next_allocation = false;
+        s_mapping_reuser_stopping.store(true, std::memory_order_release);
+        reuser.join();
+        if (construction_error) { std::rethrow_exception(construction_error); }
         bool preserved = failed && s_reused_mapping_count == 8;
         for (size_t i=0; i<s_reused_mapping_count; ++i) {
             const bool mapped = ::mprotect(s_reused_mappings[i], s_mapping_bytes, PROT_READ | PROT_WRITE) == 0;
