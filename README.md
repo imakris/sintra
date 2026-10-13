@@ -400,6 +400,44 @@ process. See
 [`docs/reference/external_process_invitation.md`](docs/reference/external_process_invitation.md)
 and [`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md).
 
+### Native executable authentication
+
+Capture an absolute selected executable with `capture_managed_child_executable()`
+before launching it, and retain that reference through peer admission.
+`Managed_child_custody::verify_native_peer()` binds a connected native peer to
+the original custody occurrence. Windows and Linux require its loaded executable
+to be the exact selected file. Darwin requires valid running code satisfying the
+selected native CodeDirectory hash; a distinct valid copy of the same signed
+code may match. This does not weaken exact occurrence or application-level
+ticket, profile, incident, and replay checks.
+
+Darwin capture retains the main executable file and performs full static
+validation of its canonical bundle, including sealed resources and nested code,
+or of its standalone executable. The caller must exclude concurrent writes to
+the complete selected generation during capture. Finish staging before launch,
+keep a running generation separate from update output, and capture a new
+generation before using it. File descriptors and matching stat samples do not
+make a writable bundle immutable. This selects trusted local code; it does not
+authenticate a publisher, require notarization, or defeat a hostile writer with
+equal authority to replace the application before selection.
+
+`compare_managed_child_executables()` always compares retained file identity.
+`compare_managed_child_executable_path()` cheaply compares a current path with
+that retained file without repeating static validation. On Darwin these are
+device/inode checks, independent of dynamic code authorization. Every admission
+still checks the actual live guest through Security. A cached capture, pathname,
+or claimed PID alone does not authorize a peer.
+
+`verify_process_executable()` is for a direct child whose caller excludes reaping
+throughout the call. Darwin nonparent consumers instead use
+`verify_observed_process_executable()` with an exact, retained local NOTE_EXIT
+observer established between matching public birth observations while the owner
+retains the unreaped original. The observer must latch exits and errors; neither
+can become live again. Sintra brackets dynamic code validation with this observer
+and matching native birth samples, without waiting, signaling, or adopting the
+process. The creation identity is `query_process_start_stamp()`'s value. Loss of
+the observer is unavailable proof, never confirmation of native process exit.
+
 ### Qt cursor sync example
 
 For a Qt widget example that forwards Qt signals through sintra, see

@@ -8,6 +8,10 @@ from typing import Any, Dict, Optional
 
 
 TEST_TIMEOUT_OVERRIDES = {
+    # Six isolated family cases each have a 20s diagnostic watchdog.
+    "native_process_family_owned_children_contract_test": 130.0,
+    # Complete bundle signing/validation plus three exact nonparent occurrences.
+    "darwin_executable_auth_contract_test": 50.0,
     "handled_exception_survival_contract_test_debug": 40.0,
     "handled_exception_survival_contract_test_release": 40.0,
     "recovery_test_debug": 120.0,

@@ -13,6 +13,13 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include "../ipc/process_utils.h"
+
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/event.h>
+#include <unistd.h>
 #endif
 
 #include <atomic>
@@ -29,11 +36,18 @@
 
 namespace sintra {
 
+enum class Native_family_scope
+{
+    TRANSITIVE,
+    OWNED_CHILDREN,
+};
+
 /// Local optional capability. No shared swarm schema or per-session ownership
 /// is implied by this process-wide observation.
 struct Native_family_status
 {
     std::uint32_t             version = 1;
+    Native_family_scope       scope = Native_family_scope::TRANSITIVE;
     bool                      active = false;
     bool                      admission_closed = false;
     bool                      pending_launches = false;
@@ -47,7 +61,7 @@ struct Native_family_status
 
     bool operator==(const Native_family_status& other) const
     {
-        return version == other.version && active == other.active &&
+        return version == other.version && scope == other.scope && active == other.active &&
             admission_closed == other.admission_closed && pending_launches == other.pending_launches &&
             native_empty == other.native_empty && termination_requested == other.termination_requested &&
             action_active == other.action_active && action_generation == other.action_generation &&
@@ -121,6 +135,11 @@ struct External_native_child
 #elif defined(__linux__)
     int native = -1;
     ~External_native_child() { if (native >= 0) close(native); }
+#elif defined(__APPLE__)
+    int native = -1;
+    bool exit_observed = false;
+    bool observer_unavailable = false;
+    ~External_native_child() { if (native >= 0) close(native); }
 #endif
 };
 
@@ -139,12 +158,23 @@ public:
 #endif
     }
 
-    bool activate()
+    bool activate(Native_family_scope scope)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_active.load()) {
-            return true;
+            return m_status.scope == scope;
         }
+#if defined(__APPLE__)
+        if (scope != Native_family_scope::OWNED_CHILDREN) {
+            fail(ENOTSUP, "transitive native process family unavailable on Darwin");
+            return false;
+        }
+#else
+        if (scope != Native_family_scope::TRANSITIVE) {
+            fail(ENOTSUP, "owned-child native family unavailable on this platform");
+            return false;
+        }
+#endif
 #ifdef _WIN32
         m_job = CreateJobObjectW(nullptr, nullptr);
         if (!m_job) {
@@ -226,11 +256,12 @@ public:
             fail(errno, "prctl(PR_SET_CHILD_SUBREAPER)");
             return false;
         }
-#else
+#elif !defined(__APPLE__)
         fail(ENOTSUP, "native process family unavailable on this platform");
         return false;
 #endif
         m_status = {};
+        m_status.scope = scope;
         m_status.active = true;
         m_active.store(true);
         return true;
@@ -250,7 +281,7 @@ public:
             PostQueuedCompletionStatus(m_completion_port, 0, reinterpret_cast<ULONG_PTR>(this), nullptr);
         }
 #endif
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         // Membership can settle after the original SIGCHLD was observed.
         // Wake the existing sole reaper; do not introduce another waiter.
         if (m_active.load()) {
@@ -281,11 +312,15 @@ inline Native_process_family& native_process_family()
 } // namespace detail
 
 /// Birth reservation for a maintained non-Sintra child. The caller retains
-/// its existing exact direct-child wait authority; the family owns adopted
-/// residual descendants. Reserve before any native creation, publish the
+/// its existing exact direct-child wait authority; a TRANSITIVE family owns
+/// adopted residual descendants. Reserve before any native creation, publish the
 /// original native reference before ending that reservation, and observe the
 /// exact reap before releasing it. Abandoning a created ticket does not erase
 /// custody: hand off only after the caller has stopped every direct wait.
+/// Darwin OWNED_CHILDREN never takes over another owner's wait or claims group
+/// cleanup. Its caller retains the original unreaped child through publication,
+/// passes zero as the unused native argument, and reports its exact completed
+/// wait with observe_reaped(). Losing that owner leaves the family unconfirmed.
 class Native_family_external_child
 {
 public:
@@ -371,6 +406,31 @@ public:
             return false;
         }
         m_record->native = retained;
+#elif defined(__APPLE__)
+        (void)native;
+        const auto before = query_process_start_stamp(process_id);
+        if (!before) {
+            return false;
+        }
+        const int observer = kqueue();
+        if (observer < 0) {
+            return false;
+        }
+        struct kevent registration{};
+        EV_SET(&registration, process_id, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_ONESHOT,
+            NOTE_EXIT, 0, nullptr);
+        if (fcntl(observer, F_SETFD, FD_CLOEXEC) != 0 ||
+            kevent(observer, &registration, 1, nullptr, 0, nullptr) != 0)
+        {
+            close(observer);
+            return false;
+        }
+        const auto after = query_process_start_stamp(process_id);
+        if (!after || *before != *after) {
+            close(observer);
+            return false;
+        }
+        m_record->native = observer;
 #else
         return false;
 #endif
@@ -412,6 +472,31 @@ public:
                 WEXITED | WNOHANG | WNOWAIT | __WALL);
         } while (inspected < 0 && errno == EINTR);
         if (inspected == 0 || errno != ECHILD) return false;
+#elif defined(__APPLE__)
+        if (m_record->observer_unavailable) {
+            return false;
+        }
+        if (!m_record->exit_observed) {
+            struct kevent event{};
+            const timespec immediate{};
+            int observed;
+            do {
+                observed = kevent(m_record->native, nullptr, 0, &event, 1, &immediate);
+            } while (observed < 0 && errno == EINTR);
+            if (observed < 0 || (observed == 1 &&
+                    ((event.flags & EV_ERROR) != 0 || event.ident != m_record->process_id ||
+                     event.filter != EVFILT_PROC || (event.fflags & NOTE_EXIT) == 0)))
+            {
+                m_record->observer_unavailable = true;
+                family.fail(observed < 0 ? errno : EIO, "observe original external child exit");
+                family.wake_observer();
+                return false;
+            }
+            m_record->exit_observed = observed == 1;
+        }
+        if (!m_record->exit_observed) {
+            return false;
+        }
 #else
         return false;
 #endif
@@ -427,6 +512,11 @@ public:
         auto& family = detail::native_process_family();
         std::lock_guard<std::mutex> lock(family.m_mutex);
         m_record->direct_waiter = false;
+#if defined(__APPLE__)
+        if (m_record->phase != detail::External_native_child::Phase::EXITED) {
+            family.fail(ECHILD, "external child wait owner unavailable");
+        }
+#endif
         family.wake_observer();
     }
 

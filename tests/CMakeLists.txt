@@ -150,6 +150,15 @@ foreach(FULL_TEST_PATH IN LISTS TEST_FILES)
             COMMENT "Generating dSYM for $<TARGET_FILE_NAME:${TARGET_NAME}>"
             VERBATIM
         )
+        if(TEST_NAME STREQUAL "managed_child_native_peer_contract_test" OR
+           TEST_NAME STREQUAL "darwin_executable_auth_contract_test")
+            add_custom_command(TARGET ${TARGET_NAME}
+                POST_BUILD
+                COMMAND /usr/bin/codesign --force --sign - "$<TARGET_FILE:${TARGET_NAME}>"
+                COMMENT "Signing native executable authentication fixture"
+                VERBATIM
+            )
+        endif()
     endif()
 endforeach()
 

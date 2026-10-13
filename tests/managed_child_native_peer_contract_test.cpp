@@ -22,7 +22,7 @@
 
 #include <sintra/sintra.h>
 
-#if defined(_WIN32) || defined(__linux__)
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
 
 #if defined(_WIN32) && (defined(OPTIONAL) || defined(FAILED) || defined(ERROR) || \
     defined(NO_DATA) || defined(DATA_AVAILABLE) || defined(EVICTED))
@@ -33,7 +33,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -104,7 +104,7 @@ Native_endpoint connect_peer(const std::string& name)
     return CreateFileA(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 using Native_endpoint = int;
 constexpr Native_endpoint k_invalid_endpoint = -1;
 void close_endpoint(Native_endpoint endpoint) { close(endpoint); }
@@ -113,22 +113,40 @@ bool exchange_byte(Native_endpoint endpoint, char& value, bool send, bool)
 {
     pollfd ready{endpoint, static_cast<short>(send ? POLLOUT : POLLIN), 0};
     if (poll(&ready, 1, 5000) <= 0) return false;
-    return send ? ::send(endpoint, &value, 1, MSG_NOSIGNAL) == 1 : recv(endpoint, &value, 1, 0) == 1;
+    return send ? ::send(endpoint, &value, 1,
+#if defined(__APPLE__)
+        0
+#else
+        MSG_NOSIGNAL
+#endif
+    ) == 1 : recv(endpoint, &value, 1, 0) == 1;
 }
 
 sockaddr_un socket_address(const std::string& name)
 {
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
-    require(name.size() + 1 < sizeof(address.sun_path), "bounded abstract socket name");
+    require(name.size() + 1 < sizeof(address.sun_path), "bounded Unix socket name");
+#if defined(__APPLE__)
+    std::memcpy(address.sun_path, name.c_str(), name.size() + 1);
+#else
     std::memcpy(address.sun_path + 1, name.data(), name.size());
+#endif
     return address;
 }
 
 Native_endpoint connect_peer(const std::string& name)
 {
-    const int socket = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    const int socket = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (socket < 0) return k_invalid_endpoint;
+    if (fcntl(socket, F_SETFD, FD_CLOEXEC) != 0) {
+        close(socket);
+        return k_invalid_endpoint;
+    }
+#if defined(__APPLE__)
+    const int no_sigpipe = 1;
+    setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
     const auto address = socket_address(name);
     if (connect(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
         close(socket);
@@ -147,6 +165,8 @@ public:
             std::to_string(Clock::now().time_since_epoch().count());
 #ifdef _WIN32
         m_name = "\\\\.\\pipe\\" + m_name;
+#elif defined(__APPLE__)
+        m_name = "/tmp/" + m_name;
 #endif
     }
 
@@ -158,9 +178,10 @@ public:
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1, 128, 128, 0, nullptr);
         require(m_listener != k_invalid_endpoint, "create owned pipe server");
-#elif defined(__linux__)
-        m_listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#elif defined(__linux__) || defined(__APPLE__)
+        m_listener = socket(AF_UNIX, SOCK_STREAM, 0);
         require(m_listener != k_invalid_endpoint, "create owned Unix listener");
+        require(fcntl(m_listener, F_SETFD, FD_CLOEXEC) == 0, "listener closes at exec");
         const auto address = socket_address(m_name);
         require(bind(m_listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0,
             "bind owned Unix listener");
@@ -171,6 +192,9 @@ public:
     {
         if (m_peer != k_invalid_endpoint && m_peer != m_listener) close_endpoint(m_peer);
         if (m_listener != k_invalid_endpoint) close_endpoint(m_listener);
+#if defined(__APPLE__)
+        unlink(m_name.c_str());
+#endif
     }
 
     void accept_peer()
@@ -199,11 +223,17 @@ public:
         CloseHandle(operation.hEvent);
         require(connected, "accept actual child pipe connection");
         m_peer = m_listener;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
         pollfd ready{m_listener, POLLIN, 0};
         require(poll(&ready, 1, 5000) == 1, "actual child connects before deadline");
-        m_peer = accept4(m_listener, nullptr, nullptr, SOCK_CLOEXEC);
+        m_peer = accept(m_listener, nullptr, nullptr);
         require(m_peer != k_invalid_endpoint, "accept actual child Unix connection");
+        require(fcntl(m_peer, F_SETFD, FD_CLOEXEC) == 0, "accepted endpoint closes at exec");
+#if defined(__APPLE__)
+        const int no_sigpipe = 1;
+        require(setsockopt(m_peer, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)) == 0,
+            "accepted endpoint suppresses SIGPIPE");
+#endif
 #endif
     }
 
@@ -335,6 +365,11 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         auto selected = sintra::capture_managed_child_executable(selected_path.string());
         auto other = sintra::capture_managed_child_executable(other_path.string());
         require(selected.reference && other.reference, "capture executable file objects before launch");
+        require(!sintra::compare_managed_child_executables(selected.reference, other.reference),
+            "distinct identical copies retain distinct file identities on every platform");
+        require(sintra::compare_managed_child_executable_path(selected.reference, selected_path.string()) &&
+            !sintra::compare_managed_child_executable_path(selected.reference, other_path.string()),
+            "cheap current-path comparison uses selected file identity");
         require(!sintra::capture_managed_child_executable((directory / "absent.exe").string()).reference,
             "missing selected file is unavailable");
         Endpoint endpoint;
@@ -351,7 +386,14 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         require(original_proof.state == State::MATCH, "actual authenticated original peer and image match");
         require(original_proof.native_process_id == (uint64_t)custody.native_snapshot().front().pid,
             "matching native PID belongs to the exact selected custody");
+#if defined(__APPLE__)
+        require(prove(identity, other.reference).state == State::MATCH, "valid identical native CODE in a distinct file matches");
+        const auto wrong_code = sintra::capture_managed_child_executable("/bin/sleep");
+        require(static_cast<bool>(wrong_code.reference), "capture a different signed native executable");
+        require(prove(identity, wrong_code.reference).state == State::MISMATCH, "different running code fails the requirement");
+#else
         require(prove(identity, other.reference).state == State::MISMATCH, "identical bytes in a different file do not match");
+#endif
         auto stale = identity;
         ++stale.custody_identity;
         require(prove(stale, selected.reference).state == State::MISMATCH, "wrong custody token cannot match");
@@ -391,8 +433,15 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         std::filesystem::copy_file(other_path, selected_path);
         auto replacement = sintra::capture_managed_child_executable(selected_path.string());
         require(static_cast<bool>(replacement.reference), "capture replacement as distinct file object");
+        require(!sintra::compare_managed_child_executable_path(selected.reference, selected_path.string()) &&
+            sintra::compare_managed_child_executable_path(selected.reference, renamed_path.string()),
+            "pathname replacement cannot retarget the retained file selection");
         require(prove(identity, selected.reference).state == State::MATCH, "renamed original loaded image still matches");
+#if defined(__APPLE__)
+        require(prove(identity, replacement.reference).state == State::MATCH, "same valid CODE accepts replacement copy");
+#else
         require(prove(identity, replacement.reference).state == State::MISMATCH, "replacement at original pathname cannot match");
+#endif
 #if defined(__linux__)
         endpoint.send('E');
         endpoint.expect('E');
@@ -419,8 +468,13 @@ int run_root(int argc, char** argv, const std::filesystem::path& directory)
         };
         require(prove_successor(identity, replacement.reference).state == State::MISMATCH,
             "reused managed IID cannot revive the retired custody token");
+#if defined(__APPLE__)
+        require(prove_successor(successor_identity, selected.reference).state == State::MATCH,
+            "new exact occurrence running the same valid CODE may match a different retained file");
+#else
         require(prove_successor(successor_identity, selected.reference).state == State::MISMATCH,
             "path replacement before launch cannot retarget original selection");
+#endif
         require(prove_successor(successor_identity, replacement.reference).state == State::MATCH,
             "new exact custody matches its preselected executable object");
         successor_endpoint.send('Q');

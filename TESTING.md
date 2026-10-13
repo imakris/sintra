@@ -149,6 +149,24 @@ same C++20 toolchain and include paths as the normal test target, and the
 required build queue for local compiler invocations. Without this definition,
 the source is a normal test target and must compile successfully.
 
+### Native executable authentication contracts
+
+`managed_child_native_peer_contract_test` exercises real connected peers and
+managed custody: exact occurrence, wrong peer, inspection denial, selected-file
+replacement and native exit. Windows/Linux retain their exact loaded-file
+expectations; Darwin accepts a distinct valid copy of the captured native code
+while keeping retained-file comparisons distinct. Darwin fixtures are signed
+after linking with the system ad-hoc signer.
+
+`darwin_executable_auth_contract_test` validates standalone and complete bundled
+code, rejects modified code and resources, and tests a nonparent workload whose
+helper is its sole waiter. A local birth-checked NOTE_EXIT observer brackets
+dynamic authentication. Original exit and observer failure after code validation
+both reject the proof and remain terminal. It creates and signs one isolated
+bundle at runtime; run it through `queued-build --slots 1 --` where the build
+queue policy applies. These are component contracts, not application recovery or
+deployment-concurrency qualification.
+
 ### Ring wait hints and optional measurement
 
 `ring_wait_hint_test` runs a brief correctness check in the normal suite. It

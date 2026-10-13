@@ -155,7 +155,9 @@ transceiver_ctor_test                                   10
 utility_test                                             1
 variable_buffer_alignment_test                           5
 native_process_family_contract_test                      1
+native_process_family_owned_children_contract_test       1
 managed_child_native_peer_contract_test                  1
+darwin_executable_auth_contract_test                     1
 ignored_signal_lifecycle_test                            1
 native_process_family_prerequisite_contract_test         1
 managed_child_orderly_lifeline_contract_test              5

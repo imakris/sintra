@@ -84,6 +84,8 @@ target_compile_features(sintra INTERFACE cxx_std_20)
 target_link_libraries(sintra INTERFACE Threads::Threads)
 if(WIN32)
     target_link_libraries(sintra INTERFACE advapi32)
+elseif(APPLE)
+    target_link_libraries(sintra INTERFACE "-framework Security" "-framework CoreFoundation" bsm)
 endif()
 
 option(SINTRA_BUILD_COMPILED "Build the optional separately compiled Sintra target" OFF)

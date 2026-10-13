@@ -3102,6 +3102,11 @@ inline void Managed_process::reap_finished_children()
     {
         std::lock_guard<std::mutex> guard(m_spawned_child_pids_mutex);
         if (m_spawned_child_pids.empty()) {
+#if defined(__APPLE__)
+            if (detail::native_process_family().m_active.load()) {
+                m_native_family_changed.notify_all();
+            }
+#endif
             return;
         }
 
@@ -3140,12 +3145,24 @@ inline void Managed_process::reap_finished_children()
                 continue;
             }
             if (result == -1 && errno == ECHILD) {
+#if defined(__APPLE__)
+                auto& family = detail::native_process_family();
+                std::lock_guard<std::mutex> family_lock(family.m_mutex);
+                if (family.m_active.load()) {
+                    family.fail(ECHILD, "owned child exact wait unavailable");
+                }
+#endif
                 note_child_os_exit(slot->occurrence, 0, false);
             }
             slot = m_spawned_child_pids.erase(slot);
         }
     }
 
+#if defined(__APPLE__)
+    if (detail::native_process_family().m_active.load()) {
+        m_native_family_changed.notify_all();
+    }
+#endif
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     for (const auto& [pid, status] : reaped_children) {
         detail::child_reaped_for_test(pid, status);

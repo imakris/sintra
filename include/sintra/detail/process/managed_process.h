@@ -300,10 +300,12 @@ class Managed_child_native_reference;
 
 struct Managed_child_executable_capture;
 struct Managed_child_native_peer_proof;
+enum class Managed_child_native_peer_state;
 
-/// An opaque, retained executable file object. Capture the fixed payload before
-/// launch and retain the same reference through native peer admission. This is
-/// file identity, not a content signature or a claim about future process exec.
+/// An opaque, retained executable selection. Windows/Linux authorize the loaded
+/// FILE; Darwin retains the selected FILE plus its validated native CODE
+/// requirement. A distinct valid copy of that CODE may authorize on Darwin.
+/// Neither contract makes a claim about a future process exec.
 class Managed_child_executable_reference
 {
 public:
@@ -316,8 +318,13 @@ private:
     friend Managed_child_executable_capture capture_managed_child_executable(const std::string&);
     friend bool compare_managed_child_executables(
         const Managed_child_executable_reference&, const Managed_child_executable_reference&);
+    friend bool compare_managed_child_executable_path(
+        const Managed_child_executable_reference&, const std::string&);
     friend Managed_child_native_peer_proof verify_process_executable(
         uint64_t, const Managed_child_executable_reference&);
+    friend Managed_child_native_peer_proof verify_observed_process_executable(
+        uint64_t, uint64_t, const Managed_child_executable_reference&,
+        const std::function<Managed_child_native_peer_state()>&);
     friend struct Managed_process;
 };
 
@@ -329,6 +336,12 @@ struct Managed_child_executable_capture
 
 /// Opens one absolute executable path without exporting its native handle.
 /// Replacement of that path does not retarget the returned reference.
+/// Darwin requires signed native code and validates the complete canonical
+/// bundle (including nested code/resources), or the standalone executable.
+/// The caller must exclude writes to this selected code generation, including
+/// resources, throughout capture. Stat samples detect observed changes; they
+/// do not make a mutable bundle immutable. Stage updates as distinct stable
+/// generations and capture each generation anew before use.
 Managed_child_executable_capture capture_managed_child_executable(const std::string& path);
 
 /// Compares retained file identities; unavailable references or native inspection
@@ -336,6 +349,11 @@ Managed_child_executable_capture capture_managed_child_executable(const std::str
 bool compare_managed_child_executables(
     const Managed_child_executable_reference& first,
     const Managed_child_executable_reference& second);
+
+/// Cheap retained FILE/current-path comparison. No signature/static validation
+/// is repeated. False includes missing files and unavailable inspection.
+bool compare_managed_child_executable_path(
+    const Managed_child_executable_reference& executable, const std::string& path);
 
 enum class Managed_child_native_peer_state
 {
@@ -362,6 +380,20 @@ struct Managed_child_native_peer_proof
 /// MATCH carries native identity only; no managed custody occurrence is asserted.
 Managed_child_native_peer_proof verify_process_executable(
     uint64_t native_pid, const Managed_child_executable_reference& executable);
+
+/// Darwin nonparent verification using a caller-retained exact occurrence.
+/// Before calling, establish a local NOTE_EXIT observer between matching public
+/// birth observations while the native owner retains the unreaped original.
+/// The observer must remain alive for this call and monotonically report MATCH
+/// (original live), EXITED, or UNAVAILABLE; terminal/error observations may never
+/// become live again. It must identify native_pid and creation_identity.
+/// Sintra brackets dynamic CODE validation with that observer and matching birth
+/// samples. It never waits for, signals, adopts, or reaps this process. Other
+/// platforms report UNAVAILABLE; their direct-child FILE contract is unchanged.
+Managed_child_native_peer_proof verify_observed_process_executable(
+    uint64_t native_pid, uint64_t creation_identity,
+    const Managed_child_executable_reference& executable,
+    const std::function<Managed_child_native_peer_state()>& observer);
 
 struct Managed_child_native_action
 {
