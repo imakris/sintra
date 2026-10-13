@@ -886,8 +886,16 @@ inline bool Coordinator::claim_external_process_invitation(
         return false;
     }
 
-    auto&      record = it->second;
-    const auto now    = std::chrono::steady_clock::now();
+    auto& record = it->second;
+    // A relayed claim can outlive its invitation. Validate its occurrence before
+    // token or expiry rejection can retire a successor using the same process id.
+    if (s_tl_current_message->managed_child_custody_identity != 0 ||
+        s_tl_current_message->managed_child_occurrence != record.occurrence)
+    {
+        return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
     if (record.state != External_process_invitation_state::pending) {
         return false;
     }
@@ -901,12 +909,6 @@ inline bool Coordinator::claim_external_process_invitation(
         record.state      = External_process_invitation_state::rejecting;
         record.expires_at = now;
         m_external_process_invitations_cv.notify_all();
-        return false;
-    }
-
-    if (s_tl_current_message->managed_child_custody_identity != 0 ||
-        s_tl_current_message->managed_child_occurrence != record.occurrence)
-    {
         return false;
     }
 

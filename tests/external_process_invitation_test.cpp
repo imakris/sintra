@@ -5,6 +5,7 @@
 #include "managed_child_test_support.h"
 #include "test_utils.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -145,6 +146,85 @@ sintra::External_process_invitation wait_for_invitation_reuse(
     return {};
 }
 
+struct Claim_dispatch_gate
+{
+    std::mutex mutex;
+    std::condition_variable changed;
+    sintra::instance_id_type process_iid = sintra::invalid_instance_id;
+    uint32_t occurrence = 0;
+    bool entered = false;
+    bool released = false;
+    bool completed = false;
+    bool relayed_predecessor = false;
+    void (*original_handler)(sintra::Message_prefix&) = nullptr;
+};
+
+Claim_dispatch_gate g_claim_gate;
+std::atomic<bool> g_stale_claim_deadline_reached{false};
+
+class Claim_handler_guard
+{
+public:
+    explicit Claim_handler_guard(void (*handler)(sintra::Message_prefix&))
+    {
+        auto handlers = sintra::Transceiver::get_rpc_handler_map().scoped();
+        auto& entry = handlers.get().at(static_cast<sintra::type_id_type>(
+            sintra::detail::reserved_id::claim_external_process_invitation));
+        g_claim_gate.original_handler = entry;
+        entry = handler;
+    }
+
+    ~Claim_handler_guard()
+    {
+        {
+            std::lock_guard lock(g_claim_gate.mutex);
+            g_claim_gate.released = true;
+            g_claim_gate.changed.notify_all();
+        }
+        auto handlers = sintra::Transceiver::get_rpc_handler_map().scoped();
+        handlers.get().at(static_cast<sintra::type_id_type>(
+            sintra::detail::reserved_id::claim_external_process_invitation)) =
+                g_claim_gate.original_handler;
+    }
+};
+
+void hold_relayed_claim(sintra::Message_prefix& message)
+{
+    auto& gate = g_claim_gate;
+    const bool selected = sintra::process_of(message.sender_instance_id) == gate.process_iid &&
+        message.managed_child_occurrence == gate.occurrence;
+    if (selected) {
+        std::unique_lock lock(gate.mutex);
+        gate.relayed_predecessor = &message == sintra::s_tl_current_message &&
+            message.managed_child_custody_identity == 0 &&
+            sintra::s_tl_current_request_reader &&
+            sintra::s_tl_current_request_reader->get_process_instance_id() == sintra::s_mproc_id;
+        gate.entered = true;
+        gate.changed.notify_all();
+        gate.changed.wait(lock, [&] { return gate.released; });
+    }
+
+    // Keep the real dispatcher, its transported arguments and its reply path.
+    gate.original_handler(message);
+    if (selected) {
+        std::lock_guard lock(gate.mutex);
+        gate.completed = true;
+        gate.changed.notify_all();
+    }
+}
+
+bool invitation_is_pending(const sintra::External_process_invitation& invitation)
+{
+    std::lock_guard lock(sintra::s_coord->m_external_process_invitations_mutex);
+    const auto& records = sintra::s_coord->m_external_process_invitations;
+    const auto it = records.find(invitation.process_instance_id);
+    const int state = it == records.end() ? -1 : static_cast<int>(it->second.state);
+    std::fprintf(stderr, "%sinvitation occurrence %u state %d (pending=0, absent=-1)\n",
+        k_failure_prefix, invitation.occurrence, state);
+    return it != records.end() && it->second.occurrence == invitation.occurrence &&
+        it->second.state == decltype(it->second.state)::pending;
+}
+
 int run_helper(int argc, char* argv[])
 {
     const auto dir = std::filesystem::path(
@@ -191,6 +271,12 @@ int run_reject_helper(int argc, char* argv[])
         sintra::test::get_argv_value(argc, argv, k_dir_arg));
     const auto marker = sintra::test::get_argv_value(argc, argv, k_marker_arg);
 
+    if (marker == "stale_claim") {
+        sintra::detail::test_hooks::s_rpc_get_until_stage.store([](const char*) {
+            g_stale_claim_deadline_reached.store(true, std::memory_order_release);
+        }, std::memory_order_release);
+    }
+
     try {
         sintra::init(argc, argv);
     }
@@ -198,7 +284,9 @@ int run_reject_helper(int argc, char* argv[])
         write_marker(
             dir,
             marker,
-            std::string(e.what()) == k_external_attach_rejected_message
+            g_stale_claim_deadline_reached.load(std::memory_order_acquire)
+                ? "claim_deadline_reached"
+                : std::string(e.what()) == k_external_attach_rejected_message
                 ? "rejected"
                 : "unexpected_init_failure");
         std::_Exit(0);
@@ -569,6 +657,115 @@ bool run_stale_invitation_cancel_case(int argc, char* argv[])
     return guard.shutdown() && ok;
 }
 
+bool run_relayed_stale_claim_case(
+    int                           argc,
+    char*                         argv[],
+    const std::string&            binary_path,
+    const std::filesystem::path&  dir)
+{
+    using namespace std::chrono_literals;
+    sintra::init(argc, argv);
+    Runtime_guard runtime{true};
+
+    const auto explicit_iid = sintra::make_process_instance_id();
+    const auto predecessor = make_invitation(explicit_iid, 20s);
+    const auto unrelated   = make_invitation(sintra::invalid_instance_id, 30s);
+    if (!sintra::test::assert_true(predecessor && unrelated,
+            k_failure_prefix, "stale-claim case should reserve both invitations"))
+    {
+        return false;
+    }
+
+    sintra::test::Exact_child old_helper(2s);
+    sintra::External_process_invitation successor;
+    bool ok = true;
+    {
+        g_claim_gate.process_iid = explicit_iid;
+        g_claim_gate.occurrence  = predecessor.occurrence;
+        Claim_handler_guard handler_guard(hold_relayed_claim);
+        ok &= sintra::test::assert_true(launch_direct_process(binary_path,
+                helper_args(dir, k_role_reject, "stale_claim", predecessor), old_helper),
+            k_failure_prefix, "predecessor helper should launch");
+        {
+            std::unique_lock lock(g_claim_gate.mutex);
+            ok &= sintra::test::assert_true(
+                g_claim_gate.changed.wait_for(lock, 8s, [] { return g_claim_gate.entered; }),
+                k_failure_prefix, "actual predecessor claim should reach coordinator dispatch");
+            ok &= sintra::test::assert_true(g_claim_gate.relayed_predecessor,
+                k_failure_prefix, "held claim should carry predecessor provenance on the coordinator ring");
+        }
+        if (ok) {
+            ok &= sintra::test::assert_true(sintra::cancel_external_process_invitation(predecessor),
+                k_failure_prefix, "predecessor invitation should retire while its relayed claim is held");
+            successor = wait_for_invitation_reuse(explicit_iid, 20s, 6s);
+            ok &= sintra::test::assert_true(successor && successor.occurrence > predecessor.occurrence,
+                k_failure_prefix, "same process id should acquire a successor occurrence before old dispatch");
+        }
+        if (ok) {
+            std::fprintf(stderr, "%srelayed predecessor %u retained; successor %u reserved\n",
+                k_failure_prefix, predecessor.occurrence, successor.occurrence);
+            ok &= sintra::test::assert_true(invitation_is_pending(successor),
+                k_failure_prefix, "successor should be pending before old dispatch");
+            ok &= sintra::test::assert_true(!sintra::cancel_external_process_invitation(predecessor),
+                k_failure_prefix, "stale invitation cancellation should preserve the successor");
+        }
+        {
+            std::unique_lock lock(g_claim_gate.mutex);
+            g_claim_gate.released = true;
+            g_claim_gate.changed.notify_all();
+            if (g_claim_gate.entered) {
+                ok &= sintra::test::assert_true(
+                    g_claim_gate.changed.wait_for(lock, 8s, [] { return g_claim_gate.completed; }),
+                    k_failure_prefix, "real stale claim dispatcher should finish");
+            }
+        }
+    }
+
+    if (successor) {
+        ok &= sintra::test::assert_true(invitation_is_pending(successor),
+            k_failure_prefix, "already-relayed stale claim must leave the successor pending");
+    }
+    ok &= wait_for_marker(dir, "stale_claim", "rejected", 8s);
+    ok &= assert_clean_exit(old_helper, 8s, "stale claimant should receive rejection and exit");
+
+    const auto claim_and_ping = [
+            &binary_path, &dir
+        ](
+            const sintra::External_process_invitation& invitation,
+            const std::string& marker)
+        {
+            sintra::test::Exact_child helper(2s);
+            bool attached = launch_direct_process(binary_path,
+                helper_args(dir, k_role_helper, marker, invitation), helper);
+            attached &= wait_for_marker(dir, marker, "ready", 8s);
+            if (attached) {
+                const auto service_iid = resolve_until(k_service_name, 8s);
+                attached &= sintra::test::assert_true(service_iid != sintra::invalid_instance_id,
+                    k_failure_prefix, "fresh external claimant should publish its service");
+                if (service_iid != sintra::invalid_instance_id) {
+                    attached &= sintra::test::assert_true(External_service::rpc_ping(service_iid, 31) == 44,
+                        k_failure_prefix, "fresh external claimant should complete an ordinary RPC");
+                }
+                sintra::world() << done_signal_t{};
+                attached &= wait_for_marker(dir, marker + "_left", "left", 8s);
+            }
+            attached &= assert_clean_exit(helper, 8s, "fresh claimant should leave and settle exactly");
+            std::fprintf(stderr, "%s%s claim/RPC/exit %s\n",
+                k_failure_prefix, marker.c_str(), attached ? "passed" : "failed");
+            return attached;
+        };
+
+    // A failed successor witness is already a regression; keep the unrelated
+    // invitation's positive control and exact child cleanup observable as well.
+    if (successor && invitation_is_pending(successor)) {
+        ok &= claim_and_ping(successor, "successor");
+    }
+    ok &= sintra::test::assert_true(invitation_is_pending(unrelated),
+        k_failure_prefix, "stale claim should preserve the unrelated invitation");
+    ok &= claim_and_ping(unrelated, "unrelated");
+    return runtime.shutdown() && ok;
+}
+
 bool run_pending_shutdown_case(int argc, char* argv[])
 {
     sintra::init(argc, argv);
@@ -618,6 +815,7 @@ int main(int argc, char* argv[])
     ok &= run_recovery_occurrence_rejected_case(argc, argv, binary_path, dir);
     ok &= run_invalid_id_case(argc, argv);
     ok &= run_stale_invitation_cancel_case(argc, argv);
+    ok &= run_relayed_stale_claim_case(argc, argv, binary_path, dir);
     ok &= run_pending_shutdown_case(argc, argv);
 
     std::error_code ec;
