@@ -118,8 +118,11 @@ Sintra exposes small helpers to make ring usage less error-prone:
 
 #### Linux/POSIX
 - Reserve 2x span with `mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS)`
-- Map file twice using `MAP_FIXED` to **replace** the reservation
-- **Critical**: Use `MAP_FIXED`, **not** `MAP_FIXED_NOREPLACE` (the goal is to replace)
+- Release the reservation and check that the release succeeded
+- Map the file twice without replacing unrelated mappings; use exact non-replacing
+  placement where supported and otherwise validate the returned advisory layout
+- Require adjacent views of the expected size; on failure, release only the
+  views acquired by that attempt before retrying
 
 ---
 

@@ -106,10 +106,9 @@
  *        expecting the OS to reuse the address.
  *  * Linux / POSIX:
  *      - Reserve a 2x span with mmap(NULL, 2*size, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, ...).
- *      - Map the file TWICE into that span using MAP_FIXED (by design replaces
- *        the reservation). Do NOT use MAP_FIXED_NOREPLACE for this step.
- *      - Use ptr = mem (mmap returns a page-aligned address).
- *      - On ANY failure after reserving, munmap the 2x span before returning.
+ *      - Release the reservation, then map twice without replacing other mappings.
+ *      - Require both views at the reserved page-aligned addresses and sizes.
+ *      - On failure, release only the views acquired by this attempt.
  */
 
 #pragma once
@@ -205,8 +204,24 @@ using Ring_wait_callback = void (*)(int);
 inline std::atomic<Ring_wait_callback> s_ring_wait_prepared{nullptr};
 using Ring_wait_started_callback = void (*)(Ring_wait_hint);
 inline std::atomic<Ring_wait_started_callback> s_ring_wait_started{nullptr};
+using Ring_mapping_callback = void (*)(const char*, const void*, int);
+inline thread_local Ring_mapping_callback s_ring_mapping_operation = nullptr;
+inline thread_local ipc::map_options_t s_ring_mapping_options = 0;
 }
 #endif
+
+inline void ring_mapping_operation_for_test(const char* stage, const void* address, int error = 0)
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_ring_mapping_operation) {
+        callback(stage, address, error);
+    }
+#else
+    (void)stage;
+    (void)address;
+    (void)error;
+#endif
+}
 
 inline void ring_guard_operation_for_test(
     const char* stage,
@@ -1651,10 +1666,9 @@ private:
      *
      * LINUX / POSIX
      *   * Reserve a 2x span with mmap(PROT_NONE). POSIX guarantees page alignment.
-     *   * Map the file twice using MAP_FIXED so the mappings REPLACE the reservation.
-     *   * IMPORTANT: Do NOT use MAP_FIXED_NOREPLACE here. The whole point is to
-     *     overwrite the reservation.
-     *   * On ANY failure after reserving, munmap the 2x span and fail cleanly.
+     *   * Release the reservation before mapping, checking that release succeeded.
+     *   * Map twice without replacing another thread's allocation; validate layout.
+     *   * On failure, release only successfully acquired views before retrying.
      */
     bool attach()
     {
@@ -1701,14 +1715,37 @@ private:
                 }
 
                 ptr = static_cast<char*>(mem);
+                struct Reservation_custody
+                {
+                    char* address;
+                    size_t size;
+                    bool retained = true;
+                    ~Reservation_custody() noexcept
+                    {
+                        if (retained) { ::munmap(address, size); }
+                    }
+                    bool release() noexcept
+                    {
+                        if (::munmap(address, size) != 0) { return false; }
+                        retained = false;
+                        return true;
+                    }
+                } reservation{ptr, m_data_region_size * 2};
                 assert((reinterpret_cast<uintptr_t>(ptr) % page_size) == 0 &&
                     "mmap(PROT_NONE) base not page-aligned?");
-
-#ifdef MAP_FIXED
-                map_extra_options |= MAP_FIXED;
+                if (!reservation.release()) { return false; }
+                // Exact placement without replacing an allocation that won the
+                // released span. Advisory hints can relocate the second view.
+#if defined(__linux__) && defined(MAP_FIXED_NOREPLACE)
+                map_extra_options |= MAP_FIXED_NOREPLACE;
+#elif defined(__FreeBSD__) && defined(MAP_EXCL)
+                map_extra_options |= MAP_FIXED | MAP_EXCL;
 #endif
 #ifdef MAP_NOSYNC
                 map_extra_options |= MAP_NOSYNC;
+#endif
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+                map_extra_options |= detail::test_hooks::s_ring_mapping_options;
 #endif
 #endif
                 // -- Platform-independent: map twice back-to-back -------------------
@@ -1716,10 +1753,16 @@ private:
                 bool mapping_failed = false;
 
                 try {
+                    detail::ring_mapping_operation_for_test("before_first_mapping", ptr);
                     region0.reset(new ipc::mapped_region(file, data_rights, 0,
                         m_data_region_size, ptr, map_extra_options));
+                    detail::ring_mapping_operation_for_test("first_mapping", region0.get());
                     region1.reset(new ipc::mapped_region(file, data_rights, 0, 0,
                         ((char*)region0->data()) + m_data_region_size, map_extra_options));
+                }
+                catch (const std::system_error& error) {
+                    mapping_failed = true;
+                    detail::ring_mapping_operation_for_test("native_failed", ptr, error.code().value());
                 }
                 catch (const std::exception&) {
                     mapping_failed = true;
@@ -1737,7 +1780,6 @@ private:
                     region1->size() == m_data_region_size;
 
                 if (layout_ok) {
-                    // Success! MAP_FIXED has replaced the PROT_NONE reservation.
                     m_data_region_0 = std::move(region0);
                     m_data_region_1 = std::move(region1);
                     m_data          = (T*)m_data_region_0->data();
@@ -1754,12 +1796,11 @@ private:
                 }
 
                 // -- Failure: clean up and retry or fail ----------------------------
-#ifndef _WIN32
-                // CRITICAL: Release the PROT_NONE reservation on POSIX.
-                // On macOS especially, leaked reservations accumulate and cause
-                // subsequent mapping attempts to fail deterministically.
-                ::munmap(mem, m_data_region_size * 2);
-#endif
+                // Only acquired wrappers own intervals here; failed native calls
+                // cannot leave cleanup authority over another thread's mapping.
+                region1.reset();
+                region0.reset();
+                detail::ring_mapping_operation_for_test("before_retry", ptr);
 
                 if (attempt + 1 < max_attach_attempts) {
 #ifdef _WIN32
