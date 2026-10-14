@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 
 def sha256(path):
@@ -95,6 +96,7 @@ class Sdk_gate:
         self.output.mkdir(parents=True, exist_ok=False)
         self.architecture = architecture
         self.sdk_version = sdk_version
+        self.cancel_signal = None
         self.result = {
             "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "expected_architecture": architecture,
@@ -107,34 +109,80 @@ class Sdk_gate:
             "linked_program_executed": False,
         }
 
+    def request_cancel(self, signum, _frame):
+        # No exception or I/O from signal delivery: command() owns settlement.
+        self.cancel_signal = signum
+
+    @staticmethod
+    def wait_group_stopped(group):
+        # Grandchildren are reparented to the OS, not waitpid children of this
+        # owner. After killing the group, require every remaining member to be
+        # a zombie (no executable work) or absent before releasing ownership.
+        while True:
+            try:
+                listing = subprocess.run(["ps", "-axo", "pgid=,stat="], text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                    check=True).stdout
+                live = any(fields[0] == str(group) and not fields[1].startswith("Z")
+                           for line in listing.splitlines()
+                           if len(fields := line.split()) >= 2)
+                if not live:
+                    return
+            except (OSError, subprocess.SubprocessError):
+                # An inspection failure cannot release an owned compiler group.
+                pass
+            time.sleep(0.1)
+
     def command(self, arguments, timeout=90):
+        if self.cancel_signal is not None:
+            raise RuntimeError("SDK gate cancellation requested")
         arguments = [str(value) for value in arguments]
         index = len(self.result["commands"])
         process = subprocess.Popen(arguments, cwd=self.output, text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True)
         timed_out = False
+        failure = None
+        deadline = time.monotonic() + timeout
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            # Clang and MIG may own subprocesses. Terminate this command's
-            # private process group before publishing timeout completion.
+            while self.cancel_signal is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    process.communicate(timeout=min(remaining, 0.1))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException as error:
+            failure = error
+        finally:
+            # This command's session also owns compiler/MIG descendants. Every
+            # path settles it, including cancellation and an unexpected error.
+            # A successful direct child must not leave an orphan in its group.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            stdout, stderr = process.communicate()
+            finally:
+                stdout, stderr = process.communicate()
+                self.wait_group_stopped(process.pid)
         for stream in ("stdout", "stderr"):
             (self.output / f"command_{index:02}_{stream}.txt").write_text(
                 stdout if stream == "stdout" else stderr, encoding="utf-8")
         self.result["commands"].append({
             "arguments": arguments, "returncode": process.returncode,
             "timed_out": timed_out,
+            "cancel_signal": self.cancel_signal,
+            "direct_child_reaped": True,
+            "no_live_process_group_members": True,
             "stdout": f"command_{index:02}_stdout.txt",
             "stderr": f"command_{index:02}_stderr.txt",
         })
-        if timed_out or process.returncode:
+        if failure is not None:
+            raise failure
+        if timed_out or self.cancel_signal is not None or process.returncode:
             raise RuntimeError(f"command {index} failed: {arguments[0]}")
         return stdout.strip()
 
@@ -226,6 +274,9 @@ class Sdk_gate:
         self.result["sdk_compile_link_passed"] = True
 
     def settle(self):
+        self.result["cancel_signal"] = self.cancel_signal
+        if self.cancel_signal is not None:
+            self.result["sdk_compile_link_passed"] = False
         self.result["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.result["output_hashes"] = [
             {"path": str(path.relative_to(self.output)), "sha256": sha256(path)}
@@ -242,6 +293,10 @@ def main():
     parser.add_argument("--sdk-version", default="15.5")
     args = parser.parse_args()
     gate = Sdk_gate(args.output, args.architecture, args.sdk_version)
+    # The workflow execs this owner, so runner cancellation reaches it directly.
+    # Install before any native command can be launched and retain through exit.
+    signal.signal(signal.SIGINT, gate.request_cancel)
+    signal.signal(signal.SIGTERM, gate.request_cancel)
     try:
         gate.run()
     except Exception as error:

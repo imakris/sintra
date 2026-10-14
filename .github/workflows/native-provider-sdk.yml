@@ -33,7 +33,7 @@ jobs:
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
         run: >-
-          python3 -B tests/native_provider_sdk/run_sdk_gate.py
+          exec python3 -B tests/native_provider_sdk/run_sdk_gate.py
           --architecture "$EXPECTED_ARCHITECTURE"
           --sdk-version 15.5 --output sdk-evidence
       - name: Retain SDK inputs, generated clients and command results
