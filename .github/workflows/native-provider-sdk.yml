@@ -1,0 +1,46 @@
+name: Darwin public SDK gate
+run-name: Darwin public SDK gate ${{ inputs.receipt }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      receipt:
+        description: Receipt from the queued dispatch owner
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sdk:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Inspect public SDK and link the provider surface serially
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          python3 -B tests/native_provider_sdk/run_sdk_gate.py
+          --architecture "$EXPECTED_ARCHITECTURE"
+          --sdk-version 15.5 --output sdk-evidence
+      - name: Retain SDK inputs, generated clients and command results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: darwin-public-sdk-${{ matrix.architecture }}
+          path: sdk-evidence/
+          if-no-files-found: error
+          retention-days: 14
