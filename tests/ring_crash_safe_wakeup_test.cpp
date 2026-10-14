@@ -4,7 +4,6 @@
 #include "test_ring_utils.h"
 #include "test_utils.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -15,7 +14,6 @@
 #include <fstream>
 #include <memory>
 #include <new>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -68,41 +66,11 @@ namespace {
 namespace fs = std::filesystem;
 using Reader = sintra::Ring_R<uint32_t>;
 using Writer = sintra::Ring_W<uint32_t>;
-using Native_notification = sintra::detail::Ring_native_notification<uint32_t>;
 using sintra::test::Exact_child;
 using sintra::test::Exact_child_state;
 constexpr const char* k_ring_name = "crash_wakeup";
 constexpr uint32_t k_payload = 0x51a7u;
 constexpr auto k_deadline = std::chrono::seconds(8);
-
-class Probe_notification : public Native_notification
-{
-public:
-    using Native_notification::Native_notification;
-    uint64_t gate_holder() const { return this->m_control->ownership_mutex.test_gate_holder(); }
-    uint64_t posting_owner() const { return this->m_control->m_spinlock.test_owner(); }
-    sintra::spinlock& reader_lock() { return this->m_control->rs_stack_spinlock; }
-    sintra::detail::interprocess_mutex& ownership_mutex() { return this->m_control->ownership_mutex; }
-};
-
-class Armed_child_witness : public sintra::detail::Native_exit_witness
-{
-public:
-    Armed_child_witness(uint64_t instance, std::shared_ptr<Exact_child> child)
-
-    :
-        Native_exit_witness(instance),
-        m_child(std::move(child))
-    {}
-
-    bool has_exited() const noexcept override
-    {
-        return m_child->observe_exit_retained() == Exact_child_state::exited;
-    }
-
-private:
-    const std::shared_ptr<Exact_child> m_child;
-};
 
 void require(bool condition, const std::string& message)
 {
@@ -142,43 +110,14 @@ std::atomic<uint64_t> s_wait_thread{0};
 std::atomic<uintptr_t> s_wait_address{0};
 std::atomic<int> s_reader_index{-1};
 thread_local bool tl_reader = false;
-bool s_recoverer = false;
-std::string s_recoverer_label = "recoverer";
 const void* s_ownership_mutex = nullptr;
-Probe_notification* s_exception_notification = nullptr;
+sintra::detail::interprocess_mutex* s_diagnostic_mutex = nullptr;
+sintra::spinlock* s_diagnostic_lock = nullptr;
 const char* s_exception_stage = nullptr;
 std::atomic<unsigned> s_native_log_callbacks{0};
 std::atomic<uint64_t> s_diagnostic_cpu{0};
 std::atomic<bool> s_held_logger{false};
 std::atomic<bool> s_expect_held_logger{false};
-std::atomic<bool> s_completion_arrived{false};
-std::atomic<bool> s_completion_continue{false};
-std::atomic<bool> s_new_enrollment_arrived{false};
-thread_local bool tl_new_enrollment = false;
-
-void exception_termination()
-{
-    if (auto error = std::current_exception()) {
-        try {
-            std::rethrow_exception(error);
-        }
-        catch (const std::exception& failure) {
-            std::fprintf(stderr, "termination exception: %s; tid=%u\n", failure.what(), sintra::get_current_tid());
-        }
-        catch (...) {
-            std::fprintf(stderr, "termination exception: non-standard\n");
-        }
-    }
-    std::fprintf(stderr,
-        "%s: noexcept termination observed before outer cleanup; gate=%llu self=%llu pending=%d posting_owner=%llu\n",
-        s_exception_stage,
-        static_cast<unsigned long long>(s_exception_notification->gate_holder()),
-        static_cast<unsigned long long>(sintra::detail::current_process_instance()),
-        int(s_exception_notification->pending()),
-        static_cast<unsigned long long>(s_exception_notification->posting_owner()));
-    std::fflush(stderr);
-    std::_Exit(79);
-}
 
 void diagnostic_abort(int)
 {
@@ -195,7 +134,7 @@ void wakeup_hook(const char* stage, const void* object)
         return;
     }
     if (!s_poster_stage.empty() && s_poster_stage == stage) {
-        signal_file(s_directory / (s_recoverer ? s_recoverer_label + "_seam" : "poster_seam"));
+        signal_file(s_directory / "poster_seam");
         // The supervisor kills this exact process here, without a destructor.
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -330,7 +269,6 @@ public:
         return with_copying_mark([&] { owned = *this->get_base_address(); }) == Copy_admission::COPIED;
     }
 
-    uint64_t guard_counts() const { return m_control->read_access.load(); }
     uint64_t posting_owner() const { return m_control->m_spinlock.test_owner(); }
     uint64_t reader_slot_owner() const { return m_control->rs_stack_spinlock.test_owner(); }
     uint64_t inspection_holder() const { return m_control->ownership_mutex.test_gate_holder(); }
@@ -338,6 +276,7 @@ public:
     int pending_count_unlocked() const { return m_control->sleeping_stack.size(); }
     sintra::spinlock& posting_lock() { return m_control->m_spinlock; }
     sintra::spinlock& reader_lock() { return m_control->rs_stack_spinlock; }
+    sintra::detail::interprocess_mutex& ownership_mutex() { return m_control->ownership_mutex; }
     void seed_registration(int index)
     {
         sintra::spinlock::locker lock(m_control->m_spinlock);
@@ -451,14 +390,7 @@ struct wakeup_case_t
 };
 
 constexpr wakeup_case_t k_cases[] = {
-    {"native_authority_lifecycle_constructor", "", "authority", "", ""},
-    {"native_authority_lifecycle_destructor", "", "authority", "", ""},
-    {"native_authority_writer_constructor", "", "authority", "", ""},
-    {"native_authority_writer_posting", "", "authority", "", ""},
-    {"native_authority_writer_close", "", "authority", "", ""},
-    {"native_authority_writer_slots", "", "authority", "", ""},
-    {"native_authority_retained_reader", "", "authority", "", ""},
-    {"native_exhausted_admission_proof_reset", "", "exhausted_admission", "", ""},
+    {"exhausted_admission_reset_failure", "", "exhausted_admission", "", ""},
 #if !defined(_WIN32)
     {"native_multithreaded_fork_exec", "", "fork_exec", "", ""},
 #endif
@@ -501,38 +433,15 @@ constexpr wakeup_case_t k_cases[] = {
 #if !defined(_WIN32)
     {"writer_close_count_throw_cleanup", "", "retirement", "", ""},
 #endif
-    {"native_signal_handler_callback", "ring_commit_published", "data", "", "native"},
+    {"native_signal_handler_callback", "", "diagnostic", "", ""},
 #if defined(_WIN32)
-    {"native_exception_handler_callback", "ring_commit_published", "data", "", "native"},
+    {"native_exception_handler_callback", "", "diagnostic", "", ""},
 #endif
     {"mutex_acquire_throw_cleanup", "mutex_before_owner_cas", "gate_throw", "", ""},
     {"mutex_recovery_throw_cleanup", "mutex_recovery_gate_acquired", "gate_throw", "", ""},
-    {"native_flush_throw_cleanup", "ring_commit_published", "data", "", "native"},
-    {"native_backend_throw_cleanup", "ring_commit_published", "data", "", "native"},
-    {"native_release_throw_cleanup", "ring_commit_published", "data", "", "native"},
-    {"native_live_stall_callback", "ring_commit_published", "data", "", "native"},
-    {"native_owner_before_cas", "mutex_before_owner_cas", "publication", "", "native"},
-    {"native_owner_after_cas", "mutex_after_owner_cas", "publication", "", "native"},
-    {"native_owner_repeated_recoverers", "mutex_inspection_gate_acquired", "publication_recoverer", "", "native"},
+    {"native_live_stall_callback", "", "diagnostic", "", ""},
     {"mutex_mixed_recursion", "", "recursion", "", ""},
-    {"native_parked_replay", "ring_commit_published", "data", "", "native"},
-    {"native_empty_late_registration", "", "exit", "ring_wait_before_register", "native"},
-    {"native_request_death", "request_published", "request", "", "native"},
-    {"native_successor_rejection", "ring_commit_published", "data", "semaphore_before_wait", "native"},
-    {"native_capability_setup", "", "capability", "", "native"},
-    {"native_recoverer_edge", "ring_native_exit_published", "recoverer", "", "native"},
-    {"native_recoverer_before_post", "ring_flush_before_post", "recoverer", "", "native"},
-    {"native_recoverer_after_post", "ring_flush_after_post", "recoverer", "", "native"},
-    {"native_recoverer_completion", "ring_native_replay_before_complete", "recoverer", "", "native"},
-    {"native_commit_replay", "ring_commit_published", "data", "semaphore_before_wait", "native"},
-    {"native_post_replay", "ring_post_before_backend", "data", "semaphore_before_wait", "native"},
-    {"native_duplicate_replay", "ring_flush_after_post", "data", "semaphore_before_wait", "native"},
-    {"native_late_registration", "ring_commit_published", "data", "ring_wait_before_register", "native"},
-    {"native_late_enrollment", "ring_commit_published", "data", "semaphore_before_wait", "native"},
-    {"native_completion_new_enrollment", "ring_commit_published", "data", "semaphore_before_wait", "native"},
-    {"native_held_logger_handler", "ring_commit_published", "data", "semaphore_before_wait", "native"},
-    {"native_transient_failure", "ring_commit_published", "data", "semaphore_before_wait", "native"},
-    {"native_empty_edge", "", "exit", "semaphore_before_wait", "native"},
+    {"native_held_logger_handler", "", "diagnostic", "", ""},
     {"post_failure", "", "checked", "", ""},
     {"post_failure_log_callback", "", "checked", "", ""},
     {"stop_post_failure", "", "checked", "", ""},
@@ -1034,92 +943,16 @@ const wakeup_case_t& find_case(std::string_view name)
     throw std::runtime_error("unknown wakeup case: " + std::string(name));
 }
 
-const void* s_authority_lock = nullptr;
-
-int run_authority_holder(const wakeup_case_t& test, const char* directory)
-{
-    s_directory = directory;
-    {
-        std::ofstream capture(s_directory / "poster_instance");
-        capture << sintra::detail::current_process_instance();
-        require(bool(capture), "cannot capture native holder before permission");
-    }
-    signal_file(s_directory / "poster_ready");
-    require(await([] { return fs::exists(s_directory / "holder_allowed"); }),
-        "holder did not receive complete-authority permission");
-    const std::string_view name = test.name;
-    s_poster_stage = "authority_holder";
-    namespace hooks = sintra::detail::test_hooks;
-    if (name.starts_with("native_authority_lifecycle")) {
-        hooks::s_mutex_operation = [](const char* stage, const void* object) {
-            if (std::string_view(stage) == "mutex_after_owner_cas") {
-                wakeup_hook("authority_holder", object);
-            }
-        };
-    }
-    if (name == "native_authority_writer_constructor") {
-        hooks::s_ipc_wakeup_operation = wakeup_hook;
-        hooks::s_mutex_operation = [](const char* stage, const void* object) {
-            if (object == s_ownership_mutex && std::string_view(stage) == "mutex_after_owner_cas") {
-                wakeup_hook("authority_holder", object);
-            }
-        };
-        Writer writer(directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>());
-    }
-    else {
-        Probe_reader reader(directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>());
-        const bool slots = name == "native_authority_writer_slots";
-        s_authority_lock = slots ? &reader.reader_lock() : &reader.posting_lock();
-        hooks::s_spinlock_event = [](const void* object, hooks::spinlock_event event) {
-            if (object == s_authority_lock && event == hooks::spinlock_event::after_acquire_cas) {
-                wakeup_hook("authority_holder", object);
-            }
-        };
-        if (!slots) { reader.request_stop(); }
-    }
-    throw std::runtime_error("native holder missed the actual lock interruption");
-}
-
 int run_poster(const wakeup_case_t& test, const char* directory)
 {
-    if (std::string_view(test.action) == "authority") { return run_authority_holder(test, directory); }
     s_directory = directory;
-    const bool publication = std::string_view(test.action) == "publication";
-    if (publication) {
-        std::ofstream capture(s_directory / "poster_instance");
-        capture << sintra::detail::current_process_instance();
-        capture.close();
-        require(bool(capture), "cannot arm writer identity before its constructor");
-        s_poster_stage = test.poster_stage;
-        sintra::detail::test_hooks::s_ipc_wakeup_operation = wakeup_hook;
-        sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void* object) {
-            if (object == s_ownership_mutex) { wakeup_hook(stage, object); }
-        };
-        signal_file(s_directory / "poster_ready");
-        require(await([] { return fs::exists(s_directory / "construct_writer"); }),
-            "pre-constructor writer was not admitted");
-    }
     {
         Writer writer(directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>());
-        {
-            std::ofstream instance(s_directory / "poster_instance");
-            instance << sintra::detail::current_process_instance();
-            instance.close();
-            require(bool(instance), "cannot publish captured writer lock instance");
-        }
         signal_file(s_directory / "poster_ready");
         require(await([] { return fs::exists(s_directory / "start_post"); }),
             "poster did not receive its start phase");
         s_poster_stage = test.poster_stage;
         sintra::detail::test_hooks::s_ipc_wakeup_operation = wakeup_hook;
-        if (std::string_view(test.action) == "request") {
-            sintra::detail::test_hooks::s_ring_guard_operation =
-                [](const char* stage, const std::atomic<uint64_t>*, uint8_t) { wakeup_hook(stage, nullptr); };
-            const auto count = sintra::test::pick_ring_elements<uint32_t>();
-            for (size_t i = 0; i <= count; ++i) {
-                writer.write_commit(k_payload);
-            }
-        }
         if (std::string_view(test.action) == "data") {
             writer.write_commit(k_payload);
         }
@@ -1135,379 +968,6 @@ int run_poster(const wakeup_case_t& test, const char* directory)
     throw std::runtime_error("poster failed to reach the requested interruption seam");
 }
 
-uint64_t captured_instance(const fs::path& path, const Exact_child& child)
-{
-    uint64_t instance = 0;
-    std::ifstream capture(path);
-    capture >> instance;
-    require(bool(capture) && sintra::detail::process_instance_pid(instance) == uint32_t(child.pid()),
-        "native fixture did not capture the exact child's lock instance");
-    return instance;
-}
-
-using Native_record = sintra::detail::ring_native_notification_record_t;
-
-std::shared_ptr<Native_record> map_native_record(const fs::path& directory,
-    const char* filename = "native_record")
-{
-    sintra::ipc::file_mapping file(directory / filename, sintra::ipc::read_write);
-    require(file.size() == sizeof(Native_record), "native sidecar fixture size mismatch");
-    auto mapping = std::make_shared<sintra::ipc::mapped_region>(file, sintra::ipc::read_write, 0, 0);
-    return std::shared_ptr<Native_record>(mapping, static_cast<Native_record*>(mapping->data()));
-}
-
-class Published_owner_witness : public sintra::detail::Native_exit_witness
-{
-public:
-    explicit Published_owner_witness(std::shared_ptr<Native_record> record)
-
-    :
-        Native_exit_witness(record->writer_instance),
-        m_record(std::move(record))
-    {}
-
-    bool has_exited() const noexcept override { return m_record->native_exit.load(); }
-
-private:
-    // The surviving parent holds the unreaped child/original Windows handle.
-    // Only that native owner publishes this fact before admitting its actor.
-    const std::shared_ptr<Native_record> m_record;
-};
-
-int run_recoverer(const wakeup_case_t& test, const char* directory, bool second = false)
-{
-    s_directory = directory;
-    s_recoverer = true;
-    if (second) { s_recoverer_label = "recoverer2"; }
-    auto record = map_native_record(directory);
-    auto witness = std::make_shared<Published_owner_witness>(record);
-    std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>> witnesses{witness};
-    if (second) {
-        witnesses.push_back(std::make_shared<Published_owner_witness>(
-            map_native_record(directory, "recoverer_record")));
-    }
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::move(witnesses));
-    auto notification = std::make_shared<Native_notification>(
-        directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), record, authority);
-    {
-        std::ofstream capture(s_directory / (s_recoverer_label + "_instance"));
-        capture << sintra::detail::current_process_instance();
-        capture.close();
-        require(bool(capture), "cannot publish recoverer's exact lock word");
-    }
-    signal_file(s_directory / (s_recoverer_label + "_ready"));
-    require(await([] { return fs::exists(s_directory / (s_recoverer_label + "_start")); }),
-        "recoverer was not admitted");
-    s_poster_stage = test.poster_stage;
-    sintra::detail::test_hooks::s_ipc_wakeup_operation = wakeup_hook;
-    sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void* object) {
-        if (std::string_view(stage) == "mutex_inspection_gate_acquired") { wakeup_hook(stage, object); }
-    };
-    require(notification->replay(1).state == Native_notification::Replay_state::COMPLETE,
-        "recoverer failed before its controlled seam");
-    throw std::runtime_error("recoverer missed the requested death seam");
-}
-
-int run_recoverer_scenario(const std::string& binary, const wakeup_case_t& test, const char* directory)
-{
-    s_directory = directory;
-    sintra::detail::test_hooks::s_ring_wait_watchdog_enabled = false;
-    sintra::detail::test_hooks::s_ipc_wakeup_operation = wakeup_hook;
-    sintra::detail::test_hooks::s_ring_wait_prepared = reader_prepared;
-    auto poster = std::make_shared<Exact_child>(std::chrono::seconds(3));
-    const bool publication = std::string_view(test.action) == "publication_recoverer";
-    const char* writer_case = publication ? "native_owner_after_cas" : "native_parked_replay";
-    const char* writer_args[] = {binary.c_str(), "--poster", writer_case, directory, nullptr};
-    require(poster->spawn(binary.c_str(), writer_args), "cannot spawn retained writer");
-    require(await([] { return fs::exists(s_directory / "poster_ready"); }), "writer was not armed");
-    const auto writer_instance = captured_instance(s_directory / "poster_instance", *poster);
-    {
-        std::ofstream file(s_directory / "native_record", std::ios::binary);
-        const std::vector<char> storage(sizeof(Native_record), 0);
-        file.write(storage.data(), std::streamsize(storage.size()));
-        file.close();
-        require(bool(file), "cannot allocate native sidecar fixture");
-    }
-    auto record = map_native_record(directory);
-    new (record.get()) Native_record(1, writer_instance);
-    auto recoverer = std::make_shared<Exact_child>(std::chrono::seconds(3));
-    const char* recovery_args[] = {binary.c_str(), "--recoverer", test.name, directory, nullptr};
-    require(recoverer->spawn(binary.c_str(), recovery_args), "cannot spawn retained recoverer");
-    require(await([] { return fs::exists(s_directory / "recoverer_ready"); }), "recoverer was not armed");
-    const auto recoverer_instance = captured_instance(s_directory / "recoverer_instance", *recoverer);
-    std::shared_ptr<Exact_child> second;
-    std::shared_ptr<Native_record> recoverer_record;
-    if (publication) {
-        std::ofstream file(s_directory / "recoverer_record", std::ios::binary);
-        const std::vector<char> storage(sizeof(Native_record), 0);
-        file.write(storage.data(), std::streamsize(storage.size()));
-        file.close();
-        require(bool(file), "cannot allocate retained recoverer sidecar");
-        recoverer_record = map_native_record(directory, "recoverer_record");
-        new (recoverer_record.get()) Native_record(2, recoverer_instance);
-        second = std::make_shared<Exact_child>(std::chrono::seconds(3));
-        const char* args[] = {binary.c_str(), "--recoverer", test.name, directory, "second", nullptr};
-        require(second->spawn(binary.c_str(), args), "cannot arm second retained recoverer");
-        require(await([] { return fs::exists(s_directory / "recoverer2_ready"); }),
-            "second recoverer was not armed");
-    }
-    std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>> witnesses{
-        std::make_shared<Armed_child_witness>(writer_instance, poster),
-        std::make_shared<Armed_child_witness>(recoverer_instance, recoverer)};
-    if (second) {
-        witnesses.push_back(std::make_shared<Armed_child_witness>(
-            captured_instance(s_directory / "recoverer2_instance", *second), second));
-    }
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::move(witnesses));
-    auto notification = std::make_shared<Native_notification>(
-        directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), record, authority);
-    auto reader = std::make_shared<Probe_reader>(
-        directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), 0,
-        sintra::detail::ring_directory_policy::caller_directory, notification);
-    reader->start_reading();
-    std::atomic<bool> valid{false};
-    std::thread waiter([&] {
-        tl_reader = true;
-        const auto range = reader->wait_for_new_data(sintra::Ring_wait_hint::BLOCKING);
-        valid = !reader->is_stopping() && (publication ? range.begin == range.end :
-            range.end - range.begin == 1 && *range.begin == k_payload);
-    });
-    const auto fail = [&](const char* message) {
-        std::fprintf(stderr, "%s: %s\n", test.name, message);
-        std::string diagnostic;
-        if (second) { (void)second->terminate_and_settle(diagnostic); }
-        (void)recoverer->terminate_and_settle(diagnostic);
-        (void)poster->terminate_and_settle(diagnostic);
-        std::_Exit(2);
-    };
-    if (!await(native_reader_is_parked)) { fail("reader was not natively parked before writer death"); }
-    std::printf("%s: native wait confirmed before writer/recoverer death\n", test.name);
-    signal_file(s_directory / (publication ? "construct_writer" : "start_post"));
-    if (!await([] { return fs::exists(s_directory / "poster_seam"); }) ||
-        !poster->terminate_retaining_authority() ||
-        !await([&] { return poster->observe_exit_retained() == Exact_child_state::exited; }))
-    {
-        fail("cannot retain exact writer death authority");
-    }
-    require(notification->observe_exit(), "native owner did not publish its retained death fact");
-    signal_file(s_directory / "recoverer_start");
-    if (!await([] { return fs::exists(s_directory / "recoverer_seam"); }) ||
-        !recoverer->terminate_retaining_authority() ||
-        !await([&] { return recoverer->observe_exit_retained() == Exact_child_state::exited; }))
-    {
-        fail("cannot retain exact recoverer death authority");
-    }
-    if (second) {
-        recoverer_record->native_exit.store(true);
-        signal_file(s_directory / "recoverer2_start");
-        if (!await([] { return fs::exists(s_directory / "recoverer2_seam"); }) ||
-            !second->terminate_retaining_authority() ||
-            !await([&] { return second->observe_exit_retained() == Exact_child_state::exited; }))
-        {
-            fail("cannot retain second exact gate-recoverer death authority");
-        }
-        std::printf("%s: two exact inspection-gate recoverers terminated with witnesses retained\n", test.name);
-        std::fflush(stdout);
-    }
-    require(notification->pending(), "interrupted recoverer discarded its unfinished obligation");
-    const auto replay = notification->replay(1);
-    if (publication && replay.state == Native_notification::Replay_state::REJECTED) {
-        fail("partial mutex publication rejected exact native replay after two gate-recoverer deaths");
-    }
-    require(replay.state == Native_notification::Replay_state::COMPLETE &&
-        !notification->pending(), "surviving owner could not repeat interrupted native replay");
-    waiter.join();
-    require(valid && !reader->consume_eviction_notification(), "recoverer death damaged committed delivery");
-    reader->request_stop();
-    reader->done_reading();
-    require(poster->observe_exit_retained() == Exact_child_state::exited &&
-        recoverer->observe_exit_retained() == Exact_child_state::exited &&
-        (!second || second->observe_exit_retained() == Exact_child_state::exited),
-        "native authority was released before replay and cleanup completed");
-    return 0;
-}
-
-int run_request_scenario(const std::string& binary, const wakeup_case_t& test,
-    const char* directory, bool recovery_enabled)
-{
-    s_directory = directory;
-    auto poster = std::make_shared<Exact_child>(std::chrono::seconds(3));
-    const char* args[] = {binary.c_str(), "--poster", test.name, directory, nullptr};
-    require(poster->spawn(binary.c_str(), args), "cannot spawn REQUEST writer");
-    require(await([] { return fs::exists(s_directory / "poster_ready"); }), "REQUEST writer was not armed");
-    const auto instance = captured_instance(s_directory / "poster_instance", *poster);
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{
-            std::make_shared<Armed_child_witness>(instance, poster)});
-    auto record = std::make_shared<Native_record>(1, instance);
-    auto notification = std::make_shared<Native_notification>(
-        directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), record, authority);
-    Probe_reader reader(directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), 0,
-        sintra::detail::ring_directory_policy::caller_directory, notification);
-    reader.start_reading();
-    signal_file(s_directory / "start_post");
-    require(await([] { return fs::exists(s_directory / "poster_seam"); }), "writer did not publish REQUEST");
-    require(poster->terminate_retaining_authority() &&
-        await([&] { return poster->observe_exit_retained() == Exact_child_state::exited; }),
-        "cannot retain exact REQUEST writer death");
-    const auto head = reader.get_leading_sequence();
-    const auto counts = reader.guard_counts();
-    // prepare_write arbitrates at the reserved end before publishing the last
-    // element of the lap. The first element remains intact behind our guard.
-    require(head == sintra::test::pick_ring_elements<uint32_t>() - 1,
-        "REQUEST seam changed the committed head: " + std::to_string(head));
-    uint32_t owned = 0;
-    require(!reader.copy_committed_first(owned) && owned == 0,
-        "REQUEST did not exclude extraction before recovery");
-    if (recovery_enabled) {
-        require(notification->replay(1).state == Native_notification::Replay_state::COMPLETE,
-            "native owner could not settle dead REQUEST arbitration");
-    }
-    require(reader.copy_committed_first(owned) && owned == k_payload,
-        "dead REQUEST stranded an intact committed frame");
-    require(reader.get_leading_sequence() == head && reader.guard_counts() == counts &&
-        !reader.consume_eviction_notification() && !reader.is_stopping(),
-        "REQUEST cleanup changed committed data, guard ownership or loss state");
-    reader.done_reading();
-    return 0;
-}
-
-class Self_live_witness : public sintra::detail::Native_exit_witness
-{
-public:
-    Self_live_witness() : Native_exit_witness(sintra::detail::current_process_instance()) {}
-    bool has_exited() const noexcept override { return false; }
-};
-
-struct Withheld_proof
-{
-    std::atomic<bool> released{false};
-    std::atomic<unsigned> attempts{0};
-};
-
-class Withheld_child_witness : public sintra::detail::Native_exit_witness
-{
-public:
-    Withheld_child_witness(uint64_t instance, std::shared_ptr<Exact_child> child,
-        std::shared_ptr<Withheld_proof> proof)
-    : Native_exit_witness(instance), m_child(std::move(child)), m_proof(std::move(proof)) {}
-
-    bool has_exited() const noexcept override
-    {
-        ++m_proof->attempts;
-        return m_proof->released && m_child->observe_exit_retained() == Exact_child_state::exited;
-    }
-private:
-    const std::shared_ptr<Exact_child> m_child;
-    const std::shared_ptr<Withheld_proof> m_proof;
-};
-
-int run_authority_scenario(const std::string& binary, const wakeup_case_t& test, const char* directory)
-{
-    s_directory = directory;
-    auto holder = std::make_shared<Exact_child>(std::chrono::seconds(3));
-    const char* args[] = {binary.c_str(), "--poster", test.name, directory, nullptr};
-    require(holder->spawn(binary.c_str(), args), "cannot spawn exact native holder");
-    require(await([] { return fs::exists(s_directory / "poster_ready"); }),
-        "holder did not publish its pre-permission identity");
-    const auto instance = captured_instance(s_directory / "poster_instance", *holder);
-    auto proof = std::make_shared<Withheld_proof>();
-    proof->released = true;
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{
-            std::make_shared<Withheld_child_witness>(instance, holder, proof)});
-    const auto elements = sintra::test::pick_ring_elements<uint32_t>();
-    const auto policy = sintra::detail::ring_directory_policy::caller_directory;
-    const std::string_view name = test.name;
-    std::unique_ptr<Probe_reader> anchor;
-    std::unique_ptr<Probe_writer> writer;
-    std::shared_ptr<Native_notification> notification;
-    sintra::Range<uint32_t> retained_range;
-    if (name == "native_authority_retained_reader") {
-        auto self = std::make_shared<Self_live_witness>();
-        auto initial = std::make_shared<sintra::detail::Native_exit_authority>(
-            std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{self});
-        authority = std::make_shared<sintra::detail::Native_exit_authority>(
-            std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{
-                self, std::make_shared<Withheld_child_witness>(instance, holder, proof)});
-        writer = std::make_unique<Probe_writer>(directory, k_ring_name, elements, policy, false, initial);
-        auto record = std::make_shared<Native_record>(1, self->process_instance());
-        notification = std::make_shared<Native_notification>(directory, k_ring_name, elements, record, initial);
-        anchor = std::make_unique<Probe_reader>(directory, k_ring_name, elements, 0, policy, notification);
-        anchor->start_reading();
-        const uint32_t first[] = {1, 2};
-        writer->write_commit(first, 2);
-        std::thread reader_operation([&] { retained_range = anchor->wait_for_new_data(); });
-        reader_operation.join();
-        const auto cursor = anchor->reading_sequence();
-        const auto guards = anchor->guard_counts();
-        bool invalid_rejected = false;
-        try { anchor->replace_native_authority(nullptr); }
-        catch (const sintra::ring_acquisition_failure_exception&) { invalid_rejected = true; }
-        require(invalid_rejected && notification->authority() == initial.get(),
-            "invalid replacement partially changed the original binding");
-        writer->replace_native_authority(authority);
-        anchor->replace_native_authority(authority);
-        require(anchor->reading_sequence() == cursor && anchor->guard_counts() == guards &&
-            retained_range.end - retained_range.begin == 2 && retained_range.begin[0] == 1 &&
-            retained_range.begin[1] == 2 && notification->authority() == authority.get(),
-            "same-reader replacement lost its actual range, cursor or guard");
-    }
-    if (name == "native_authority_writer_constructor" || name == "native_authority_writer_slots") {
-        anchor = std::make_unique<Probe_reader>(directory, k_ring_name, elements, 0, policy,
-            nullptr, true, sintra::Ring_reader_policy::forcible, authority);
-    }
-    if (!writer && name != "native_authority_writer_constructor") {
-        writer = std::make_unique<Probe_writer>(directory, k_ring_name, elements, policy, false, authority);
-    }
-    signal_file(s_directory / "holder_allowed");
-    require(await([] { return fs::exists(s_directory / "poster_seam"); }),
-        "holder did not acquire the actual lifecycle/ownership/slot/posting lock");
-    require(holder->terminate_retaining_authority() &&
-        await([&] { return holder->observe_exit_retained() == Exact_child_state::exited; }),
-        "cannot import and retain exact holder death");
-    proof->attempts = 0;
-    if (name == "native_authority_lifecycle_constructor") {
-        Probe_reader reader(directory, k_ring_name, elements, 0, policy, nullptr,
-            true, sintra::Ring_reader_policy::forcible, authority);
-    }
-    else if (name == "native_authority_retained_reader") {
-        const uint32_t tail[] = {3, 4, 5, 6};
-        writer->write_commit(tail, 4);
-        const auto unread = anchor->wait_for_new_data();
-        require(unread.end - unread.begin == 4 && std::equal(unread.begin, unread.end, tail) &&
-            !anchor->consume_eviction_notification() && !anchor->is_stopping(),
-            "retained reader failed to deliver the actual committed unread tail after holder death");
-        anchor->done_reading();
-    }
-    else if (name == "native_authority_writer_posting") {
-        writer->write_commit(k_payload);
-    }
-    else if (name == "native_authority_writer_constructor" || name == "native_authority_writer_slots") {
-        writer.reset();
-        writer = std::make_unique<Probe_writer>(directory, k_ring_name, elements, policy, false, authority);
-    }
-    else {
-        // The writer's retained base reference is the only authority reference
-        // during final lifecycle release in the lifecycle-destructor selector.
-        authority.reset();
-        writer.reset();
-    }
-    require(proof->attempts != 0, "first/final lock recovery bypassed the supplied native authority");
-    writer.reset();
-    anchor.reset();
-    notification.reset();
-    authority.reset();
-    require(holder->observe_exit_retained() == Exact_child_state::exited,
-        "holder identity was consumed before final ring cleanup");
-    std::string diagnostic;
-    require(holder->settle_observed_exit(diagnostic), diagnostic);
-    std::printf("%s: native witness calls=%u, actual helper settled\n", test.name, proof->attempts.load());
-    return 0;
-}
-
 int s_exhausted_first_slot = -1;
 
 int run_exhausted_reader_owner(const char* directory)
@@ -1518,9 +978,6 @@ int run_exhausted_reader_owner(const char* directory)
         capture << sintra::detail::current_process_instance() << '\n';
         require(bool(capture), "cannot publish exact reader owner's instance");
     }
-    signal_file(path / "reader_owner_born");
-    require(await([&] { return fs::exists(path / "reader_owner_enroll"); }),
-        "reader owner did not receive preparticipation authority acknowledgement");
     std::vector<std::unique_ptr<Probe_reader>> readers;
     sintra::detail::test_hooks::s_ring_guard_operation = [](const char* stage, const std::atomic<uint64_t>*, uint8_t index) {
         if (s_exhausted_first_slot < 0 && std::string_view(stage) == "slot_acquired") { s_exhausted_first_slot = index; }
@@ -1545,7 +1002,7 @@ int run_exhausted_reader_owner(const char* directory)
     readers.front()->posting_lock().lock();
     signal_file(path / "reader_owner_locked");
     // The original owner leaves every reader guard/slot and the posting lock
-    // published. The fixture retains its native authority before this exit.
+    // published so the next ordinary admission must scavenge them.
     std::_Exit(0);
 }
 
@@ -1558,20 +1015,14 @@ int run_exhausted_admission_case(const std::string& binary, const char* director
     const auto elements = sintra::test::pick_ring_elements<uint32_t>();
     Probe_writer writer(directory, k_ring_name, elements);
     s_reset_report_writer = &writer;
-    auto child = std::make_shared<Exact_child>(std::chrono::seconds(3));
+    Exact_child child(std::chrono::seconds(3));
     const char* args[] = {binary.c_str(), "--exhausted-reader-owner", directory, nullptr};
-    require(child->spawn(binary.c_str(), args), "cannot arm exact reader owner: " + child->error());
-    require(await([&] { return fs::exists(path / "reader_owner_born"); }), "reader owner did not publish birth");
+    require(child.spawn(binary.c_str(), args), "cannot spawn reader owner: " + child.error());
+    require(await([&] { return fs::exists(path / "reader_owner_full"); }), "reader owner did not exhaust the actual slots");
     uint64_t instance = 0;
     std::ifstream(path / "reader_owner_instance") >> instance;
-    require(sintra::detail::process_instance_pid(instance) == uint32_t(child->pid()),
-        "reader owner instance does not match retained native authority");
-    auto proof = std::make_shared<Withheld_proof>();
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{
-            std::make_shared<Self_live_witness>(), std::make_shared<Withheld_child_witness>(instance, child, proof)});
-    signal_file(path / "reader_owner_enroll");
-    require(await([&] { return fs::exists(path / "reader_owner_full"); }), "reader owner did not exhaust the actual slots");
+    require(sintra::detail::process_instance_pid(instance) == uint32_t(child.pid()),
+        "reader owner instance does not match the spawned child");
     int registered = -1;
     std::ifstream(path / "reader_owner_slot") >> registered;
     require(registered >= 0 && writer.free_slots() == 0 && writer.pending_count_unlocked() == 1,
@@ -1579,15 +1030,11 @@ int run_exhausted_admission_case(const std::string& binary, const char* director
     // Keep the Windows named token pinned in the surviving process too.
     writer.post_token(registered);
     signal_file(path / "reader_owner_hold");
-    require(await([&] { return child->observe_exit_retained() == Exact_child_state::exited; }) &&
+    require(await([&] { return child.poll() == Exact_child_state::exited; }) &&
         fs::exists(path / "reader_owner_locked") && writer.posting_owner() == instance,
         "reader owner did not die while holding its published posting lock");
     const auto guards = writer.guard_counts();
     require(guards != 0, "dead actual snapshots did not retain their guard counts");
-    // Construct after death: dead lifecycle attachments can clear without
-    // exceeding the anchor's writer plus maximum-reader capacity before exit.
-    auto notification = std::make_shared<Native_notification>(directory, k_ring_name, elements,
-        std::make_shared<Native_record>(1, sintra::detail::current_process_instance()), authority);
     s_exhausted_reset_fault = true;
     sintra::detail::test_hooks::s_ipc_wakeup_operation = [](const char* stage, const void*) {
         observe_reset_report(stage);
@@ -1596,24 +1043,12 @@ int run_exhausted_admission_case(const std::string& binary, const char* director
             if (s_exhausted_reset_fault) { sintra::detail::test_hooks::s_ipc_reset_error = EIO; }
         }
     };
-    std::atomic<bool> finished{false};
-    std::atomic<bool> rejected{false};
-    std::thread admission([&] {
-        try {
-            Probe_reader reader(directory, k_ring_name, elements, 0,
-                sintra::detail::ring_directory_policy::caller_directory, notification);
-        } catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
-        finished = true;
-    });
-    if (!await([&] { return proof->attempts.load() != 0; })) {
-        fixture_failure("nested scavenging did not consult the withheld exact posting-holder proof");
+    bool rejected = false;
+    try {
+        Probe_reader reader(directory, k_ring_name, elements);
     }
-    require(!finished && s_exhausted_reset_attempts == 0 && writer.free_slots_unlocked() == 0 &&
-        writer.guard_counts() == guards && writer.posting_owner() == instance,
-        "bound admission reclaimed a dead slot before exact nested-lock proof was available");
-    proof->released = true;
-    admission.join();
-    require(rejected && finished && s_exhausted_reset_attempts == unsigned(sintra::max_process_index) &&
+    catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
+    require(rejected && s_exhausted_reset_attempts == unsigned(sintra::max_process_index) &&
         writer.free_slots() == 0 && writer.guard_counts() == guards && writer.pending_count_unlocked() == 1,
         "failed checked scavenging reset retired or reused a guard/token-bearing slot");
     require(s_reset_reports == unsigned(sintra::max_process_index) && !s_reset_report_with_gate,
@@ -1622,8 +1057,7 @@ int run_exhausted_admission_case(const std::string& binary, const char* director
     writer.post_token(registered);
     s_exhausted_reset_fault = false;
     {
-        Probe_reader reader(directory, k_ring_name, elements, 0,
-            sintra::detail::ring_directory_policy::caller_directory, notification);
+        Probe_reader reader(directory, k_ring_name, elements);
         require(writer.free_slots() == sintra::max_process_index - 1 && writer.guard_counts() == 0 &&
             writer.pending_count_unlocked() == 0 && !writer.consume_token(registered),
             "successful checked drain did not settle dead registrations before ACTIVE reuse");
@@ -1632,8 +1066,8 @@ int run_exhausted_admission_case(const std::string& binary, const char* director
         reader.done_reading();
     }
     sintra::detail::test_hooks::s_ipc_wakeup_operation = nullptr;
-    require(writer.free_slots() == sintra::max_process_index && child->observe_exit_retained() == Exact_child_state::exited,
-        "reused admission or repeated exact native observation lost retained custody");
+    require(writer.free_slots() == sintra::max_process_index && child.exited_with_code(0),
+        "reused admission leaked a slot or reader owner did not exit normally");
     return 0;
 }
 
@@ -1651,14 +1085,21 @@ int run_post_fork_callback()
     return 0;
 }
 
+struct fork_probe_t
+{
+    const void* mutex;
+    int channel;
+    pid_t child = -1;
+    char acknowledgement = 0;
+};
+fork_probe_t* s_fork_probe = nullptr;
+
 int run_fork_exec_case(const std::string& binary, const char* directory)
 {
     const auto elements = sintra::test::pick_ring_elements<uint32_t>();
-    Probe_writer writer(directory, k_ring_name, elements);
+    Probe_reader reader(directory, k_ring_name, elements);
+    auto& mutex = reader.ownership_mutex();
     const auto instance = sintra::detail::current_process_instance();
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{std::make_shared<Self_live_witness>()});
-    Probe_notification notification(directory, k_ring_name, elements, std::make_shared<Native_record>(1, instance), authority);
     int channel[2];
     require(::pipe(channel) == 0 && ::fcntl(channel[0], F_SETFD, FD_CLOEXEC) == 0 &&
         ::fcntl(channel[1], F_SETFD, FD_CLOEXEC) == 0, "cannot prepare fork-safe acknowledgement pipe");
@@ -1672,25 +1113,30 @@ int run_fork_exec_case(const std::string& binary, const char* directory)
         while (!release.load()) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
     });
     require(await([&] { return held.load(); }), "ordinary logger was not held before multithreaded fork");
-    pid_t child = -1;
-    char acknowledgement = 0;
-    sintra::detail::interprocess_mutex::Owner_inspection inspection;
-    {
-        sintra::spinlock::locker readers(notification.reader_lock());
-        inspection = notification.ownership_mutex().inspect_owner_instance(instance, *authority, [&] {
-            child = ::fork();
-            if (child > 0) {
+    fork_probe_t probe{&mutex, channel[0]};
+    s_fork_probe = &probe;
+    sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void* object) {
+        if (object == s_fork_probe->mutex && std::string_view(stage) == "mutex_after_owner_cas") {
+            s_fork_probe->child = ::fork();
+            if (s_fork_probe->child > 0) {
                 ssize_t count;
-                do { count = ::read(channel[0], &acknowledgement, 1); } while (count < 0 && errno == EINTR);
-                if (count != 1) { acknowledgement = 0; }
+                do {
+                    count = ::read(s_fork_probe->channel, &s_fork_probe->acknowledgement, 1);
+                } while (count < 0 && errno == EINTR);
+                if (count != 1) { s_fork_probe->acknowledgement = 0; }
             }
-        });
+        }
+    };
+    bool acquired = false;
+    {
+        sintra::spinlock::locker readers(reader.reader_lock());
+        acquired = mutex.test_try_lock_throwing();
         // Only PID-aware native guard release runs in the child on this path.
         // No Ring destruction or application callback is attempted before exec.
     }
-    if (child == 0) {
-        const bool parent_custody = notification.gate_holder() == instance &&
-            notification.reader_lock().test_owner() == instance;
+    if (probe.child == 0) {
+        const bool parent_custody = acquired && reader.inspection_holder() == instance &&
+            reader.reader_slot_owner() == instance;
         sintra::detail::native_diagnostic("fork child native output; parent shared custody preserved=", parent_custody, "\n");
         const char ready = parent_custody ? 1 : 0;
         ssize_t written;
@@ -1699,17 +1145,20 @@ int run_fork_exec_case(const std::string& binary, const char* directory)
         ::execv(program, args);
         ::_exit(82);
     }
+    sintra::detail::test_hooks::s_mutex_operation = nullptr;
+    s_fork_probe = nullptr;
     release = true;
     logger.join();
     ::close(channel[0]);
     ::close(channel[1]);
-    require(child > 0 && acknowledgement == 1 &&
-        inspection == sintra::detail::interprocess_mutex::Owner_inspection::MATCHED &&
-        notification.gate_holder() == 0 && notification.reader_lock().test_owner() == 0,
+    require(probe.child > 0 && probe.acknowledgement == 1 && acquired &&
+        reader.inspection_holder() == 0 && reader.reader_slot_owner() == 0,
         "fork-child guard abandonment modified the parent's actual shared custody");
+    mutex.unlock();
     int status = 0;
-    require(await([&] { return ::waitpid(child, &status, WNOHANG) == child; }) &&
+    require(await([&] { return ::waitpid(probe.child, &status, WNOHANG) == probe.child; }) &&
         WIFEXITED(status) && WEXITSTATUS(status) == 0, "fork/exec child did not restore ordinary callback behavior");
+    Probe_writer writer(directory, k_ring_name, elements);
     writer.write_commit(k_payload);
     require(writer.get_leading_sequence() == 1, "parent writer lost ownership after child-image abandonment");
     return 0;
@@ -1721,6 +1170,8 @@ struct Recursion_probe
     const void* mutex;
     std::atomic<bool> snapshot_loaded{false};
     std::atomic<bool> other_owns{false};
+    std::atomic<bool> gate_held{false};
+    std::atomic<bool> attempted{false};
 };
 Recursion_probe* s_recursion_probe = nullptr;
 
@@ -1731,16 +1182,20 @@ int run_recursion_case()
     const auto pid = uint32_t(sintra::get_current_pid());
     const auto tid = uint32_t(sintra::get_current_tid());
     const auto earlier_token = uint32_t(instance) + 1u;
-    const auto earlier_instance = (uint64_t(pid) << 32u) | earlier_token;
     Mutex mutex;
     mutex.test_install_owner_fixture({pid, tid, 0, earlier_token});
     const auto stale_owner = mutex.test_owner_token();
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{
-            std::make_shared<Self_live_witness>()});
     Recursion_probe probe{&mutex};
     s_recursion_probe = &probe;
     sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void* object) {
+        if (object == s_recursion_probe->mutex &&
+            std::string_view(stage) == "mutex_recovery_gate_acquired")
+        {
+            s_recursion_probe->gate_held = true;
+            require(await([] {
+                return s_recursion_probe->snapshot_loaded.load() || s_recursion_probe->attempted.load();
+            }), "contender did not enter the recursion decision");
+        }
         if (object == s_recursion_probe->mutex &&
             std::string_view(stage) == "mutex_recursion_after_owner_load")
         {
@@ -1749,21 +1204,14 @@ int run_recursion_case()
                 "other thread did not acquire after the stale recursion snapshot");
         }
     };
-    std::atomic<bool> held{false};
-    std::atomic<bool> attempted{false};
     std::atomic<bool> release{false};
     std::thread other([&] {
-        require(mutex.inspect_owner_instance(earlier_instance, *authority, [&] {
-            held = true;
-            require(await([&] { return probe.snapshot_loaded.load() || attempted.load(); }),
-                "contender did not enter the recursion decision");
-        }) == Mutex::Owner_inspection::MATCHED, "predecessor inspection did not hold its gate");
         mutex.lock();
         probe.other_owns = true;
         require(await([&] { return release.load(); }), "contender did not release the fixture");
         mutex.unlock();
     });
-    require(await([&] { return held.load(); }), "inspection gate was not held by the other thread");
+    require(await([&] { return probe.gate_held.load(); }), "recovery gate was not held by the other thread");
     bool false_recursion = false;
     bool acquired = false;
     try { acquired = mutex.test_try_lock_throwing(); }
@@ -1772,7 +1220,7 @@ int run_recursion_case()
             "recursion attempt threw an unrelated error");
         false_recursion = true;
     }
-    attempted = true;
+    probe.attempted = true;
     require(await([&] { return probe.other_owns.load(); }), "successor thread did not acquire the mutex");
     const auto current_owner = mutex.test_owner_token();
     release = true;
@@ -2192,40 +1640,6 @@ int run_custody_case(const wakeup_case_t& test, const char* directory)
     return 0;
 }
 
-int run_capability_case(const char* directory)
-{
-    const auto instance = sintra::detail::current_process_instance();
-    auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-        std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{
-            std::make_shared<Self_live_witness>()});
-    const auto reject = [&](std::shared_ptr<Native_record> record,
-        std::shared_ptr<const sintra::detail::Native_exit_authority> proof) {
-        bool rejected = false;
-        try {
-            Native_notification notification(
-                directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), record, proof);
-        }
-        catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
-        require(rejected, "invalid optional native capability was admitted");
-    };
-    reject(nullptr, authority);
-    reject(std::make_shared<Native_record>(1, instance), nullptr);
-    reject(std::make_shared<Native_record>(1, instance, Native_record::k_version + 1), authority);
-    reject(std::make_shared<Native_record>(0, instance), authority);
-    reject(std::make_shared<Native_record>(1, instance ^ 1u), authority);
-    auto notification = std::make_shared<Native_notification>(directory, k_ring_name,
-        sintra::test::pick_ring_elements<uint32_t>(), std::make_shared<Native_record>(1, instance), authority);
-    bool rejected = false;
-    try {
-        Probe_reader reader(directory, "another_mapping", sintra::test::pick_ring_elements<uint32_t>(), 0,
-            sintra::detail::ring_directory_policy::caller_directory, notification);
-    }
-    catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
-    require(rejected && notification->replay(1).state == Native_notification::Replay_state::REJECTED &&
-        !notification->exited(), "mapping mismatch or live native owner was accepted as death");
-    return 0;
-}
-
 bool s_lifecycle_acquired = false;
 int s_opened_directory_fd = -1;
 const char* s_construction_stage = nullptr;
@@ -2603,15 +2017,120 @@ int run_backoff_case(const wakeup_case_t& test)
 }
 #endif
 
-int run_scenario(const std::string& binary, const wakeup_case_t& test, const char* directory,
-    bool recovery_enabled = true)
+int run_diagnostic_case(const wakeup_case_t& test)
 {
-    if (std::string_view(test.action) == "authority") { return run_authority_scenario(binary, test, directory); }
-    if (std::string_view(test.action) == "exhausted_admission") { return run_exhausted_admission_case(binary, directory); }
+    const std::string_view name = test.name;
+    sintra::detail::interprocess_mutex mutex;
+    mutex.test_install_owner_fixture({0, 1, 0, 0});
+    s_diagnostic_mutex = &mutex;
+    if (name == "native_signal_handler_callback" || name == "native_exception_handler_callback" ||
+        name == "native_held_logger_handler") {
+        sintra::set_log_callback([](sintra::log_level, const char* message, void*) {
+            ++s_native_log_callbacks;
+            const bool held = s_diagnostic_mutex->test_gate_holder() ==
+                sintra::detail::current_process_instance();
+            std::fprintf(stderr, "%s", message);
+            std::fprintf(stderr, "original debug handler application callback: recovery_gate_held=%d callbacks=%u\n",
+                int(held), s_native_log_callbacks.load());
+            std::fflush(stderr);
+            if (held) { std::_Exit(78); }
+        });
+        sintra::Log_stream(sintra::log_level::info) << "ordinary logging outside recovery gate\n";
+        require(s_native_log_callbacks == 1 && s_diagnostic_mutex->test_gate_holder() == 0,
+            "ordinary callback behavior outside recovery gate changed");
+        s_native_log_callbacks = 0;
+        if (name == "native_held_logger_handler") {
+            s_expect_held_logger = true;
+            std::thread holder([] {
+                std::unique_lock<std::mutex> lock(sintra::detail::log_mutex());
+                s_held_logger = true;
+                for (;;) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+            });
+            holder.detach();
+            require(await([] { return s_held_logger.load(); }), "ordinary logger mutex was not held before interruption");
+        }
+        sintra::detail::set_debug_pause_active(true);
+        sintra::detail::test_hooks::s_debug_pause_entered = [](const char* reason) noexcept {
+            sintra::detail::native_diagnostic("installed handler terminal observer, callbacks=",
+                s_native_log_callbacks.load(), "\n");
+            (void)reason;
+            std::_Exit(s_native_log_callbacks == 0 && (!s_expect_held_logger || s_held_logger) ? 0 : 78);
+        };
+        const bool exception = name == "native_exception_handler_callback";
+        if (!exception) {
+            require(std::signal(SIGABRT, sintra::detail::debug_signal_handler) != SIG_ERR,
+                "could not install original debug signal handler");
+        }
+#if defined(_WIN32)
+        if (exception) {
+            require(AddVectoredExceptionHandler(1, sintra::detail::debug_vectored_exception_handler) != nullptr,
+                "could not install original debug exception handler");
+        }
+#endif
+        sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void*) {
+            if (std::string_view(stage) == "mutex_recovery_gate_acquired") {
+                if (s_exception_stage) {
+#if defined(_WIN32)
+                    RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+#endif
+                } else {
+                    std::raise(SIGABRT);
+                }
+            }
+        };
+        s_exception_stage = exception ? "installed_exception_handler" : nullptr;
+        (void)mutex.test_try_lock_throwing();
+        fixture_failure("original installed debug handler did not reach its pause boundary");
+    }
+    if (name == "native_live_stall_callback") {
+        sintra::spinlock lock;
+        s_diagnostic_lock = &lock;
+        std::atomic<bool> held{false};
+        std::thread holder([&] {
+            sintra::spinlock::locker lock(*s_diagnostic_lock);
+            held = true;
+            for (;;) { std::this_thread::yield(); }
+        });
+        holder.detach();
+        require(await([&] { return held.load(); }), "diagnostic fixture did not hold its reader lock");
+        sintra::detail::set_debug_pause_active(false);
+        sintra::test::prepare_for_intentional_crash();
+#if defined(_WIN32)
+        SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        require(_set_error_mode(_OUT_TO_STDERR) != -1,
+            "diagnostic fixture could not select noninteractive CRT errors");
+#endif
+        require(std::signal(SIGABRT, diagnostic_abort) != SIG_ERR,
+            "diagnostic fixture could not observe its intentional abort");
+        sintra::detail::test_hooks::s_spinlock_cpu = [](sintra::detail::spinlock_cpu_sample& sample) {
+            sample.ns = s_diagnostic_cpu.fetch_add(3'000'000'000ull);
+            return true;
+        };
+        sintra::set_log_callback([](sintra::log_level, const char*, void*) {
+            ++s_native_log_callbacks;
+            std::fprintf(stderr, "application callback entered while recovery gate was held=%d\n",
+                int(s_diagnostic_mutex->test_gate_holder() == sintra::detail::current_process_instance()));
+            std::fflush(stderr);
+        });
+        sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void*) {
+            if (std::string_view(stage) == "mutex_recovery_gate_acquired") {
+                s_diagnostic_lock->lock();
+            }
+        };
+        (void)mutex.test_try_lock_throwing();
+        fixture_failure("diagnostic fixture did not reach its live-holder abort policy");
+    }
+    throw std::runtime_error("unknown diagnostic case");
+}
+
+int run_scenario(const std::string& binary, const wakeup_case_t& test, const char* directory)
+{
 #if !defined(_WIN32)
     if (std::string_view(test.action) == "fork_exec") { return run_fork_exec_case(binary, directory); }
 #endif
+    if (std::string_view(test.action) == "exhausted_admission") { return run_exhausted_admission_case(binary, directory); }
     if (std::string_view(test.action) == "recursion") { return run_recursion_case(); }
+    if (std::string_view(test.action) == "diagnostic") { return run_diagnostic_case(test); }
     if (std::string_view(test.action) == "gate_throw") { return run_gate_exception_case(test); }
     if (std::string_view(test.action) == "timed_throw") { return run_timed_exception_case(test); }
     if (std::string_view(test.action) == "close_errors") { return run_close_error_case(directory); }
@@ -2622,16 +2141,6 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
     if (std::string_view(test.action) == "acquisition_error") { return run_mandatory_error_case(); }
     if (std::string_view(test.action) == "backoff_error") { return run_backoff_case(test); }
 #endif
-    if (std::string_view(test.action) == "request") {
-        return run_request_scenario(binary, test, directory, recovery_enabled);
-    }
-    if (std::string_view(test.action) == "recoverer" ||
-        std::string_view(test.action) == "publication_recoverer") {
-        return run_recoverer_scenario(binary, test, directory);
-    }
-    if (std::string_view(test.action) == "capability") {
-        return run_capability_case(directory);
-    }
     if (std::string_view(test.action) == "checked") {
         return run_checked_case(test, directory);
     }
@@ -2643,32 +2152,14 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
     sintra::detail::test_hooks::s_ring_wait_watchdog_enabled = false;
     sintra::detail::test_hooks::s_ipc_wakeup_operation = wakeup_hook;
     sintra::detail::test_hooks::s_ring_wait_prepared = reader_prepared;
-    auto poster_owner = std::make_shared<Exact_child>(std::chrono::seconds(3));
-    auto& poster = *poster_owner;
+    Exact_child poster(std::chrono::seconds(3));
     const char* args[] = {binary.c_str(), "--poster", test.name, directory, nullptr};
     require(poster.spawn(binary.c_str(), args), "cannot spawn poster: " + poster.error());
     require(await([] { return fs::exists(s_directory / "poster_ready"); }),
         "poster did not acquire writer ownership");
 
-    std::shared_ptr<Native_notification> notification;
-    const bool native_case = std::string_view(test.retry) == "native";
-    if (native_case) {
-        uint64_t instance = 0;
-        std::ifstream capture(s_directory / "poster_instance");
-        capture >> instance;
-        require(bool(capture) && sintra::detail::process_instance_pid(instance) == uint32_t(poster.pid()),
-            "native fixture did not capture this exact child's writer instance");
-        auto witness = std::make_shared<Armed_child_witness>(instance, poster_owner);
-        auto authority = std::make_shared<sintra::detail::Native_exit_authority>(
-            std::vector<std::shared_ptr<const sintra::detail::Native_exit_witness>>{witness});
-        require(!authority->has_exited(instance ^ 1u), "native authority accepted another lock word");
-        auto record = std::make_shared<sintra::detail::ring_native_notification_record_t>(1, instance);
-        notification = std::make_shared<Probe_notification>(
-            directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), record, authority);
-    }
     auto reader = std::make_shared<Probe_reader>(
-        directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), 0,
-        sintra::detail::ring_directory_policy::caller_directory, notification);
+        directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>());
     reader->start_reading();
     std::atomic<bool> completed{false};
     std::atomic<bool> valid{false};
@@ -2717,13 +2208,7 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
     if (!await([] { return s_reader_arrived.load(); })) {
         fail("reader did not reach its controlled wait seam");
     }
-    signal_file(s_directory / (std::string_view(test.action) == "publication" ? "construct_writer" : "start_post"));
-    if (native_case && std::string_view(test.poster_stage).empty()) {
-        if (!await([&] { return poster.observe_exit_retained() == Exact_child_state::exited; })) {
-            fail("poster native exit was not observed with retained authority");
-        }
-    }
-    else
+    signal_file(s_directory / "start_post");
     if (std::string_view(test.poster_stage).empty()) {
         if (!await([&] { return poster.poll() == Exact_child_state::exited; })) {
             fail("poster did not exit after publishing");
@@ -2738,255 +2223,12 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
         }
     }
     std::string diagnostic;
-    if (native_case) {
-        if (!poster.terminate_retaining_authority() ||
-            !await([&] { return poster.observe_exit_retained() == Exact_child_state::exited; }))
-        {
-            fail("cannot prove exact native exit while retaining child authority");
-        }
-    }
-    else
     if (!poster.terminate_and_settle(diagnostic)) {
         fail(diagnostic.c_str());
     }
 
     std::unique_ptr<Writer> successor;
     const std::string_view retry = test.retry;
-    std::shared_ptr<Probe_reader> late_reader;
-    if (native_case) {
-        require(notification->replay(2).state == Native_notification::Replay_state::REJECTED &&
-            !notification->exited(), "wrong occurrence published a native death edge");
-        if (std::string_view(test.name) == "native_late_enrollment") {
-            late_reader = std::make_shared<Probe_reader>(
-                directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>(), 1,
-                sintra::detail::ring_directory_policy::caller_directory, notification);
-            const auto committed = late_reader->start_reading(1);
-            require(committed.end - committed.begin == 1 && *committed.begin == k_payload,
-                "late enrollment lost the intact committed payload");
-            const auto edge = late_reader->wait_for_new_data(sintra::Ring_wait_hint::BLOCKING);
-            require(edge.begin == edge.end && !late_reader->is_stopping(),
-                "late enrolled reader did not consume its retained native exit edge");
-        }
-        if (std::string_view(test.name) == "native_transient_failure") {
-            sintra::detail::test_hooks::s_ipc_binary_post_error = EIO;
-            const auto failed = notification->replay(1);
-            require(failed.state == Native_notification::Replay_state::PENDING && failed.error &&
-                notification->pending(), "failed native replay discarded its checked obligation");
-        }
-        if (std::string_view(test.name) == "native_successor_rejection") {
-            auto successor = std::make_unique<Writer>(
-                directory, k_ring_name, sintra::test::pick_ring_elements<uint32_t>());
-            const auto head = reader->get_leading_sequence();
-            require(notification->replay(1).state == Native_notification::Replay_state::REJECTED &&
-                reader->get_leading_sequence() == head,
-                "predecessor native proof changed successor ownership or committed head");
-            s_reader_released = true;
-            waiter.join();
-            require(valid && completed, "successor admission lost the predecessor's committed payload");
-            successor->write_commit(k_payload + 1);
-            require(reader->get_leading_sequence() == head + 1,
-                "rejected predecessor replay damaged the live successor");
-            const auto next = reader->wait_for_new_data(sintra::Ring_wait_hint::BLOCKING);
-            require(next.end - next.begin == 1 && *next.begin == k_payload + 1,
-                "live successor payload was damaged by rejected predecessor replay");
-            reader->request_stop();
-            reader->done_reading();
-            return 0;
-        }
-        if (recovery_enabled) {
-            const std::string_view name = test.name;
-            if (name == "native_completion_new_enrollment") {
-                sintra::detail::test_hooks::s_ipc_wakeup_operation = [](const char* stage, const void* object) {
-                    if (std::string_view(stage) == "ring_native_posting_released") {
-                        s_completion_arrived = true;
-                        while (!s_completion_continue.load()) { std::this_thread::yield(); }
-                    }
-                    if (tl_new_enrollment && std::string_view(stage) == "ring_native_enrollment_before_slot_lock") {
-                        s_new_enrollment_arrived = true;
-                    }
-                    wakeup_hook(stage, object);
-                };
-                Native_notification::Replay_state old_result = Native_notification::Replay_state::REJECTED;
-                std::thread recovery([&] { old_result = notification->replay(1).state; });
-                if (!await([] { return s_completion_arrived.load(); })) {
-                    fixture_failure("old replay did not release posting before completion");
-                }
-                std::atomic<bool> enrolled{false};
-                std::thread admission([&] {
-                    tl_new_enrollment = true;
-                    late_reader = std::make_shared<Probe_reader>(directory, k_ring_name,
-                        sintra::test::pick_ring_elements<uint32_t>(), 1,
-                        sintra::detail::ring_directory_policy::caller_directory, notification);
-                    enrolled = true;
-                });
-                if (!await([] { return s_new_enrollment_arrived.load(); })) {
-                    fixture_failure("genuinely new reader did not reach slot admission during old completion");
-                }
-                require(!enrolled && notification->pending(), "slot exclusion did not retain late admission duty");
-                s_completion_continue = true;
-                recovery.join();
-                admission.join();
-                sintra::detail::test_hooks::s_ipc_wakeup_operation = wakeup_hook;
-                require(old_result == Native_notification::Replay_state::COMPLETE && enrolled && notification->pending(),
-                    "old replay completion erased the genuinely new reader's later enrollment obligation");
-                const auto data = late_reader->start_reading(1);
-                require(data.end - data.begin == 1 && *data.begin == k_payload,
-                    "new enrollment across completion lost intact committed data");
-            }
-            if (name == "native_signal_handler_callback" || name == "native_exception_handler_callback" ||
-                name == "native_held_logger_handler") {
-                s_exception_notification = static_cast<Probe_notification*>(notification.get());
-                sintra::set_log_callback([](sintra::log_level, const char* message, void*) {
-                    ++s_native_log_callbacks;
-                    const bool held = s_exception_notification->gate_holder() ==
-                        sintra::detail::current_process_instance();
-                    std::fprintf(stderr, "%s", message);
-                    std::fprintf(stderr, "original debug handler application callback: inspection_held=%d callbacks=%u\n",
-                        int(held), s_native_log_callbacks.load());
-                    std::fflush(stderr);
-                    if (held) { std::_Exit(78); }
-                });
-                sintra::Log_stream(sintra::log_level::info) << "ordinary logging outside native inspection\n";
-                require(s_native_log_callbacks == 1 && s_exception_notification->gate_holder() == 0,
-                    "ordinary callback behavior outside inspection changed");
-                s_native_log_callbacks = 0;
-                if (name == "native_held_logger_handler") {
-                    s_expect_held_logger = true;
-                    std::thread holder([] {
-                        std::unique_lock<std::mutex> lock(sintra::detail::log_mutex());
-                        s_held_logger = true;
-                        for (;;) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
-                    });
-                    holder.detach();
-                    require(await([] { return s_held_logger.load(); }), "ordinary logger mutex was not held before interruption");
-                }
-                sintra::detail::set_debug_pause_active(true);
-                sintra::detail::test_hooks::s_debug_pause_entered = [](const char* reason) noexcept {
-                    sintra::detail::native_diagnostic("installed handler terminal observer, callbacks=",
-                        s_native_log_callbacks.load(), "\n");
-                    (void)reason;
-                    std::_Exit(s_native_log_callbacks == 0 && (!s_expect_held_logger || s_held_logger) ? 0 : 78);
-                };
-                const bool exception = name == "native_exception_handler_callback";
-                if (!exception) {
-                    require(std::signal(SIGABRT, sintra::detail::debug_signal_handler) != SIG_ERR,
-                        "could not install original debug signal handler");
-                }
-#if defined(_WIN32)
-                if (exception) {
-                    require(AddVectoredExceptionHandler(1, sintra::detail::debug_vectored_exception_handler) != nullptr,
-                        "could not install original debug exception handler");
-                }
-#endif
-                sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void*) {
-                    if (std::string_view(stage) == "mutex_inspection_gate_acquired") {
-                        if (s_exception_stage) {
-#if defined(_WIN32)
-                            RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
-#endif
-                        } else {
-                            std::raise(SIGABRT);
-                        }
-                    }
-                };
-                s_exception_stage = exception ? "installed_exception_handler" : nullptr;
-                (void)notification->replay(1);
-                fail("original installed debug handler did not reach its pause boundary");
-            }
-            const bool throwing_replay = name == "native_flush_throw_cleanup" ||
-                name == "native_backend_throw_cleanup" || name == "native_release_throw_cleanup";
-            if (throwing_replay) {
-                s_exception_notification = static_cast<Probe_notification*>(notification.get());
-                s_exception_stage = name == "native_flush_throw_cleanup" ? "ring_flush_before_post" :
-                    name == "native_backend_throw_cleanup" ? "semaphore_post_failed" : "before_zero_store";
-                std::set_terminate(exception_termination);
-                if (name == "native_release_throw_cleanup") {
-                    sintra::detail::test_hooks::s_spinlock_event = [](const void*,
-                        sintra::detail::test_hooks::spinlock_event event) {
-                        if (event == sintra::detail::test_hooks::spinlock_event::before_zero_store) {
-                            throw std::runtime_error("fixture spinlock release exception");
-                        }
-                    };
-                }
-                else {
-                    if (name == "native_backend_throw_cleanup") {
-                        sintra::detail::test_hooks::s_ipc_binary_post_error = EIO;
-                    }
-                    sintra::detail::test_hooks::s_ipc_wakeup_operation = [](const char* stage, const void* object) {
-                        if (std::string_view(stage) == s_exception_stage) {
-                            throw std::runtime_error("fixture checked posting exception");
-                        }
-                        wakeup_hook(stage, object);
-                    };
-                }
-                const auto failed = notification->replay(1);
-                sintra::detail::test_hooks::s_spinlock_event = nullptr;
-                sintra::detail::test_hooks::s_ipc_wakeup_operation = wakeup_hook;
-                sintra::detail::test_hooks::s_ipc_binary_post_error = 0;
-                // The wake lets the live reader acquire this same posting lock.
-                // Check release after its cleanup, not during its legitimate
-                // concurrent ownership of the shared word.
-                if (name == "native_release_throw_cleanup" || name == "native_flush_throw_cleanup") {
-                    require(await([&] { return completed.load(); }),
-                        "throwing replay did not deliver the native wake to its parked reader");
-                }
-                require(failed.state == Native_notification::Replay_state::PENDING && failed.error &&
-                    notification->pending() && s_exception_notification->gate_holder() == 0 &&
-                    s_exception_notification->posting_owner() == 0,
-                    "throwing replay lost its checked duty or retained a live lock/gate");
-                require(sintra::detail::test_hooks::take_observation_failure() != nullptr,
-                    "checked replay swallowed the deferred instrumentation failure");
-            }
-            if (name == "native_live_stall_callback") {
-                s_exception_notification = static_cast<Probe_notification*>(notification.get());
-                std::atomic<bool> held{false};
-                std::thread holder([&] {
-                    sintra::spinlock::locker lock(s_exception_notification->reader_lock());
-                    held = true;
-                    for (;;) { std::this_thread::yield(); }
-                });
-                holder.detach();
-                require(await([&] { return held.load(); }), "diagnostic fixture did not hold its reader lock");
-                sintra::detail::set_debug_pause_active(false);
-                sintra::test::prepare_for_intentional_crash();
-#if defined(_WIN32)
-                SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-                require(_set_error_mode(_OUT_TO_STDERR) != -1,
-                    "diagnostic fixture could not select noninteractive CRT errors");
-#endif
-                require(std::signal(SIGABRT, diagnostic_abort) != SIG_ERR,
-                    "diagnostic fixture could not observe its intentional abort");
-                sintra::detail::test_hooks::s_spinlock_cpu = [](sintra::detail::spinlock_cpu_sample& sample) {
-                    sample.ns = s_diagnostic_cpu.fetch_add(3'000'000'000ull);
-                    return true;
-                };
-                sintra::set_log_callback([](sintra::log_level, const char*, void*) {
-                    ++s_native_log_callbacks;
-                    std::fprintf(stderr, "application callback entered while native inspection gate was held=%d\n",
-                        int(s_exception_notification->gate_holder() == sintra::detail::current_process_instance()));
-                    std::fflush(stderr);
-                });
-                (void)notification->replay(1);
-                fail("diagnostic fixture did not reach its live-holder abort policy");
-            }
-            std::atomic<unsigned> application_callbacks{0};
-            sintra::set_log_callback([](sintra::log_level, const char*, void* counter) {
-                ++*static_cast<std::atomic<unsigned>*>(counter);
-            }, &application_callbacks);
-            const auto result = notification->replay(1);
-            sintra::set_log_callback(nullptr);
-            if (std::string_view(test.action) == "publication" &&
-                result.state == Native_notification::Replay_state::REJECTED)
-            {
-                fail("partial mutex publication rejected exact native replay");
-            }
-            require(application_callbacks == 0,
-                "native replay invoked application code inside its ownership inspection gate");
-            require(result.state == Native_notification::Replay_state::COMPLETE &&
-                !notification->pending(), "armed native owner did not complete notification replay");
-        }
-    }
-    else
     if (retry == "stop") {
         reader->request_stop();
     }
@@ -3009,48 +2251,17 @@ int run_scenario(const std::string& binary, const wakeup_case_t& test, const cha
     waiter.join();
     require(completed && valid, "reader returned the wrong wake outcome");
     require(reader->token_empty(), "cleanup left a stale token for the next registration");
-    if (!native_case) {
-        reader->done_reading();
-    }
-    if (native_case) {
-        // Consumed death is not a permanently true empty-return predicate.
-        s_reader_arrived = false;
-        s_reader_released = true;
-        s_reader_stage = "ring_wait_prepared";
-        s_wait_thread = 0;
-        s_wait_address = 0;
-        completed = false;
-        std::thread next_wait([&] {
-            tl_reader = true;
-            const auto empty = reader->wait_for_new_data(sintra::Ring_wait_hint::BLOCKING);
-            valid = empty.begin == empty.end && reader->is_stopping();
-            completed = true;
-        });
-        require(await(native_reader_is_parked) && s_reader_arrived && !completed,
-            "consumed native death edge returned repeatedly instead of parking");
-        std::printf("%s: native wait confirmed after consumed exit edge\n", test.name);
-        std::fflush(stdout);
-        reader->request_stop();
-        next_wait.join();
-        require(valid && completed, "stop after native recovery did not finish the parked reader");
-        reader->done_reading();
-        if (late_reader) {
-            late_reader->request_stop();
-            late_reader->done_reading();
-        }
-        require(poster.observe_exit_retained() == Exact_child_state::exited,
-            "native child authority was consumed before replay and reader cleanup completed");
-    }
+    reader->done_reading();
+
     return 0;
 }
 
-bool supervise_case(const std::string& binary, const wakeup_case_t& test, bool recovery_enabled = true)
+bool supervise_case(const std::string& binary, const wakeup_case_t& test)
 {
     sintra::test::Temp_ring_dir directory(test.name);
     const std::string path = directory.str();
     Exact_child scenario(std::chrono::seconds(3));
-    const char* args[] = {binary.c_str(), recovery_enabled ? "--scenario" : "--scenario-without-recovery",
-        test.name, path.c_str(), nullptr};
+    const char* args[] = {binary.c_str(), "--scenario", test.name, path.c_str(), nullptr};
     require(scenario.spawn(binary.c_str(), args), "cannot spawn scenario: " + scenario.error());
     const bool exited = await([&] { return scenario.poll() != Exact_child_state::running; });
     const bool passed = exited && scenario.exited_with_code(0);
@@ -3083,22 +2294,8 @@ int main(int argc, char* argv[])
         if (argc == 4 && std::string_view(argv[1]) == "--scenario") {
             return run_scenario(binary, find_case(argv[2]), argv[3]);
         }
-        if (argc == 4 && std::string_view(argv[1]) == "--scenario-without-recovery") {
-            return run_scenario(binary, find_case(argv[2]), argv[3], false);
-        }
-        if (argc == 4 && std::string_view(argv[1]) == "--recoverer") {
-            return run_recoverer(find_case(argv[2]), argv[3]);
-        }
-        if (argc == 5 && std::string_view(argv[1]) == "--recoverer" &&
-            std::string_view(argv[4]) == "second")
-        {
-            return run_recoverer(find_case(argv[2]), argv[3], true);
-        }
         if (argc == 3 && std::string_view(argv[1]) == "--case") {
             return supervise_case(binary, find_case(argv[2])) ? 0 : 1;
-        }
-        if (argc == 3 && std::string_view(argv[1]) == "--case-without-recovery") {
-            return supervise_case(binary, find_case(argv[2]), false) ? 0 : 1;
         }
         require(argc == 1, "expected --case NAME or no arguments");
         bool passed = true;

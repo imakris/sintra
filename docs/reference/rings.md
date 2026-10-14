@@ -300,40 +300,6 @@ Contract:
   `ring_reader_evicted_exception`; `try_snapshot_e` returns
   `Ring_R_snapshot_error::evicted`. The reader must be reconstructed.
 
-Optional native retained history:
-
-- `detail::Ring_retained_history<T>` owns an independently versioned capability
-  mapping for one exact writer occurrence. Its owner allocates
-  `storage_size(capacity)` shared bytes, calls `initialize` before permitting
-  that writer to reserve, and retains the mapping with the native authority.
-  Supply the same capability to the writer and its native notification binding.
-  The ordinary ring control representation does not contain this capability.
-- Before a writable reservation can overwrite committed elements, their
-  preimages are preserved. Preservation follows each committed element across
-  failed larger constructions and subsequent smaller commits. A new head alone
-  does not retire surviving preimages. Framed message writers also retain their
-  complete frame boundaries through typed construction, relay and buffer batches.
-- Native replay requires the original writer's exact death and excludes a
-  successor while constructing a separate immutable recovered ring image.
-  Interrupted construction remains unpublished and may be repeated by the
-  occurrence's next qualified recovery owner. Recovery never writes through an
-  already exposed data mapping. Missing or incompatible capability storage is
-  an error for the requested capability, not a fallback that discards history.
-- A raw reader selects the recovered view at its own snapshot or returned-range
-  release boundary. Its old mapping remains alive with its existing owners.
-  Another application's held range does not block recovery. A returned raw range
-  advances delivery progress as before; there is no element-level consumption
-  acknowledgment and no retroactive repair of an overwritten pointer.
-- Managed readers select the recovered view between complete frame extractions,
-  using their finer message cursor. They report only the prefix preceding the
-  first retained complete frame, then copy each surviving frame once into the
-  existing dispatch buffer. Native recovery does not establish writer close or
-  transport completion. Ordinary live-reader eviction remains a separate path.
-- Storage is bounded by the capacity: per-element preservation and framing
-  metadata plus one recovered image. Allocate it before destructive writes;
-  the capability owner releases its backing storage only after all associated
-  readers, native delivery and recovery operations have released their ownership.
-
 Threading and lifecycle:
 
 - Exactly one writer is permitted across processes. `Ring_W`'s

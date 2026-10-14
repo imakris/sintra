@@ -459,7 +459,6 @@ struct Message_prefix
     // this authority.
     uint64_t           managed_child_custody_identity = 0;
     uint32_t           managed_child_occurrence       = 0;
-
 };
 
 struct corrupted_message_exception : public std::runtime_error
@@ -914,23 +913,12 @@ std::string get_base_filename(const string& prefix, uint64_t id, uint32_t occurr
 
 struct Message_ring_R: Ring_R<char>
 {
-    Message_ring_R(const string& directory, const string& prefix, uint64_t id,
-        uint32_t occurrence = 0, bool prepare_native_notification = false,
-        Ring_reader_policy reader_policy = Ring_reader_policy::forcible,
-        std::shared_ptr<const detail::Native_exit_authority> bootstrap_authority = nullptr):
+    Message_ring_R(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0):
         Ring_R(directory, get_base_filename(prefix, id, occurrence), message_ring_size,
-            0, detail::ring_directory_policy::private_existing_directory,
-            nullptr, prepare_native_notification, reader_policy, std::move(bootstrap_authority)),
+            0, detail::ring_directory_policy::private_existing_directory),
         m_id(id),
         m_channel(prefix)
-    {
-        set_retained_history_progress(&m_message_reading_sequence);
-    }
-
-    ~Message_ring_R()
-    {
-        set_retained_history_progress(nullptr);
-    }
+    {}
 
     Range<char> start_reading(size_t num_trailing_elements = 0)
     {
@@ -950,40 +938,17 @@ struct Message_ring_R: Ring_R<char>
     // If there is no message to read, this blocks without holding the copy gate.
     // A supplied hint accumulates across readable ranges until an empty-ring
     // observation consumes it; unhinted callers retain adaptive waiting.
-    Message_prefix* fetch_message(Ring_wait_hint* next_wait_hint = nullptr, bool* control_work = nullptr)
+    Message_prefix* fetch_message(Ring_wait_hint* next_wait_hint = nullptr)
     {
-        if (control_work) {
-            *control_work = false;
-            if (take_control_work()) {
-                *control_work = true;
-                return nullptr;
-            }
-        }
         if (!m_reading) {
             start_reading();
         }
 
         detail::Spin_backoff copy_backoff;
         while (true) {
-            bool recovered = false;
-            if (recovered_history_available()) {
-                Local_read_lock read_lock(m_reading_lock);
-                recovered = select_recovered_history();
-                if (recovered) { m_range = {}; }
-            }
-            if (recovered) { report_eviction(reading_sequence()); }
             if (m_range.begin == m_range.end) {
-                const bool consumed_range = m_range.begin != nullptr;
-                detail::ipc_wakeup_operation_for_test("message_history_before_range_release", this);
                 done_reading_new_data();
-                m_range = {};
                 report_eviction(reading_sequence());
-                if (control_work && consumed_range) {
-                    // The guard just moved. Give the notification owner one
-                    // chance to use that space before this reader can park.
-                    *control_work = true;
-                    return nullptr;
-                }
 
                 auto wait_hint = Ring_wait_hint::ADAPTIVE;
                 if (next_wait_hint) {
@@ -995,20 +960,13 @@ struct Message_ring_R: Ring_R<char>
                 auto range = wait_for_new_data(wait_hint);
                 const auto available = range.begin ? size_t(range.end - range.begin) : 0;
                 report_eviction(reading_sequence() - available);
-                if (control_work && take_control_work()) {
-                    m_range = range;
-                    *control_work = true;
-                    return nullptr;
-                }
                 if (!range.begin) {
-                    detail::ipc_wakeup_operation_for_test("message_ring_empty_wait_returned", this);
                     if (is_stopping()) {
                         return nullptr;
                     }
                     continue;
                 }
                 m_range = range;
-                detail::ipc_wakeup_operation_for_test("message_ring_readable_range_before_extract", &range);
             }
 
             Copy_admission admission = Copy_admission::STOPPED;
@@ -1071,13 +1029,6 @@ struct Message_ring_R: Ring_R<char>
         m_eviction_handler = std::move(handler);
     }
 
-    // Installed before the session starts. fetch_message runs on the owning
-    // worker after its previous dispatch, so this accounts loss before parking.
-    void set_loss_handler(std::function<void(sequence_counter_type, sequence_counter_type)> handler)
-    {
-        m_loss_handler = std::move(handler);
-    }
-
 public:
     const uint64_t m_id;
 
@@ -1131,16 +1082,13 @@ private:
             return;
         }
         const auto skipped_from = m_message_reading_sequence.exchange(resumed_sequence);
-        if (m_loss_handler) {
-            m_loss_handler(skipped_from, resumed_sequence);
-        }
         if (m_eviction_handler) {
             m_eviction_handler();
         }
         Log_stream(log_level::warning)
             << "Sintra message reader evicted on " << m_channel << " ring for peer " << m_id
             << "; discarded unread sequence interval [" << skipped_from << ", "
-            << resumed_sequence << "). Resuming at sequence " << resumed_sequence << ".\n";
+            << resumed_sequence << "). Resuming at the published head; traffic was lost.\n";
     }
 
     struct alignas(detail::message_frame_alignment) frame_storage_t
@@ -1152,66 +1100,20 @@ private:
     std::atomic<sequence_counter_type> m_message_reading_sequence{0};
     const std::string m_channel;
     std::function<void()> m_eviction_handler;
-    std::function<void(sequence_counter_type, sequence_counter_type)> m_loss_handler;
 };
 
 
 
 struct Message_ring_W: public Ring_W<char>
 {
-    Message_ring_W(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0,
-        std::shared_ptr<const detail::Native_exit_authority> authority = nullptr,
-        std::shared_ptr<detail::Ring_retained_history<char>> history = nullptr) :
+    Message_ring_W(const string& directory, const string& prefix, uint64_t id, uint32_t occurrence = 0) :
         Ring_W(directory, get_base_filename(prefix, id, occurrence), message_ring_size,
-            detail::ring_directory_policy::private_existing_directory, true,
-            std::move(authority), std::move(history)),
+            detail::ring_directory_policy::private_existing_directory),
         m_id(id)
     {}
 
     Message_ring_W(const Message_ring_W&) = delete;
     const Message_ring_W& operator = (const Message_ring_W&) = delete;
-
-    using Ring_W<char>::write;
-    using Ring_W<char>::write_commit;
-
-    sequence_counter_type write_commit(const char* source, size_t bytes)
-    {
-        write(source, bytes);
-        return done_writing();
-    }
-
-    char* write(const char* source, size_t bytes)
-    {
-        // Relay and raw batches supply their actual complete frames. Validate
-        // before reservation so malformed input cannot leave a partial batch.
-        if (retains_history()) {
-            for (size_t offset = 0; offset != bytes;) {
-                if (bytes - offset < sizeof(Message_prefix)) {
-                    throw corrupted_message_exception("Retained batch has a truncated frame prefix.");
-                }
-                Message_prefix prefix;
-                std::memcpy(&prefix, source + offset, sizeof(prefix));
-                const auto size = prefix.bytes_to_next_message;
-                if (prefix.magic != message_magic || size < sizeof(Message_prefix) ||
-                    size > bytes - offset || size % detail::message_frame_alignment != 0)
-                {
-                    throw corrupted_message_exception("Retained batch has an invalid frame boundary.");
-                }
-                offset += size;
-            }
-        }
-        char* result = Ring_W<char>::write(source, bytes);
-        if (retains_history()) {
-            const auto start = pending_sequence() - bytes;
-            for (size_t offset = 0; offset != bytes;) {
-                const auto* frame = reinterpret_cast<const Message_prefix*>(result + offset);
-                const auto end = offset + frame->bytes_to_next_message;
-                record_written_frame(start + offset, start + end);
-                offset = end;
-            }
-        }
-        return result;
-    }
 
     void relay(
         const Message_prefix& msg,

@@ -126,7 +126,6 @@ ring_control_first_attach_process_test                  10
 ring_crash_safe_wakeup_test                              1
 ring_helpers_test                                        5
 ring_mapping_ownership_test                              1
-ring_retained_history_test                               1
 ring_wakeup_ownership_test                               1
 ring_wait_hint_test                                      1
 ring_lifecycle_anchor_race_process_test                 10

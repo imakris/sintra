@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "native_exit_authority.h"
 #include "observation.h"
 
 #include <atomic>
@@ -162,10 +161,10 @@ struct alignas(16) spinlock
 {
     struct locker
     {
-        locker(spinlock& sl, const detail::Native_exit_authority* authority = nullptr)
+        locker(spinlock& sl)
         :
             m_sl(sl), m_pid(uint32_t(get_current_pid()))
-        { m_sl.lock(authority); }
+        { m_sl.lock(); }
         ~locker() noexcept
         {
             if (m_pid == uint32_t(get_current_pid())) {
@@ -180,7 +179,7 @@ struct alignas(16) spinlock
         uint32_t m_pid;
     };
 
-    void lock(const detail::Native_exit_authority* authority = nullptr)
+    void lock()
     {
         const uint64_t self = detail::current_process_instance();
         auto next_poll = std::chrono::steady_clock::now();
@@ -214,7 +213,7 @@ struct alignas(16) spinlock
             next_poll = now + k_owner_liveness_poll;
             SINTRA_SPINLOCK_HOOK(poll);
 
-            if (try_take_over_exited_owner(self, authority)) {
+            if (try_take_over_exited_owner(self)) {
                 return;
             }
             if (!witness.active) {
@@ -337,13 +336,10 @@ private:
         return true;
     }
 
-    bool try_take_over_exited_owner(uint64_t self, const detail::Native_exit_authority* authority)
+    bool try_take_over_exited_owner(uint64_t self)
     {
         const uint64_t owner = m_words.owner.load(std::memory_order_acquire);
-        if (owner == 0 ||
-            !(authority ? authority->has_exited(owner) :
-                detail::process_instance_has_exited(owner, self)))
-        {
+        if (owner == 0 || !detail::process_instance_has_exited(owner, self)) {
             return false;
         }
         detail::native_diagnostic("[sintra][spinlock] Exited owner PID ",

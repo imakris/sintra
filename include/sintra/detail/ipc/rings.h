@@ -195,15 +195,6 @@ enum class Ring_wait_hint
     BLOCKING
 };
 
-// Immutable for one admitted slot lifetime. The reserved room belongs only
-// to the coordinator's request-ring control writer, not to ordinary traffic.
-enum class Ring_reader_policy : uint8_t
-{
-    forcible,
-    protected_reader,
-    coordinator_notifications
-};
-
 namespace detail {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
 namespace test_hooks {
@@ -550,9 +541,7 @@ inline constexpr uint64_t fnv1a_64(std::initializer_list<uint64_t> words) noexce
 // a wall-clock progress stamp. Old controls cannot be safely attached.
 // Revision 6 replaces the shared notification flags with a binary backend token
 // and retains each sleeping registration until its checked post succeeds.
-// Revision 7 adds immutable reader protection and notification-reserve bits.
-// Writers that do not understand these bits must not attach to this control.
-inline constexpr uint64_t k_ring_abi_layout_revision = 7;
+inline constexpr uint64_t k_ring_abi_layout_revision = 6;
 
 inline constexpr uint64_t k_ring_abi_fingerprint = fnv1a_64({
     k_sintra_ring_abi_version,
@@ -1109,11 +1098,9 @@ protected:
     Ring_lifecycle_guard_base(
         const std::string& directory,
         const std::string& data_filename,
-        detail::ring_directory_policy policy,
-        std::shared_ptr<const detail::Native_exit_authority> authority)
+        detail::ring_directory_policy policy)
     :
-        m_ring_directory(directory, policy),
-        m_native_authority(std::move(authority))
+        m_ring_directory(directory, policy)
     {
         m_lifecycle_directory        = directory + "/";
         m_lifecycle_data_filename    = m_lifecycle_directory + data_filename;
@@ -1237,19 +1224,6 @@ protected:
         lock_lifecycle();
     }
 
-    const detail::Native_exit_authority* native_exit_authority() const noexcept
-    {
-        return m_native_authority.get();
-    }
-
-    // The prepared/cohort owner excludes local operations while replacing this
-    // reference. Base ownership keeps the proof through constructor unwind and
-    // final lifecycle release, after derived notification members are destroyed.
-    void retain_native_authority(std::shared_ptr<const detail::Native_exit_authority> authority) noexcept
-    {
-        m_native_authority = std::move(authority);
-    }
-
     void begin_lifecycle_delete()
     {
         if (!m_anchor) {
@@ -1328,7 +1302,7 @@ private:
     void lock_lifecycle()
     {
         if (!m_lifecycle_locked) {
-            m_anchor->mutex.lock_cleanup(m_lifecycle_token, native_exit_authority());
+            m_anchor->mutex.lock_cleanup(m_lifecycle_token);
             m_lifecycle_locked = true;
         }
     }
@@ -1584,7 +1558,6 @@ private:
 protected:
     detail::ring_directory              m_ring_directory;
 private:
-    std::shared_ptr<const detail::Native_exit_authority> m_native_authority;
     std::unique_ptr<ipc::mapped_region> m_anchor_region;
     std::string                         m_lifecycle_directory;
     std::string                         m_lifecycle_data_filename;
@@ -1759,7 +1732,6 @@ private:
     {
         return m_data_directory.create(fs::path(m_data_filename), m_data_region_size);
     }
-
     /**
      * Attach the data file with a "double mapping".
      *
@@ -1993,12 +1965,6 @@ struct Ring:
 {
     using lifecycle_base = Ring_lifecycle_guard_base;
 
-protected:
-    using lifecycle_base::native_exit_authority;
-    using lifecycle_base::retain_native_authority;
-
-public:
-
     static_assert(
         std::is_trivially_copyable_v<T>,
         "sintra::Ring element type T must be trivially copyable."
@@ -2026,8 +1992,6 @@ public:
         static constexpr uint32_t guard_present_mask  = 0x00000100u;
         static constexpr uint32_t copying_mask        = 0x00000200u;
         static constexpr uint32_t request_mask        = 0x00000400u;
-        static constexpr uint32_t protected_mask      = 0x00000800u;
-        static constexpr uint32_t reserve_mask        = 0x00001000u;
         static constexpr uint32_t status_mask         = 0x00ff0000u;
         static constexpr uint32_t pending_octile_mask = 0xff000000u;
 
@@ -2068,22 +2032,6 @@ public:
 
         constexpr bool copying() const noexcept { return (word & copying_mask) != 0; }
         constexpr bool request_pending() const noexcept { return (word & request_mask) != 0; }
-        constexpr bool protected_reader() const noexcept { return (word & protected_mask) != 0; }
-        constexpr bool notification_reserve() const noexcept { return (word & reserve_mask) != 0; }
-
-        constexpr Reader_state_union with_policy(Ring_reader_policy policy) const noexcept
-        {
-            Reader_state_union copy(*this);
-            copy.word &= ~(protected_mask | reserve_mask);
-            if (policy != Ring_reader_policy::forcible) {
-                copy.word |= protected_mask;
-            }
-            if (policy == Ring_reader_policy::coordinator_notifications) {
-                copy.word |= reserve_mask;
-            }
-            return copy;
-        }
-
         constexpr bool guard_transition_allowed() const noexcept
         {
             return !copying() && !request_pending() && !guard_pending();
@@ -2525,18 +2473,17 @@ public:
             }
         };
 
-        bool scavenge_orphans(
-            Wakeup_errors& errors, const detail::Native_exit_authority* authority = nullptr)
+        bool scavenge_orphans(Wakeup_errors& errors)
         {
             bool freed = false;
 
-            spinlock::locker lock(rs_stack_spinlock, authority);
+            spinlock::locker lock(rs_stack_spinlock);
 
             for (int i = 0; i < max_process_index; ++i) {
                 auto& slot = reading_sequences[i].data;
 
                 if (slot.status() == READER_STATE_INACTIVE) {
-                    if (const auto error = clear_reader_wakeup(i, authority)) {
+                    if (const auto error = clear_reader_wakeup(i)) {
                         errors.add(i, error);
                         continue;
                     }
@@ -2552,7 +2499,7 @@ public:
 
                 const auto identity = probe_process_identity(slot.owner());
                 if (identity.status == Process_identity_status::DEAD) {
-                    if (const auto error = clear_reader_wakeup(i, authority)) {
+                    if (const auto error = clear_reader_wakeup(i)) {
                         errors.add(i, error);
                         continue;
                     }
@@ -2721,10 +2668,9 @@ public:
 
         // Caller owns the slot (or has confirmed its owner died), and no live
         // waiter remains. Slot transfer takes rs_stack_spinlock before this lock.
-        std::error_code clear_reader_wakeup(
-            int index, const detail::Native_exit_authority* authority = nullptr)
+        std::error_code clear_reader_wakeup(int index)
         {
-            spinlock::locker lock(m_spinlock, authority);
+            spinlock::locker lock(m_spinlock);
             return clear_reader_wakeup_unlocked(index);
         }
 
@@ -2774,10 +2720,9 @@ public:
         const std::string& directory,
         const std::string& data_filename,
         size_t             num_elements,
-        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory,
-        std::shared_ptr<const detail::Native_exit_authority> authority = nullptr)
+        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory)
     :
-        lifecycle_base(directory, data_filename, policy, std::move(authority)),
+        lifecycle_base(directory, data_filename, policy),
         Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements, policy)
     {
         detail::maybe_pause_after_ring_data_attach_for_test(this->m_data_filename);
@@ -2991,394 +2936,6 @@ public:
 // Reader API
 //==============================================================================
 
-namespace detail {
-
-// Optional, independently versioned state. It is not part of the common ring
-// control block. A raw owner may retain it in separately mapped sidecar storage.
-struct ring_native_notification_record_t
-{
-    static constexpr uint32_t k_version = 1;
-    const uint32_t version;
-    const uint64_t occurrence;
-    const uint64_t writer_instance;
-    std::atomic<bool> native_exit{false};
-    std::atomic<bool> replay_pending{false};
-
-    ring_native_notification_record_t(
-        uint64_t occurrence_value, uint64_t writer, uint32_t record_version = k_version)
-
-    :
-        version(record_version),
-        occurrence(occurrence_value),
-        writer_instance(writer)
-    {}
-};
-
-/** One exact occurrence's retained mapping, native authority and replay duty.
- * Its owner retains this object and enrolled readers until delivery has joined.
- * Infrastructure native observers supply the authority; this is not death
- * detection by timer, PID snapshot, ring closure or transport publication.
- */
-template <typename T>
-class Ring_retained_history : public Ring<T, true>
-{
-    struct record_t
-    {
-        uint64_t version;
-        uint64_t capacity;
-        uint64_t occurrence;
-        uint64_t writer_instance;
-        bool framed;
-        std::atomic<bool> ready{false};
-        sequence_counter_type first = 0;
-        sequence_counter_type head = 0;
-    };
-
-    struct element_t
-    {
-        std::atomic<uint64_t> saved_sequence{0};
-        uint64_t saved_frame_end = 0;
-        uint64_t frame_sequence = 0;
-        uint64_t frame_end = 0;
-        alignas(T) std::byte saved[sizeof(T)];
-    };
-
-    static constexpr uint64_t k_version = 1;
-    static constexpr size_t align_up(size_t value, size_t alignment)
-    {
-        return (value + alignment - 1) / alignment * alignment;
-    }
-
-    static constexpr size_t elements_offset = align_up(sizeof(record_t), alignof(element_t));
-
-public:
-    static size_t storage_size(size_t capacity)
-    {
-        constexpr size_t overhead = elements_offset + alignof(T);
-        if (capacity == 0 || capacity > (std::numeric_limits<size_t>::max() - overhead) /
-                (sizeof(element_t) + sizeof(T)))
-        {
-            throw std::invalid_argument("Invalid retained ring capacity.");
-        }
-        return align_up(elements_offset + capacity * sizeof(element_t), alignof(T)) + capacity * sizeof(T);
-    }
-
-    // The capability owner initializes shared storage before permitting its
-    // writer to reserve. It keeps the mapping and exact native witnesses alive
-    // through every continuing reader and unfinished recovery operation.
-    static void initialize(void* storage, size_t bytes, size_t capacity,
-        uint64_t occurrence, uint64_t writer_instance, bool framed = false)
-    {
-        if (!storage || bytes != storage_size(capacity) || !occurrence || !writer_instance ||
-            reinterpret_cast<uintptr_t>(storage) % alignof(element_t) != 0)
-        {
-            throw std::invalid_argument("Invalid retained ring storage.");
-        }
-        new (storage) record_t{k_version, capacity, occurrence, writer_instance, framed};
-        auto* elements = reinterpret_cast<element_t*>(static_cast<std::byte*>(storage) + elements_offset);
-        for (size_t index = 0; index != capacity; ++index) {
-            new (elements + index) element_t{};
-        }
-    }
-
-    Ring_retained_history(const std::string& directory, const std::string& filename,
-        size_t capacity, std::shared_ptr<ipc::mapped_region> storage,
-        std::shared_ptr<const Native_exit_authority> authority,
-        ring_directory_policy policy = ring_directory_policy::caller_directory)
-    :
-        Ring<T, true>(directory, filename, capacity, policy, authority),
-        m_storage(std::move(storage)),
-        m_authority(std::move(authority))
-    {
-        if (!m_storage || m_storage->size() != storage_size(capacity)) {
-            throw ring_acquisition_failure_exception("Invalid retained ring capability storage.");
-        }
-        m_record = static_cast<record_t*>(m_storage->data());
-        if (m_record->version != k_version || m_record->capacity != capacity ||
-            !m_record->occurrence || !m_authority ||
-            !m_authority->contains(m_record->writer_instance))
-        {
-            throw ring_acquisition_failure_exception("Invalid retained ring capability.");
-        }
-        auto* bytes = static_cast<std::byte*>(m_storage->data());
-        m_elements = reinterpret_cast<element_t*>(bytes + elements_offset);
-        m_image = reinterpret_cast<T*>(bytes + align_up(
-            elements_offset + capacity * sizeof(element_t), alignof(T)));
-    }
-
-    bool matches(const std::string& filename, size_t capacity) const
-    {
-        std::error_code error;
-        return capacity == m_record->capacity &&
-            fs::equivalent(filename, this->m_data_filename, error) && !error;
-    }
-
-    uint64_t occurrence() const noexcept { return m_record->occurrence; }
-    uint64_t writer_instance() const noexcept { return m_record->writer_instance; }
-    bool framed() const noexcept { return m_record->framed; }
-    bool ready() const noexcept { return m_record->ready.load(std::memory_order_acquire); }
-    sequence_counter_type first() const noexcept { return m_record->first; }
-    sequence_counter_type head() const noexcept { return m_record->head; }
-    T* pointer(sequence_counter_type sequence) const noexcept
-    {
-        return m_image + (sequence - m_record->first);
-    }
-
-    void replace_native_authority(std::shared_ptr<const Native_exit_authority> authority)
-    {
-        if (!authority || !authority->contains(writer_instance())) {
-            throw ring_acquisition_failure_exception("Invalid retained history native authority.");
-        }
-        this->retain_native_authority(authority);
-        m_authority = std::move(authority);
-    }
-
-    // Called under the existing writer reservation ownership, after copy/guard
-    // arbitration and before exposing any destructive writable pointer.
-    void preserve(sequence_counter_type start, size_t count, sequence_counter_type head)
-    {
-        const auto capacity = this->m_num_elements;
-        for (size_t offset = 0; offset != count; ++offset) {
-            const size_t index = mod_u64(start + offset, capacity);
-            if (head <= index) { continue; }
-            const auto previous = index + ((head - index - 1) / capacity) * capacity;
-            auto& element = m_elements[index];
-            if (element.saved_sequence.load(std::memory_order_acquire) == previous + 1) {
-                continue;
-            }
-            std::memcpy(element.saved, this->m_data + index, sizeof(T));
-            element.saved_frame_end = element.frame_sequence == previous + 1 ? element.frame_end : 0;
-            element.saved_sequence.store(previous + 1, std::memory_order_release);
-            ipc_wakeup_operation_for_test("history_preserved", this);
-        }
-        ipc_wakeup_operation_for_test("history_before_exposure", this);
-    }
-
-    void record_frame(sequence_counter_type start, sequence_counter_type end)
-    {
-        auto& element = m_elements[mod_u64(start, this->m_num_elements)];
-        element.frame_end = end;
-        element.frame_sequence = start + 1;
-    }
-
-    interprocess_mutex::Owner_inspection recover(uint64_t expected_occurrence)
-    {
-        if (expected_occurrence != occurrence() || !m_authority->has_exited(writer_instance())) {
-            return interprocess_mutex::Owner_inspection::CHANGED;
-        }
-        auto& control = *this->m_control;
-        const auto result = control.ownership_mutex.inspect_owner_instance(
-            writer_instance(), *m_authority, [&] {
-                if (ready()) { return; }
-                const auto head = control.leading_sequence.load(std::memory_order_acquire);
-                auto first = head > this->m_num_elements ? head - this->m_num_elements : 0;
-                if (framed()) {
-                    while (first != head && frame_end(first) == 0) { ++first; }
-                    if (head != 0 && first == head) {
-                        throw ring_acquisition_failure_exception("Retained message history has no complete boundary.");
-                    }
-                    for (auto cursor = first; cursor != head;) {
-                        const auto end = frame_end(cursor);
-                        if (end <= cursor || end > head) {
-                            throw ring_acquisition_failure_exception("Retained message frame boundary is incomplete.");
-                        }
-                        cursor = end;
-                    }
-                }
-                for (auto sequence = first; sequence != head; ++sequence) {
-                    const size_t index = mod_u64(sequence, this->m_num_elements);
-                    const auto& element = m_elements[index];
-                    const void* source = element.saved_sequence.load(std::memory_order_acquire) == sequence + 1
-                        ? static_cast<const void*>(element.saved)
-                        : static_cast<const void*>(this->m_data + index);
-                    std::memcpy(m_image + (sequence - first), source, sizeof(T));
-                    ipc_wakeup_operation_for_test("history_image_copy", this);
-                }
-                m_record->first = first;
-                m_record->head = head;
-                m_record->ready.store(true, std::memory_order_release);
-                ipc_wakeup_operation_for_test("history_image_published", this);
-            });
-        return result;
-    }
-
-private:
-    uint64_t frame_end(sequence_counter_type sequence) const
-    {
-        const auto& element = m_elements[mod_u64(sequence, this->m_num_elements)];
-        if (element.saved_sequence.load(std::memory_order_acquire) == sequence + 1) {
-            return element.saved_frame_end;
-        }
-        return element.frame_sequence == sequence + 1 ? element.frame_end : 0;
-    }
-
-    const std::shared_ptr<ipc::mapped_region> m_storage;
-    std::shared_ptr<const Native_exit_authority> m_authority;
-    record_t* m_record = nullptr;
-    element_t* m_elements = nullptr;
-    T* m_image = nullptr;
-};
-
-template <typename T>
-class Ring_native_notification : public Ring<T, true>
-{
-public:
-    enum class Replay_state { COMPLETE, PENDING, REJECTED };
-    struct replay_result_t
-    {
-        Replay_state state;
-        std::error_code error;
-    };
-
-    Ring_native_notification(
-        const std::string& directory,
-        const std::string& filename,
-        size_t num_elements,
-        std::shared_ptr<ring_native_notification_record_t> record,
-        std::shared_ptr<const Native_exit_authority> authority,
-        ring_directory_policy policy = ring_directory_policy::caller_directory,
-        std::function<void()> replay_ready = {},
-        std::shared_ptr<Ring_retained_history<T>> history = nullptr)
-
-    :
-        Ring<T, true>(directory, filename, num_elements, policy, authority),
-        m_record(std::move(record)),
-        m_authority(std::move(authority)),
-        m_replay_ready(std::move(replay_ready)),
-        m_history(std::move(history))
-    {
-        if (!m_record || !m_authority ||
-            m_record->version != ring_native_notification_record_t::k_version ||
-            m_record->occurrence == 0 || !m_authority->contains(m_record->writer_instance))
-        {
-            throw ring_acquisition_failure_exception("Invalid native notification capability.");
-        }
-        if (m_history && (!m_history->matches(this->m_data_filename, num_elements) ||
-            m_history->occurrence() != m_record->occurrence ||
-            m_history->writer_instance() != m_record->writer_instance))
-        {
-            throw ring_acquisition_failure_exception("Retained history belongs to another ring occurrence.");
-        }
-    }
-
-    bool matches(const std::string& control_filename, size_t num_elements) const
-    {
-        std::error_code error;
-        return num_elements == this->m_num_elements &&
-            fs::equivalent(this->m_data_filename + "_control", control_filename, error) && !error;
-    }
-
-    const Native_exit_authority* authority() const noexcept { return m_authority.get(); }
-    std::shared_ptr<const Native_exit_authority> authority_reference() const noexcept { return m_authority; }
-    bool exited() const noexcept { return m_record->native_exit.load(std::memory_order_acquire); }
-    bool pending() const noexcept { return m_record->replay_pending.load(std::memory_order_acquire); }
-    std::shared_ptr<Ring_retained_history<T>> retained_history() const noexcept { return m_history; }
-
-    // The occurrence owner has withdrawn entry and joined every old operation,
-    // including replay, before replacing any binding. It must update every
-    // continuing lock participant before granting a newcomer permission.
-    // Keep this mapping, record and replay_ready signal through the transition.
-    void replace_native_authority(std::shared_ptr<const Native_exit_authority> authority)
-    {
-        if (!this->ring_owned_by_this_process() || !authority ||
-            !authority->contains(m_record->writer_instance))
-        {
-            throw ring_acquisition_failure_exception("Invalid replacement native authority.");
-        }
-        this->retain_native_authority(authority);
-        if (m_history) { m_history->replace_native_authority(authority); }
-        m_authority = std::move(authority);
-    }
-
-    // May also be called during enrollment, before any reader lock acquisition.
-    bool observe_exit() noexcept
-    {
-        if (!m_authority->has_exited(m_record->writer_instance)) {
-            return false;
-        }
-        m_record->replay_pending.store(true, std::memory_order_release);
-        m_record->native_exit.store(true, std::memory_order_release);
-        return true;
-    }
-
-    // Caller holds this mapping's posting lock. Late admission cannot overwrite
-    // an earlier unfinished duty; it leaves a new checked replay obligation.
-    void enroll_after_exit() noexcept
-    {
-        if (exited()) {
-            m_record->replay_pending.store(true, std::memory_order_release);
-            if (m_replay_ready) { m_replay_ready(); }
-        }
-    }
-
-    replay_result_t replay(uint64_t expected_occurrence)
-    {
-        if (expected_occurrence != m_record->occurrence || !observe_exit()) {
-            return {Replay_state::REJECTED, {}};
-        }
-        auto& control = *this->m_control;
-        ipc_wakeup_operation_for_test("ring_native_exit_published", &control);
-        if (m_history) {
-            const auto recovery = m_history->recover(expected_occurrence);
-            if (recovery == interprocess_mutex::Owner_inspection::CHANGED) {
-                return {Replay_state::REJECTED, {}};
-            }
-            if (recovery == interprocess_mutex::Owner_inspection::BUSY) {
-                return {Replay_state::PENDING, std::make_error_code(std::errc::operation_in_progress)};
-            }
-        }
-        typename Ring<T, true>::Control::Wakeup_errors errors;
-        const auto inspection = control.ownership_mutex.inspect_owner_instance(
-            m_record->writer_instance, *m_authority,
-            [&]
-            {
-                // This gate excludes a successor without acquiring, releasing
-                // or clearing writer ownership. Clear only dead arbitration.
-                spinlock::locker readers(control.rs_stack_spinlock, m_authority.get());
-                for (auto& entry : control.reading_sequences) {
-                    entry.data.word.fetch_and(~Ring<T, true>::Reader_state_union::request_mask);
-                }
-                {
-                    spinlock::locker posting(control.m_spinlock, m_authority.get());
-                    errors = control.flush_wakeups();
-                    ipc_wakeup_operation_for_test("ring_native_replay_before_complete", &control);
-                }
-                // Publish completion only after posting release, while reader
-                // admission is still excluded by the outer slot lock.
-                ipc_wakeup_operation_for_test("ring_native_posting_released", &control);
-                if (errors.count == 0 && !observation_failure_pending()) {
-                    m_record->replay_pending.store(false, std::memory_order_release);
-                }
-            });
-        using Inspection = interprocess_mutex::Owner_inspection;
-        if (inspection == Inspection::CHANGED) {
-            return {Replay_state::REJECTED, {}};
-        }
-        if (inspection == Inspection::BUSY) {
-            return {Replay_state::PENDING, std::make_error_code(std::errc::operation_in_progress)};
-        }
-        if (errors.count != 0) {
-            errors.report(&control, this->m_data_filename.c_str(),
-                "native exit notification incomplete; replay obligation retained");
-            return {Replay_state::PENDING, (*errors.entries)[0].error};
-        }
-        if (observation_failure_pending()) {
-            m_record->replay_pending.store(true, std::memory_order_release);
-            return {Replay_state::PENDING, std::make_error_code(std::errc::operation_canceled)};
-        }
-        return {Replay_state::COMPLETE, {}};
-    }
-
-private:
-    const std::shared_ptr<ring_native_notification_record_t> m_record;
-    std::shared_ptr<const Native_exit_authority> m_authority;
-    // Local owning-operation signal; never part of mapped/shared ring state.
-    const std::function<void()> m_replay_ready;
-    const std::shared_ptr<Ring_retained_history<T>> m_history;
-};
-
-} // namespace detail
-
 template <typename T>
 struct Ring_R : Ring<T, true>
 {
@@ -3426,28 +2983,15 @@ struct Ring_R : Ring<T, true>
         const std::string& data_filename,
         size_t             num_elements,
         size_t             max_trailing_elements = 0,
-        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory,
-        std::shared_ptr<detail::Ring_native_notification<T>> notification = nullptr,
-        bool prepare_native_notification = false,
-        Ring_reader_policy reader_policy = Ring_reader_policy::forcible,
-        std::shared_ptr<const detail::Native_exit_authority> bootstrap_authority = nullptr)
+        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory)
     :
-        Ring<T, true>::Ring(directory, data_filename, num_elements, policy,
-            notification ? notification->authority_reference() : std::move(bootstrap_authority)),
+        Ring<T, true>::Ring(directory, data_filename, num_elements, policy),
         m_max_trailing_elements(max_trailing_elements),
-        m_notification(std::move(notification)),
-        m_native_binding_pending(prepare_native_notification),
         c(*this->m_control)
     {
         assert(num_elements % 8 == 0);
         assert(max_trailing_elements <= 3 * num_elements / 4);
 
-        if (m_notification) {
-            if (!m_notification->matches(this->m_data_filename + "_control", num_elements)) {
-                throw ring_acquisition_failure_exception("Native notification mapping mismatch.");
-            }
-            m_notification->observe_exit();
-        }
 
         // Capture the incarnation at every slot acquisition: this process's
         // namespaces may differ from those of its earlier readers.
@@ -3464,7 +3008,7 @@ struct Ring_R : Ring<T, true>
             bool admitted = false;
             {
                 detail::ipc_wakeup_operation_for_test("ring_native_enrollment_before_slot_lock", &c);
-                spinlock::locker lock(c.rs_stack_spinlock, native_exit_authority());
+                spinlock::locker lock(c.rs_stack_spinlock);
                 if (!c.free_rs_stack.empty()) {
                     m_rs_index = c.free_rs_stack.pop_or(-1);
                     struct Slot_reservation
@@ -3485,14 +3029,11 @@ struct Ring_R : Ring<T, true>
 
                     admission_index = m_rs_index;
                     {
-                        spinlock::locker posting(c.m_spinlock, native_exit_authority());
+                        spinlock::locker posting(c.m_spinlock);
                         admission_error = c.clear_reader_wakeup_unlocked(m_rs_index);
                         if (!admission_error) {
                             // Pin the kernel token before publishing this reader.
                             c.dirty_semaphores[m_rs_index].prepare_wait();
-                            if (m_notification) {
-                                m_notification->enroll_after_exit();
-                            }
                         }
                     }
                     if (!admission_error) {
@@ -3501,7 +3042,7 @@ struct Ring_R : Ring<T, true>
                             m_rs_index,
                             Ring<T, true>::Control::Slot_read_access_release::unpaired);
                         slot.publish_owner(*owner);
-                        auto admitted_state = slot.load_state().with_policy(reader_policy);
+                        auto admitted_state = slot.load_state();
                         admitted_state.word &= ~(Reader_state_union::copying_mask | Reader_state_union::request_mask);
                         slot.word.store(admitted_state.with_status(Ring<T, true>::READER_STATE_ACTIVE).word);
                         reservation.committed = true;
@@ -3522,7 +3063,7 @@ struct Ring_R : Ring<T, true>
                 throw ring_acquisition_failure_exception(); // No slots available.
             }
             typename Ring<T, true>::Control::Wakeup_errors errors;
-            const bool freed = c.scavenge_orphans(errors, native_exit_authority());
+            const bool freed = c.scavenge_orphans(errors);
             errors.report(&c, this->m_data_filename.c_str(), "reader scavenging retained reset debt");
             if (!freed) {
                 throw ring_acquisition_failure_exception();
@@ -3531,45 +3072,6 @@ struct Ring_R : Ring<T, true>
         }
 
         m_reading_sequence = &c.reading_sequences[m_rs_index].data.v;
-    }
-
-    // The owning prepared reader excludes every local read, stop and release
-    // until this installation finishes. The authority is immutable afterwards.
-    void install_native_notification(
-        std::shared_ptr<detail::Ring_native_notification<T>> notification)
-    {
-        if (!m_native_binding_pending || m_notification || !notification ||
-            !notification->matches(this->m_data_filename + "_control", this->m_num_elements))
-        {
-            throw ring_acquisition_failure_exception("Invalid prepared native notification binding.");
-        }
-        notification->observe_exit();
-        // Publish the exact authority before any shared lock can encounter a
-        // dead writer. A partial pair remains with its prepared owner.
-        this->retain_native_authority(notification->authority_reference());
-        m_notification = std::move(notification);
-        spinlock::locker readers(c.rs_stack_spinlock, native_exit_authority());
-        spinlock::locker posting(c.m_spinlock, native_exit_authority());
-        m_notification->enroll_after_exit();
-        m_native_binding_pending = false;
-    }
-
-    // Requires the same withdrawal and real operation joins as the notification
-    // binding. Keeping this reader retains its cursor, slot, guard, consumed
-    // exit edge and any derived consumer's range. This does not resume an
-    // evicted interval or grant permission to a new actor.
-    void replace_native_authority(
-        std::shared_ptr<const detail::Native_exit_authority> authority)
-    {
-        if (!this->ring_owned_by_this_process() || m_native_binding_pending || !m_notification) {
-            throw ring_acquisition_failure_exception("Reader has no installed native binding.");
-        }
-        m_notification->replace_native_authority(authority);
-        this->retain_native_authority(std::move(authority));
-        m_notification->observe_exit();
-        spinlock::locker readers(c.rs_stack_spinlock, native_exit_authority());
-        spinlock::locker posting(c.m_spinlock, native_exit_authority());
-        m_notification->enroll_after_exit();
     }
 
     // =========================================================================
@@ -3592,9 +3094,9 @@ struct Ring_R : Ring<T, true>
             {
                 // Keep the active owner until its checked drain succeeds.
                 // Each failed attempt releases both shared locks before retry.
-                spinlock::locker lock(c.rs_stack_spinlock, native_exit_authority());
+                spinlock::locker lock(c.rs_stack_spinlock);
                 auto& slot = c.reading_sequences[m_rs_index].data;
-                error = c.clear_reader_wakeup(m_rs_index, native_exit_authority());
+                error = c.clear_reader_wakeup(m_rs_index);
                 if (!error) {
                     const bool release_read_access = slot.status() == Ring<T, true>::READER_STATE_ACTIVE;
                     c.clear_slot_guard(
@@ -3638,9 +3140,7 @@ struct Ring_R : Ring<T, true>
         if (m_stopping) {
             return {};
         }
-        select_recovered_history();
         m_reading = true;
-        if (history_recovery_pending()) { return {}; }
 
         // NOTE: Readers may only snapshot up to m_max_trailing_elements (typically 3/4 of the ring).
         // If this fires, you probably called start_reading()/try_snapshot_e(reader, N) with N larger than
@@ -3648,16 +3148,6 @@ struct Ring_R : Ring<T, true>
         // construct the reader with a larger trailing cap.
         assert(num_trailing_elements <= m_max_trailing_elements);
 
-        if (m_history_selected) {
-            const auto history = m_notification->retained_history();
-            const auto head = history->head();
-            const auto first = std::max(history->first(), head > num_trailing_elements
-                ? head - num_trailing_elements : 0);
-            m_reading_sequence->store(head);
-            m_last_consumed_sequence = head;
-            m_raw_range_outstanding = first != head;
-            return {history->pointer(first), history->pointer(head)};
-        }
 
         // This function NO LONGER acquires m_rs_index. It uses the one from the constructor.
 
@@ -3715,7 +3205,6 @@ struct Ring_R : Ring<T, true>
             }
         }
 
-        m_raw_range_outstanding = ret.begin != ret.end;
         return ret;
     }
 
@@ -3738,7 +3227,7 @@ struct Ring_R : Ring<T, true>
         // Snapshot release is reusable. Permanent admission stop belongs to
         // request_stop(), including the production session shutdown path.
         {
-            spinlock::locker release_lock(c.rs_stack_spinlock, native_exit_authority());
+            spinlock::locker release_lock(c.rs_stack_spinlock);
             auto& slot = c.reading_sequences[m_rs_index].data;
             assert(!slot.load_state().copying());
             bool released = false;
@@ -3762,24 +3251,9 @@ struct Ring_R : Ring<T, true>
             slot.word.fetch_and(~Reader_state_union::request_mask);
         }
         m_reading = false;
-        m_raw_range_outstanding = false;
-        select_recovered_history();
     }
 
     sequence_counter_type reading_sequence()     const { return m_reading_sequence->load(); }
-
-    sequence_counter_type get_leading_sequence() const
-    {
-        return m_history_selected ? m_notification->retained_history()->head()
-            : c.leading_sequence.load();
-    }
-
-    T* get_element_from_sequence(sequence_counter_type sequence) const
-    {
-        if (!m_history_selected) { return Ring<T, true>::get_element_from_sequence(sequence); }
-        const auto history = m_notification->retained_history();
-        return sequence >= history->first() && sequence < history->head() ? history->pointer(sequence) : nullptr;
-    }
 
     /**
      * Block until new data is available (or until unblocked) and return the new
@@ -3792,7 +3266,7 @@ struct Ring_R : Ring<T, true>
      */
     const Range<T> wait_for_new_data(Ring_wait_hint wait_hint = Ring_wait_hint::ADAPTIVE)
     {
-        constexpr auto blocking_wait_watchdog = std::chrono::milliseconds(1000);
+        constexpr auto blocking_wait_watchdog = std::chrono::seconds(1);
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
         if (auto callback = detail::test_hooks::s_ring_wait_started.load(
@@ -3804,17 +3278,13 @@ struct Ring_R : Ring<T, true>
 
         auto produce_range = [&]() -> Range<T> {
             Local_read_lock read_lock(m_reading_lock);
-            if (!m_raw_range_outstanding) {
-                select_recovered_history();
-            }
-            if (history_recovery_pending()) { return {}; }
             const bool require_reading = m_reading;
             if (handle_eviction(read_lock, require_reading) || !read_can_continue(require_reading)) {
                 return {};
             }
 
             auto start_sequence   = m_reading_sequence->load();
-            auto leading_sequence = get_leading_sequence();
+            auto leading_sequence = c.leading_sequence.load();
             const auto last_consumed_before = m_last_consumed_sequence;
 
             auto update_max_relaxed = [](auto& target, sequence_counter_type value) {
@@ -3859,19 +3329,13 @@ struct Ring_R : Ring<T, true>
 
             ret.begin = this->m_data + mod_u64(start_sequence, this->m_num_elements);
             ret.end   = ret.begin + num_range_elements;
-            if (m_history_selected) {
-                const auto history = m_notification->retained_history();
-                ret.begin = history->pointer(start_sequence);
-                ret.end = history->pointer(leading_sequence);
-            }
             m_reading_sequence->fetch_add(num_range_elements);  // +=
             m_last_consumed_sequence = start_sequence + sequence_counter_type(num_range_elements);
-            m_raw_range_outstanding = true;
             return ret;
         };
 
         auto sequences_equal = [&]() {
-            return m_reading_sequence->load() == get_leading_sequence();
+            return m_reading_sequence->load() == c.leading_sequence;
         };
 
         bool stay_in_blocking_phase = wait_hint == Ring_wait_hint::BLOCKING;
@@ -3881,9 +3345,6 @@ struct Ring_R : Ring<T, true>
                 return Range<T>{};
             }
 
-            if (control_work_pending()) {
-                return Range<T>{};
-            }
 
             // If the writer has closed the ring and there is no unread data,
             // set m_stopping so fetch_message() returns nullptr, cleanly
@@ -3909,7 +3370,7 @@ struct Ring_R : Ring<T, true>
                 // Phase 1 - fast spin: aggressively poll for a very short window to
                 // deliver sub-100us wakeups when the writer is still active.
                 const double fast_spin_end = get_wtime() + fast_spin_duration;
-                while (sequences_equal() && !control_work_pending() && get_wtime() < fast_spin_end) {
+                while (sequences_equal() && get_wtime() < fast_spin_end) {
                     if (m_stopping) {
                         return Range<T>{};
                     }
@@ -3919,7 +3380,7 @@ struct Ring_R : Ring<T, true>
                     // Phase 2 - precision sleeps: yield the CPU in 1ms slices while
                     // still polling at a high enough cadence to catch bursts quickly.
                     const double precision_sleep_end = get_wtime() + precision_sleep_duration;
-                    while (sequences_equal() && !control_work_pending() && get_wtime() < precision_sleep_end) {
+                    while (sequences_equal() && get_wtime() < precision_sleep_end) {
                         if (m_stopping) {
                             return Range<T>{};
                         }
@@ -3956,7 +3417,7 @@ struct Ring_R : Ring<T, true>
                 int reset_index = -1;
                 std::error_code reset_error;
                 {
-                    spinlock::locker lock(c.m_spinlock, native_exit_authority());
+                    spinlock::locker lock(c.m_spinlock);
                     // A failed cleanup leaves the existing local index as a
                     // reset obligation, but no obsolete shared registration.
                     const int previous = m_sleepy_index;
@@ -3969,13 +3430,6 @@ struct Ring_R : Ring<T, true>
                         }
                     }
                     if (!registration_failed) {
-                        if (control_work_pending()) {
-                            unblocked = true;
-                        }
-                        if (m_notification && m_notification->exited() && !m_native_exit_consumed) {
-                            m_native_exit_consumed = true;
-                            unblocked = true;
-                        }
                         if (sequences_equal() && !unblocked) {
                             if (m_stopping || c.writer_closed.load(std::memory_order_acquire)) {
                                 m_stopping = true;
@@ -4011,9 +3465,6 @@ struct Ring_R : Ring<T, true>
                     return Range<T>{};
                 }
                 if (unblocked) {
-                    if (control_work_pending()) {
-                        return Range<T>{};
-                    }
                     if (!sequences_equal()) {
                         return produce_range();
                     }
@@ -4031,16 +3482,13 @@ struct Ring_R : Ring<T, true>
                             int current;
                             std::error_code error;
                             {
-                                spinlock::locker lock(reader.c.m_spinlock, reader.native_exit_authority());
+                                spinlock::locker lock(reader.c.m_spinlock);
                                 current = reader.m_sleepy_index;
                                 if (current >= 0) {
                                     error = reader.c.clear_reader_wakeup_unlocked(current);
                                     if (!error) {
                                         reader.m_sleepy_index = -1;
                                     }
-                                }
-                                if (reader.m_notification && reader.m_notification->exited()) {
-                                    reader.m_native_exit_consumed = true;
                                 }
                             }
                             if (current >= 0) {
@@ -4081,9 +3529,6 @@ struct Ring_R : Ring<T, true>
                 }
             }
 
-            if (control_work_pending()) {
-                return Range<T>{};
-            }
             if (!sequences_equal()) {
                 return produce_range();
             }
@@ -4101,9 +3546,6 @@ struct Ring_R : Ring<T, true>
     void done_reading_new_data()
     {
         Local_read_lock read_lock(m_reading_lock);
-        m_raw_range_outstanding = false;
-        select_recovered_history();
-        if (m_history_selected || history_recovery_pending()) { return; }
         const bool require_reading = m_reading;
         while (!m_stopping && (!require_reading || m_reading)) {
             if (handle_eviction(read_lock, require_reading)) {
@@ -4133,8 +3575,6 @@ struct Ring_R : Ring<T, true>
     void reattach_after_eviction()
     {
         Local_read_lock read_lock(m_reading_lock);
-        if (!m_raw_range_outstanding) { select_recovered_history(); }
-        if (m_history_selected || history_recovery_pending()) { return; }
         acquire_guard(read_lock, uint8_t(m_trailing_octile), m_reading, true);
     }
 
@@ -4242,21 +3682,12 @@ private:
 
     bool handle_eviction(Local_read_lock& read_lock, bool require_reading)
     {
-        if (m_history_selected) { return false; }
-        if (!m_raw_range_outstanding && select_recovered_history()) {
-            return false;
-        }
-        if (recovered_history_available()) { return true; }
-        if (history_recovery_pending()) { return true; }
         auto& slot = c.reading_sequences[m_rs_index].data;
         auto state = slot.load_state();
         if (state.guard_present() || !read_can_continue(require_reading)) {
             return false;
         }
         if (state.status() == Ring<T, true>::READER_STATE_EVICTED) {
-            if (m_notification && m_notification->retained_history() && m_notification->observe_exit()) {
-                return true;
-            }
             if (resume_at_leading_sequence(read_lock, require_reading)) {
                 m_evicted_since_last_wait = true;
             }
@@ -4348,7 +3779,7 @@ public:
         std::error_code error;
         int sleepy;
         {
-            spinlock::locker lock(c.m_spinlock, native_exit_authority());
+            spinlock::locker lock(c.m_spinlock);
             sleepy = m_sleepy_index;
             if (sleepy >= 0) {
                 error = c.dirty_semaphores[sleepy].post();
@@ -4358,54 +3789,6 @@ public:
             &c, sleepy, error, this->m_data_filename.c_str());
     }
 
-    // This local durable reason participates in the same posting/registration
-    // handshake as ring data. Its producer retains failed-post ownership.
-    bool notify_control_work(const std::atomic<bool>& owner_closed)
-    {
-        bool published = false;
-        std::error_code reported_error;
-        for (;;) {
-            std::error_code error;
-            int sleepy = -1;
-            {
-                spinlock::locker lock(c.m_spinlock, native_exit_authority());
-                if (owner_closed.load() || m_stopping) {
-                    return false;
-                }
-                if (!published) {
-                    m_control_work_sequence.fetch_add(1);
-                    published = true;
-                }
-                sleepy = m_sleepy_index;
-                if (sleepy >= 0) {
-                    error = c.dirty_semaphores[sleepy].post();
-                }
-            }
-            if (!error) {
-                return true;
-            }
-            if (error != reported_error) {
-                detail::report_ring_wakeup_error("control producer retains notification debt",
-                    &c, sleepy, error, this->m_data_filename.c_str());
-                reported_error = error;
-            }
-            detail::native_error_backoff();
-        }
-    }
-
-    // Called only by the reader. Consuming a generation, rather than a level,
-    // lets space-blocked work wait for actual input/guard progress.
-    bool take_control_work()
-    {
-        spinlock::locker lock(c.m_spinlock, native_exit_authority());
-        const auto sequence = m_control_work_sequence.load();
-        if (sequence == m_seen_control_work_sequence) {
-            return false;
-        }
-        m_seen_control_work_sequence = sequence;
-        return true;
-    }
-
     void request_stop()
     {
         std::error_code reported_error;
@@ -4413,7 +3796,7 @@ public:
             std::error_code error;
             int sleepy;
             {
-                spinlock::locker lock(c.m_spinlock, native_exit_authority());
+                spinlock::locker lock(c.m_spinlock);
                 m_stopping = true;
                 sleepy = m_sleepy_index;
                 if (sleepy >= 0) {
@@ -4440,7 +3823,7 @@ public:
 
         // A guardless count can still belong to an eviction or slot cleanup.
         // Those paired releases use the same lock until their decrement ends.
-        spinlock::locker release_lock(c.rs_stack_spinlock, native_exit_authority());
+        spinlock::locker release_lock(c.rs_stack_spinlock);
         c.guard_rollback_attempt_count.fetch_add(1, std::memory_order_relaxed);
 
         uint64_t access_snapshot = c.read_access.load();
@@ -4487,28 +3870,13 @@ public:
     }
 
 private:
-    bool control_work_pending() const
-    {
-        return m_control_work_sequence.load() != m_seen_control_work_sequence;
-    }
-
-    const detail::Native_exit_authority* native_exit_authority() const noexcept
-    {
-        return Ring<T, true>::native_exit_authority();
-    }
-
     Precision_sleeper                      m_precision_sleeper;
     const size_t                           m_max_trailing_elements;
     std::atomic<sequence_counter_type>*    m_reading_sequence       = &s_zero_rs;
     size_t                                 m_trailing_octile        = 0;
     uint64_t                               m_seen_unblock_sequence  = 0;
-    std::atomic<uint64_t>                   m_control_work_sequence  = 0;
-    uint64_t                               m_seen_control_work_sequence = 0;
     sequence_counter_type                  m_last_consumed_sequence = 0;
     std::atomic<bool>                      m_evicted_since_last_wait{false};
-    std::shared_ptr<detail::Ring_native_notification<T>> m_notification;
-    bool                                  m_native_binding_pending = false;
-    bool                                  m_native_exit_consumed = false;
 
 protected:
     enum class Copy_admission { COPIED, RETRY, EVICTED, STOPPED };
@@ -4525,12 +3893,6 @@ protected:
     {
         if (!m_reading || m_stopping) {
             return Copy_admission::STOPPED;
-        }
-        if (m_history_selected) {
-            // This occurrence's completed image is immutable. No writer can
-            // mutate it, and the notification keeps its mapping alive.
-            read();
-            return Copy_admission::COPIED;
         }
         auto& slot = c.reading_sequences[m_rs_index].data;
         auto state = slot.load_state();
@@ -4563,53 +3925,6 @@ protected:
         return Copy_admission::COPIED;
     }
 
-    // A derived reader installs its finer progress during construction and
-    // clears it before destruction. Every selection path consults this same
-    // cursor, including publication racing a raw returned-range release.
-    void set_retained_history_progress(const std::atomic<sequence_counter_type>* progress) noexcept
-    {
-        m_retained_history_progress = progress;
-    }
-
-    // The caller holds m_reading_lock at an actual raw release boundary, or
-    // between managed complete-frame extractions with its finer message cursor.
-    bool recovered_history_available() const
-    {
-        return !m_history_selected && m_notification && m_notification->retained_history() &&
-            m_notification->retained_history()->ready();
-    }
-
-    bool select_recovered_history()
-    {
-        if (m_history_selected || !m_notification) { return false; }
-        const auto history = m_notification->retained_history();
-        if (!history || !history->ready()) { return false; }
-        const auto cursor = m_retained_history_progress
-            ? m_retained_history_progress->load() : m_reading_sequence->load();
-        const auto first = std::max(cursor, history->first());
-        {
-            spinlock::locker lock(c.rs_stack_spinlock, native_exit_authority());
-            auto& slot = c.reading_sequences[m_rs_index].data;
-            const bool active = slot.status() == Ring<T, true>::READER_STATE_ACTIVE;
-            c.clear_slot_guard(m_rs_index, active
-                ? Ring<T, true>::Control::Slot_read_access_release::paired
-                : Ring<T, true>::Control::Slot_read_access_release::unpaired);
-            slot.word.fetch_and(~Reader_state_union::request_mask);
-        }
-        if (first != cursor) { m_evicted_since_last_wait = true; }
-        m_reading_sequence->store(first);
-        m_last_consumed_sequence = first;
-        m_raw_range_outstanding = false;
-        m_history_selected = true;
-        return true;
-    }
-
-    bool history_recovery_pending() const
-    {
-        return m_notification && m_notification->retained_history() &&
-            m_notification->exited() && !m_notification->retained_history()->ready();
-    }
-
     std::atomic<bool>                      m_reading                = false;
     std::atomic<bool>                      m_reading_lock           = false;
 
@@ -4627,9 +3942,6 @@ private:
     std::atomic<int>                       m_sleepy_index           = -1;
     int                                    m_rs_index               = -1;
     std::atomic<bool>                      m_stopping               = false;
-    bool                                   m_raw_range_outstanding  = false;
-    bool                                   m_history_selected       = false;
-    const std::atomic<sequence_counter_type>* m_retained_history_progress = nullptr;
 
     inline static std::atomic<sequence_counter_type> s_zero_rs{0};
 
@@ -4670,22 +3982,11 @@ struct Ring_W : Ring<T, false>
         const std::string& directory,
         const std::string& data_filename,
         size_t             num_elements,
-        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory,
-        bool message_writer = false,
-        std::shared_ptr<const detail::Native_exit_authority> authority = nullptr,
-        std::shared_ptr<detail::Ring_retained_history<T>> history = nullptr)
+        detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory)
     :
-        Ring<T, false>::Ring(directory, data_filename, num_elements, policy, std::move(authority)),
-        m_message_writer(message_writer),
-        m_history(std::move(history)),
+        Ring<T, false>::Ring(directory, data_filename, num_elements, policy),
         c(*this->m_control)
     {
-        if (m_history && (!m_history->matches(this->m_data_filename, num_elements) ||
-            m_history->writer_instance() != detail::current_process_instance() ||
-            m_history->framed() != message_writer || m_history->ready()))
-        {
-            throw ring_acquisition_failure_exception("Invalid writer retained history binding.");
-        }
         // Single writer across processes
         detail::ipc_wakeup_operation_for_test("ring_writer_before_ownership", &c.ownership_mutex);
         bool acquired = false;
@@ -4703,8 +4004,7 @@ struct Ring_W : Ring<T, false>
                 }
             }
         } custody{c.ownership_mutex, m_ownership_token, acquired};
-        if (!c.ownership_mutex.try_lock_cleanup(
-                m_ownership_token, acquired, nullptr, this->native_exit_authority()))
+        if (!c.ownership_mutex.try_lock_cleanup(m_ownership_token, acquired))
         {
             throw ring_acquisition_failure_exception();
         }
@@ -4718,7 +4018,7 @@ struct Ring_W : Ring<T, false>
         typename Ring<T, false>::Control::Wakeup_errors wakeup_errors;
         cancel_requests();
         {
-            spinlock::locker lock(c.m_spinlock, this->native_exit_authority());
+            spinlock::locker lock(c.m_spinlock);
             c.writer_closed.store(0, std::memory_order_release);
             wakeup_errors = c.flush_wakeups();
         }
@@ -4727,18 +4027,6 @@ struct Ring_W : Ring<T, false>
         custody.committed = true;
         wakeup_errors.report(&c, this->m_data_filename.c_str(),
             "writer acquired; notification replay failed; registrations retained");
-    }
-
-    // The occurrence owner has joined this writer's old operations and keeps
-    // newcomers excluded until every surviving binding has been replaced.
-    void replace_native_authority(
-        std::shared_ptr<const detail::Native_exit_authority> authority)
-    {
-        if (!this->ring_owned_by_this_process() || !authority) {
-            throw ring_acquisition_failure_exception("Invalid replacement writer authority.");
-        }
-        if (m_history) { m_history->replace_native_authority(authority); }
-        this->retain_native_authority(std::move(authority));
     }
 
     ~Ring_W()
@@ -4760,7 +4048,7 @@ struct Ring_W : Ring<T, false>
         std::array<std::error_code, max_process_index> reported_errors{};
         for (;;) {
             {
-                spinlock::locker lock(c.m_spinlock, this->native_exit_authority());
+                spinlock::locker lock(c.m_spinlock);
                 if (!published) {
                     c.writer_closed.store(1, std::memory_order_release);
                     detail::ipc_wakeup_operation_for_test("ring_close_published", &c);
@@ -4830,9 +4118,7 @@ struct Ring_W : Ring<T, false>
         const bool already_owned = m_writing_thread_index.load() == thread_index();
         T2* write_location = (T2*)prepare_write(num_elements);
         try {
-            auto* placed = new (write_location) T2{std::forward<Args>(args)...};
-            record_constructed_frame(placed, num_elements);
-            return placed;
+            return new (write_location) T2{std::forward<Args>(args)...};
         }
         catch (...) {
             m_pending_new_sequence -= num_elements;
@@ -4843,56 +4129,6 @@ struct Ring_W : Ring<T, false>
             }
             throw;
         }
-    }
-
-    // Only the coordinator's existing notification writer may use the reserved
-    // octile. A failed attempt owns no reservation and never waits for its own
-    // reader. In particular, it cannot commit a caller's earlier raw write.
-    template <typename T2, typename... Args>
-    T2* try_write_notification(size_t num_extra_elements, Args&&... args)
-    {
-        static_assert(sizeof(T2) % sizeof(T) == 0, "T2 must be a multiple of T");
-        static_assert(std::is_trivially_copyable_v<T2> || ring_payload_traits<T2>::allow_nontrivial,
-            "Notification payload must satisfy the ring payload contract.");
-        static_assert(std::is_trivially_destructible_v<T2> || ring_payload_traits<T2>::allow_nontrivial,
-            "Notification payload must satisfy the ring payload contract.");
-        const auto num_elements = sizeof(T2) / sizeof(T) + num_extra_elements;
-        auto* location = reinterpret_cast<T2*>(prepare_write(num_elements, true));
-        if (!location) {
-            return nullptr;
-        }
-        try {
-            auto* placed = new (location) T2{std::forward<Args>(args)...};
-            record_constructed_frame(placed, num_elements);
-            return placed;
-        }
-        catch (...) {
-            m_pending_new_sequence -= num_elements;
-            m_octile = octile_of_index(mod_u64(m_pending_new_sequence, this->m_num_elements),
-                this->m_num_elements);
-            m_writing_thread_index = 0;
-            throw;
-        }
-    }
-
-    // Publication is already complete. Retry only the retained notification
-    // debt; repeating the frame write would publish the event twice.
-    bool retry_notification_wakeups(const std::atomic<bool>& owner_closed)
-    {
-        detail::Spin_backoff backoff;
-        while (!owner_closed.load()) {
-            typename Ring<T, false>::Control::Wakeup_errors errors;
-            {
-                spinlock::locker lock(c.m_spinlock, this->native_exit_authority());
-                errors = c.flush_wakeups();
-            }
-            if (!errors.count) {
-                return true;
-            }
-            errors.report(&c, this->m_data_filename.c_str(), "notification writer retains wake debt");
-            backoff.spin();
-        }
-        return false;
     }
 
     /**
@@ -4919,7 +4155,7 @@ struct Ring_W : Ring<T, false>
      *    The update occurs under the ring spinlock and uses the default atomic
      *    ordering of leading_sequence.
      */
-    sequence_counter_type done_writing(const std::atomic<bool>* owner_closed = nullptr)
+    sequence_counter_type done_writing()
     {
         const auto committed_sequence = m_pending_new_sequence;
         typename Ring<T, false>::Control::Wakeup_errors wakeup_errors;
@@ -4929,14 +4165,8 @@ struct Ring_W : Ring<T, false>
                 std::atomic<uint32_t>& owner;
                 ~Release_writer() { owner = 0; }
             } release{m_writing_thread_index};
-            spinlock::locker lock(c.m_spinlock, this->native_exit_authority());
+            spinlock::locker lock(c.m_spinlock);
             assert(m_writing_thread_index == thread_index());
-            if (owner_closed && owner_closed->load()) {
-                m_pending_new_sequence = c.leading_sequence.load();
-                m_octile = octile_of_index(mod_u64(m_pending_new_sequence, this->m_num_elements),
-                    this->m_num_elements);
-                return invalid_sequence;
-            }
             c.leading_sequence = committed_sequence;
             detail::ipc_wakeup_operation_for_test("ring_commit_published", &c);
             wakeup_errors = c.flush_wakeups();
@@ -4944,14 +4174,6 @@ struct Ring_W : Ring<T, false>
         wakeup_errors.report(&c, this->m_data_filename.c_str(),
             "head committed; notification failed; registrations retained");
         return committed_sequence;
-    }
-
-    // Closure and a retained service reply's final commit share the existing
-    // posting gate. No Coordinator/list mutex spans a ring operation.
-    void close_notification_writer(std::atomic<bool>& owner_closed)
-    {
-        spinlock::locker lock(c.m_spinlock, this->native_exit_authority());
-        owner_closed = true;
     }
 
     /**
@@ -4962,7 +4184,7 @@ struct Ring_W : Ring<T, false>
     {
         typename Ring<T, false>::Control::Wakeup_errors wakeup_errors;
         {
-            spinlock::locker lock(c.m_spinlock, this->native_exit_authority());
+            spinlock::locker lock(c.m_spinlock);
             c.global_unblock_sequence++;
             detail::ipc_wakeup_operation_for_test("ring_unblock_published", &c);
             wakeup_errors = c.flush_wakeups();
@@ -4990,15 +4212,9 @@ struct Ring_W : Ring<T, false>
 
     void advance_writer_octile_if_needed(size_t head_index)
     {
-        (void)advance_writer_octile(head_index, false);
-    }
-
-private:
-    bool advance_writer_octile(size_t head_index, bool yield_to_protected)
-    {
         const uint8_t new_octile = octile_of_index(head_index, this->m_num_elements);
         if (m_octile == new_octile) {
-            return true;
+            return;
         }
 
 #ifndef NDEBUG
@@ -5014,7 +4230,7 @@ private:
         const auto range_mask = uint64_t(0xff) << (8 * new_octile);
         if ((c.read_access & range_mask) == 0) {
             m_octile = new_octile;
-            return true;
+            return;
         }
         bool requests_published = false;
         struct Request_cleanup
@@ -5039,8 +4255,7 @@ private:
             const bool guarded = state.guard_present() && state.guard_octile() == new_octile;
             const bool pending = state.guard_pending() && state.pending_octile() == new_octile;
 #if SINTRA_ENABLE_SLOW_READER_EVICTION
-            return pending || (guarded &&
-                (state.protected_reader() || state.copying() || state.guard_pending()));
+            return pending || (guarded && (state.copying() || state.guard_pending()));
 #else
             return pending || guarded;
 #endif
@@ -5049,7 +4264,7 @@ private:
         std::array<std::error_code, max_process_index> reported_reset_errors{};
         auto scavenge = [&]() {
             typename Ring<T, false>::Control::Wakeup_errors errors;
-            c.scavenge_orphans(errors, this->native_exit_authority());
+            c.scavenge_orphans(errors);
             std::array<std::error_code, max_process_index> current_errors{};
             for (size_t i = 0; i != errors.count; ++i) {
                 const auto& entry = (*errors.entries)[i];
@@ -5066,9 +4281,6 @@ private:
             // Dead copying owners must be observed while their published guard
             // still blocks, independently of the live-eviction configuration.
             scavenge();
-            if (protected_octile(new_octile)) {
-                return;
-            }
 #if SINTRA_ENABLE_SLOW_READER_EVICTION
             const sequence_counter_type lag_limit =
                 sequence_counter_type(SINTRA_EVICTION_LAG_RINGS) * this->m_num_elements;
@@ -5080,14 +4292,13 @@ private:
 #if SINTRA_ENABLE_SLOW_READER_EVICTION
                 auto eligible = [&](State state) {
                     return state.status() == Ring<T, false>::READER_STATE_ACTIVE &&
-                        !state.protected_reader() &&
                         state.guard_present() &&
                         (slot.v.load() < threshold || state.guard_octile() == new_octile);
                 };
                 bool published_now = false;
 #endif
                 {
-                    spinlock::locker release_lock(c.rs_stack_spinlock, this->native_exit_authority());
+                    spinlock::locker release_lock(c.rs_stack_spinlock);
                     auto state = slot.load_state();
                     if (blocks_on_identity(state)) {
                         const auto owner = slot.owner();
@@ -5138,7 +4349,7 @@ private:
                 }
                 // Release the lifetime lock at publication, then re-read the
                 // slot: a pre-REQUEST transaction may have completed meanwhile.
-                spinlock::locker release_lock(c.rs_stack_spinlock, this->native_exit_authority());
+                spinlock::locker release_lock(c.rs_stack_spinlock);
                 bool evicted = false;
                 const auto previous = slot.fetch_update_state_if(
                     [&](State current) -> std::optional<State>
@@ -5197,11 +4408,6 @@ private:
         };
 
         while (c.read_access & range_mask) {
-            // Do not force an unrelated leaf while a protected reader still
-            // determines whether this reservation can proceed.
-            if (yield_to_protected && protected_octile(new_octile)) {
-                return false;
-            }
             bool has_blocking_reader = scan_blocking_readers();
 
             if (has_blocking_reader) {
@@ -5213,7 +4419,7 @@ private:
 
                 // Serialize guardless-count recovery with slot teardown and
                 // eviction, which can own a decrement without a visible guard.
-                spinlock::locker release_lock(c.rs_stack_spinlock, this->native_exit_authority());
+                spinlock::locker release_lock(c.rs_stack_spinlock);
                 uint64_t access_snapshot = c.read_access.load();
                 if (blocked_start   == std::chrono::steady_clock::time_point{} ||
                     access_snapshot != last_access_snapshot)
@@ -5310,70 +4516,14 @@ private:
         }
 
         m_octile = new_octile;
-        return true;
+        return;
     }
 
 private:
-    bool protected_octile(uint8_t octile) const
-    {
-        for (const auto& entry : c.reading_sequences) {
-            const auto state = entry.data.load_state();
-            if (state.status() == Ring<T, false>::READER_STATE_ACTIVE && state.protected_reader() &&
-                ((state.guard_present() && state.guard_octile() == octile) ||
-                 (state.guard_pending() && state.pending_octile() == octile)))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool protected_reservation(sequence_counter_type first, size_t count, bool notification) const
-    {
-        if (!count) {
-            return false;
-        }
-        const auto octile_size = this->m_num_elements / 8;
-        const auto first_octile = first / octile_size;
-        const auto last_octile = (first + count) / octile_size;
-        const auto last_payload_octile = (first + count - 1) / octile_size;
-        for (const auto& entry : c.reading_sequences) {
-            const auto state = entry.data.load_state();
-            if (state.status() != Ring<T, false>::READER_STATE_ACTIVE || !state.protected_reader()) {
-                continue;
-            }
-            const auto blocks = [&](uint8_t guard) {
-                // Only a transition into a retained physical octile reuses
-                // unread storage. Forward append within this logical octile
-                // remains safe, including an idle ring at sequence zero.
-                for (auto octile = first_octile + 1; octile <= last_octile; ++octile) {
-                    if ((octile & 7) == guard) {
-                        return true;
-                    }
-                }
-                if (!notification && state.notification_reserve()) {
-                    const auto reserved = (guard + 7) & 7;
-                    for (auto octile = first_octile; octile <= last_payload_octile; ++octile) {
-                        if ((octile & 7) == reserved) {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            };
-            if ((state.guard_present() && blocks(state.guard_octile())) ||
-                (state.guard_pending() && blocks(state.pending_octile())))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
     void cancel_requests()
     {
         using State = typename Ring<T, false>::Reader_state_union;
-        spinlock::locker lock(c.rs_stack_spinlock, this->native_exit_authority());
+        spinlock::locker lock(c.rs_stack_spinlock);
         for (auto& entry : c.reading_sequences) {
             if (entry.data.load_state().request_pending()) {
                 entry.data.word.fetch_and(~State::request_mask);
@@ -5386,10 +4536,8 @@ private:
      * Precondition: num_elements_to_write <= ring_size/8 (single octile).
      * Guarantees:
      *  * Returns a pointer to a contiguous range within the linearized mapping.
-     *  * Checks the entire reservation against protected storage and the
-     *    coordinator notification reserve, even without an octile transition.
      */
-    T* prepare_write(size_t num_elements_to_write, bool notification = false)
+    T* prepare_write(size_t num_elements_to_write)
     {
         assert(num_elements_to_write <= this->m_num_elements / 8);
         if (num_elements_to_write > this->m_num_elements / 8) {
@@ -5397,103 +4545,42 @@ private:
         }
         const auto current_thread = thread_index();
         detail::Spin_backoff backoff;
-        bool owns_new_reservation = false;
-        for (;;) {
-            uint32_t expected = 0;
-            bool acquired = false;
+        uint32_t expected = 0;
+        bool acquired = false;
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
-            bool waiting_reported = false;
+        bool waiting_reported = false;
 #endif
-            while (!(acquired = m_writing_thread_index.compare_exchange_strong(expected, current_thread))) {
-                if (expected == current_thread) {
-                    // A notification cannot consume or commit this thread's
-                    // earlier raw reservation. Other writers must finish their
-                    // bounded construction before we test protected space:
-                    // rollback releases the token without publishing a wake.
-                    if (notification) {
-                        return nullptr;
-                    }
-                    break;
-                }
+        while (!(acquired = m_writing_thread_index.compare_exchange_strong(expected, current_thread))) {
+            if (expected == current_thread) {
+                break;
+            }
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
-                if (!waiting_reported) {
-                    detail::ring_guard_observation_for_test("writer_waiting", &c.read_access, 0);
-                    waiting_reported = true;
-                }
+            if (!waiting_reported) {
+                detail::ring_guard_observation_for_test("writer_waiting", &c.read_access, 0);
+                waiting_reported = true;
+            }
 #endif
-                expected = 0;
-                backoff.spin();
-            }
-            owns_new_reservation |= acquired;
-            const auto saved_sequence = m_pending_new_sequence;
-            const auto saved_octile   = m_octile;
-            const size_t index = mod_u64(saved_sequence, this->m_num_elements);
-            try {
-                bool blocked = protected_reservation(saved_sequence, num_elements_to_write, notification);
-                if (!blocked) {
-                    m_pending_new_sequence += num_elements_to_write;
-                    const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
-                    blocked = !advance_writer_octile(head, m_message_writer || notification);
-                }
-                if (blocked) {
-                    cancel_requests();
-                    m_pending_new_sequence = saved_sequence;
-                    m_octile = saved_octile;
-                    if (owns_new_reservation && (m_message_writer || notification)) {
-                        m_writing_thread_index = 0;
-                        owns_new_reservation = false;
-                    }
-                    if (notification) {
-                        return nullptr;
-                    }
-                    detail::ring_guard_observation_for_test(
-                        "writer_protected_blocked", &c.read_access, uint8_t(saved_octile));
-                    backoff.spin();
-                    continue;
-                }
-            }
-            catch (...) {
-                // Restore while still owning the writer. An earlier unpublished
-                // reservation and its pointer remain owned by this same thread.
-                cancel_requests();
-                m_pending_new_sequence = saved_sequence;
-                m_octile = saved_octile;
-                if (owns_new_reservation) {
-                    m_writing_thread_index = 0;
-                }
-                throw;
-            }
-            if (m_history) {
-                m_history->preserve(saved_sequence, num_elements_to_write,
-                    c.leading_sequence.load(std::memory_order_acquire));
-            }
-            return this->m_data + index;
+            expected = 0;
+            backoff.spin();
         }
-    }
-
-protected:
-    sequence_counter_type pending_sequence() const noexcept { return m_pending_new_sequence; }
-    bool retains_history() const noexcept { return bool(m_history); }
-
-    void record_written_frame(sequence_counter_type start, sequence_counter_type end)
-    {
-        if (m_history) { m_history->record_frame(start, end); }
-    }
-
-private:
-    template <typename T2>
-    void record_constructed_frame(const T2* frame, size_t elements)
-    {
-        if (!m_history || !m_message_writer) { return; }
-        if constexpr (requires { frame->bytes_to_next_message; }) {
-            if (frame->bytes_to_next_message != elements * sizeof(T)) {
-                throw std::invalid_argument("Constructed message does not fill its retained reservation.");
+        const auto saved_sequence = m_pending_new_sequence;
+        const auto saved_octile   = m_octile;
+        const size_t index = mod_u64(saved_sequence, this->m_num_elements);
+        try {
+            m_pending_new_sequence += num_elements_to_write;
+            const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
+            advance_writer_octile_if_needed(head);
+        }
+        catch (...) {
+            cancel_requests();
+            m_pending_new_sequence = saved_sequence;
+            m_octile = saved_octile;
+            if (acquired) {
+                m_writing_thread_index = 0;
             }
-            record_written_frame(m_pending_new_sequence - elements, m_pending_new_sequence);
+            throw;
         }
-        else {
-            throw std::invalid_argument("Retained message construction requires a complete frame.");
-        }
+        return this->m_data + index;
     }
 
     // Use uint32_t (trivial type) instead of std::thread::id for reliable atomic operations
@@ -5504,8 +4591,6 @@ private:
     uint32_t               m_owner_tid                       = 0;
     uint32_t               m_owner_pid                       = 0;
     uint64_t               m_ownership_token                 = 0;
-    const bool             m_message_writer;
-    const std::shared_ptr<detail::Ring_retained_history<T>> m_history;
 
     typename Ring<T, false>::Control& c;
 };

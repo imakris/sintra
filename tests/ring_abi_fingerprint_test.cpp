@@ -30,7 +30,7 @@ void test_message_prefix_ring_abi()
     sintra::test::require_true(
         sintra::detail::k_sintra_ring_abi_version == 11,
         k_failure_prefix,
-        "native ownership and wakeup records require ring ABI version 11");
+        "binary wakeup tokens require ring ABI version 11");
     sintra::test::require_true(
         sintra::detail::k_ring_lifecycle_anchor_abi_version == 5,
         k_failure_prefix,
@@ -139,18 +139,18 @@ void test_attach_rejects_mismatched_fingerprint()
             static_cast<uint64_t>(sintra::num_reserved_service_instances),
         });
     };
-    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 7,
+    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 6,
         k_failure_prefix,
-        "native ownership and wakeup records require ABI-11 layout revision 7");
+        "the common binary wakeup control uses ABI-11 layout revision 6");
     sintra::test::require_true(
-        revision_fingerprint(11, 7) == sintra::detail::k_ring_abi_fingerprint,
+        revision_fingerprint(11, 6) == sintra::detail::k_ring_abi_fingerprint,
         k_failure_prefix,
         "the revision fixture must reproduce this build's fingerprint");
 
     for (const std::uint64_t wrong_fingerprint :
             {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(10, 2),
                 revision_fingerprint(10, 3), revision_fingerprint(10, 4),
-                revision_fingerprint(10, 5), revision_fingerprint(11, 6)})
+                revision_fingerprint(10, 5), revision_fingerprint(11, 7)})
     {
         sintra::test::require_true(wrong_fingerprint != sintra::detail::k_ring_abi_fingerprint,
             k_failure_prefix,
