@@ -338,6 +338,30 @@ The complete status, failure, exact-exit, callback, cancellation, quiescence,
 threading, and teardown contract is in
 [`sintra::spawn_swarm_process`](reference/spawn_swarm_process.md).
 
+For a child that publishes `worker_service` when ready:
+
+```cpp
+sintra::Spawn_options options;
+options.binary_path                  = binary_path;
+options.env_overrides                = {"WORKER_MODE=active"};
+options.readiness_instance_name      = "worker_service";
+options.lifetime.hard_exit_code      = 99;
+options.lifetime.hard_exit_timeout_ms = 100;
+
+auto custody = sintra::spawn_swarm_process(options);
+if (!custody) {
+    throw std::runtime_error("managed-child request rejected");
+}
+
+auto launch = custody.wait_for_readiness_until(
+    std::chrono::steady_clock::now() + std::chrono::seconds(5));
+if (launch.readiness_state == sintra::Managed_child_readiness_state::pending) {
+    // The deadline only bounded observation; request cleanup explicitly.
+    auto cleanup = custody.terminate_until(
+        std::chrono::steady_clock::now() + std::chrono::seconds(5));
+}
+```
+
 ### `sintra::join_swarm`
 
 Signature:
@@ -638,6 +662,16 @@ MESSAGE_T receive(Typed_instance_id<SENDER_T> sender_id);
 Blocks a control thread until a matching message arrives. Do not call
 `receive<T>()` from a message handler or post-handler callback.
 
+```cpp
+auto tick = sintra::receive<Tick>();
+sintra::console() << tick.symbol << " @ " << tick.price << '\n';
+```
+
+For generated messages with variable-buffer fields, use `receive_owned<T>()`
+and retain or move the returned frame owner. By-value `receive<T>()` rejects
+those types at compile time. See [receiving messages](reference/receive.md)
+for the ownership contract and examples.
+
 Compiled examples/tests:
 - [`example/sintra/sintra_example_0_basic_pubsub.cpp`](../example/sintra/sintra_example_0_basic_pubsub.cpp)
 - [`tests/receive_test.cpp`](../tests/receive_test.cpp)
@@ -676,6 +710,65 @@ teardown outcome is known.
 
 Remote exceptions are propagated back to the caller. Exception conversion covers
 standard exception families and unknown exceptions.
+
+For example, export a transceiver method:
+
+```cpp
+struct Remotely_accessible : sintra::Derived_transceiver<Remotely_accessible>
+{
+    std::string append(const std::string& text, int value)
+    {
+        return std::to_string(value) + ": " + text;
+    }
+
+    SINTRA_RPC(append);
+};
+```
+
+The callee keeps its named instance alive while callers use it:
+
+```cpp
+Remotely_accessible service;
+service.assign_name("append-service");
+```
+
+After the callee publishes that name, a caller can invoke it and catch a
+propagated remote exception:
+
+```cpp
+try {
+    auto value = Remotely_accessible::rpc_append("append-service", "Hi", 43);
+    sintra::console() << value << '\n';
+}
+catch (const std::exception& error) {
+    sintra::console() << "Remote RPC failed: " << error.what() << '\n';
+}
+```
+
+See [RPC exports](reference/rpc.md) for exception families, payload requirements,
+and the differences between direct and transported same-process calls.
+
+For a targeted one-way notification, export a void-returning method with
+`SINTRA_UNICAST` and call the generated wrapper with the receiver's instance id:
+
+```cpp
+struct Tick_receiver : sintra::Derived_transceiver<Tick_receiver>
+{
+    void handle_tick(const Tick& tick)
+    {
+        sintra::console() << "Targeted price: " << tick.price << '\n';
+    }
+
+    SINTRA_UNICAST(handle_tick)
+};
+
+Tick_receiver::rpc_handle_tick(target_instance_id, Tick{1, 100.0});
+```
+
+The sender obtains `target_instance_id` from the receiver or through name
+resolution. A unicast send does not wait for handler completion or return a
+remote exception; see the
+[complete unicast example](../example/sintra/sintra_example_6_unicast_send_to.cpp).
 
 ### Async RPC
 
@@ -1182,6 +1275,42 @@ target_link_libraries(my_app PRIVATE sintra::sintra)
 The target requires C++20 and links platform support libraries through the
 interface target.
 
+Tests and examples default to enabled in a top-level Sintra build and disabled
+when included as a subproject. Override these defaults with `SINTRA_BUILD_TESTS`
+and `SINTRA_BUILD_EXAMPLES`. Top-level builds also enable installation by
+default; `SINTRA_INSTALL` controls the install rules and exported CMake package.
+
+Header-only use is the default. To compile the non-template message-reader core
+once, configure with `-DSINTRA_BUILD_COMPILED=ON` and link
+`sintra::sintra_compiled`. Without CMake, define `SINTRA_SEPARATE_COMPILATION`
+consistently and compile exactly one source file containing
+`#include <sintra/src.hpp>`.
+
+Windows builds outside CMake must link `advapi32`; MSVC and clang-cl receive an
+automatic library directive.
+
+### Windows build switches
+
+These optional switches must be defined identically for every translation unit
+that includes Sintra:
+
+- `SINTRA_HAS_SEH` enables the per-thread fault guard on Sintra-owned threads.
+  It defaults to `1` for MSVC and clang-cl. MinGW GCC cannot compile
+  `__try`/`__except`, so it uses `0` and relies on host notification through
+  [`announce_fatal_windows_exception`](reference/announce_fatal_windows_exception.md).
+  Clang targeting `*-w64-windows-gnu` can opt in with
+  `-DSINTRA_HAS_SEH=1 -fms-extensions`. Scope the definition to Windows in
+  cross-platform CMake code, for example
+  `$<$<PLATFORM_ID:Windows>:SINTRA_HAS_SEH=1>`; enabling it on another platform
+  is an error.
+- `SINTRA_CRASH_WATCHDOG_GRACE_MS` (default `5000`) bounds the time a host crash
+  reporter can spend on a faulted process before Sintra ends it. Raise it if
+  the reporter needs longer to write a minidump.
+
+See [Windows host crash notification](#windows-host-crash-notification) for
+host responsibilities and the fault-handling contract. Build and test commands
+are in [TESTING.md](../TESTING.md).
+
 ## Recipes
 
 Recipes point to compiled examples or tests so copied code starts from checked
@@ -1196,6 +1325,7 @@ sources.
 | Async RPC with bounded result retrieval | [`tests/rpc_bounded_result_test.cpp`](../tests/rpc_bounded_result_test.cpp) |
 | Async RPC lifecycle outcomes | [`tests/rpc_async_lifecycle_test.cpp`](../tests/rpc_async_lifecycle_test.cpp) |
 | Fire-and-forget unicast | [`example/sintra/sintra_example_6_unicast_send_to.cpp`](../example/sintra/sintra_example_6_unicast_send_to.cpp) |
+| Qt signals and UI-thread dispatch | [Qt cursor sync example](../example/qt_basic/README.md) |
 | Spawn and wait for a process | [`tests/spawn_wait_test.cpp`](../tests/spawn_wait_test.cpp) |
 | Admit a manually launched process | [`tests/external_process_invitation_test.cpp`](../tests/external_process_invitation_test.cpp) |
 | Collective shutdown | [`example/sintra/sintra_example_1_ping_pong_multi.cpp`](../example/sintra/sintra_example_1_ping_pong_multi.cpp) |

@@ -55,114 +55,104 @@
 ![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-green)
 
 Sintra is a C++20 library for type-safe interprocess communication on a single host.
-It lets independent processes exchange typed messages, broadcast events, and invoke
-RPC-style calls with a compile-time-checked API, avoiding string-based protocols and
-external brokers. It also provides coordination primitives such as named barriers,
-as well as typed publish/subscribe, synchronous and asynchronous RPC, crash detection,
-and opt-in worker respawning.
+Independent processes exchange typed messages, broadcast events, and invoke
+synchronous or asynchronous RPC through a compile-time-checked API. Named barriers,
+crash detection, and opt-in worker respawning provide coordination alongside
+communication.
 
-Sintra targets low-latency, crash-resilient local IPC where shared-memory transport and
-coordination need to be integrated rather than assembled from multiple layers. Common
-alternatives such as ZeroMQ or nanomsg provide local transports, but those are socket-based,
-cross the kernel boundary, and still copy data. Sintra uses memory-mapped shared rings
-so data stays in user space and readers access published messages directly, which is
-suitable for latency-sensitive workloads.
+Sintra targets low-latency local IPC, using memory-mapped shared rings and a
+coordinator process to connect a swarm. It suits plugin hosts with out-of-process plugins,
+GUI front-ends communicating with background services, and test harnesses that
+keep multiple workers in sync while exchanging typed data.
 
 ## Table of contents
 
 - [Key features](#key-features)
 - [Quick example](#quick-example)
 - [Getting started](#getting-started)
-- [Reference and guide](#reference-and-guide)
+- [Process and message model](#process-and-message-model)
 - [Supported platforms and architectures](#supported-platforms-and-architectures)
-- [Interprocess communication patterns](#interprocess-communication-patterns)
-- [Advanced topics](#advanced-topics)
+- [Reference and guide](#reference-and-guide)
 - [Tests and continuous integration](#tests-and-continuous-integration)
 - [License](#license)
 
-
 ## Key features
 
-* **Type-safe APIs across processes** - interfaces are expressed as C++ types, so
-  mismatched payloads are detected at compile time instead of surfacing as runtime
-  protocol errors.
-* **Signal bus and RPC in one package** - publish/subscribe dispatch, targeted
-  fire-and-forget messages, and blocking or async remote procedure calls share the same
-  primitives, allowing programs to mix patterns as the architecture requires.
-* **Header-only distribution** - integrate the library by adding the headers to a
-  project; no separate build step or binaries are necessary.
-* **No RTTI required** - type ids are derived from compile-time signatures (or
-  explicit ids when pinned).
-* **Cross-platform design** - shared-memory transport on Linux, macOS, Windows, and FreeBSD.
-* **Opt-in crash recovery** - managed children call `sintra::enable_recovery()`
-  to let the coordinator respawn later occurrences of that custody after an
-  unexpected exit.
-* **Lifeline ownership for spawned processes** - child processes monitor a lifeline
-  pipe/handle and hard-exit if the owner disappears (timeout and exit code are configurable).
-
-Typical use cases include plugin hosts coordinating work with out-of-process plugins,
-GUI front-ends that need to communicate with background services, and distributed test
-harnesses that must keep multiple workers in sync while exchanging strongly typed data.
+* **Type-safe APIs across processes** - message and RPC interfaces are expressed
+  as C++ types, with compile-time payload checks.
+* **Publish/subscribe and RPC** - broadcasts, targeted fire-and-forget messages,
+  and blocking or asynchronous remote calls share the same runtime.
+* **Header-only distribution** - add the headers to your project; a compiled
+  core is also available for builds that want to compile it once.
+* **No RTTI required** - type ids derive from compile-time signatures, with
+  explicit ids available for ABI-compatible builds.
+* **Shared-memory transport** - Linux, macOS, Windows, and FreeBSD are supported.
+* **Managed process lifetimes** - spawned children have a lifeline to their
+  owner; crash recovery is an explicit child opt-in.
 
 ## Quick example
 
-```cpp
-// Publisher process: announce a shared struct Ping to everyone listening.
-sintra::world() << Ping{};
+This complete program starts a publisher and a receiver from one executable.
+The receiver registers its slot before the ready barrier lets the publisher
+send. Both branches use a processing fence to finish the handler before
+coordinated shutdown.
 
-// Receiver process: register a slot so cross-process Pings show up locally.
-sintra::activate_slot([](const Ping&) {
-    sintra::console() << "Received Ping from another process" << '\n';
-});
+```cpp
+#include <sintra/sintra.h>
+
+struct Market_tick
+{
+    int    instrument_id;
+    double last_price;
+};
+
+int sender_branch()
+{
+    sintra::barrier("market-tick-ready");
+    sintra::world() << Market_tick{17, 101.25};
+    sintra::barrier<sintra::processing_fence_t>("market-tick-processed");
+    return 0;
+}
+
+int receiver_branch()
+{
+    sintra::activate_slot([](const Market_tick& tick) {
+        sintra::console()
+            << "instrument " << tick.instrument_id
+            << " last price " << tick.last_price << '\n';
+    });
+
+    sintra::barrier("market-tick-ready");
+    sintra::barrier<sintra::processing_fence_t>("market-tick-processed");
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+    sintra::init(argc, argv, sender_branch, receiver_branch);
+    sintra::shutdown();
+    return 0;
+}
 ```
+
+The example is also available as
+[`sintra_example_9_minimal_pubsub.cpp`](example/sintra/sintra_example_9_minimal_pubsub.cpp).
+For RPC, targeted messages, recovery, and Qt integration, follow the
+[guide's recipes](docs/guide.md#recipes).
 
 ## Getting started
 
-1. The `include/` directory must be on the project's include path.
-2. A C++20 compliant compiler is required (GCC, Clang, or MSVC are supported).
-3. Start with `example/sintra/` for focused samples covering publish/subscribe,
-   ping-pong, RPC, recovery, barriers, and targeted messaging.
-   [`sintra_example_9_minimal_pubsub.cpp`](example/sintra/sintra_example_9_minimal_pubsub.cpp)
-   is the smallest complete multi-process publish/subscribe program.
-
-Because everything ships as headers, Sintra works well in monorepos or projects that
-prefer vendoring dependencies as git submodules or fetching them during configuration.
-
-Header-only use remains the default. To compile the non-template message-reader core
-once, configure with `-DSINTRA_BUILD_COMPILED=ON` and link
-`sintra::sintra_compiled`. For builds not using CMake, define
-`SINTRA_SEPARATE_COMPILATION` consistently and compile exactly one source file
-containing `#include <sintra/src.hpp>`.
-
-### Windows build switches
-
-Both are optional, and both must be defined identically for every translation unit
-that includes Sintra.
-
-- `SINTRA_HAS_SEH` enables the per-thread fault guard, which lets Sintra report a
-  hardware fault taken on one of its own threads. Windows raises no C signal for a
-  fault outside the main thread, so without it such a fault is invisible to the
-  runtime. It defaults to `1` for MSVC and clang-cl. GCC does not implement
-  `__try`/`__except`, so MinGW GCC builds get `0` and must rely on
-  [`sintra::announce_fatal_windows_exception`](docs/reference/announce_fatal_windows_exception.md);
-  clang targeting `*-w64-windows-gnu` can opt in with
-  `-DSINTRA_HAS_SEH=1 -fms-extensions`. Scope it per platform in a cross-platform
-  build, for example
-  `$<$<PLATFORM_ID:Windows>:SINTRA_HAS_SEH=1>`, because defining it on a
-  non-Windows target is an error.
-- `SINTRA_CRASH_WATCHDOG_GRACE_MS` (default `5000`) bounds how long the host's
-  crash reporter may run on a faulted process before Sintra ends it. Raise it if
-  your reporter needs longer to write a minidump.
+1. Obtain this repository and put its `include/` directory on your project's
+   include path, or consume its CMake target as shown below.
+2. Use a C++20 compiler: GCC, Clang, and MSVC are supported.
+3. Include `<sintra/sintra.h>` for managed processes, messages, RPC, and barriers.
+   Include `<sintra/rings.h>` when using the direct ring API.
+4. Start with the complete example above or the focused samples in
+   [`example/sintra/`](example/sintra/).
 
 ### CMake integration
 
-If Sintra is already available to your build, link the interface target:
-
-```cmake
-target_link_libraries(my_app PRIVATE sintra::sintra)
-```
-
-For an in-tree dependency, make the target available first:
+For an in-tree dependency:
 
 ```cmake
 add_subdirectory(external/sintra)
@@ -173,388 +163,128 @@ Tests and examples default to enabled for a top-level Sintra build and disabled
 when included as a subproject. Set `SINTRA_BUILD_TESTS` or
 `SINTRA_BUILD_EXAMPLES` explicitly to override these defaults.
 
-For installed consumers, top-level builds export CMake package metadata. After
-`cmake --install`, use:
+Top-level builds export CMake package metadata. After installing Sintra with
+`cmake --install`, an installed consumer uses:
 
 ```cmake
 find_package(sintra CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE sintra::sintra)
 ```
 
-## Reference and guide
+Header-only use is the default. To compile the non-template message-reader core
+once, configure Sintra with `-DSINTRA_BUILD_COMPILED=ON` and link
+`sintra::sintra_compiled`. See [build integration](docs/guide.md#cmake-integration)
+for separate compilation without CMake, platform libraries, and Windows fault
+handling switches.
 
-For a browser view, build the static reference site and serve it locally:
+## Process and message model
 
-```sh
-python scripts/build_reference_site.py
-python -m http.server 8000 --directory docs/reference_site
-```
+### A swarm has a coordinator
 
-Then open `http://localhost:8000/`.
+`sintra::init(argc, argv, branches...)` initializes the runtime and starts the
+declared branches as managed processes. The starter hosts the coordinator,
+which manages process membership, instance names, type resolution, and barriers.
+The coordinator is trusted infrastructure: if it dies, the swarm dies with it.
+Application work hosted in that process shares its fate. See
+[initialization and process topology](docs/guide.md#initialization-and-process-topology).
 
-The Markdown sources remain available for symbol lookup in
-[docs/reference/index.md](docs/reference/index.md), and the narrative guide is
-[docs/guide.md](docs/guide.md). For reverse lookup from compiler errors,
-exceptions, or runtime symptoms, use [docs/diagnostics.md](docs/diagnostics.md).
-Contributors should read [docs/design_principles.md](docs/design_principles.md)
-before changing Sintra's design.
-[Deferred development and current limitations](docs/deferred_work.md) records
-the work postponed for the current product release.
+Managed children monitor a lifeline pipe or handle. If their owner disappears
+or unpublishes them, they begin teardown and hard-exit after the configured
+timeout. A child can call `enable_recovery()` to let the coordinator respawn
+its custody after an unexpected exit. This recovery restarts a process; it
+does not preserve its application state. Dynamic spawning and admission of
+manually launched processes use the
+[managed-child and invitation APIs](docs/process_lifecycle_notes.md).
+
+### Dispatch runs on reader threads
+
+Sintra's reader threads invoke slots and transported RPC handlers
+asynchronously. Handlers and their post-handler continuations run on those
+threads, so shared application state still needs mutexes, atomics, or other
+normal C++ synchronization. A barrier coordinates progress between processes;
+it does not remove in-process data races.
+
+Use `activate_slot()` for asynchronous delivery and `receive<T>()` for a
+blocking receive on a control thread. A handler must not block in `receive()`:
+the message it awaits needs the reader thread that it would stop. See
+[threading and reentrancy](docs/guide.md#threading-and-reentrancy).
+
+### Message storage has a lifetime
+
+Plain payload structs must satisfy Sintra's
+[message payload contract](docs/reference/message_payloads.md). Generated
+messages can carry variable-size fields such as `message_string`; those fields
+borrow the dispatch frame and must be converted to owning values before the
+callback returns if they are to outlive it. `receive_owned<T>()` retains a
+complete generated message frame for independent ownership. See
+[receiving and owning messages](docs/reference/receive.md).
+
+### Coordinate progress and teardown
+
+A plain `barrier("name")` is a delivery fence: it combines a rendezvous with
+local reader progress, while handlers may still be running. Use
+`processing_fence_t` from a control thread when the next phase needs completed
+handler side effects. The [barrier modes](docs/reference/barrier_modes.md)
+describe the guarantees and handler-context exclusions.
+
+Use `shutdown()` when all live participants finish together; each participant
+calls it after its branch work. Sintra performs the collective handoff before
+tearing down the local runtime. Use `leave()` from a control thread for an
+intentional departure while peers continue. The coordinator can leave only
+when it is the sole remaining known process. An incomplete managed-child join
+retains runtime state for a sequential shutdown retry; see
+[shutdown and departure](docs/barriers_and_shutdown.md) for return values,
+retry rules, and the optional coordinator hook.
+
+### Participants share an account and compatible builds
+
+Managed swarm participants run under the same operating-system account.
+Sintra uses owner-only IPC resources in a trusted temporary location; this
+provides no isolation between mutually untrusted processes in that account.
+See [IPC resource privacy and cleanup](docs/reference/init.md#ipc-resource-privacy)
+for filesystem requirements and cleanup behavior.
+
+Build swarm participants with compatible compiler, standard-library, platform,
+architecture, and Sintra ring configurations. Startup rejects an ABI-token
+mismatch. A matching token and explicit type ids do not by themselves make raw
+C++ object representations interoperable. See
+[type identity and compatibility](docs/guide.md#type-ids) and
+[ring compatibility](docs/reference/rings.md).
 
 ## Supported platforms and architectures
 
 * **Linux, macOS, Windows, FreeBSD** - shared-memory transport is supported on all four.
-* **CPU architectures** - Sintra targets x86/x64 and ARM/AArch64 CPUs. Builds on other
-  architectures still succeed, but they emit a warning and fall back to a simple no-op
-  spin pause for the interprocess primitives, so those primitives may run with a very
-  basic implementation and performance is not guaranteed.
-* **Process visibility for reader liveness** - a writer reclaims a dead reader's slot only
-  on proof of that reader's death. From the capture of a reader slot's start stamp until the
-  slot is reclaimed, the processes of one swarm must observe one another through the native
-  process-lookup calls. Configurations outside the following are unsupported, and reader
-  liveness classification may be wrong there:
-  * **Linux** - all processes of a swarm share one PID namespace and one time namespace,
-    and neither changes during a slot's lifetime. The procfs at `/proc`, whose
-    `/proc/self/stat`, `/proc/<pid>/stat` and `/proc/self/status` Sintra reads, is mounted
-    for that PID namespace. No seccomp or similar filter fakes the results of `kill`,
-    `pidfd_open` or procfs reads.
-  * **FreeBSD** - processes of a swarm stay visible to one another through both
-    `sysctl(KERN_PROC_PID)` and `kill(pid, 0)` with a positive PID. No MAC policy (Biba,
-    MLS, `mac_seeotheruids`), `security.bsd.see_other_uids` or `see_other_gids`,
-    `see_jail_proc`, jail boundary or credential change may hide one from another.
-  * **macOS and Windows** - no additional requirement.
-* **macOS requirement** - Sintra requires macOS 15.0 or newer with the Command Line Tools
-  for Xcode 15 (or newer) installed (the full Xcode IDE is not required). The build fails
-  if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing.
-
-## Interprocess Communication Patterns
-
-### Broadcast a Ping and listen from another process
-
-```cpp
-// Sender process: announce a shared struct Ping to everyone listening.
-sintra::world() << Ping{};
-
-// Receiver process: register a slot so cross-process Pings show up locally.
-sintra::activate_slot([](const Ping&) {
-    sintra::console() << "Received Ping from another process" << '\n';
-});
-```
-
-### Send a targeted fire-and-forget message
-
-```cpp
-struct Unicast_receiver : sintra::Derived_transceiver<Unicast_receiver>
-{
-    void handle_unicast(const Ping& msg) {
-        sintra::console() << "Got targeted ping\n";
-    }
-
-    SINTRA_UNICAST(handle_unicast)
-};
-
-// Send to a specific instance id (e.g., exchanged out-of-band or via a broadcast).
-Unicast_receiver::rpc_handle_unicast(target_instance_id, Ping{});
-```
-
-For full flows, see `example/sintra/sintra_example_0_basic_pubsub.cpp`,
-`example/sintra/sintra_example_6_unicast_send_to.cpp`, and
-`example/sintra/sintra_example_2_rpc_append.cpp`.
-
-### Block until a specific message arrives
-
-```cpp
-// Wait for a Stop signal (synchronous receive).
-sintra::receive<Stop>();
-
-// Wait for a message and capture its payload.
-auto msg = sintra::receive<DataMessage>();
-sintra::console() << "value=" << msg.value << '\n';
-```
-
-Note: call `receive<T>()` from main/control threads only; do not call it from a message handler.
-Debug builds abort if this is violated.
-
-For a generated message containing `message_string` or other variable-buffer
-fields, use `receive_owned<Message>()`. It returns a typed unique pointer that
-owns the complete frame; access fields with `message->field` and move the
-pointer to transfer ownership. By-value `receive<Message>()` rejects these
-types at compile time. See [receiving messages](docs/reference/receive.md).
-
-### Export a transceiver method for RPC
-
-```cpp
-struct Remotely_accessible: sintra::Derived_transceiver<Remotely_accessible>
-{
-    std::string append(const std::string& s, int v) {
-        return std::to_string(v) + ": " + s;
-    }
-
-    SINTRA_RPC(append); // generates Remotely_accessible::rpc_append(...)
-};
-```
-
-
-Usage example:
-
-```cpp
-// Callee process: create and name the instance.
-Remotely_accessible ra;
-ra.assign_name("instance name");
-
-// Caller process: invoke the RPC.
-auto value = Remotely_accessible::rpc_append("instance name", "Hi", 43);
-sintra::console() << value << '\n';
-```
-
-Async RPC variants (`rpc_async_<method>(...)`) are also available when a caller
-needs to start a request and collect the result later. For the async-handle API
-and same-process export details, see the RPC overview comments in
-`include/sintra/sintra.h` and `tests/rpc_async_lifecycle_test.cpp`.
-
-### Handle a Remote Exception
-
-```cpp
-// Remote exceptions thrown inside append() propagate back across the process boundary.
-try {
-    sintra::console() << Remotely_accessible::rpc_append("instance", "Hi", 43) << '\n';
-}
-catch (const std::exception& e) {
-    sintra::console() << "Remote RPC failed in callee: " << e.what() << '\n';
-}
-```
-
-### Observe abnormal exits from managed peers
-
-```cpp
-sintra::set_lifecycle_handler(
-    [](const sintra::process_lifecycle_event& event) {
-        if (event.why != sintra::process_lifecycle_event::reason::crash) {
-            return;
-        }
-        sintra::console()
-            << "Process "
-            << event.process_iid
-            << " crashed with status " << event.status << '\n';
-    });
-```
-
-### Lifeline process ownership
-
-Sintra spawns managed processes with a lifeline pipe/handle. The child watches the
-read end; if the parent process exits or unpublishes, the pipe breaks and the child
-shuts down, then hard-exits after a timeout.
-
-You can configure the policy per spawn:
-
-```cpp
-sintra::Spawn_options options;
-options.binary_path = binary_path;
-options.env_overrides = {"WORKER_MODE=active"};
-options.readiness_instance_name = "worker_service";
-options.lifetime.hard_exit_code = 99;
-options.lifetime.hard_exit_timeout_ms = 100;
-auto custody = sintra::spawn_swarm_process(options);
-if (!custody) {
-    throw std::runtime_error("managed-child request rejected");
-}
-
-auto launch = custody.wait_for_readiness_until(
-    std::chrono::steady_clock::now() + std::chrono::seconds(5));
-if (launch.readiness_state == sintra::Managed_child_readiness_state::pending) {
-    // The deadline only bounded this observation. Custody remains open.
-    auto cleanup = custody.terminate_until(
-        std::chrono::steady_clock::now() + std::chrono::seconds(5));
-}
-```
-
-Environment overrides merge with the inherited environment, and recovery
-occurrences reuse the same overrides. Deadline expiry does not request release
-or cleanup and does not itself create a failure.
-Use `terminate_until()` to request cleanup explicitly. The custody handle's
-boolean conversion reports validity and acceptance; status reports readiness
-and release separately. See
-[managed process spawning](docs/reference/spawn_swarm_process.md) for
-environment entry rules and failure diagnostics.
-
-Note: spawned processes require a lifeline by default. To launch a process
-manually into an existing swarm, create an external process invitation in the
-coordinator and pass `External_process_invitation::sintra_args()` to that
-process. See
-[`docs/reference/external_process_invitation.md`](docs/reference/external_process_invitation.md)
-and [`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md).
-
-### Qt cursor sync example
-
-For a Qt widget example that forwards Qt signals through sintra, see
-[`example/qt_basic/README.md`](example/qt_basic/README.md).
-
-## Advanced topics
-
-### Threading model and barriers
-
-#### Asynchronous message dispatch
-
-Sintra uses **dedicated reader threads** to process incoming messages from shared memory rings. When a message arrives:
-1. A reader thread pulls the message from the ring buffer.
-2. The reader thread invokes the matching slot or RPC handler **asynchronously**.
-3. Handlers (and their post-handler continuations) execute on the reader thread, not the thread that published the message or called the barrier.
-
-**Concurrency reminder:** Slot handlers that touch shared state must still synchronize with other threads in the process (via mutexes, atomics, etc.). The barriers described below coordinate *when* handlers run; they do not eliminate the need for thread-safe data structures.
-
-#### Barrier semantics
-
-`sintra::barrier()` coordinates progress across processes and comes in three flavors that trade off strength for cost. The template defaults to `delivery_fence_t`, so a plain `barrier("name")` is already stronger than a bare rendezvous. The lightest-weight barrier whose guarantees match the code's requirements is preferred:
-
-* **Rendezvous barriers** (`barrier<sintra::rendezvous_t>(name)`) simply ensure that every participant has reached the synchronization point. Messages published before the barrier might still be in flight or waiting to be handled, so this mode is appropriate when only aligned phase progression is needed - for example, coordinating the simultaneous start of a workload whose logic does not depend on the effects of earlier messages.
-
-  **Warning:** Two peers can both reach the rendezvous while still missing each other's prior messages (A sends x, B sends y, both call rendezvous, neither is guaranteed to have received the other). Prefer delivery or processing fences when correctness depends on pre-barrier messages being observed.
-* **Delivery-fence barriers** (`barrier(name)` or `barrier<sintra::delivery_fence_t>(name)`) guarantee that all pre-barrier messages have been pulled off the shared-memory rings by each process's reader thread and are queued locally for handling, though the handlers may still be running. This is a local guarantee for the caller; it does not add a second rendezvous proving that peers have also drained their readers. The default delivery fence is suitable when the next step requires the complete set of incoming work to be staged locally, such as inspecting an inbox before taking action.
-* **Processing-fence barriers** (`barrier<sintra::processing_fence_t>(name)`) wait until every handler (and any continuations) for messages published before the barrier has finished executing. This mode is appropriate when subsequent logic must observe the completed side effects - for instance, reading shared state that earlier handlers updated or applying a configuration change only after all peers processed preparatory updates.
-
-Delivery fences cost the same as rendezvous plus a short wait for readers to catch up. Processing fences add a single control message per process and an extra rendezvous to allow deterministic observation of handler side effects.
-
-Barrier names beginning with `_sintra_` are reserved for internal runtime coordination and now fail fast.
-
-```cpp
-// Wait until everyone reaches the same point and any prior messages are queued locally.
-sintra::barrier("phase-1"); // delivery fence
-
-// Later: ensure the side effects from earlier messages are visible before reading shared data.
-sintra::barrier<sintra::processing_fence_t>("apply-updates");
-```
-
-Barrier rounds track processes, not calling threads. For a single
-`(barrier_name, group_name, BarrierMode)` round, each process should have one
-in-flight caller; when several threads in the same process must wait for the same
-phase, coordinate them with normal threading primitives and have one
-representative enter `sintra::barrier`.
-
-Processing fences are best issued from control threads when the fence must
-include all pre-barrier handler work. A processing fence called from a
-request-reader handler or post-handler is reentrancy-aware: it skips the
-currently executing reader and may run queued post-handlers while waiting, so it
-does not wait for the current handler/post-handler or for messages queued behind
-it on that same request-reader stream.
-
-### Coordinated shutdown
-
-Most multi-process Sintra programs follow this top-level shape:
-
-```cpp
-sintra::init(argc, argv, process_a, process_b, process_c);
-
-// branch-specific work
-// ...
-
-sintra::shutdown();
-```
-
-`shutdown()` is the recommended teardown call when every live participant is
-expected to finish together. It first performs the library's standard
-all-process shutdown handoff, making sure earlier interprocess work has been
-fully processed, and then tears down the local runtime.
-
-A `false` return means that no runtime was active or that the final
-managed-child custody join was bounded-incomplete. In the latter case Sintra
-retains the runtime and teardown state: settle or terminate the retained
-custody, then retry `shutdown()` sequentially.
-The retry skips collective and coordinator-hook phases that already completed.
-Concurrent, nested, and reentrant shutdown calls are unsupported. The 250 ms
-custody-join bound is not a deadline for the complete shutdown protocol.
-
-If one process is intentionally departing while peers continue running, use
-`sintra::leave()`. If the coordinator must run a bounded final local action before
-raw teardown, use `sintra::shutdown(options)`.
-
-In other words:
-
-* Use `shutdown()` for the ordinary "all processes are done, now exit cleanly"
-  case.
-* Use `leave()` for intentional unilateral departure.
-
-Low-level lifecycle escape hatches and shutdown internals are documented in
-[`docs/barriers_and_shutdown.md`](docs/barriers_and_shutdown.md) and
-[`docs/process_lifecycle_notes.md`](docs/process_lifecycle_notes.md).
-
-### Local account and IPC resources
-
-Managed swarm participants run under the same operating-system account. Each
-coordinator creates a direct owner-only directory in the operating system's
-temporary directory, using an operating-system random swarm identifier. Name
-collisions cause another identifier to be drawn. Windows names include a short
-hash of the account SID; POSIX names include the effective uid. Joining
-processes use the exact swarm identifier and require its directory to exist.
-Use a trusted temporary-directory location: the system default or a parent
-that other accounts cannot replace or alter. A shared writable POSIX temporary
-parent must have the sticky bit set.
-
-The filesystem must preserve and report account ownership and private
-permissions: POSIX directories have mode `0700`, files have no group/other
-permissions, and Windows objects use current-user ACLs. Storage that cannot
-provide these properties is rejected; select a suitable temporary location
-with the operating system's temporary-directory configuration. Creation rolls
-back a newly created empty directory if privacy validation fails. Existing
-entries are never adopted unless they meet the policy. Links and entries whose
-ownership cannot be verified are excluded from cleanup. This does not isolate
-mutually untrusted processes within the same account.
-
-Normal shutdown removes its own swarm directory. POSIX startup remains
-available without directory locking, but crash residue then requires operator
-cleanup. All participants must use the same directory policy. See
-[IPC resource cleanup](docs/reference/init.md#ipc-resource-cleanup) for
-automatic cleanup and fork constraints.
-
-Windows builds outside CMake must link `advapi32` (MSVC and clang-cl receive an
-automatic library directive).
-
-### Optional explicit type ids
-
-Most users do not need explicit type ids when every process uses the same compatible
-build. When ids must remain stable across ABI-compatible build boundaries, they can be
-pinned explicitly for both transceivers and messages. Explicit ids stabilize identity
-only. Every joining process must present exactly the coordinator's startup ABI token.
-That token contains compiler, standard-library, platform, and architecture identities
-plus the Sintra ring ABI version. A token mismatch, including between MSVC and MinGW
-builds, is rejected before that joining process opens its request/reply message rings.
-Rebuild every swarm participant together after an incompatible ring ABI change.
-See [ring compatibility](docs/reference/rings.md) and
-[explicit type IDs](docs/reference/explicit_type_ids.md).
-A matching token is required, but it does not guarantee that raw C++ object
-representations are interoperable; explicit ids provide no such guarantee either. The
-ids must remain unique and consistent across every process in the swarm.
-
-```cpp
-struct Explicit_bus : sintra::Derived_transceiver<Explicit_bus>
-{
-    SINTRA_TYPE_ID(0x120)
-    SINTRA_MESSAGE_EXPLICIT(ping, 0x121, int value)
-};
-
-Explicit_bus bus;
-sintra::activate_slot([](const Explicit_bus::ping& msg) {
-    sintra::console() << "ping value=" << msg.value << '\n';
-});
-bus.emit_global<Explicit_bus::ping>(73);
-```
-
-See `example/sintra/sintra_example_7_explicit_type_ids.cpp` for a full example.
+* **CPU architectures** - Sintra targets x86/x64 and ARM/AArch64. Other
+  architectures emit a warning and use a no-op spin pause; performance is not
+  guaranteed there.
+* **Process visibility** - processes sharing rings must remain mutually visible
+  to native process lookup for reader-liveness classification. Linux requires a
+  shared PID and time namespace with matching procfs; FreeBSD visibility must
+  not be hidden by jail or security policy. See the exact
+  [process-visibility requirements](docs/reference/rings.md#process-visibility-requirements).
+* **macOS** - requires macOS 15.0 or newer and Command Line Tools for Xcode 15
+  or newer. The full Xcode IDE is not required. Missing
+  `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` fails the build.
+
+## Reference and guide
+
+- [Guide](docs/guide.md) - concepts, usage patterns, build integration, and recipes.
+- [API reference](docs/reference/index.md) - per-symbol contracts and examples.
+- [Diagnostics](docs/diagnostics.md) - lookup by compiler error, exception, or runtime symptom.
+- [Barriers and shutdown](docs/barriers_and_shutdown.md) and
+  [process lifecycle](docs/process_lifecycle_notes.md) - coordination and ownership details.
+- [Design principles](docs/design_principles.md) - design constraints for contributors.
+- [Deferred work and limitations](docs/deferred_work.md) - maintained development scope.
+
+The [guide](docs/guide.md) also explains how to build and serve the static
+reference site locally.
 
 ## Tests and continuous integration
 
-The library includes a comprehensive test suite covering publish/subscribe, RPC,
-barriers, and crash recovery. Test runs are selected by `tests/active_tests.txt`.
-
-```bash
-cmake -S . -B build -DSINTRA_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-cd tests && python3 run_tests.py --build-dir ../build --config Release
-```
-
-See [TESTING.md](TESTING.md) for detailed documentation.
-
-CI runs on Linux, macOS, Windows, and FreeBSD — all on GitHub Actions (FreeBSD in a QEMU VM via `vmactions/freebsd-vm`).
+The suite covers publish/subscribe, RPC, barriers, and recovery. See
+[TESTING.md](TESTING.md) for configuring, building, selecting, and running tests.
+CI runs on Linux, macOS, Windows, and FreeBSD through GitHub Actions.
 
 ## License
 
-The source code is licensed under the Simplified BSD License.
+Sintra is licensed under the [Simplified BSD License](LICENSE).

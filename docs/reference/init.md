@@ -95,6 +95,29 @@ slots, barriers, lifecycle helpers) is usable.
   warning when the assumed cache-line size does not match the host's actual
   size; the check is suppressed in `Release` builds.
 
+### IPC resource privacy
+
+Managed swarm participants run under the same operating-system account. Each
+coordinator creates a direct owner-only directory in the operating system's
+temporary directory, using an operating-system random swarm identifier. Name
+collisions cause another identifier to be drawn. Windows names include a short
+hash of the account SID; POSIX names include the effective uid. Joining
+processes use the exact swarm identifier and require its directory to exist.
+Use a trusted temporary-directory location: the system default or a parent
+that other accounts cannot replace or alter. A shared writable POSIX temporary
+parent must have the sticky bit set.
+
+The filesystem must preserve and report account ownership and private
+permissions: POSIX directories have mode `0700`, files have no group/other
+permissions, and Windows objects use current-user ACLs. Storage that cannot
+provide these properties is rejected; select a suitable temporary location
+with the operating system's temporary-directory configuration. Creation rolls
+back a newly created empty directory if privacy validation fails. Existing
+entries are never adopted unless they meet the policy. Links and entries whose
+ownership cannot be verified are excluded from cleanup. This does not isolate
+mutually untrusted processes within the same account. All participants must
+use the same directory policy.
+
 ### IPC resource cleanup
 
 Normal shutdown removes the coordinator's swarm directory. On POSIX,

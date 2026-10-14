@@ -123,7 +123,7 @@ The owned-frame API addresses retention without reopening that architecture.
 The deployment visibility requirements, foreign-owner UNKNOWN diagnostic,
 FreeBSD start-stamp limitations, and generation-wrap assumption remain in the
 [design principles](design_principles.md). The same-account and private
-filesystem requirements remain in the [README](../README.md#local-account-and-ipc-resources).
+filesystem requirements are in the [initialization reference](reference/init.md#ipc-resource-privacy).
 
 ## Derived-object teardown
 

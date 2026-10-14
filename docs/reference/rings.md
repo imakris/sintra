@@ -293,9 +293,8 @@ Contract:
   unrelated identity observation failures do not fail a write. A reader
   slot publishes its process incarnation: PID, start stamp and, on Linux,
   its PID and time namespaces. Liveness classification relies on the
-  process-visibility requirement in the README's
-  [Supported platforms and architectures](../../README.md#supported-platforms-and-architectures)
-  section; outside it, a reader's death may be misjudged. Any
+  [process-visibility requirements](#process-visibility-requirements);
+  outside them, a reader's death may be misjudged. Any
   subsequent `start_reading` or `make_snapshot` throws
   `ring_reader_evicted_exception`; `try_snapshot_e` returns
   `Ring_R_snapshot_error::evicted`. The reader must be reconstructed.
@@ -403,6 +402,26 @@ Example source:
 - [example/sintra/sintra_example_8_ring_helpers.cpp](../../example/sintra/sintra_example_8_ring_helpers.cpp)
 - [tests/ring_helpers_test.cpp](../../tests/ring_helpers_test.cpp)
 - [tests/ipc_rings_tests.cpp](../../tests/ipc_rings_tests.cpp)
+
+## Process visibility requirements
+
+A writer reclaims a dead reader's slot only on proof of that reader's death.
+From the capture of a reader slot's start stamp until the slot is reclaimed,
+processes sharing the rings must observe one another through native
+process-lookup calls. Configurations outside the following are unsupported,
+and reader liveness classification may be wrong there:
+
+- **Linux** - all processes share one PID namespace and one time namespace,
+  and neither changes during a slot's lifetime. The procfs at `/proc`, whose
+  `/proc/self/stat`, `/proc/<pid>/stat` and `/proc/self/status` Sintra reads,
+  is mounted for that PID namespace. No seccomp or similar filter fakes the
+  results of `kill`, `pidfd_open` or procfs reads.
+- **FreeBSD** - processes stay visible to one another through both
+  `sysctl(KERN_PROC_PID)` and `kill(pid, 0)` with a positive PID. No MAC policy
+  (Biba, MLS, `mac_seeotheruids`), `security.bsd.see_other_uids` or
+  `see_other_gids`, `see_jail_proc`, jail boundary or credential change may
+  hide one from another.
+- **macOS and Windows** - no additional requirement.
 
 See also:
 
