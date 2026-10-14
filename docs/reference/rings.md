@@ -246,6 +246,14 @@ Contract:
   default `T2` must be both trivially copyable and trivially
   destructible. Specialise `ring_payload_traits<T2>::allow_nontrivial =
   true` to opt a specific payload type into non-trivial semantics.
+  The destination must satisfy `alignof(T2)`; the writer rejects an
+  under-aligned position before constructing the object.
+- `Ring_W::try_write_notification<T2>(num_extra_elements, args...)` is the
+  notification-specific typed form. It can return `nullptr` before checking
+  destination alignment when this thread already owns an unpublished
+  reservation. It also refuses when protected capacity is unavailable. A
+  refusal retains no new reservation and preserves an existing same-thread
+  reservation. A successful write still needs `done_writing()` to publish.
 - `Ring_R::start_reading(n)` returns a `Range<T>` view of up to `n`
   trailing elements behind the current leading sequence. `n` must not
   exceed `max_trailing_elements`. Each `start_reading` must be paired
@@ -304,15 +312,28 @@ Optional native retained history:
 
 - `detail::Ring_retained_history<T>` owns an independently versioned capability
   mapping for one exact writer occurrence. Its owner allocates
-  `storage_size(capacity)` shared bytes, calls `initialize` before permitting
+  `storage_size(capacity, framed)` shared bytes (`framed` defaults to `false`),
+  calls `initialize` with the same framing choice before permitting
   that writer to reserve, and retains the mapping with the native authority.
   Supply the same capability to the writer and its native notification binding.
   The ordinary ring control representation does not contain this capability.
 - Before a writable reservation can overwrite committed elements, their
-  preimages are preserved. Preservation follows each committed element across
+  preimages are preserved. Raw histories keep format 1 and element precision.
+  Framed `char` histories use format 2: one saved 16-byte block and its separate
+  current/saved frame generations per aligned block. The ordinary ring schema
+  is unchanged.
+  Preservation follows committed data across
   failed larger constructions and subsequent smaller commits. A new head alone
   does not retire surviving preimages. Framed message writers also retain their
   complete frame boundaries through typed construction, relay and buffer batches.
+  Under the supported atomic and toolchain contract, a thread fence orders
+  saved bytes and their markers before current frame-receipt invalidation and
+  destructive writes to the original ring. The capability provides recovery
+  after exact native process termination, not persistence across machine or
+  storage failure.
+  Compact message reservations, frame boundaries and committed heads must be
+  multiples of 16 bytes. Unaligned source buffers remain valid for complete
+  frame imports; alignment applies to the destination and frame lengths.
 - Native replay requires the original writer's exact death and excludes a
   successor while constructing a separate immutable recovered ring image.
   Interrupted construction remains unpublished and may be repeated by the
@@ -329,8 +350,9 @@ Optional native retained history:
   first retained complete frame, then copy each surviving frame once into the
   existing dispatch buffer. Native recovery does not establish writer close or
   transport completion. Ordinary live-reader eviction remains a separate path.
-- Storage is bounded by the capacity: per-element preservation and framing
-  metadata plus one recovered image. Allocate it before destructive writes;
+- Storage is bounded by the capacity: raw per-element or compact per-block
+  preservation and framing metadata plus one recovered image. Allocate it
+  before destructive writes;
   the capability owner releases its backing storage only after all associated
   readers, native delivery and recovery operations have released their ownership.
 
@@ -387,7 +409,22 @@ Failures:
   intervening `done_reading`.
 - `std::invalid_argument` from a writer attempting to commit more than
   `num_elements / 8` elements in a single write (the single-octile
-  limit).
+  limit). Assertion-enabled builds, including Debug, hit the existing size
+  assertion before this exception and abort instead.
+- `std::invalid_argument` from typed `write<T2>` or `try_write_notification<T2>`
+  when its reservation size overflows or its destination does not meet
+  `alignof(T2)`. Rejection precedes placement construction and preserves any
+  earlier unpublished reservation owned by that thread. The notification
+  overload can instead refuse with `nullptr` before destination validation,
+  as described above; size overflow is checked before reservation.
+- `corrupted_message_exception` from retained message-frame imports or relay
+  when a frame is truncated, invalid or not a multiple of 16 bytes. These
+  checks precede reservation and leave any earlier pending batch intact.
+- `std::invalid_argument` from an unaligned compact message reservation or from
+  `done_writing` when a compact pending batch lacks a complete chain of recorded
+  aligned frames. A failed publication discards that pending batch, restores the
+  committed head and releases its writer token. Inherited raw-buffer writes do
+  not supply message-frame receipts and cannot publish such a batch.
 - `static_assert` from `Ring_W::write<T2>` when `T2` is not trivially
   copyable or destructible and `ring_payload_traits<T2>::allow_nontrivial`
   is `false`.

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -64,6 +65,14 @@ constexpr history_case_t k_cases[] = {
     {"recovery_copy_death", true, false, true},
     {"framed_prefix", true, false, false, true},
     {"framed_release_race", true, false, false, true, true},
+    {"framed_before_saved_marker", false, false, false, true},
+    {"framed_after_saved_marker", false, false, false, true},
+    {"framed_before_exposure", false, false, false, true},
+    {"framed_batch_wrap", true, false, false, true},
+    {"framed_partial_wrap", false, false, false, true},
+    {"framed_validation", true, false, false, true},
+    {"framed_versions", true, false, false, true},
+    {"framed_recovery_copy_death", true, false, true, true},
     {"protected_guard", false, false, false},
 };
 
@@ -214,11 +223,16 @@ void kill_retaining_authority(const std::shared_ptr<Exact_child>& child)
 
 fs::path s_directory;
 std::string s_death_stage;
+bool s_poison_unpublished_save = false;
 
-void death_hook(const char* stage, const void*)
+void death_hook(const char* stage, const void* object)
 {
     if (s_death_stage != stage) {
         return;
+    }
+    if (s_poison_unpublished_save && std::string_view(stage) == "history_before_saved_marker") {
+        // This marker is still unset. Recovery must ignore these saved bytes.
+        std::memset(const_cast<void*>(object), 0xa5, 16);
     }
     signal_file(s_directory / "death_seam");
     wait_for_file(s_directory / "unexpected_release");
@@ -247,6 +261,20 @@ struct frame_body_t
 
 using Frame = sintra::Message<frame_body_t, void, 0x71a4e21u>;
 
+unsigned s_probe_constructions = 0;
+
+struct alignas(16) Construction_probe
+{
+    Construction_probe() { ++s_probe_constructions; }
+    uint32_t bytes_to_next_message = sizeof(Construction_probe);
+};
+
+struct alignas(8192) Overaligned_probe
+{
+    Overaligned_probe() { ++s_probe_constructions; }
+    uint32_t bytes_to_next_message = sizeof(Overaligned_probe);
+};
+
 class Throwing_frame_body
 {
 public:
@@ -268,6 +296,24 @@ constexpr uint64_t k_frame_writer_id = 11;
 constexpr size_t k_frame_bytes = 4096;
 constexpr size_t k_small_frame_bytes = 6144;
 constexpr size_t k_initial_frames = 4;
+constexpr size_t k_batch_bytes = k_frame_bytes + k_small_frame_bytes;
+constexpr size_t k_batch_count = 4 * sintra::message_ring_size / k_batch_bytes + 2;
+
+bool batch_wrap(const history_case_t& test)
+{
+    return std::string_view(test.name) == "framed_batch_wrap";
+}
+
+size_t frame_size(const history_case_t& test, size_t sequence)
+{
+    return batch_wrap(test) && sequence % 2 ? k_small_frame_bytes : k_frame_bytes;
+}
+
+size_t frame_start(const history_case_t& test, size_t sequence)
+{
+    return batch_wrap(test) ? sequence / 2 * k_batch_bytes + (sequence % 2) * k_frame_bytes
+        : sequence * k_frame_bytes;
+}
 
 Frame_notification* s_frame_notification = nullptr;
 unsigned s_frame_release_calls = 0;
@@ -311,27 +357,155 @@ void check_frame(const sintra::Message_prefix* prefix, size_t sequence, size_t b
         "recovered typed frame has the wrong sequence or variable payload");
 }
 
+void write_frame_batch(sintra::Message_ring_W& writer, size_t sequence)
+{
+    alignas(Frame) std::array<char, k_batch_bytes> bytes;
+    auto* first = new (bytes.data()) Frame(uint64_t(sequence), frame_text(sequence, k_frame_bytes));
+    auto* second = new (bytes.data() + k_frame_bytes) Frame(uint64_t(sequence + 1),
+        frame_text(sequence + 1, k_small_frame_bytes));
+    writer.write(bytes.data(), bytes.size());
+    writer.done_writing();
+    second->~Frame();
+    first->~Frame();
+}
+
+template <typename F>
+void require_rejection(F&& action)
+{
+    bool rejected = false;
+    try { action(); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "malformed retained write was not rejected");
+}
+
+void check_frame_validation(sintra::Message_ring_W& writer)
+{
+    auto& raw = static_cast<sintra::Ring_W<char>&>(writer);
+    const std::array<char, 16> invalid{};
+    require_rejection([&] { writer.write_commit(char(0)); });
+    require_rejection([&] { writer.write<Construction_probe>(1); });
+    require_rejection([&] { writer.try_write_notification<Construction_probe>(1); });
+    require_rejection([&] { writer.write<Construction_probe>(std::numeric_limits<size_t>::max()); });
+    raw.write(invalid.data(), invalid.size());
+    require_rejection([&] { writer.write<Overaligned_probe>(0); });
+    require(s_probe_constructions == 0, "rejected alignment reached placement construction");
+    require_rejection([&] { writer.done_writing(); });
+
+    // A failed batch leaves a previous frame receipt at the same absolute
+    // sequence. Raw bytes from the next attempt must not reuse that receipt.
+    const auto text = frame_text(0, k_frame_bytes);
+    writer.write<Frame>(sintra::vb_size<Frame>(uint64_t(0), text), uint64_t(0), text);
+    require_rejection([&] { raw.write(invalid.data(), 1); });
+    raw.write(invalid.data(), invalid.size());
+    require_rejection([&] { writer.done_writing(); });
+    const std::vector<char> stale_frame(k_frame_bytes, 0);
+    raw.write(stale_frame.data(), stale_frame.size());
+    require_rejection([&] { writer.done_writing(); });
+    require(writer.get_leading_sequence() == 0, "rejected batch published a malformed head");
+}
+
+void check_frame_versions(const fs::path& directory,
+    const std::shared_ptr<const detail::Native_exit_authority>& authority)
+{
+    auto storage = map_storage(directory / "history");
+    auto* version = static_cast<uint64_t*>(storage->data());
+    const auto current = *version;
+    require(current == 2 && storage->size() == Frame_history::storage_size(sintra::message_ring_size, true),
+        "framed capability does not identify the compact history format");
+    const auto filename = sintra::get_base_filename(k_frame_prefix, k_frame_writer_id, k_occurrence);
+    for (const uint64_t unsupported : {uint64_t(1), uint64_t(3)}) {
+        *version = unsupported;
+        bool rejected = false;
+        unsigned writers_created = 0;
+        try {
+            auto opened = std::make_shared<Frame_history>(directory.string(), filename,
+                sintra::message_ring_size, storage, authority);
+            sintra::Message_ring_W writer(directory.string(), k_frame_prefix, k_frame_writer_id,
+                k_occurrence, authority, opened);
+            ++writers_created;
+        }
+        catch (const sintra::ring_acquisition_failure_exception&) { rejected = true; }
+        *version = current;
+        require(rejected && writers_created == 0,
+            "unsupported history format reached an actual message writer");
+    }
+    auto opened = std::make_shared<Frame_history>(directory.string(), filename,
+        sintra::message_ring_size, storage, authority);
+    require(opened->compact(), "valid compact history no longer opens after rejected versions");
+}
+
 int run_frame_writer(const history_case_t& test, const fs::path& directory)
 {
     publish_instance(directory, "writer");
     wait_for_file(directory / "capabilities_ready");
     const auto filename = sintra::get_base_filename(k_frame_prefix, k_frame_writer_id, k_occurrence);
-    auto authority = child_authority(directory, false);
+    auto authority = child_authority(directory, test.kill_recoverer);
     auto history = std::make_shared<Frame_history>(directory.string(), filename,
         sintra::message_ring_size, map_storage(directory / "history"), authority);
+    if (std::string_view(test.name) == "framed_versions") {
+        check_frame_versions(directory, authority);
+    }
     sintra::Message_ring_W writer(directory.string(), k_frame_prefix, k_frame_writer_id,
         k_occurrence, authority, history);
-    for (size_t sequence = 0; sequence < k_initial_frames; ++sequence) {
-        write_frame(writer, sequence, k_frame_bytes);
+    if (std::string_view(test.name) == "framed_validation") {
+        check_frame_validation(writer);
+    }
+    for (size_t sequence = 0; sequence < k_initial_frames;) {
+        if (batch_wrap(test)) {
+            write_frame_batch(writer, sequence);
+            sequence += 2;
+        }
+        else {
+            write_frame(writer, sequence++, k_frame_bytes);
+        }
     }
     signal_file(directory / "first_committed");
     wait_for_file(directory / "readers_ready");
-    const auto frame_count = sintra::message_ring_size / k_frame_bytes;
-    for (size_t sequence = k_initial_frames; sequence < frame_count; ++sequence) {
-        write_frame(writer, sequence, k_frame_bytes);
+    const auto frame_count = batch_wrap(test) ? 2 * k_batch_count : sintra::message_ring_size / k_frame_bytes;
+    bool crossed_frame = false;
+    for (size_t sequence = k_initial_frames; sequence < frame_count;) {
+        if (batch_wrap(test)) {
+            const auto position = writer.get_leading_sequence() % sintra::message_ring_size;
+            crossed_frame |= position + k_frame_bytes > sintra::message_ring_size ||
+                (position + k_frame_bytes) % sintra::message_ring_size + k_small_frame_bytes >
+                    sintra::message_ring_size;
+            write_frame_batch(writer, sequence);
+            sequence += 2;
+        }
+        else {
+            write_frame(writer, sequence++, k_frame_bytes);
+        }
     }
-    require(writer.get_leading_sequence() == sintra::message_ring_size,
-        "typed frames did not fill exactly one ring lap");
+    require(writer.get_leading_sequence() == frame_start(test, frame_count),
+        "frames did not reach the intended committed boundary");
+    require(!batch_wrap(test) || (crossed_frame && writer.get_leading_sequence() > 4 * sintra::message_ring_size),
+        "imported frames did not straddle the physical ring end across four laps");
+    s_directory = directory;
+    if (std::string_view(test.name) == "framed_before_saved_marker" ||
+        std::string_view(test.name) == "framed_after_saved_marker" ||
+        std::string_view(test.name) == "framed_before_exposure")
+    {
+        s_poison_unpublished_save = std::string_view(test.name) == "framed_before_saved_marker";
+        s_death_stage = s_poison_unpublished_save ? "history_before_saved_marker"
+            : std::string_view(test.name) == "framed_after_saved_marker" ? "history_preserved"
+            : "history_before_exposure";
+        detail::test_hooks::s_ipc_wakeup_operation = death_hook;
+    }
+    if (std::string_view(test.name) == "framed_partial_wrap") {
+        // Exercise the preservation primitive with a partial failed overwrite
+        // crossing the physical end, then retry within an already saved block.
+        const auto capacity = sintra::message_ring_size;
+        auto storage = map_storage(directory / filename);
+        auto* original = static_cast<char*>(storage->data());
+        history->preserve(capacity - 7, 30, capacity);
+        std::fill_n(original + capacity - 7, 7, char(0xa5));
+        std::fill_n(original, 23, char(0xa5));
+        history->preserve(capacity + 5, 3, capacity);
+        std::fill_n(original + 5, 3, char(0xb6));
+        signal_file(directory / "writer_seam");
+        wait_for_file(directory / "unexpected_release");
+        return 1;
+    }
     bool placement_failed = false;
     try {
         writer.write<Throwing_frame>(sintra::vb_size<Throwing_frame>());
@@ -412,20 +586,30 @@ int run_writer(const history_case_t& test, const fs::path& directory)
     return 1;
 }
 
-int run_recoverer(const fs::path& directory)
+int run_recoverer(const history_case_t& test, const fs::path& directory)
 {
     s_directory = directory;
     publish_instance(directory, "recoverer");
     wait_for_file(directory / "recovery_allowed");
-    const auto capacity = sintra::test::pick_ring_elements<uint32_t>();
     auto authority = child_authority(directory, true);
     auto record = map_record(directory, "writer_record");
+    s_death_stage = "history_image_copy";
+    detail::test_hooks::s_ipc_wakeup_operation = death_hook;
+    if (test.framed) {
+        const auto filename = sintra::get_base_filename(k_frame_prefix, k_frame_writer_id, k_occurrence);
+        auto history = std::make_shared<Frame_history>(directory.string(), filename,
+            sintra::message_ring_size, map_storage(directory / "history"), authority);
+        Frame_notification notification(directory.string(), filename, sintra::message_ring_size,
+            record, authority, detail::ring_directory_policy::private_existing_directory,
+            std::function<void()>{}, history);
+        notification.replay(k_occurrence);
+        throw std::runtime_error("framed recoverer missed its image-copy death seam");
+    }
+    const auto capacity = sintra::test::pick_ring_elements<uint32_t>();
     auto history = std::make_shared<History>(directory.string(), k_ring_name, capacity,
         map_storage(directory / "history"), authority);
     Notification notification(directory.string(), k_ring_name, capacity, record, authority,
         detail::ring_directory_policy::caller_directory, std::function<void()>{}, history);
-    s_death_stage = "history_image_copy";
-    detail::test_hooks::s_ipc_wakeup_operation = death_hook;
     notification.replay(k_occurrence);
     throw std::runtime_error("recoverer missed its image-copy death seam");
 }
@@ -450,13 +634,26 @@ int run_frame_scenario(const std::string& binary, const history_case_t& test, co
     require(writer->spawn(binary.c_str(), writer_args), "cannot spawn exact message writer");
     wait_for_file(directory / "writer_armed");
     const auto instance = captured_instance(directory, "writer", *writer);
-    auto authority = std::make_shared<detail::Native_exit_authority>(
-        std::vector<std::shared_ptr<const detail::Native_exit_witness>>{
-            std::make_shared<Armed_child_witness>(instance, writer)});
+    std::vector<std::shared_ptr<const detail::Native_exit_witness>> witnesses{
+        std::make_shared<Armed_child_witness>(instance, writer)};
+    std::shared_ptr<Exact_child> recoverer;
+    std::shared_ptr<Native_record> recoverer_record;
+    if (test.kill_recoverer) {
+        recoverer = std::make_shared<Exact_child>(std::chrono::seconds(3));
+        const char* args[] = {binary.c_str(), "--recoverer", test.name, path.c_str(), nullptr};
+        require(recoverer->spawn(binary.c_str(), args), "cannot spawn exact framed recoverer");
+        wait_for_file(directory / "recoverer_armed");
+        const auto recoverer_instance = captured_instance(directory, "recoverer", *recoverer);
+        auto recoverer_storage = create_storage(directory / "recoverer_record", sizeof(Native_record));
+        recoverer_record = std::shared_ptr<Native_record>(recoverer_storage,
+            new (recoverer_storage->data()) Native_record(2, recoverer_instance));
+        witnesses.push_back(std::make_shared<Armed_child_witness>(recoverer_instance, recoverer));
+    }
+    auto authority = std::make_shared<detail::Native_exit_authority>(std::move(witnesses));
     auto record_storage = create_storage(directory / "writer_record", sizeof(Native_record));
     auto record = std::shared_ptr<Native_record>(record_storage,
         new (record_storage->data()) Native_record(k_occurrence, instance));
-    const auto bytes = Frame_history::storage_size(sintra::message_ring_size);
+    const auto bytes = Frame_history::storage_size(sintra::message_ring_size, true);
     auto storage = create_storage(directory / "history", bytes);
     Frame_history::initialize(storage->data(), bytes, sintra::message_ring_size,
         k_occurrence, instance, true);
@@ -474,20 +671,40 @@ int run_frame_scenario(const std::string& binary, const history_case_t& test, co
     signal_file(directory / "capabilities_ready");
     wait_for_file(directory / "first_committed");
     check_frame(reader.fetch_message(), 0, k_frame_bytes);
-    require(reader.reading_sequence() == k_initial_frames * k_frame_bytes &&
+    require(reader.reading_sequence() == frame_start(test, k_initial_frames) &&
         reader.get_message_reading_sequence() == k_frame_bytes,
         "message extraction did not retain its finer cursor within the returned batch");
     signal_file(directory / "readers_ready");
-    wait_for_file(directory / "writer_seam");
+    const bool marker_death = std::string_view(test.name) == "framed_before_saved_marker" ||
+        std::string_view(test.name) == "framed_after_saved_marker" ||
+        std::string_view(test.name) == "framed_before_exposure";
+    wait_for_file(directory / (marker_death ? "death_seam" : "writer_seam"));
     kill_retaining_authority(writer);
 
     auto original_storage = map_storage(directory / filename);
-    const auto* original = static_cast<const char*>(original_storage->data());
+    auto* original = static_cast<char*>(original_storage->data());
+    if (std::string_view(test.name) == "framed_after_saved_marker" ||
+        std::string_view(test.name) == "framed_before_exposure")
+    {
+        // The complete saved block must win even when the original differs.
+        std::memset(original, 0xb6, 16);
+    }
     const std::vector<char> original_before(original, original + sintra::message_ring_size);
     uint64_t damaged_magic = 0;
     std::memcpy(&damaged_magic, original + 2 * k_frame_bytes, sizeof(damaged_magic));
-    require(damaged_magic != sintra::message_magic,
-        "failed larger construction did not damage the surviving frame prefix");
+    if (test.publish_small && !batch_wrap(test)) {
+        require(damaged_magic != sintra::message_magic,
+            "failed larger construction did not damage the surviving frame prefix");
+    }
+    if (recoverer) {
+        require(notification->observe_exit(), "exact framed writer death was not observed");
+        signal_file(directory / "recovery_allowed");
+        wait_for_file(directory / "death_seam");
+        kill_retaining_authority(recoverer);
+        recoverer_record->native_exit.store(true);
+        require(notification->pending() && !history->ready(),
+            "interrupted compact recovery advertised a partial image");
+    }
     if (test.replay_at_release) {
         require(notification->observe_exit() && !history->ready(),
             "framed publication race did not begin with pending recovery");
@@ -499,24 +716,45 @@ int run_frame_scenario(const std::string& binary, const history_case_t& test, co
             "native framed recovery did not complete");
     }
 
-    const auto frame_count = sintra::message_ring_size / k_frame_bytes;
-    for (size_t sequence = 2; sequence < frame_count; ++sequence) {
-        check_frame(reader.fetch_message(), sequence, k_frame_bytes);
+    const auto frame_count = batch_wrap(test) ? 2 * k_batch_count : sintra::message_ring_size / k_frame_bytes;
+    const auto expected_head = frame_start(test, frame_count) + (test.publish_small ? k_small_frame_bytes : 0);
+    const auto retained_floor = expected_head - sintra::message_ring_size;
+    size_t first_frame = 0;
+    while (frame_start(test, first_frame) < retained_floor) { ++first_frame; }
+    size_t replayed_wrap_frames = 0;
+    for (size_t sequence = std::max(size_t(1), first_frame); sequence < frame_count; ++sequence) {
+        check_frame(reader.fetch_message(), sequence, frame_size(test, sequence));
+        if (frame_start(test, sequence) % sintra::message_ring_size + frame_size(test, sequence) >
+            sintra::message_ring_size)
+        {
+            ++replayed_wrap_frames;
+        }
     }
-    check_frame(reader.fetch_message(), frame_count, k_small_frame_bytes);
+    require(!batch_wrap(test) || replayed_wrap_frames != 0,
+        "recovered window did not retain and replay a complete frame straddling the physical ring end");
+    if (test.publish_small) {
+        check_frame(reader.fetch_message(), frame_count, k_small_frame_bytes);
+    }
     detail::test_hooks::s_ipc_wakeup_operation = nullptr;
     if (test.replay_at_release) {
         require(s_frame_release_calls == 1 && s_frame_release_was_pending && s_frame_release_replayed,
             "framed recovery did not publish at the actual managed range-release seam");
     }
-    require(history->first() == 2 * k_frame_bytes &&
-        history->head() == sintra::message_ring_size + k_small_frame_bytes,
+    require(history->first() == frame_start(test, first_frame) && history->head() == expected_head,
         "framed history did not exclude exactly the partially displaced frame");
     require(std::equal(original_before.begin(), original_before.end(), original),
         "framed recovery modified the original ring mapping");
-    require(losses.size() == 1 && losses[0].first == k_frame_bytes &&
-        losses[0].second == 2 * k_frame_bytes,
-        "framed recovery did not report exactly the lost unread frame interval");
+    if (test.publish_small) {
+        require(losses.size() == 1 && losses[0].first == k_frame_bytes &&
+            losses[0].second == frame_start(test, first_frame),
+            "framed recovery did not report exactly the lost unread frame interval");
+    }
+    else {
+        require(losses.empty(), "partial uncommitted overwrite lost a committed frame");
+        alignas(Frame) std::array<char, k_frame_bytes> first;
+        std::memcpy(first.data(), history->pointer(0), first.size());
+        check_frame(reinterpret_cast<const sintra::Message_prefix*>(first.data()), 0, k_frame_bytes);
+    }
     require(reader.get_message_reading_sequence() == history->head(),
         "framed extraction did not finish at the committed head");
     reader.request_stop();
@@ -583,7 +821,7 @@ int run_scenario(const std::string& binary, const history_case_t& test, const fs
     std::shared_ptr<Native_record> recoverer_record;
     if (test.kill_recoverer) {
         recoverer = std::make_shared<Exact_child>(std::chrono::seconds(3));
-        const char* args[] = {binary.c_str(), "--recoverer", path.c_str(), nullptr};
+        const char* args[] = {binary.c_str(), "--recoverer", test.name, path.c_str(), nullptr};
         require(recoverer->spawn(binary.c_str(), args), "cannot spawn exact recoverer");
         wait_for_file(directory / "recoverer_armed");
         const auto instance = captured_instance(directory, "recoverer", *recoverer);
@@ -690,8 +928,8 @@ int main(int argc, char* argv[])
         if (argc == 4 && std::string_view(argv[1]) == "--writer") {
             return run_writer(find_case(argv[2]), argv[3]);
         }
-        if (argc == 3 && std::string_view(argv[1]) == "--recoverer") {
-            return run_recoverer(argv[2]);
+        if (argc == 4 && std::string_view(argv[1]) == "--recoverer") {
+            return run_recoverer(find_case(argv[2]), argv[3]);
         }
         if (argc == 4 && std::string_view(argv[1]) == "--scenario") {
             return run_scenario(binary, find_case(argv[2]), argv[3]);
