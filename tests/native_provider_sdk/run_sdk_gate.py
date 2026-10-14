@@ -110,8 +110,10 @@ class Sdk_gate:
         }
 
     def request_cancel(self, signum, _frame):
-        # No exception or I/O from signal delivery: command() owns settlement.
-        self.cancel_signal = signum
+        # No exception or I/O from signal delivery. Keep the first request
+        # sticky through command settlement and final evidence publication.
+        if self.cancel_signal is None:
+            self.cancel_signal = signum
 
     @staticmethod
     def wait_group_stopped(group):
@@ -274,16 +276,22 @@ class Sdk_gate:
         self.result["sdk_compile_link_passed"] = True
 
     def settle(self):
-        self.result["cancel_signal"] = self.cancel_signal
-        if self.cancel_signal is not None:
-            self.result["sdk_compile_link_passed"] = False
         self.result["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.result["output_hashes"] = [
             {"path": str(path.relative_to(self.output)), "sha256": sha256(path)}
             for path in sorted(self.output.rglob("*")) if path.is_file()
         ]
-        (self.output / "result.json").write_text(
-            json.dumps(self.result, indent=2) + "\n", encoding="utf-8")
+        while True:
+            cancelled = self.cancel_signal
+            self.result["cancel_signal"] = cancelled
+            if cancelled is not None:
+                self.result["sdk_compile_link_passed"] = False
+            (self.output / "result.json").write_text(
+                json.dumps(self.result, indent=2) + "\n", encoding="utf-8")
+            # A first request during serialization or writing invalidates that
+            # snapshot. The sticky request permits at most one extra write.
+            if cancelled == self.cancel_signal:
+                break
 
 
 def main():
@@ -304,7 +312,7 @@ def main():
         print(gate.result["error"], file=sys.stderr)
     finally:
         gate.settle()
-    return 0 if gate.result["sdk_compile_link_passed"] else 1
+    return 0 if gate.cancel_signal is None and gate.result["sdk_compile_link_passed"] else 1
 
 
 if __name__ == "__main__":
