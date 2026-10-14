@@ -368,19 +368,14 @@ if (launch.readiness_state == sintra::Managed_child_readiness_state::pending) {
 }
 ```
 
-Environment overrides merge with the inherited environment in order; a later
-duplicate wins. Variable names are case-insensitive on Windows and
-case-sensitive on POSIX, and recovery occurrences reuse the same overrides.
-Windows drive current-directory entries such as `=C:=C:\work` are also
-supported. Other entries are not syntax-validated, so provide `NAME=VALUE`
-strings. Custody status also retains occurrence-qualified `last_failure`
-diagnostics. Deadline expiry does not request release or cleanup and does not
-itself create a failure.
+Environment overrides merge with the inherited environment, and recovery
+occurrences reuse the same overrides. Deadline expiry does not request release
+or cleanup and does not itself create a failure.
 Use `terminate_until()` to request cleanup explicitly. The custody handle's
-boolean conversion is the validity and acceptance fact; status reports typed
-readiness and release states. A
-`last_failure.kind == Managed_child_failure_kind::none` means only that no
-failure report has been recorded—not that readiness or release succeeded.
+boolean conversion reports validity and acceptance; status reports readiness
+and release separately. See
+[managed process spawning](docs/reference/spawn_swarm_process.md) for
+environment entry rules and failure diagnostics.
 
 Note: spawned processes require a lifeline by default. To launch a process
 manually into an existing swarm, create an external process invitation in the
