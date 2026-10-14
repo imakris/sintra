@@ -227,17 +227,6 @@ the work postponed for the current product release.
   for Xcode 15 (or newer) installed (the full Xcode IDE is not required). The build fails
   if `<os/os_sync_wait_on_address.h>` or `<os/clock.h>` is missing.
 
-  Older macOS versions are not supported because Sintra's adaptive reader policy relies on
-  `os_sync_wait_on_address` to wait on a specific atomic with timeouts and ordered/unordered
-  wakeup semantics. The pre-15 alternatives all force compromises that hurt the whole
-  library: `dispatch_semaphore_t` loses fine-grained timeouts and the wakeup-coalescing
-  hooks; `pthread_cond_t` requires a kernel transition per wake even on the fast path,
-  defeating the spin/precision-sleep/block phases in `config.h`; Mach `semaphore_t` is
-  per-task rather than per-address and would force rebuilding the wakeup layer on top.
-  After evaluating these options, requiring `os_sync_wait_on_address` is the cleanest
-  trade-off.
-
-
 ## Interprocess Communication Patterns
 
 ### Broadcast a Ping and listen from another process
@@ -515,32 +504,12 @@ entries are never adopted unless they meet the policy. Links and entries whose
 ownership cannot be verified are excluded from cleanup. This does not isolate
 mutually untrusted processes within the same account.
 
-On POSIX filesystems supporting directory `flock`, the coordinator holds a
-kernel lifetime lock on its `sintra-l1-<uid>-<random id>` directory. Stale cleanup
-acquires that same lock and verifies the directory inode before deletion. It
-works independently of process and time namespaces and requires no procfs
-metadata. Ordinary fork children close inherited lease descriptors; a raw fork
-that bypasses atfork callbacks can conservatively delay cleanup until the
-inherited descriptor closes, the child execs, or the child exits. It cannot
-cause premature deletion. Normal shutdown removes its own directory while
-holding the lease.
+Normal shutdown removes its own swarm directory. POSIX startup remains
+available without directory locking, but crash residue then requires operator
+cleanup. All participants must use the same directory policy. See
+[IPC resource cleanup](docs/reference/init.md#ipc-resource-cleanup) for
+automatic cleanup and fork constraints.
 
-When directory locking is unsupported or unavailable, POSIX startup uses
-the distinct `sintra-<uid>-<random id>` policy. Normal shutdown still removes its own directory.
-Crash residue requires explicit operator cleanup while directory locks remain
-unavailable. Existing no-lease directories on a filesystem with working locks
-can be scavenged with matching Linux boot, PID-namespace and time-namespace
-records and native process absence evidence; unavailable evidence preserves
-them. Failure to establish the optional locking capability selects that fallback;
-ownership or privacy validation failures still reject startup. Older no-lease directories are never interpreted as
-lifetime-locked directories. The former fixed per-account roots are not
-migrated or scavenged by the direct-root cleanup path.
-
-All participants must use the same directory policy together. Existing sessions
-under the former shared `sintra` directory are not migrated or scavenged, and
-old permissive ring files are rejected. The shared-memory ABI is unchanged by
-this permission policy. The generic `sintra::ipc::file_mapping` keeps caller
-access policy and follows links by default; managed rings opt into rejection.
 Windows builds outside CMake must link `advapi32` (MSVC and clang-cl receive an
 automatic library directive).
 
@@ -553,9 +522,9 @@ only. Every joining process must present exactly the coordinator's startup ABI t
 That token contains compiler, standard-library, platform, and architecture identities
 plus the Sintra ring ABI version. A token mismatch, including between MSVC and MinGW
 builds, is rejected before that joining process opens its request/reply message rings.
-Ring ABI 9 binds each wakeup semaphore to its reader slot so stopped or dead readers
-cannot exhaust wakeup capacity. Rebuild every swarm participant together when updating
-from ring ABI 8; the persistent lifecycle-anchor ABI remains 3.
+Rebuild every swarm participant together after an incompatible ring ABI change.
+See [ring compatibility](docs/reference/rings.md) and
+[explicit type IDs](docs/reference/explicit_type_ids.md).
 A matching token is required, but it does not guarantee that raw C++ object
 representations are interoperable; explicit ids provide no such guarantee either. The
 ids must remain unique and consistent across every process in the swarm.

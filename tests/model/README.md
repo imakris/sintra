@@ -13,8 +13,6 @@ The expected result for the forbidden conditions in `acquire_only`,
 `bump_marks` is `No`. The paired `*_calibration` cases must report `Ok` for
 the intended handoff, preventing a branch that never executes from passing
 unnoticed. These are expected outcomes, not recorded verification results.
-The introducing commit (`37a2b54c`) records that no new model run was performed;
-its validation does not establish results for these checked-in inputs.
 
 `acquire_only` tests visibility through a zero release and an acquire-only
 winning CAS. `takeover_bump` tests visibility of a +2 bump through the

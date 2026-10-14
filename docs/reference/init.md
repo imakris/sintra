@@ -95,6 +95,28 @@ slots, barriers, lifecycle helpers) is usable.
   warning when the assumed cache-line size does not match the host's actual
   size; the check is suppressed in `Release` builds.
 
+### IPC resource cleanup
+
+Normal shutdown removes the coordinator's swarm directory. On POSIX,
+automatic stale-directory cleanup uses optional filesystem directory locking;
+this cleanup is independent of process and time namespaces and requires no
+procfs metadata. If directory locking is unavailable, startup uses a separate
+directory policy and crash residue requires operator cleanup. Ownership or
+privacy validation failures still reject startup.
+
+Ordinary fork children close inherited lifetime-lock descriptors. A raw fork
+that bypasses atfork callbacks can delay automatic cleanup until the inherited
+descriptor closes, the child execs, or the child exits; it cannot cause
+premature deletion.
+
+Once directory locking is available, automatic cleanup of directories created
+without a lifetime lock requires matching Linux boot, PID-namespace and
+time-namespace records and native process absence evidence; unavailable
+evidence preserves them. Cleanup does not migrate or remove directories from
+the shared per-account layout. Managed rings reject permissive files and
+links. These requirements do not change the caller's access policy for
+`sintra::ipc::file_mapping`, which follows links by default.
+
 ## Example source
 
 - [example/sintra/sintra_example_0_basic_pubsub.cpp](../../example/sintra/sintra_example_0_basic_pubsub.cpp)
