@@ -10,8 +10,8 @@
 #include <sys/un.h>
 
 extern "C" {
-#include "private_mach_port.h"
-#include "private_thread_act.h"
+@mach_port_get_context_declaration@
+@thread_abort_declaration@
 }
 
 // Link-only SDK coverage. This executable is not run by the SDK gate.

@@ -90,6 +90,17 @@ def check_client(original, private, routine):
     return {"symbol": name, "message_id": int(actual[0]), "reply_cache_calls": False}
 
 
+def client_declaration(header, symbol):
+    # The complete generated header shares guards/types with SDK headers.
+    # Copy the exact needed prototype; its C implementation keeps that header.
+    pattern = re.compile(r"\bkern_return_t\s+" + re.escape(symbol)
+                         + r"\s*\([^;{}]*\)\s*;")
+    declarations = pattern.findall(uncomment(header))
+    if len(declarations) != 1:
+        raise RuntimeError(f"expected one generated declaration for {symbol}")
+    return declarations[0]
+
+
 class Sdk_gate:
     def __init__(self, output, architecture, sdk_version):
         self.output = output.resolve()
@@ -251,6 +262,9 @@ class Sdk_gate:
             clients[routine] = check_client(
                 (self.output / f"baseline_{definition}.c").read_text(),
                 (self.output / f"private_{definition}.c").read_text(), routine)
+            clients[routine]["declaration"] = client_declaration(
+                (self.output / f"private_{definition}.h").read_text(),
+                clients[routine]["symbol"])
             target = f"private_{definition}.o"
             self.command(xcrun + ["clang"] + compiler_flags + ["-std=c11", "-O0",
                 "-Wall", "-Werror=implicit-function-declaration", "-c",
@@ -261,6 +275,7 @@ class Sdk_gate:
         template = Path(__file__).with_name("sdk_surface.cpp.in").read_text()
         for routine, details in clients.items():
             template = template.replace(f"@{routine}@", details["symbol"])
+            template = template.replace(f"@{routine}_declaration@", details["declaration"])
         (self.output / "sdk_surface.cpp").write_text(template, encoding="utf-8")
         self.command(xcrun + ["clang++"] + compiler_flags + ["-std=c++20", "-O0",
             "-Wall", "-Wextra", "-c", "sdk_surface.cpp", "-o", "sdk_surface.o"])
