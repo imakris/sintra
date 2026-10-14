@@ -245,7 +245,7 @@ class Sdk_gate:
                                  ("private", modified)):
                 stem = f"{kind}_{definition}"
                 self.command(xcrun + ["mig", "-arch", self.architecture,
-                    "-isysroot", str(sdk), "-I", str(include),
+                    "-isysroot", str(sdk), f"-I{include}",
                     "-user", f"{stem}.c", "-header", f"{stem}.h",
                     "-server", "/dev/null", "-sheader", "/dev/null", source])
             clients[routine] = check_client(
