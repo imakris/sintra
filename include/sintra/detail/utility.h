@@ -4,6 +4,7 @@
 #pragma once
 
 #include "config.h"
+#include "debug_pause.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -196,6 +197,9 @@ struct Spawn_detached_options
     // Keep them open and unchanged until spawn returns. Other descriptors retain
     // their existing inheritance behavior; this is not a descriptor allowlist.
     std::vector<int>            inherited_fds;
+    // A managed native observer retains the successful child before any
+    // consuming wait. Failed exec remains exclusively settled here.
+    bool                       retain_successful_child = false;
 #endif
 };
 
@@ -1178,7 +1182,10 @@ Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options
 
         int ready_status = 0;
         if (!write_fully(ready_pipe[1], &ready_status, sizeof(ready_status))) {
-            report_failure(spawn_detached_debug_info_t::Stage::CHILD_READY_PIPE_WRITE, errno, 0);
+            // This is the pre-exec child of a possibly multithreaded process:
+            // no inherited logger, test callback or allocating diagnostic.
+            detail::native_diagnostic("[sintra][spawn] Child ready-pipe write failed, errno ",
+                uint64_t(errno), "\n");
             if (ready_pipe[1] >= 0) {
                 close(ready_pipe[1]);
             }
@@ -1311,6 +1318,10 @@ Spawn_detached_result spawn_detached_posix(const Spawn_detached_options& options
 
 #ifndef _WIN32
     spawn_detached_exec_handshake_for_test(child_pid);
+    if (options.retain_successful_child) {
+        return {Spawn_detached_result::State::created_live,
+            static_cast<int>(child_pid), 0, false};
+    }
     int   wait_status = 0;
     pid_t wait_result = 0;
     do {
