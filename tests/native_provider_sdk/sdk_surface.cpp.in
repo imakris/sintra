@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <limits>
+#include <type_traits>
 
 extern "C" {
 @mach_port_get_context_declaration@
@@ -18,7 +20,17 @@ extern "C" {
 kern_return_t explicit_context(mach_port_t reply, mach_port_name_t marker,
                                mach_port_context_t* context)
 {
-    return @mach_port_get_context@(reply, task_self_trap(), marker, context);
+    static_assert(std::is_unsigned_v<mach_vm_address_t>);
+    static_assert(std::is_unsigned_v<mach_port_context_t>);
+    static_assert(std::numeric_limits<mach_vm_address_t>::digits
+                  <= std::numeric_limits<mach_port_context_t>::digits);
+    mach_vm_address_t received_context{};
+    const auto result = @mach_port_get_context@(
+        reply, task_self_trap(), marker, &received_context);
+    if (result == KERN_SUCCESS) {
+        *context = static_cast<mach_port_context_t>(received_context);
+    }
+    return result;
 }
 
 kern_return_t explicit_abort(mach_port_t reply, thread_act_t target)
