@@ -28,9 +28,9 @@ constexpr std::string_view k_failure_prefix = "ring_abi_fingerprint_test: ";
 void test_message_prefix_ring_abi()
 {
     sintra::test::require_true(
-        sintra::detail::k_sintra_ring_abi_version == 10,
+        sintra::detail::k_sintra_ring_abi_version == 11,
         k_failure_prefix,
-        "reader copying marks and process identity require ring ABI version 10");
+        "native ownership and wakeup records require ring ABI version 11");
     sintra::test::require_true(
         sintra::detail::k_ring_lifecycle_anchor_abi_version == 5,
         k_failure_prefix,
@@ -115,7 +115,8 @@ void test_attach_rejects_mismatched_fingerprint()
     // first ABI-10 layout, whose reader slots lacked namespace identities, from
     // ABI-10 revision 2, whose Windows writers rebuild ownership_mutex from
     // writer_pid, from revision 3, whose locks recorded owners by PID alone,
-    // and from revision 4, whose second spinlock word was a wall-clock stamp,
+    // from revision 4, whose second spinlock word was a wall-clock stamp, and
+    // from the previous native ownership and wakeup layouts,
     // must be rejected even when their size happens to match.
     const auto previous_fingerprint = [](std::uint64_t abi_version) {
         return sintra::detail::fnv1a_64({
@@ -127,9 +128,9 @@ void test_attach_rejects_mismatched_fingerprint()
             static_cast<uint64_t>(sintra::num_reserved_service_instances),
         });
     };
-    const auto revision_fingerprint = [](std::uint64_t revision) {
+    const auto revision_fingerprint = [](std::uint64_t abi_version, std::uint64_t revision) {
         return sintra::detail::fnv1a_64({
-            sintra::detail::k_sintra_ring_abi_version,
+            abi_version,
             revision,
             static_cast<uint64_t>(sintra::num_process_index_bits),
             static_cast<uint64_t>(sintra::max_process_index),
@@ -138,17 +139,18 @@ void test_attach_rejects_mismatched_fingerprint()
             static_cast<uint64_t>(sintra::num_reserved_service_instances),
         });
     };
-    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 5,
+    sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 7,
         k_failure_prefix,
-        "spinlock generation words require ABI-10 layout revision 5");
+        "native ownership and wakeup records require ABI-11 layout revision 7");
     sintra::test::require_true(
-        revision_fingerprint(5) == sintra::detail::k_ring_abi_fingerprint,
+        revision_fingerprint(11, 7) == sintra::detail::k_ring_abi_fingerprint,
         k_failure_prefix,
         "the revision fixture must reproduce this build's fingerprint");
 
     for (const std::uint64_t wrong_fingerprint :
-            {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(2),
-                revision_fingerprint(3), revision_fingerprint(4)})
+            {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(10, 2),
+                revision_fingerprint(10, 3), revision_fingerprint(10, 4),
+                revision_fingerprint(10, 5), revision_fingerprint(11, 6)})
     {
         sintra::test::require_true(wrong_fingerprint != sintra::detail::k_ring_abi_fingerprint,
             k_failure_prefix,
