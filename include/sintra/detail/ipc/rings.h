@@ -3034,16 +3034,25 @@ class Ring_retained_history : public Ring<T, true>
         sequence_counter_type head = 0;
     };
 
-    struct element_t
+    template <size_t Bytes>
+    struct saved_element_t
     {
         std::atomic<uint64_t> saved_sequence{0};
         uint64_t saved_frame_end = 0;
         uint64_t frame_sequence = 0;
         uint64_t frame_end = 0;
-        alignas(T) std::byte saved[sizeof(T)];
+        alignas(T) std::byte saved[Bytes];
     };
 
+    using element_t = saved_element_t<sizeof(T)>;
+    using block_t = saved_element_t<16>;
     static constexpr uint64_t k_version = 1;
+    static constexpr uint64_t k_compact_version = 2;
+    static constexpr size_t k_block_bytes = 16;
+    static constexpr bool compact_format(bool framed)
+    {
+        return std::is_same_v<T, char> && framed;
+    }
     static constexpr size_t align_up(size_t value, size_t alignment)
     {
         return (value + alignment - 1) / alignment * alignment;
@@ -3052,15 +3061,19 @@ class Ring_retained_history : public Ring<T, true>
     static constexpr size_t elements_offset = align_up(sizeof(record_t), alignof(element_t));
 
 public:
-    static size_t storage_size(size_t capacity)
+    static size_t storage_size(size_t capacity, bool framed = false)
     {
+        const bool compact = compact_format(framed);
+        const size_t granule = compact ? k_block_bytes : 1;
+        const size_t stride = compact ? sizeof(block_t) : sizeof(element_t);
         constexpr size_t overhead = elements_offset + alignof(T);
-        if (capacity == 0 || capacity > (std::numeric_limits<size_t>::max() - overhead) /
-                (sizeof(element_t) + sizeof(T)))
+        if (capacity == 0 || capacity % granule != 0 ||
+            capacity / granule > (std::numeric_limits<size_t>::max() - overhead) /
+                (stride + granule * sizeof(T)))
         {
             throw std::invalid_argument("Invalid retained ring capacity.");
         }
-        return align_up(elements_offset + capacity * sizeof(element_t), alignof(T)) + capacity * sizeof(T);
+        return align_up(elements_offset + capacity / granule * stride, alignof(T)) + capacity * sizeof(T);
     }
 
     // The capability owner initializes shared storage before permitting its
@@ -3069,15 +3082,26 @@ public:
     static void initialize(void* storage, size_t bytes, size_t capacity,
         uint64_t occurrence, uint64_t writer_instance, bool framed = false)
     {
-        if (!storage || bytes != storage_size(capacity) || !occurrence || !writer_instance ||
+        if (!storage || bytes != storage_size(capacity, framed) || !occurrence || !writer_instance ||
             reinterpret_cast<uintptr_t>(storage) % alignof(element_t) != 0)
         {
             throw std::invalid_argument("Invalid retained ring storage.");
         }
-        new (storage) record_t{k_version, capacity, occurrence, writer_instance, framed};
-        auto* elements = reinterpret_cast<element_t*>(static_cast<std::byte*>(storage) + elements_offset);
-        for (size_t index = 0; index != capacity; ++index) {
-            new (elements + index) element_t{};
+        const bool compact = compact_format(framed);
+        new (storage) record_t{compact ? k_compact_version : k_version,
+            capacity, occurrence, writer_instance, framed};
+        auto* bytes_begin = static_cast<std::byte*>(storage) + elements_offset;
+        if (compact) {
+            auto* blocks = reinterpret_cast<block_t*>(bytes_begin);
+            for (size_t index = 0; index != capacity / k_block_bytes; ++index) {
+                new (blocks + index) block_t{};
+            }
+        }
+        else {
+            auto* elements = reinterpret_cast<element_t*>(bytes_begin);
+            for (size_t index = 0; index != capacity; ++index) {
+                new (elements + index) element_t{};
+            }
         }
     }
 
@@ -3090,20 +3114,24 @@ public:
         m_storage(std::move(storage)),
         m_authority(std::move(authority))
     {
-        if (!m_storage || m_storage->size() != storage_size(capacity)) {
+        if (!m_storage || m_storage->size() < sizeof(record_t)) {
             throw ring_acquisition_failure_exception("Invalid retained ring capability storage.");
         }
         m_record = static_cast<record_t*>(m_storage->data());
-        if (m_record->version != k_version || m_record->capacity != capacity ||
+        m_compact = compact_format(m_record->framed);
+        if (m_record->version != (m_compact ? k_compact_version : k_version) ||
+            m_record->capacity != capacity || m_storage->size() != storage_size(capacity, m_record->framed) ||
             !m_record->occurrence || !m_authority ||
             !m_authority->contains(m_record->writer_instance))
         {
             throw ring_acquisition_failure_exception("Invalid retained ring capability.");
         }
         auto* bytes = static_cast<std::byte*>(m_storage->data());
-        m_elements = reinterpret_cast<element_t*>(bytes + elements_offset);
+        m_elements = bytes + elements_offset;
+        const size_t granule = m_compact ? k_block_bytes : 1;
+        const size_t stride = m_compact ? sizeof(block_t) : sizeof(element_t);
         m_image = reinterpret_cast<T*>(bytes + align_up(
-            elements_offset + capacity * sizeof(element_t), alignof(T)));
+            elements_offset + capacity / granule * stride, alignof(T)));
     }
 
     bool matches(const std::string& filename, size_t capacity) const
@@ -3116,6 +3144,7 @@ public:
     uint64_t occurrence() const noexcept { return m_record->occurrence; }
     uint64_t writer_instance() const noexcept { return m_record->writer_instance; }
     bool framed() const noexcept { return m_record->framed; }
+    bool compact() const noexcept { return m_compact; }
     bool ready() const noexcept { return m_record->ready.load(std::memory_order_acquire); }
     sequence_counter_type first() const noexcept { return m_record->first; }
     sequence_counter_type head() const noexcept { return m_record->head; }
@@ -3138,27 +3167,78 @@ public:
     void preserve(sequence_counter_type start, size_t count, sequence_counter_type head)
     {
         const auto capacity = this->m_num_elements;
-        for (size_t offset = 0; offset != count; ++offset) {
-            const size_t index = mod_u64(start + offset, capacity);
-            if (head <= index) { continue; }
-            const auto previous = index + ((head - index - 1) / capacity) * capacity;
-            auto& element = m_elements[index];
-            if (element.saved_sequence.load(std::memory_order_acquire) == previous + 1) {
-                continue;
+        const size_t granule = m_compact ? k_block_bytes : 1;
+        if (count > std::numeric_limits<sequence_counter_type>::max() - start ||
+            (m_compact && head % granule != 0))
+        {
+            throw std::invalid_argument("Invalid retained reservation interval.");
+        }
+        const auto end = start + count;
+        for (auto sequence = start - start % granule; count && sequence < end;) {
+            const size_t index = mod_u64(sequence, capacity);
+            visit_element(index, [&](auto& element) {
+                if (head > index) {
+                    const auto previous = index + ((head - index - 1) / capacity) * capacity;
+                    if (element.saved_sequence.load(std::memory_order_acquire) != previous + 1) {
+                        std::memcpy(element.saved, this->m_data + index, granule * sizeof(T));
+                        element.saved_frame_end = element.frame_sequence == previous + 1 ? element.frame_end : 0;
+                        ipc_wakeup_operation_for_test("history_before_saved_marker", element.saved);
+                        element.saved_sequence.store(previous + 1, std::memory_order_release);
+                        ipc_wakeup_operation_for_test("history_preserved", this);
+                    }
+                }
+            });
+            if (end - sequence <= granule) {
+                break;
             }
-            std::memcpy(element.saved, this->m_data + index, sizeof(T));
-            element.saved_frame_end = element.frame_sequence == previous + 1 ? element.frame_end : 0;
-            element.saved_sequence.store(previous + 1, std::memory_order_release);
-            ipc_wakeup_operation_for_test("history_preserved", this);
+            sequence += granule;
+        }
+        // The release markers order the saved bytes, but do not prevent later
+        // receipt invalidation or construction stores from moving before them.
+        // Order both the compiler and CPU before either destructive operation.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (m_compact) {
+            // A rejected write can reuse the same unpublished sequence. Its
+            // receipt must not authorize new raw bytes. Clear only after every
+            // saved marker is ordered, so a death cannot remove both receipts.
+            for (auto sequence = start - start % granule; count && sequence < end;) {
+                visit_element(mod_u64(sequence, capacity), [](auto& element) { element.frame_sequence = 0; });
+                if (end - sequence <= granule) { break; }
+                sequence += granule;
+            }
         }
         ipc_wakeup_operation_for_test("history_before_exposure", this);
     }
 
     void record_frame(sequence_counter_type start, sequence_counter_type end)
     {
-        auto& element = m_elements[mod_u64(start, this->m_num_elements)];
-        element.frame_end = end;
-        element.frame_sequence = start + 1;
+        validate_frame_interval(start, end);
+        visit_element(mod_u64(start, this->m_num_elements), [&](auto& element) {
+            element.frame_end = end;
+            element.frame_sequence = start + 1;
+        });
+    }
+
+    void validate_frame_interval(sequence_counter_type start, sequence_counter_type end) const
+    {
+        if (m_compact && (end <= start || start % k_block_bytes || end % k_block_bytes)) {
+            throw std::invalid_argument("Retained message frame is not aligned.");
+        }
+    }
+
+    void validate_commit(sequence_counter_type start, sequence_counter_type end) const
+    {
+        if (!m_compact || start == end) { return; }
+        validate_frame_interval(start, end);
+        for (auto cursor = start; cursor != end;) {
+            const auto next = visit_element(mod_u64(cursor, this->m_num_elements), [&](const auto& element) {
+                return element.frame_sequence == cursor + 1 ? element.frame_end : 0;
+            });
+            if (next <= cursor || next > end || next % k_block_bytes) {
+                throw std::invalid_argument("Retained message publication has an unrecorded frame.");
+            }
+            cursor = next;
+        }
     }
 
     interprocess_mutex::Owner_inspection recover(uint64_t expected_occurrence)
@@ -3171,27 +3251,32 @@ public:
             writer_instance(), *m_authority, [&] {
                 if (ready()) { return; }
                 const auto head = control.leading_sequence.load(std::memory_order_acquire);
+                const size_t granule = m_compact ? k_block_bytes : 1;
+                if (m_compact && head % granule) {
+                    throw ring_acquisition_failure_exception("Retained message head is not aligned.");
+                }
                 auto first = head > this->m_num_elements ? head - this->m_num_elements : 0;
                 if (framed()) {
-                    while (first != head && frame_end(first) == 0) { ++first; }
+                    while (first != head && frame_end(first) == 0) { first += granule; }
                     if (head != 0 && first == head) {
                         throw ring_acquisition_failure_exception("Retained message history has no complete boundary.");
                     }
                     for (auto cursor = first; cursor != head;) {
                         const auto end = frame_end(cursor);
-                        if (end <= cursor || end > head) {
+                        if (end <= cursor || end > head || end % granule) {
                             throw ring_acquisition_failure_exception("Retained message frame boundary is incomplete.");
                         }
                         cursor = end;
                     }
                 }
-                for (auto sequence = first; sequence != head; ++sequence) {
+                for (auto sequence = first; sequence != head; sequence += granule) {
                     const size_t index = mod_u64(sequence, this->m_num_elements);
-                    const auto& element = m_elements[index];
-                    const void* source = element.saved_sequence.load(std::memory_order_acquire) == sequence + 1
-                        ? static_cast<const void*>(element.saved)
-                        : static_cast<const void*>(this->m_data + index);
-                    std::memcpy(m_image + (sequence - first), source, sizeof(T));
+                    visit_element(index, [&](const auto& element) {
+                        const void* source = element.saved_sequence.load(std::memory_order_acquire) == sequence + 1
+                            ? static_cast<const void*>(element.saved)
+                            : static_cast<const void*>(this->m_data + index);
+                        std::memcpy(m_image + (sequence - first), source, granule * sizeof(T));
+                    });
                     ipc_wakeup_operation_for_test("history_image_copy", this);
                 }
                 m_record->first = first;
@@ -3203,19 +3288,30 @@ public:
     }
 
 private:
+    template <typename F>
+    decltype(auto) visit_element(size_t index, F&& action) const
+    {
+        if (m_compact) {
+            return action(reinterpret_cast<block_t*>(m_elements)[index / k_block_bytes]);
+        }
+        return action(reinterpret_cast<element_t*>(m_elements)[index]);
+    }
+
     uint64_t frame_end(sequence_counter_type sequence) const
     {
-        const auto& element = m_elements[mod_u64(sequence, this->m_num_elements)];
-        if (element.saved_sequence.load(std::memory_order_acquire) == sequence + 1) {
-            return element.saved_frame_end;
-        }
-        return element.frame_sequence == sequence + 1 ? element.frame_end : 0;
+        return visit_element(mod_u64(sequence, this->m_num_elements), [&](const auto& element) {
+            if (element.saved_sequence.load(std::memory_order_acquire) == sequence + 1) {
+                return element.saved_frame_end;
+            }
+            return element.frame_sequence == sequence + 1 ? element.frame_end : 0;
+        });
     }
 
     const std::shared_ptr<ipc::mapped_region> m_storage;
     std::shared_ptr<const Native_exit_authority> m_authority;
     record_t* m_record = nullptr;
-    element_t* m_elements = nullptr;
+    std::byte* m_elements = nullptr;
+    bool m_compact = false;
     T* m_image = nullptr;
 };
 
@@ -4826,9 +4922,12 @@ struct Ring_W : Ring<T, false>
             std::is_trivially_destructible_v<T2> || ring_payload_traits<T2>::allow_nontrivial,
             "Ring payload T2 must be trivially destructible or explicitly allowed by ring_payload_traits."
         );
-        auto num_elements = sizeof(T2) / sizeof(T) + num_extra_elements;
+        if (num_extra_elements > std::numeric_limits<size_t>::max() - sizeof(T2) / sizeof(T)) {
+            throw std::invalid_argument("Ring construction size overflow.");
+        }
+        const auto num_elements = sizeof(T2) / sizeof(T) + num_extra_elements;
         const bool already_owned = m_writing_thread_index.load() == thread_index();
-        T2* write_location = (T2*)prepare_write(num_elements);
+        T2* write_location = (T2*)prepare_write(num_elements, false, alignof(T2));
         try {
             auto* placed = new (write_location) T2{std::forward<Args>(args)...};
             record_constructed_frame(placed, num_elements);
@@ -4856,8 +4955,11 @@ struct Ring_W : Ring<T, false>
             "Notification payload must satisfy the ring payload contract.");
         static_assert(std::is_trivially_destructible_v<T2> || ring_payload_traits<T2>::allow_nontrivial,
             "Notification payload must satisfy the ring payload contract.");
+        if (num_extra_elements > std::numeric_limits<size_t>::max() - sizeof(T2) / sizeof(T)) {
+            throw std::invalid_argument("Ring notification construction size overflow.");
+        }
         const auto num_elements = sizeof(T2) / sizeof(T) + num_extra_elements;
-        auto* location = reinterpret_cast<T2*>(prepare_write(num_elements, true));
+        auto* location = reinterpret_cast<T2*>(prepare_write(num_elements, true, alignof(T2)));
         if (!location) {
             return nullptr;
         }
@@ -4936,6 +5038,17 @@ struct Ring_W : Ring<T, false>
                 m_octile = octile_of_index(mod_u64(m_pending_new_sequence, this->m_num_elements),
                     this->m_num_elements);
                 return invalid_sequence;
+            }
+            try {
+                if (m_history) {
+                    m_history->validate_commit(c.leading_sequence.load(), committed_sequence);
+                }
+            }
+            catch (...) {
+                m_pending_new_sequence = c.leading_sequence.load();
+                m_octile = octile_of_index(mod_u64(m_pending_new_sequence, this->m_num_elements),
+                    this->m_num_elements);
+                throw;
             }
             c.leading_sequence = committed_sequence;
             detail::ipc_wakeup_operation_for_test("ring_commit_published", &c);
@@ -5389,7 +5502,7 @@ private:
      *  * Checks the entire reservation against protected storage and the
      *    coordinator notification reserve, even without an octile transition.
      */
-    T* prepare_write(size_t num_elements_to_write, bool notification = false)
+    T* prepare_write(size_t num_elements_to_write, bool notification = false, size_t alignment = 1)
     {
         assert(num_elements_to_write <= this->m_num_elements / 8);
         if (num_elements_to_write > this->m_num_elements / 8) {
@@ -5429,6 +5542,14 @@ private:
             const auto saved_octile   = m_octile;
             const size_t index = mod_u64(saved_sequence, this->m_num_elements);
             try {
+                if (num_elements_to_write > std::numeric_limits<sequence_counter_type>::max() - saved_sequence ||
+                    reinterpret_cast<uintptr_t>(this->m_data + index) % alignment != 0)
+                {
+                    throw std::invalid_argument("Invalid ring construction interval or alignment.");
+                }
+                if (m_history && m_history->compact() && num_elements_to_write) {
+                    m_history->validate_frame_interval(saved_sequence, saved_sequence + num_elements_to_write);
+                }
                 bool blocked = protected_reservation(saved_sequence, num_elements_to_write, notification);
                 if (!blocked) {
                     m_pending_new_sequence += num_elements_to_write;
@@ -5451,6 +5572,10 @@ private:
                     backoff.spin();
                     continue;
                 }
+                if (m_history) {
+                    m_history->preserve(saved_sequence, num_elements_to_write,
+                        c.leading_sequence.load(std::memory_order_acquire));
+                }
             }
             catch (...) {
                 // Restore while still owning the writer. An earlier unpublished
@@ -5462,10 +5587,6 @@ private:
                     m_writing_thread_index = 0;
                 }
                 throw;
-            }
-            if (m_history) {
-                m_history->preserve(saved_sequence, num_elements_to_write,
-                    c.leading_sequence.load(std::memory_order_acquire));
             }
             return this->m_data + index;
         }

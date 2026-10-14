@@ -599,6 +599,42 @@ TEST_CASE(test_ring_write_read_single_reader)
     ASSERT_EQ(writer.get_leading_sequence(), payload.size());
 }
 
+TEST_CASE(test_typed_write_rejection_preserves_raw_reservation)
+{
+    struct alignas(8) Payload
+    {
+        Payload(bool& constructed, uint64_t value) : value(value) { constructed = true; }
+        uint64_t value;
+    };
+    Temp_ring_dir tmp("typed_write_rejection");
+    const auto capacity = pick_ring_elements<char>(128);
+    sintra::Ring_W<char> writer(tmp.str(), "ring_data", capacity);
+    writer.write_commit('x');
+    bool constructed = false;
+    ASSERT_THROW(writer.write<Payload>(0, constructed, uint64_t(17)), std::invalid_argument);
+    ASSERT_THROW(writer.try_write_notification<Payload>(0, constructed, uint64_t(17)), std::invalid_argument);
+    ASSERT_TRUE(!constructed);
+    ASSERT_EQ(writer.get_leading_sequence(), 1u);
+    ASSERT_EQ(writer.m_pending_new_sequence, 1u);
+    ASSERT_EQ(writer.m_writing_thread_index.load(), 0u);
+
+    const char padding[7] = {'a', 'b', 'c', 'd', 'e', 'f', 'g'};
+    auto* pending = writer.write(padding, sizeof(padding));
+    const auto owner = writer.m_writing_thread_index.load();
+    ASSERT_THROW(writer.write<Payload>(std::numeric_limits<size_t>::max(), constructed, uint64_t(17)),
+        std::invalid_argument);
+    ASSERT_THROW(writer.try_write_notification<Payload>(std::numeric_limits<size_t>::max(), constructed, uint64_t(17)),
+        std::invalid_argument);
+    ASSERT_EQ(writer.m_pending_new_sequence, 8u);
+    ASSERT_EQ(writer.m_writing_thread_index.load(), owner);
+    ASSERT_TRUE(std::equal(padding, padding + sizeof(padding), pending));
+    const auto* placed = writer.write<Payload>(0, constructed, uint64_t(17));
+    ASSERT_TRUE(constructed);
+    ASSERT_EQ(placed->value, uint64_t(17));
+    ASSERT_EQ(writer.done_writing(), 16u);
+    ASSERT_EQ(writer.m_writing_thread_index.load(), 0u);
+}
+
 TEST_CASE(test_multiple_readers_see_same_data)
 {
     Temp_ring_dir tmp("multi_reader");
