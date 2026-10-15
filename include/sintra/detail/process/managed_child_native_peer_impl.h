@@ -6,9 +6,14 @@
 #include "managed_process.h"
 #include "../ipc/process_utils.h"
 
+#if defined(__APPLE__)
+#include "darwin_code_identity.h"
+#include <sys/un.h>
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -38,12 +43,26 @@ public:
         : m_handle(std::exchange(other.m_handle, nullptr)) {}
     ~Managed_child_native_reference() { if (m_handle) CloseHandle(m_handle); }
     HANDLE handle() const { return m_handle; }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     explicit Managed_child_native_reference(int descriptor) : m_descriptor(descriptor) {}
     Managed_child_native_reference(Managed_child_native_reference&& other) noexcept
-        : m_descriptor(std::exchange(other.m_descriptor, -1)) {}
-    ~Managed_child_native_reference() { if (m_descriptor >= 0) close(m_descriptor); }
+        : m_descriptor(std::exchange(other.m_descriptor, -1))
+#if defined(__APPLE__)
+        , m_requirement(std::exchange(other.m_requirement, nullptr))
+#endif
+    {}
+    ~Managed_child_native_reference()
+    {
+        if (m_descriptor >= 0) close(m_descriptor);
+#if defined(__APPLE__)
+        if (m_requirement) CFRelease(m_requirement);
+#endif
+    }
     int descriptor() const { return m_descriptor; }
+#if defined(__APPLE__)
+    SecRequirementRef requirement() const { return m_requirement; }
+    SecRequirementRef* requirement_out() { return &m_requirement; }
+#endif
 #endif
     Managed_child_native_reference(const Managed_child_native_reference&) = delete;
     Managed_child_native_reference& operator=(const Managed_child_native_reference&) = delete;
@@ -51,8 +70,11 @@ public:
 private:
 #ifdef _WIN32
     HANDLE m_handle;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     int m_descriptor;
+#if defined(__APPLE__)
+    SecRequirementRef m_requirement = nullptr;
+#endif
 #endif
 };
 
@@ -173,6 +195,14 @@ inline Managed_child_native_peer_proof verify_native_executable_image(
     proof.native_process_id                = (uint64_t)native_pid;
     proof.native_process_creation_identity = start_stamp;
     return proof;
+#elif defined(__APPLE__)
+    const auto injected = native_peer_inspection_error_for_test();
+    if (injected != 0) {
+        const auto final = liveness();
+        return final.state != State::MATCH ? final : result(State::UNAVAILABLE,
+            {Domain::PROVIDER, injected, "Darwin native code inspection"});
+    }
+    return verify_darwin_code(native_pid, start_stamp, executable.requirement(), nullptr, result, liveness);
 #else
     (void)native_pid;
     (void)start_stamp;
@@ -218,8 +248,12 @@ inline Managed_child_executable_capture capture_managed_child_executable(const s
         return result;
     }
     result.reference.m_state = std::make_shared<detail::Managed_child_native_reference>(std::move(owned));
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
+#if defined(__APPLE__)
+    const int descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+#else
     const int descriptor = open(path.c_str(), O_PATH | O_CLOEXEC);
+#endif
     if (descriptor < 0) {
         result.error = {Domain::POSIX, errno, "open(selected executable)"};
         return result;
@@ -234,6 +268,12 @@ inline Managed_child_executable_capture capture_managed_child_executable(const s
         result.error = {Domain::PROVIDER, 0, "Selected executable is not a regular file"};
         return result;
     }
+#if defined(__APPLE__)
+    result.error = detail::capture_darwin_code(descriptor, path, information, owned.requirement_out());
+    if (result.error.domain != Domain::NONE) {
+        return result;
+    }
+#endif
     result.reference.m_state = std::make_shared<detail::Managed_child_native_reference>(std::move(owned));
 #else
     result.error = {Domain::PROVIDER, 0, "Native executable identity unsupported"};
@@ -259,7 +299,7 @@ inline bool compare_managed_child_executables(
     return first_information.dwVolumeSerialNumber == second_information.dwVolumeSerialNumber &&
         first_information.nFileIndexHigh == second_information.nFileIndexHigh &&
         first_information.nFileIndexLow == second_information.nFileIndexLow;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     struct stat first_information{};
     struct stat second_information{};
     if (fstat(first.m_state->descriptor(), &first_information) != 0 ||
@@ -269,6 +309,28 @@ inline bool compare_managed_child_executables(
     }
     return first_information.st_dev == second_information.st_dev &&
         first_information.st_ino == second_information.st_ino;
+#else
+    return false;
+#endif
+}
+
+inline bool compare_managed_child_executable_path(
+    const Managed_child_executable_reference& executable, const std::string& path)
+{
+    if (!executable.m_state || path.empty() || path.find('\0') != std::string::npos) {
+        return false;
+    }
+    const auto native_path = std::filesystem::path(std::u8string(path.begin(), path.end()));
+    if (!native_path.is_absolute()) {
+        return false;
+    }
+#ifdef _WIN32
+    const auto current = capture_managed_child_executable(path);
+    return compare_managed_child_executables(executable, current.reference);
+#elif defined(__linux__) || defined(__APPLE__)
+    struct stat selected{}, current{};
+    return fstat(executable.m_state->descriptor(), &selected) == 0 && stat(path.c_str(), &current) == 0 &&
+        S_ISREG(current.st_mode) && selected.st_dev == current.st_dev && selected.st_ino == current.st_ino;
 #else
     return false;
 #endif
@@ -308,7 +370,7 @@ inline Managed_child_native_peer_proof verify_process_executable(
         return initial;
     }
     return detail::verify_native_executable_image(process, *executable.m_state, result, liveness);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     if (native_pid == 0 || native_pid > static_cast<uint64_t>(std::numeric_limits<pid_t>::max())) {
         return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Invalid native process identity"});
     }
@@ -317,7 +379,11 @@ inline Managed_child_native_peer_proof verify_process_executable(
         siginfo_t information{};
         int observed;
         do {
-            observed = waitid(P_PID, pid, &information, WEXITED | WNOHANG | WNOWAIT | __WALL);
+            observed = waitid(P_PID, pid, &information, WEXITED | WNOHANG | WNOWAIT
+#if defined(__linux__)
+                | __WALL
+#endif
+            );
         }
         while (observed < 0 && errno == EINTR);
         if (observed < 0) {
@@ -352,6 +418,47 @@ inline Managed_child_native_peer_proof verify_process_executable(
 #endif
 }
 
+inline Managed_child_native_peer_proof verify_observed_process_executable(
+    uint64_t native_pid, uint64_t creation_identity,
+    const Managed_child_executable_reference& executable,
+    const std::function<Managed_child_native_peer_state()>& observer)
+{
+    using State  = Managed_child_native_peer_state;
+    using Domain = Managed_child_native_error_domain;
+    auto result = [](State state, Managed_child_native_error error = {}) {
+        return Managed_child_native_peer_proof{state, {}, std::move(error)};
+    };
+#if defined(__APPLE__)
+    if (!executable.m_state || !observer || native_pid == 0 || creation_identity == 0 ||
+        native_pid > (uint64_t)std::numeric_limits<pid_t>::max())
+    {
+        return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Retained native occurrence or executable unavailable"});
+    }
+    auto liveness = [&]() {
+        const auto state = observer();
+        if (state != State::MATCH) {
+            return result(state == State::EXITED ? State::EXITED : State::UNAVAILABLE);
+        }
+        const auto stamp = query_process_start_stamp((uint32_t)native_pid);
+        if (!stamp || *stamp != creation_identity) {
+            return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Original native creation identity unavailable"});
+        }
+        return result(State::MATCH);
+    };
+    const auto initial = liveness();
+    if (initial.state != State::MATCH) {
+        return initial;
+    }
+    return detail::verify_native_executable_image(native_pid, creation_identity, *executable.m_state, result, liveness);
+#else
+    (void)native_pid;
+    (void)creation_identity;
+    (void)executable;
+    (void)observer;
+    return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Retained-observer executable verification unsupported"});
+#endif
+}
+
 inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer(
     const std::shared_ptr<detail::Managed_child_custody_record>& custody,
     const Managed_child_occurrence_identity& identity,
@@ -364,7 +471,7 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
         return Managed_child_native_peer_proof{state, identity, std::move(error)};
     };
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     // Same order as native handoff and the sole reaper. Holding this roster
     // prevents reaping/PID reuse throughout peer and /proc image inspection.
     std::lock_guard<std::mutex> roster_lock(m_spawned_child_pids_mutex);
@@ -435,7 +542,7 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
             {Domain::WINDOWS, static_cast<int>(error), "CompareObjectHandles(authenticated peer)"});
     }
     return detail::verify_native_executable_image(process, *executable.m_state, result, liveness);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     const auto slot = std::find_if(m_spawned_child_pids.begin(), m_spawned_child_pids.end(),
         [&](const Spawned_child_reap_slot& candidate) {
             return candidate.pid == occurrence->native.pid() &&
@@ -450,7 +557,11 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
         siginfo_t information{};
         int observed;
         do {
-            observed = waitid(P_PID, slot->pid, &information, WEXITED | WNOHANG | WNOWAIT | __WALL);
+            observed = waitid(P_PID, slot->pid, &information, WEXITED | WNOHANG | WNOWAIT
+#if defined(__linux__)
+                | __WALL
+#endif
+            );
         }
         while (observed < 0 && errno == EINTR);
         if (observed < 0) {
@@ -466,12 +577,22 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
         return result(State::UNAVAILABLE, {Domain::POSIX, EBADF, "Native peer socket descriptor"});
     }
     const int socket = static_cast<int>(connected_server_endpoint);
-    pollfd connection{socket, POLLIN | POLLRDHUP, 0};
+    constexpr short connection_events = POLLIN
+#if defined(__linux__)
+        | POLLRDHUP
+#endif
+        ;
+    pollfd connection{socket, connection_events, 0};
     const int connection_result = poll(&connection, 1, 0);
     if (connection_result < 0) {
         return result(State::UNAVAILABLE, {Domain::POSIX, errno, "poll(native peer connection)"});
     }
-    if ((connection.revents & (POLLHUP | POLLRDHUP | POLLERR | POLLNVAL)) != 0) {
+    if ((connection.revents & (POLLHUP | POLLERR | POLLNVAL
+#if defined(__linux__)
+        | POLLRDHUP
+#endif
+        )) != 0)
+    {
         return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Native peer connection unavailable"});
     }
     sockaddr_un address{};
@@ -482,6 +603,19 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
     if (address.sun_family != AF_UNIX) {
         return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Native proof requires AF_UNIX peer"});
     }
+#if defined(__APPLE__)
+    audit_token_t peer{};
+    socklen_t peer_size = sizeof(peer);
+    if (getsockopt(socket, SOL_LOCAL, LOCAL_PEERTOKEN, &peer, &peer_size) != 0) {
+        return result(State::UNAVAILABLE, {Domain::POSIX, errno, "getsockopt(LOCAL_PEERTOKEN)"});
+    }
+    if (peer_size != sizeof(peer)) {
+        return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Native peer audit credential size mismatch"});
+    }
+    if (audit_token_to_pid(peer) != slot->pid || audit_token_to_euid(peer) != geteuid()) {
+        return result(State::MISMATCH, {Domain::PROVIDER, 0, "Authenticated socket peer differs from child"});
+    }
+#else
     ucred peer{};
     socklen_t peer_size = sizeof(peer);
     if (getsockopt(socket, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0) {
@@ -493,12 +627,24 @@ inline Managed_child_native_peer_proof Managed_process::verify_child_native_peer
     if (peer.pid != slot->pid || peer.uid != geteuid()) {
         return result(State::MISMATCH, {Domain::PROVIDER, 0, "Authenticated socket peer differs from child"});
     }
+#endif
     const auto stamp = query_process_start_stamp(static_cast<uint32_t>(slot->pid));
     if (!stamp || *stamp != slot->start_stamp) {
         return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Original native creation identity unavailable"});
     }
+#if defined(__APPLE__)
+    const auto injected = detail::native_peer_inspection_error_for_test();
+    if (injected != 0) {
+        const auto final = liveness();
+        return final.state != State::MATCH ? final : result(State::UNAVAILABLE,
+            {Domain::PROVIDER, injected, "Darwin native code inspection"});
+    }
+    return detail::verify_darwin_code((uint64_t)slot->pid, slot->start_stamp,
+        executable.m_state->requirement(), &peer, result, liveness);
+#else
     return detail::verify_native_executable_image(
         (uint64_t)slot->pid, slot->start_stamp, *executable.m_state, result, liveness);
+#endif
 #else
     (void)connected_server_endpoint;
     return result(State::UNAVAILABLE, {Domain::PROVIDER, 0, "Native peer identity unsupported"});

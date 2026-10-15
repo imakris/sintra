@@ -531,16 +531,19 @@ inline void cleanup_failed_init_noexcept()
 
 } // namespace detail
 
-/// Activate before init and before any child creation. The caller dedicates
-/// this process to its native family and grants Sintra sole child wait custody.
-/// Unmanaged external viewers and recovery controllers must already be outside
-/// this process ancestry on Linux.
-inline bool activate_native_family()
+/// Activate before init and before any child creation. TRANSITIVE dedicates
+/// this process to its native family and grants Sintra residual child wait
+/// custody. Unmanaged external viewers and recovery controllers must already
+/// be outside this process ancestry on Linux.
+/// Darwin requires explicit OWNED_CHILDREN: only admitted original children are
+/// observed, external owners retain their waits, and no descendant/group cleanup
+/// is implied. Activation never changes the shared swarm format.
+inline bool activate_native_family(Native_family_scope scope = Native_family_scope::TRANSITIVE)
 {
     if (s_init_once || s_mproc) {
         return false;
     }
-    return detail::native_process_family().activate();
+    return detail::native_process_family().activate(scope);
 }
 
 inline void close_native_family_admission()

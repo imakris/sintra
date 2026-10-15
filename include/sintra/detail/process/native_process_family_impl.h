@@ -335,6 +335,49 @@ inline Native_family_status Managed_process::observe_native_family()
         std::lock_guard<std::mutex> lock(family.m_mutex);
         return family.m_status;
     }
+#if defined(__APPLE__)
+    // Closure and every birth reservation share this lock. Taking it before
+    // the roster snapshot prevents a pre-close admission from escaping an
+    // otherwise empty observation. Existing owners remain the sole waiters.
+    std::lock_guard<std::mutex> family_lock(family.m_mutex);
+    auto& status = family.m_status;
+    detail::Native_family_change_publication publication(status, m_native_family_changed);
+    status.admission_closed = family.m_closed.load(std::memory_order_acquire);
+    status.pending_launches = false;
+    status.observed_process_ids.clear();
+    bool roots_settled = true;
+    {
+        std::lock_guard<std::mutex> records_lock(m_child_custody_mutex);
+        for (auto entry = m_native_family_custodies.begin(); entry != m_native_family_custodies.end();) {
+            const auto custody = entry->lock();
+            if (!custody) {
+                entry = m_native_family_custodies.erase(entry);
+                continue;
+            }
+            ++entry;
+            std::lock_guard<std::mutex> custody_lock(custody->mutex);
+            for (const auto& occurrence : custody->occurrences) {
+                const bool pending = occurrence.setup ==
+                    detail::Managed_child_occurrence_record::setup_state::pending;
+                status.pending_launches |= pending;
+                roots_settled &= !pending && !occurrence.native.running() &&
+                    occurrence.native_action.outcome != Managed_child_native_outcome::ACTIVE;
+                if (occurrence.native.running()) {
+                    status.observed_process_ids.push_back((std::uint32_t)occurrence.native.pid());
+                }
+            }
+        }
+    }
+    for (const auto& child : family.m_external_children) {
+        status.pending_launches |= child->phase == detail::External_native_child::Phase::PENDING;
+        if (child->phase == detail::External_native_child::Phase::CREATED) {
+            status.observed_process_ids.push_back(child->process_id);
+        }
+    }
+    status.native_empty = status.admission_closed && !status.pending_launches &&
+        roots_settled && family.m_external_children.empty() && status.native_error == 0;
+    return status;
+#else
     bool pending_launches = false;
     {
         std::lock_guard<std::mutex> records_lock(m_child_custody_mutex);
@@ -402,6 +445,7 @@ inline Native_family_status Managed_process::observe_native_family()
     // settled under closed admission. Communication release remains separate.
     result.native_empty &= result.admission_closed && !pending_launches && family.m_external_children.empty();
     return result;
+#endif
 }
 
 #ifdef _WIN32
@@ -447,8 +491,10 @@ inline bool Managed_process::request_native_family_termination(
         family.m_force_until = deadline;
         family.m_status.termination_requested = true;
         ++family.m_status.action_generation;
+#if !defined(__APPLE__)
         family.m_status.native_error = 0;
         family.m_status.failed_operation.clear();
+#endif
     }
     m_native_family_changed.notify_all();
     try {

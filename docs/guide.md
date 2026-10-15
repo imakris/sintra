@@ -1286,6 +1286,10 @@ once, configure with `-DSINTRA_BUILD_COMPILED=ON` and link
 consistently and compile exactly one source file containing
 `#include <sintra/src.hpp>`.
 
+macOS builds outside CMake must link the Security and CoreFoundation frameworks
+and `bsm` for native executable authentication. CMake targets supply these
+platform dependencies automatically.
+
 Windows builds outside CMake must link `advapi32`; MSVC and clang-cl receive an
 automatic library directive.
 
