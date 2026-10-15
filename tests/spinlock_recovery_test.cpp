@@ -1,3 +1,6 @@
+#include "isolated_test_support.h"
+
+#include <sintra/detail/ipc/mutex.h>
 #include <sintra/detail/ipc/spinlock.h>
 #include <sintra/detail/debug_pause.h>
 
@@ -10,6 +13,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -539,8 +544,91 @@ bool windows_liveness_regressions()
 
 } // namespace
 
+namespace native_diagnostic {
+
+using sintra::test::isolated::await;
+using sintra::test::isolated::require;
+using sintra::test::isolated::fixture_failure;
+using sintra::test::isolated::case_t;
+
+constexpr case_t k_cases[] = {
+    {"native_live_stall_callback", "", "diagnostic"},
+};
+
+sintra::detail::interprocess_mutex* s_diagnostic_mutex = nullptr;
+sintra::spinlock* s_diagnostic_lock = nullptr;
+std::atomic<unsigned> s_native_log_callbacks{0};
+std::atomic<uint64_t> s_diagnostic_cpu{0};
+
+void diagnostic_abort(int)
+{
+    const bool no_callback = s_native_log_callbacks == 0;
+    sintra::detail::native_diagnostic("native live-stall diagnostic: application_callbacks=",
+        s_native_log_callbacks.load(), "\n");
+    std::_Exit(no_callback ? 0 : 78);
+}
+
+int run_diagnostic_case(const case_t& test)
+{
+    const std::string_view name = test.name;
+    sintra::detail::interprocess_mutex mutex;
+    mutex.test_install_owner_fixture({0, 1, 0, 0});
+    s_diagnostic_mutex = &mutex;
+    if (name == "native_live_stall_callback") {
+        sintra::spinlock lock;
+        s_diagnostic_lock = &lock;
+        std::atomic<bool> held{false};
+        std::thread holder([&] {
+            sintra::spinlock::locker lock(*s_diagnostic_lock);
+            held = true;
+            for (;;) { std::this_thread::yield(); }
+        });
+        holder.detach();
+        require(await([&] { return held.load(); }), "diagnostic fixture did not hold its reader lock");
+        sintra::detail::set_debug_pause_active(false);
+        sintra::test::prepare_for_intentional_crash();
+#if defined(_WIN32)
+        SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        require(_set_error_mode(_OUT_TO_STDERR) != -1,
+            "diagnostic fixture could not select noninteractive CRT errors");
+#endif
+        require(std::signal(SIGABRT, diagnostic_abort) != SIG_ERR,
+            "diagnostic fixture could not observe its intentional abort");
+        sintra::detail::test_hooks::s_spinlock_cpu = [](sintra::detail::spinlock_cpu_sample& sample) {
+            sample.ns = s_diagnostic_cpu.fetch_add(3'000'000'000ull);
+            return true;
+        };
+        sintra::set_log_callback([](sintra::log_level, const char*, void*) {
+            ++s_native_log_callbacks;
+            std::fprintf(stderr, "application callback entered while recovery gate was held=%d\n",
+                int(s_diagnostic_mutex->test_gate_holder() == sintra::detail::current_process_instance()));
+            std::fflush(stderr);
+        });
+        sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void*) {
+            if (std::string_view(stage) == "mutex_recovery_gate_acquired") {
+                s_diagnostic_lock->lock();
+            }
+        };
+        (void)mutex.test_try_lock_throwing();
+        fixture_failure("diagnostic fixture did not reach its live-holder abort policy");
+    }
+    throw std::runtime_error("unknown diagnostic case");
+}
+
+int run_case(const std::string&, const case_t& test, const char*)
+{
+    return run_diagnostic_case(test);
+}
+
+} // namespace native_diagnostic
+
 int main(int argc, char* argv[])
 {
+    if (const auto result = sintra::test::isolated::run_cases(
+        argc, argv, native_diagnostic::k_cases, native_diagnostic::run_case))
+    {
+        return *result;
+    }
 #ifdef _WIN32
     if (argc == 2 && std::string_view(argv[1]) == "--liveness-child") {
         ::Sleep(INFINITE);

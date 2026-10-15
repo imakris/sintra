@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "native_exit_authority.h"
 #include "observation.h"
 #include "../debug_pause.h"
 /*
@@ -111,58 +110,28 @@ public:
     interprocess_mutex& operator=(const interprocess_mutex&) = delete;
 
     // Blocks until the lock is acquired. Throws on recursive acquisition (same thread).
-    void lock(const Native_exit_authority* authority = nullptr)
+    void lock()
     {
         const owner_token self = make_owner_token();
-        if (try_acquire(self, /*throw_on_recursive=*/true, nullptr, false, authority)) {
+        if (try_acquire(self, /*throw_on_recursive=*/true)) {
             return;
         }
 
         std::size_t iteration = 0;
         for (;;) {
             adaptive_wait(iteration++);
-            if (try_acquire(self, /*throw_on_recursive=*/true, nullptr, false, authority)) {
+            if (try_acquire(self, /*throw_on_recursive=*/true)) {
                 return;
             }
         }
     }
 
     // Non-blocking attempt. Returns false on contention or recursive attempt by the same thread.
-    bool try_lock(const Native_exit_authority* authority = nullptr)
+    bool try_lock()
     {
         const owner_token self = make_owner_token();
-        return try_acquire(self, /*throw_on_recursive=*/false, nullptr, false, authority);
+        return try_acquire(self, /*throw_on_recursive=*/false);
     }
-
-    enum class Owner_inspection { MATCHED, CHANGED, BUSY };
-
-    // Infrastructure-only bounded inspection. The publication gate excludes
-    // successor acquisition; neither mutex ownership nor its token is changed.
-    // The callback must not acquire this mutex or invoke application code.
-    template <typename F>
-    Owner_inspection inspect_owner_instance(
-        uint64_t expected_instance,
-        const Native_exit_authority& authority,
-        F&& inspect)
-    {
-        recover_token gate = 0;
-        if (!acquire_recovery_gate(gate, &authority)) {
-            return Owner_inspection::BUSY;
-        }
-        Gate_release release(*this, gate);
-
-        operation("mutex_inspection_gate_acquired", true);
-
-        const auto owner = m_owner.load(std::memory_order_acquire);
-        if (owner != k_unowned &&
-            m_owner_instance.load(std::memory_order_acquire) != expected_instance)
-        {
-            return Owner_inspection::CHANGED;
-        }
-        inspect();
-        return Owner_inspection::MATCHED;
-    }
-
 
     // Tries to acquire within a steady_clock-relative duration.
     // Uses adaptive spinning, then sleeps with exponential backoff capped and
@@ -243,15 +212,14 @@ public:
     // Infrastructure custody is captured by the acquiring call, never inferred
     // from a later owner reread. Instrumentation cannot cancel mandatory cleanup.
     bool try_lock_cleanup(
-        uint64_t& token, bool& acquired, std::error_code* error = nullptr,
-        const Native_exit_authority* authority = nullptr) noexcept
+        uint64_t& token, bool& acquired, std::error_code* error = nullptr) noexcept
     {
         acquired = false;
         std::error_code failure;
         try {
             token = make_owner_token();
             if (error) { error->clear(); }
-            return try_acquire(token, false, &acquired, true, authority);
+            return try_acquire(token, false, &acquired, true);
         }
         catch (const std::system_error& exception) { failure = exception.code(); }
         catch (...) {
@@ -265,13 +233,13 @@ public:
         return acquired;
     }
 
-    void lock_cleanup(uint64_t& token, const Native_exit_authority* authority = nullptr) noexcept
+    void lock_cleanup(uint64_t& token) noexcept
     {
         bool acquired = false;
         std::error_code last_error;
         for (;;) {
             std::error_code error;
-            const bool locked = try_lock_cleanup(token, acquired, &error, authority);
+            const bool locked = try_lock_cleanup(token, acquired, &error);
             if (error && error != last_error) {
                 native_diagnostic("[sintra][mutex] mandatory mutex acquisition error ",
                     uint64_t(error.value()), "; original acquisition duty retained.\n");
@@ -401,16 +369,11 @@ private:
     }
 
     // The owned token is this process instance.
-    bool acquire_recovery_gate(
-        recover_token& owned_token,
-        const Native_exit_authority* authority = nullptr)
+    bool acquire_recovery_gate(recover_token& owned_token)
     {
         owned_token = current_process_instance();
         recover_token holder = m_recovering.load(std::memory_order_acquire);
-        if (holder != 0 &&
-            (authority ? authority->has_exited(holder) :
-                process_instance_has_exited(holder, owned_token)))
-        {
+        if (holder != 0 && process_instance_has_exited(holder, owned_token)) {
             m_recovering.compare_exchange_strong(holder, static_cast<recover_token>(0));
         }
 
@@ -441,12 +404,8 @@ private:
     bool owner_has_exited(
         owner_token     owner,
         std::uint64_t   stored_stamp,
-        std::uint64_t   self_instance,
-        const Native_exit_authority* authority) const
+        std::uint64_t   self_instance) const
     {
-        if (authority) {
-            return authority->has_exited(m_owner_instance.load(std::memory_order_acquire));
-        }
         const auto pid = owner_pid(owner);
         if (pid == process_instance_pid(self_instance)) {
             return m_owner_instance.load(std::memory_order_acquire) != self_instance;
@@ -460,10 +419,10 @@ private:
     }
 
     bool try_acquire_unowned_when_no_recovery(
-        owner_token self, bool* acquired, bool contain, const Native_exit_authority* authority)
+        owner_token self, bool* acquired, bool contain)
     {
         recover_token gate = 0;
-        if (!acquire_recovery_gate(gate, authority)) {
+        if (!acquire_recovery_gate(gate)) {
             return false;
         }
         Gate_release release(*this, gate);
@@ -503,18 +462,17 @@ private:
 
     // Internal helper lets timed/try APIs avoid throwing on recursion.
     bool try_acquire(
-        owner_token self, bool throw_on_recursive, bool* acquired = nullptr, bool contain = false,
-        const Native_exit_authority* authority = nullptr)
+        owner_token self, bool throw_on_recursive, bool* acquired = nullptr, bool contain = false)
     {
-        if (try_acquire_unowned_when_no_recovery(self, acquired, contain, authority)) {
+        if (try_acquire_unowned_when_no_recovery(self, acquired, contain)) {
             return true;
         }
 
         owner_token expected = m_owner.load(std::memory_order_acquire);
 
         // Recovery path: previous owner is gone (process crashed/exited).
-        if (expected != k_unowned && try_recover(expected, contain, authority)) {
-            if (try_acquire_unowned_when_no_recovery(self, acquired, contain, authority)) {
+        if (expected != k_unowned && try_recover(expected, contain)) {
+            if (try_acquire_unowned_when_no_recovery(self, acquired, contain)) {
                 return true;
             }
         }
@@ -527,7 +485,7 @@ private:
             bool recursive = false;
             {
                 recover_token gate = 0;
-                if (!acquire_recovery_gate(gate, authority)) {
+                if (!acquire_recovery_gate(gate)) {
                     return false;
                 }
                 Gate_release release(*this, gate);
@@ -546,14 +504,14 @@ private:
     }
 
     // Attempt robust recovery if the observed owner appears to be dead.
-    bool try_recover(owner_token observed_owner, bool contain, const Native_exit_authority* authority)
+    bool try_recover(owner_token observed_owner, bool contain)
     {
         if (observed_owner == k_unowned) {
             return false;
         }
 
         recover_token gate = 0;
-        if (!acquire_recovery_gate(gate, authority)) {
+        if (!acquire_recovery_gate(gate)) {
             return false; // someone else is (still) recovering
         }
         Gate_release release(*this, gate);
@@ -570,7 +528,7 @@ private:
         else
         if (current_owner == observed_owner) {
             const auto stored_stamp = m_owner_start_stamp.load(std::memory_order_acquire);
-            if (owner_has_exited(observed_owner, stored_stamp, gate, authority)) {
+            if (owner_has_exited(observed_owner, stored_stamp, gate)) {
                 recovered = m_owner.compare_exchange_strong(current_owner, k_unowned);
             }
         }
