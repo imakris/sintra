@@ -101,6 +101,9 @@ def parse_active_tests(tests_dir: Path) -> Dict[str, int]:
     # This prerequisite exercises Linux per-thread child lists, not other native backends.
     if sys.platform != "linux":
         active_tests.pop("native_process_family_prerequisite_contract_test", None)
+    # Executable CODE authentication is a Darwin-native contract.
+    if sys.platform != "darwin":
+        active_tests.pop("darwin_executable_auth_contract_test", None)
 
     return active_tests
 
