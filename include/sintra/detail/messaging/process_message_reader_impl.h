@@ -519,12 +519,14 @@ Process_message_reader::Process_message_reader(
         s_mproc->m_directory,
         "req",
         m_process_instance_id,
-        occurrence);
+        occurrence,
+        m_managed_child_custody_identity);
     m_in_rep_c              = std::make_shared<Message_ring_R>(
         s_mproc->m_directory,
         "rep",
         m_process_instance_id,
-        occurrence);
+        occurrence,
+        m_managed_child_custody_identity);
 
     if (m_process_instance_id == process_of(s_coord_id) && !s_coord) {
         m_in_req_c->set_eviction_handler([owner = s_mproc]() {

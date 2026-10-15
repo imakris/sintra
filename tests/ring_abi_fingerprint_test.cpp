@@ -28,9 +28,9 @@ constexpr std::string_view k_failure_prefix = "ring_abi_fingerprint_test: ";
 void test_message_prefix_ring_abi()
 {
     sintra::test::require_true(
-        sintra::detail::k_sintra_ring_abi_version == 11,
+        sintra::detail::k_sintra_ring_abi_version == 12,
         k_failure_prefix,
-        "binary wakeup tokens require ring ABI version 11");
+        "custody-qualified managed rings require ring ABI version 12");
     sintra::test::require_true(
         sintra::detail::k_ring_lifecycle_anchor_abi_version == 5,
         k_failure_prefix,
@@ -116,7 +116,8 @@ void test_attach_rejects_mismatched_fingerprint()
     // ABI-10 revision 2, whose Windows writers rebuild ownership_mutex from
     // writer_pid, from revision 3, whose locks recorded owners by PID alone,
     // from revision 4, whose second spinlock word was a wall-clock stamp, and
-    // from the previous native ownership and wakeup layouts,
+    // from the previous native ownership and wakeup layouts, and from ABI 11
+    // before managed ring names included custody identities,
     // must be rejected even when their size happens to match.
     const auto previous_fingerprint = [](std::uint64_t abi_version) {
         return sintra::detail::fnv1a_64({
@@ -141,16 +142,17 @@ void test_attach_rejects_mismatched_fingerprint()
     };
     sintra::test::require_true(sintra::detail::k_ring_abi_layout_revision == 6,
         k_failure_prefix,
-        "the common binary wakeup control uses ABI-11 layout revision 6");
+        "the common binary wakeup control uses ABI-12 layout revision 6");
     sintra::test::require_true(
-        revision_fingerprint(11, 6) == sintra::detail::k_ring_abi_fingerprint,
+        revision_fingerprint(12, 6) == sintra::detail::k_ring_abi_fingerprint,
         k_failure_prefix,
         "the revision fixture must reproduce this build's fingerprint");
 
     for (const std::uint64_t wrong_fingerprint :
             {previous_fingerprint(9), previous_fingerprint(10), revision_fingerprint(10, 2),
                 revision_fingerprint(10, 3), revision_fingerprint(10, 4),
-                revision_fingerprint(10, 5), revision_fingerprint(11, 7)})
+                revision_fingerprint(10, 5), revision_fingerprint(11, 6),
+                revision_fingerprint(11, 7)})
     {
         sintra::test::require_true(wrong_fingerprint != sintra::detail::k_ring_abi_fingerprint,
             k_failure_prefix,

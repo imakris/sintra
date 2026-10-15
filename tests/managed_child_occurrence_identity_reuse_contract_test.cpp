@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <shared_mutex>
 #include <string>
 
 namespace {
@@ -30,6 +32,8 @@ constexpr const char* k_child_b_flag =
     "--managed_child_occurrence_identity_b";
 constexpr const char* k_child_a_file =
     "managed_child_occurrence_identity_a.txt";
+constexpr const char* k_child_a_exit_file =
+    "managed_child_occurrence_identity_a_exit.txt";
 constexpr const char* k_child_b_file =
     "managed_child_occurrence_identity_b.txt";
 constexpr const char* k_child_b_recovery_file =
@@ -78,7 +82,9 @@ int run_child_a(int argc, char* argv[], const fs::path& shared_path)
     catch (...) {
         return 2;
     }
-    return write_marker(shared_path / k_child_a_file) ? 0 : 2;
+    const bool exit_requested = write_marker(shared_path / k_child_a_file) &&
+        sintra::test::wait_for_file(shared_path / k_child_a_exit_file, 5s, 10ms);
+    return exit_requested ? 0 : 2;
 }
 
 int run_child_b(int argc, char* argv[], const fs::path& shared_path)
@@ -157,6 +163,18 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         : Child_marker{};
     Managed_child_exit_capture capture_a;
     auto observation_a = observe(custody_a, capture_a);
+    // A completed retirement worker may still own its stopped reader when
+    // the next custody starts. Keep that exact mapping overlap deterministic.
+    std::shared_ptr<sintra::Process_message_reader> retained_predecessor;
+    {
+        std::shared_lock lock(sintra::s_mproc->m_readers_mutex);
+        const auto reader = sintra::s_mproc->m_readers.find(k_reused_process_iid);
+        if (reader != sintra::s_mproc->m_readers.end()) {
+            retained_predecessor = reader->second;
+        }
+    }
+    const bool a_exit_requested = sintra::test::managed_child::write_complete_file(
+        shared_path / k_child_a_exit_file, "1\n");
     const bool a_exit_seen = capture_a.wait_for_one(5s);
     const auto released_a = custody_a.release_until(
         std::chrono::steady_clock::now() + 5s);
@@ -164,6 +182,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     auto custody_b = spawn(k_child_b_flag);
     const bool b_marker_seen = sintra::test::wait_for_file(
         shared_path / k_child_b_file, 5s, 10ms);
+    const bool predecessor_retained = retained_predecessor != nullptr;
+    retained_predecessor.reset();
     const auto marker_b = b_marker_seen
         ? read_marker(shared_path / k_child_b_file)
         : Child_marker{};
@@ -223,7 +243,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
     const bool finalized = sintra::shutdown();
 
     const bool valid = custody_a && custody_b && a_marker_seen && b_marker_seen &&
-        recovery_marker_seen && marker_a.pid > 0 && marker_b.pid > 0 &&
+        recovery_marker_seen && a_exit_requested && predecessor_retained &&
+        marker_a.pid > 0 && marker_b.pid > 0 &&
         recovery_marker.pid > 0 && marker_a.pid != marker_b.pid &&
         marker_b.pid != recovery_marker.pid && crash_requested &&
         recovery_terminated && custody_relative_numbering &&
@@ -237,6 +258,7 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             stderr,
             "MANAGED_CHILD_OCCURRENCE_IDENTITY_REUSE_INVALID "
             "custody_a=%d custody_b=%d marker_a=%d marker_b=%d recovery=%d "
+            "a_exit_requested=%d predecessor_retained=%d "
             "occurrence_a=%u occurrence_b=%u occurrence_recovery=%u "
             "custody_identity_a=%llu custody_identity_b=%llu "
             "custody_identity_recovery=%llu custody_relative_numbering=%d "
@@ -249,6 +271,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
             a_marker_seen ? 1 : 0,
             b_marker_seen ? 1 : 0,
             recovery_marker_seen ? 1 : 0,
+            a_exit_requested ? 1 : 0,
+            predecessor_retained ? 1 : 0,
             identity_a.occurrence,
             identity_b.occurrence,
             recovery_identity.occurrence,

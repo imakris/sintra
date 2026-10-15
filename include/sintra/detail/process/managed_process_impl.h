@@ -3209,6 +3209,7 @@ void Managed_process::init(int argc, const char* const* argv)
     std::string coordinator_id_arg;
     std::string external_attach_token_arg;
     uint32_t    external_attach_occurrence = 0;
+    uint64_t    managed_child_custody_identity = 0;
 
     auto option_value = [&](
         const std::string& arg,
@@ -3333,6 +3334,18 @@ void Managed_process::init(int argc, const char* const* argv)
             if (auto value = option_value(arg, "--recovery_occurrence", 'e', true, i)) {
                 try {
                     s_recovery_occurrence = static_cast<uint32_t>(std::stoul(*value));
+                }
+                catch (...) {
+                    throw 1;
+                }
+                continue;
+            }
+
+            if (auto value = option_value(
+                    arg, "--managed_child_custody_identity", '\0', true, i))
+            {
+                try {
+                    managed_child_custody_identity = std::stoull(*value);
                 }
                 catch (...) {
                     throw 1;
@@ -3510,8 +3523,10 @@ void Managed_process::init(int argc, const char* const* argv)
     const auto ring_occurrence = external_attach_token_arg.empty()
         ? s_recovery_occurrence
         : external_attach_occurrence;
-    m_out_req_c = new Message_ring_W(m_directory, "req", m_instance_id, ring_occurrence);
-    m_out_rep_c = new Message_ring_W(m_directory, "rep", m_instance_id, ring_occurrence);
+    m_out_req_c = new Message_ring_W(
+        m_directory, "req", m_instance_id, ring_occurrence, managed_child_custody_identity);
+    m_out_rep_c = new Message_ring_W(
+        m_directory, "rep", m_instance_id, ring_occurrence, managed_child_custody_identity);
 
     if (coordinator_is_local) {
         s_coord = new Coordinator;
@@ -6125,6 +6140,8 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
         args.push_back(detail::k_skip_startup_barrier_arg);
     }
     args.insert(args.end(), {"--recovery_occurrence", std::to_string(s.occurrence)});
+    args.insert(args.end(), {
+        "--managed_child_custody_identity", std::to_string(custody->identity)});
 
     // Before spawning the new process, we have to assure that the corresponding
     // reading threads are up and running.

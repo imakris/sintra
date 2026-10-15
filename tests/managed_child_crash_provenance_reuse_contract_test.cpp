@@ -385,8 +385,8 @@ int run_root(int argc, char* argv[], const fs::path& shared_path)
         observation_a.occurrence.process_instance_id == k_reused_process_iid &&
         observation_a.occurrence.occurrence          == child_a->occurrence;
     // A retirement worker can retain its stopped reader after custody release.
-    // Keep those mappings alive until B is ready so reuse exercises the same
-    // ring generation instead of relying on prompt predecessor destruction.
+    // Keep those mappings alive until B is ready so custody isolation does
+    // not rely on prompt predecessor destruction.
     std::shared_ptr<sintra::Process_message_reader> retained_predecessor;
     {
         std::shared_lock lock(sintra::s_mproc->m_readers_mutex);
