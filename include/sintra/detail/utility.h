@@ -145,16 +145,16 @@ size_t get_cache_line_size()
 // conversion utility
 struct C_string_vector
 {
-    explicit C_string_vector(const std::vector<std::string>& v_in)
-        : m_storage(v_in)
-    {
-        initialize();
-    }
+    explicit C_string_vector(std::vector<std::string> strings)
 
-    explicit C_string_vector(std::vector<std::string>&& v_in)
-        : m_storage(std::move(v_in))
+    :
+        m_storage(std::move(strings))
     {
-        initialize();
+        m_v.reserve(m_storage.size() + 1);
+        for (const auto& string : m_storage) {
+            m_v.push_back(string.c_str());
+        }
+        m_v.push_back(nullptr);
     }
 
     C_string_vector(const C_string_vector&) = delete;
@@ -162,19 +162,10 @@ struct C_string_vector
     C_string_vector(C_string_vector&&) = delete;
     C_string_vector& operator=(C_string_vector&&) = delete;
 
-    const char* const* v()    const { return m_v.data();       }
+    const char* const* v()    const { return m_v.data();        }
     size_t             size() const { return m_storage.size(); }
 
 private:
-    void initialize()
-    {
-        m_v.reserve(m_storage.size() + 1);
-        for (auto& s : m_storage) {
-            m_v.push_back(s.c_str());
-        }
-        m_v.push_back(nullptr);
-    }
-
     std::vector<std::string>   m_storage;
     std::vector<const char*>   m_v;
 };
