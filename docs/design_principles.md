@@ -34,7 +34,7 @@ application references into the ring.
 
 The [dispatch-buffer decision](#retaining-the-shared-dispatch-buffer) below
 records why a fixed-size receive fast path is not pending implementation.
-The [variable-field ownership contract](deferred_work.md#owning-values-for-variable-field-receivet)
+The [variable-field ownership contract](reference/receive.md#threading-and-lifecycle)
 uses `receive_owned<T>()` for an independent complete frame. By-value
 `receive<T>()` rejects generated variable-field messages at compile time.
 

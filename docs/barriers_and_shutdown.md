@@ -9,6 +9,44 @@ coordinated execution:
   progress.
 - **TERMINATED** - the process has exited and its resources have been scavenged.
 
+## Barrier modes
+
+`sintra::barrier()` tracks process progress and defaults to
+`delivery_fence_t`. Choose the lightest mode whose guarantees match the next
+phase:
+
+- **Rendezvous** (`barrier<sintra::rendezvous_t>(name)`) proves that every
+  participant reached the point. Earlier messages may still be in flight;
+  two peers can both arrive without having observed each other's messages.
+- **Delivery fence** (`barrier(name)`) also waits for local readers to fetch
+  pre-barrier messages. Handlers may still be running. It provides no second
+  rendezvous proving that peers have drained their readers.
+- **Processing fence** (`barrier<sintra::processing_fence_t>(name)`) from a
+  control thread waits for pre-barrier handlers and their continuations to
+  finish, including the cross-participant processing handoff.
+
+Delivery fences add local reader progress to the rendezvous. Processing fences
+add a second rendezvous to make handler side effects observable across
+participants. Neither replaces synchronization between application threads.
+
+Barrier rounds track processes, not calling threads. Keep one in-flight caller
+per process for a `(barrier_name, group_name, BarrierMode)` round. When several
+local threads wait for one phase, coordinate them with normal threading
+primitives and have one representative enter the Sintra barrier.
+
+From a request-reader handler or post-handler, a processing fence skips the
+currently executing reader and any other request reader of that process
+parked in a fence. It does not wait for those handlers or for messages queued
+behind them on the skipped streams. Queued post-handler tasks remain deferred;
+entering a fence does not end the current handler's lifetime. Use a control
+thread when the fence must include all pre-barrier handler work. See
+[barrier modes](reference/barrier_modes.md) for the complete threading contract.
+
+```cpp
+sintra::barrier("phase-ready");
+sintra::barrier<sintra::processing_fence_t>("apply-updates");
+```
+
 ## `sintra::shutdown()`
 
 `shutdown()` is the standard terminal API for the multi-process lifecycle.

@@ -71,6 +71,25 @@ Failures:
   is not a `Derived_transceiver` (the static assertion ties the message to
   `Transceiver_type`).
 
+## Example
+
+Pin a transceiver and one of its messages, then publish with the ordinary typed
+message API:
+
+```cpp
+struct Explicit_bus : sintra::Derived_transceiver<Explicit_bus>
+{
+    SINTRA_TYPE_ID(0x120)
+    SINTRA_MESSAGE_EXPLICIT(ping, 0x121, int value)
+};
+
+Explicit_bus bus;
+sintra::activate_slot([](const Explicit_bus::ping& message) {
+    sintra::console() << "ping value=" << message.value << '\n';
+});
+bus.emit_global<Explicit_bus::ping>(73);
+```
+
 Example source:
 - [example/sintra/sintra_example_7_explicit_type_ids.cpp](../../example/sintra/sintra_example_7_explicit_type_ids.cpp)
 - [tests/explicit_type_id_test.cpp](../../tests/explicit_type_id_test.cpp)

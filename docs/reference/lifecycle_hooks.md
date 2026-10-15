@@ -132,6 +132,26 @@ Failures:
 - None. Exceptions thrown by the handler are caught by the runtime's
   exception boundary and logged.
 
+## Example
+
+Register on the coordinator to observe crash retirements:
+
+```cpp
+sintra::set_lifecycle_handler(
+    [](const sintra::process_lifecycle_event& event) {
+        if (event.why != sintra::process_lifecycle_event::reason::crash) {
+            return;
+        }
+        sintra::console()
+            << "Process " << event.process_iid
+            << " crashed with status " << event.status << '\n';
+    });
+```
+
+The `status` above is the event's abnormal-termination message value, not
+OS-authoritative exit status. For that distinction, see the contract above and
+the [managed-child exit observer](spawn_swarm_process.md).
+
 Example source:
 
 - [tests/lifecycle_handler_test.cpp](../../tests/lifecycle_handler_test.cpp)
