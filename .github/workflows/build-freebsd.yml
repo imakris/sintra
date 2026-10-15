@@ -2,6 +2,17 @@ name: Build & Test - FreeBSD
 
 on:
   workflow_dispatch:
+    inputs:
+      test_name:
+        description: 'Optional top-level test name without sintra_ or .cpp'
+        required: false
+        default: ''
+        type: string
+      repetitions:
+        description: 'Repetitions when a test name is selected'
+        required: false
+        default: 1
+        type: number
   push:
     branches: [ '*' ]
     paths:
@@ -40,15 +51,39 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         env:
           SINTRA_TEST_ITERATION_MULTIPLIER: "0.5"
+          SINTRA_TEST_NAME: ${{ inputs.test_name }}
+          SINTRA_TEST_REPETITIONS: ${{ inputs.repetitions }}
         with:
           release: "15.0"
           usesh: true
           copyback: false
-          envs: 'SINTRA_TEST_ITERATION_MULTIPLIER'
+          envs: 'SINTRA_TEST_ITERATION_MULTIPLIER SINTRA_TEST_NAME SINTRA_TEST_REPETITIONS'
           prepare: |
             date +%s > /tmp/ci_start_time
-            pkg install -y cmake python
+            pkg install -y cmake ninja python
           run: |
+            if [ -n "$SINTRA_TEST_NAME" ]; then
+              case "$SINTRA_TEST_NAME" in
+                *[!a-zA-Z0-9_]*) echo "Invalid top-level test name" >&2; exit 1 ;;
+              esac
+              if [ ! -f "tests/$SINTRA_TEST_NAME.cpp" ]; then
+                echo "Selected test source does not exist" >&2
+                exit 1
+              fi
+              case "$SINTRA_TEST_REPETITIONS" in
+                ''|*[!0-9]*) echo "Repetitions must be a positive integer" >&2; exit 1 ;;
+              esac
+              if [ "$SINTRA_TEST_REPETITIONS" -lt 1 ]; then
+                echo "Repetitions must be a positive integer" >&2
+                exit 1
+              fi
+              printf '%s %s\n' "$SINTRA_TEST_NAME" "$SINTRA_TEST_REPETITIONS" > tests/active_tests.txt
+              cmake -S . -B build-focused -G Ninja -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_TESTS=ON
+              cmake --build build-focused --target "sintra_$SINTRA_TEST_NAME" --parallel 2
+              cd tests
+              python3 run_tests.py --timeout 30 --build-dir ../build-focused --config Release --iteration-multiplier 1
+              exit
+            fi
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_TESTS=ON
             cmake --build build
             cd tests

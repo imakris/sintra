@@ -52,6 +52,8 @@ constexpr const char* k_pid_1_file =
     "managed_child_exact_exit_observation_pid_1.txt";
 constexpr const char* k_crash_0_file =
     "managed_child_exact_exit_observation_crash_0.txt";
+constexpr const char* k_reentrant_exit_file =
+    "managed_child_exact_exit_observation_reentrant_exit.txt";
 constexpr std::uint32_t k_exit_code = 0xc0000005u;
 constexpr sintra::instance_id_type k_child_process_iid =
     sintra::compose_instance(31u, 1ull);
@@ -266,12 +268,19 @@ int run_child(
     return 2;
 }
 
-int run_reentrant_child(int argc, char* argv[])
+int run_reentrant_child(int argc, char* argv[], const fs::path& shared_path)
 {
     try {
         sintra::init(argc, argv);
     }
     catch (...) {
+        return 2;
+    }
+    // The unavailable-status hook runs after native custody handoff, so this
+    // child must not be reaped by the spawn handshake itself.
+    if (sintra::s_mproc_id == k_reentrant_process_iid &&
+        !sintra::test::wait_for_file(shared_path / k_reentrant_exit_file, 30s, 10ms))
+    {
         return 2;
     }
     return 0;
@@ -554,6 +563,8 @@ int run_root(
                 ++unavailable_count;
                 unavailable_changed.notify_all();
             });
+    const bool unavailable_exit_released =
+        write_pid(shared_path / k_reentrant_exit_file, 1);
     bool unavailable_observed = false;
     {
         std::unique_lock<std::mutex> lock(unavailable_mutex);
@@ -563,7 +574,7 @@ int run_root(
             [&]() { return unavailable_count == 1; });
     }
     unavailable_status_hook.restore();
-    const bool unavailable_delivery = unavailable_observation &&
+    const bool unavailable_delivery = unavailable_exit_released && unavailable_observation &&
         unavailable_observed && unavailable_count == 1 &&
         unavailable_observation.occurrence.process_instance_id ==
             k_reentrant_process_iid &&
@@ -959,7 +970,7 @@ int main(int argc, char* argv[])
         return run_child(argc, argv, shared.path());
     }
     if (sintra::test::has_argv_flag(argc, argv, k_reentrant_child_flag)) {
-        return run_reentrant_child(argc, argv);
+        return run_reentrant_child(argc, argv, shared.path());
     }
     return run_root(argc, argv, shared.path());
 }
