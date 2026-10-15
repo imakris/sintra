@@ -17,23 +17,29 @@
 // corrected rule: a recovered exception is not evidence of process
 // termination and must leave the abnormal-termination protocol untouched.
 //
-// The scenario is Windows-specific (first-chance SEH visibility); on other
-// platforms the test passes trivially.
+// First-chance SEH survival is Windows-specific. Native signal-handler
+// diagnostics also run on the other supported platforms.
 //
+
+#include "isolated_test_support.h"
 
 #include <sintra/sintra.h>
 #include <sintra/detail/process/managed_process.h>
 
 #include "test_utils.h"
 
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -234,13 +240,114 @@ int run_coordinator(const fs::path& dir)
 
 } // namespace
 
+namespace native_handler {
+
+using sintra::test::isolated::await;
+using sintra::test::isolated::require;
+using sintra::test::isolated::fixture_failure;
+using sintra::test::isolated::case_t;
+
+constexpr case_t k_cases[] = {
+    {"native_signal_handler_callback", "", "diagnostic"},
+#if defined(_WIN32)
+    {"native_exception_handler_callback", "", "diagnostic"},
+#endif
+    {"native_held_logger_handler", "", "diagnostic"},
+};
+
+sintra::detail::interprocess_mutex* s_diagnostic_mutex = nullptr;
+const char* s_exception_stage = nullptr;
+std::atomic<unsigned> s_native_log_callbacks{0};
+std::atomic<bool> s_held_logger{false};
+std::atomic<bool> s_expect_held_logger{false};
+
+int run_diagnostic_case(const case_t& test)
+{
+    const std::string_view name = test.name;
+    sintra::detail::interprocess_mutex mutex;
+    mutex.test_install_owner_fixture({0, 1, 0, 0});
+    s_diagnostic_mutex = &mutex;
+    if (name == "native_signal_handler_callback" || name == "native_exception_handler_callback" ||
+        name == "native_held_logger_handler") {
+        sintra::set_log_callback([](sintra::log_level, const char* message, void*) {
+            ++s_native_log_callbacks;
+            const bool held = s_diagnostic_mutex->test_gate_holder() ==
+                sintra::detail::current_process_instance();
+            std::fprintf(stderr, "%s", message);
+            std::fprintf(stderr, "original debug handler application callback: recovery_gate_held=%d callbacks=%u\n",
+                int(held), s_native_log_callbacks.load());
+            std::fflush(stderr);
+            if (held) { std::_Exit(78); }
+        });
+        sintra::Log_stream(sintra::log_level::info) << "ordinary logging outside recovery gate\n";
+        require(s_native_log_callbacks == 1 && s_diagnostic_mutex->test_gate_holder() == 0,
+            "ordinary callback behavior outside recovery gate changed");
+        s_native_log_callbacks = 0;
+        if (name == "native_held_logger_handler") {
+            s_expect_held_logger = true;
+            std::thread holder([] {
+                std::unique_lock<std::mutex> lock(sintra::detail::log_mutex());
+                s_held_logger = true;
+                for (;;) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+            });
+            holder.detach();
+            require(await([] { return s_held_logger.load(); }), "ordinary logger mutex was not held before interruption");
+        }
+        sintra::detail::set_debug_pause_active(true);
+        sintra::detail::test_hooks::s_debug_pause_entered = [](const char* reason) noexcept {
+            sintra::detail::native_diagnostic("installed handler terminal observer, callbacks=",
+                s_native_log_callbacks.load(), "\n");
+            (void)reason;
+            std::_Exit(s_native_log_callbacks == 0 && (!s_expect_held_logger || s_held_logger) ? 0 : 78);
+        };
+        const bool exception = name == "native_exception_handler_callback";
+        if (!exception) {
+            require(std::signal(SIGABRT, sintra::detail::debug_signal_handler) != SIG_ERR,
+                "could not install original debug signal handler");
+        }
+#if defined(_WIN32)
+        if (exception) {
+            require(AddVectoredExceptionHandler(1, sintra::detail::debug_vectored_exception_handler) != nullptr,
+                "could not install original debug exception handler");
+        }
+#endif
+        sintra::detail::test_hooks::s_mutex_operation = [](const char* stage, const void*) {
+            if (std::string_view(stage) == "mutex_recovery_gate_acquired") {
+                if (s_exception_stage) {
+#if defined(_WIN32)
+                    RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+#endif
+                } else {
+                    std::raise(SIGABRT);
+                }
+            }
+        };
+        s_exception_stage = exception ? "installed_exception_handler" : nullptr;
+        (void)mutex.test_try_lock_throwing();
+        fixture_failure("original installed debug handler did not reach its pause boundary");
+    }
+    throw std::runtime_error("unknown diagnostic case");
+}
+
+int run_case(const std::string&, const case_t& test, const char*)
+{
+    return run_diagnostic_case(test);
+}
+
+} // namespace native_handler
+
 int main(int argc, char* argv[])
 {
+    if (const auto result = sintra::test::isolated::run_cases(
+        argc, argv, native_handler::k_cases, native_handler::run_case))
+    {
+        return *result;
+    }
 #ifndef _WIN32
     (void)argc;
     (void)argv;
     std::fprintf(stderr,
-        "handled_exception_survival_contract_test skipped: "
+        "first-chance survival case skipped: "
         "first-chance SEH recovery is Windows-specific\n");
     return 0;
 #else

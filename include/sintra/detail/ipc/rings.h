@@ -3418,8 +3418,8 @@ struct Ring_R : Ring<T, true>
                 std::error_code reset_error;
                 {
                     spinlock::locker lock(c.m_spinlock);
-                    // A failed cleanup leaves the existing local index as a
-                    // reset obligation, but no obsolete shared registration.
+                    // Retry the retained reset obligation before registering again.
+                    // A failed drain preserves any shared registration for replay.
                     const int previous = m_sleepy_index;
                     if (previous >= 0) {
                         reset_index = previous;

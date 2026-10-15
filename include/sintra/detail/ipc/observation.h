@@ -33,15 +33,6 @@ inline void defer_observation_failure(const char* stage) noexcept
 #endif
 }
 
-inline bool observation_failure_pending() noexcept
-{
-#if defined(SINTRA_ENABLE_TEST_HOOKS)
-    return test_hooks::s_deferred_observation_failure != nullptr;
-#else
-    return false;
-#endif
-}
-
 template <typename F>
 inline void observe_without_canceling(const char* stage, F&& observe) noexcept
 {
