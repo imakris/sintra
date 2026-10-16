@@ -32,8 +32,8 @@
 - Exact managed-child exit identities now include an opaque runtime-scoped
   custody identity so separate custodies remain distinct without redefining
   recovery occurrence semantics.
-- Bumped the ring ABI to version 8 for the internal joined-process startup
-  protocol. All processes in a swarm must use binaries built against the same
+- Bumped the ring ABI to version 12 for custody-qualified managed transport
+  rings. All processes in a swarm must use binaries built against the same
   Sintra ring ABI.
 - Windows fatal-signal exit statuses changed. A hardware fault now exits with the
   OS exception code, for example `0xC0000005`, instead of `1`. When Sintra's
