@@ -1,0 +1,71 @@
+name: Native external confirmation evidence
+
+on:
+  pull_request:
+    paths:
+      - 'tests/native_external_proof/**'
+      - '.github/workflows/native-external-proof.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-external-proof-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  unix:
+    name: Native evidence - ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            architecture: x86_64
+          - os: macos-15
+            architecture: arm64
+          - os: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - name: Checkout probe source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Capture actual native observations
+        run: python3 -B tests/native_external_proof/run_native_probes.py --hosted-ci --expected-arch '${{ matrix.architecture }}' --output native-evidence/result.json
+      - name: Preserve observations including unavailable gates
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-external-proof-${{ matrix.os }}
+          path: native-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  freebsd:
+    name: Native evidence - FreeBSD 15.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout probe source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Capture native shared-table and credential observations
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.0'
+          cpu: 1
+          copyback: true
+          envs: 'GITHUB_ACTIONS'
+          prepare: pkg install -y python3
+          run: |
+            set -eu
+            python3 -B tests/native_external_proof/run_native_probes.py --hosted-ci --expected-arch amd64 --output native-evidence/result.json
+      - name: Preserve actual FreeBSD observations
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-external-proof-freebsd-15
+          path: native-evidence/
+          if-no-files-found: error
+          retention-days: 14
