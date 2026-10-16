@@ -908,7 +908,10 @@ Barrier membership is snapshotted atomically at the coordinator when the
 barrier round starts. Draining processes are filtered from that snapshot. If a
 process becomes draining while a barrier is in flight, it is removed from the
 pending/arrived sets and the barrier completes when no pending participants
-remain. Barrier completions carry per-recipient reply-ring flush tokens.
+remain. Completion results identify the coordinator's shared reply-ring
+watermark. The member-removal path captures a watermark for each completion
+write; ordinary last-arrival completion returns one captured result to every
+waiter.
 
 Processing fences are designed to keep reader threads draining while a handler
 waits, but a handler-context fence skips the currently executing reader and

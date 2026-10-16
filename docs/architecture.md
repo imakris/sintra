@@ -11,7 +11,7 @@ This document provides a comprehensive architectural overview of Sintra's intern
 6. [Message Flow](#message-flow)
 7. [Key Data Structures](#key-data-structures)
 8. [Process Recovery](#process-recovery)
-9. [Per-Recipient Flush Tokens](#per-recipient-flush-tokens-critical-for-correctness)
+9. [Reply-ring watermarks](#reply-ring-watermarks)
 10. [References](#references)
 
 ---
@@ -143,24 +143,26 @@ Message_ring_W*  m_out_rep_c;  // Outgoing reply channel
 - **Request ring** (`m_out_req_c`): For broadcast signals and initiating RPCs
 - **Reply ring** (`m_out_rep_c`): For RPC responses and barrier completions
 
-Other processes read from these rings via `Process_message_reader` instances.
+The coordinator reads every participant's request and reply rings. Every process
+also reads the coordinator's two rings. Ordinary non-coordinator participants
+do not open readers for one another.
 
-#### Ring Topology
+#### Ring topology
 
+```text
+Participant A request/reply rings --> Coordinator readers
+Participant B request/reply rings --> Coordinator readers
+
+Coordinator request/reply rings --> Participant A reader
+Coordinator request/reply rings --> Participant B reader
 ```
-Process A (pid=1)                    Process B (pid=2)
-┌─────────────────┐                 ┌─────────────────┐
-│ m_out_req_c  ────────────────────>│  reader[A].req  │
-│ m_out_rep_c  ────────────────────>│  reader[A].rep  │
-│                 │                 │                 │
-│ reader[B].req <─────────────────────  m_out_req_c   │
-│ reader[B].rep <─────────────────────  m_out_rep_c   │
-└─────────────────┘                 └─────────────────┘
-```
 
-Each process:
-- **Writes** to its own `m_out_req_c` and `m_out_rep_c`
-- **Reads** from all other processes via `m_readers` collection
+Each process writes its own two outgoing rings. The coordinator dispatches
+messages addressed to itself and relays messages addressed to other processes
+through its corresponding outgoing ring. All participants consume that shared
+coordinator stream and admit messages according to their addressing and service
+mode. This is a star topology, as required by
+[the settled design principles](design_principles.md#settled-principles).
 
 #### Communication States
 
@@ -290,12 +292,12 @@ struct Process_group : Derived_transceiver<Process_group> {
    - Last arrival emits completion messages to all waiters
    - Returns flush sequence (watermark)
 
-**Return vs. Per-Recipient Tokens:** The barrier RPC returns a **single**
-watermark from the coordinator's **reply ring** for the **caller**. Per-recipient
-tokens are computed **inside** the coordinator's emit loop-one token **per
-completion message**, at write time. Don't confuse the RPC's return value
-(the single marker the caller must flush) with the per-recipient tokens
-(embedded in each completion message).
+Barrier results are watermarks in the coordinator's reply ring. Ordinary
+last-arrival completion captures one watermark and the RPC dispatcher returns
+that same result to the deferred waiters and final caller. Completion collected
+after member removal uses `emit_barrier_completions()`, which instead captures
+a watermark for each completion write. See [reply-ring watermarks](#reply-ring-watermarks)
+for the distinction; neither path uses recipients' own outgoing rings.
 
 #### Draining and Barriers
 
@@ -440,32 +442,23 @@ when the handler enters a fence.
 
 ## Message Flow
 
-### RPC Call Flow
+### RPC call flow
 
-```
-Caller (Process A)                Coordinator           Callee (Process B)
-     │                                   │                      │
-     │ 1. rpc_foo(target, args)          │                      │
-     ├─────────────────────────────────> │                      │
-     │   Write to m_out_req_c            │                      │
-     │   Common fiid = make_instance_id()│                      │
-     │                                   │                      │
-     │                                   │  2. Reader sees msg  │
-     │                                   │ <────────────────────┤
-     │                                   │   Dispatch to target │
-     │                                   │                      │
-     │                                   │ 3. Execute foo()     │
-     │                                   │  <───────────────────┤
-     │                                   │   Return value       │
-     │                                   │                      │
-     │ 4. Reply arrives                  │                      │
-     │<─────────────────────────────────────────────────────────┤
-     │   Reads from B's m_out_rep_c      │   Write to m_out_rep_c
-     │   Match common_fiid               │                      │
-     │                                   │                      │
-     │ 5. Return to caller               │                      │
-     └───                                │                      │
-```
+For a remote call between two non-coordinator participants:
+
+1. The caller writes the targeted request to its own request ring, identifying
+   the call with its common function instance ID.
+2. The coordinator reads the request and relays it to its request ring.
+3. The callee's coordinator reader admits the request and invokes the target.
+4. The callee writes its result to its own reply ring. The coordinator reads
+   and relays that reply to its reply ring.
+5. The caller's coordinator reader matches the reply to the pending common
+   function instance ID and completes the call.
+
+A call whose target is in the coordinator is dispatched there without the
+participant relay hop. This transport routing does not make application
+handlers run on the calling thread; see the
+[reader-thread dispatch contract](../README.md#dispatch-runs-on-reader-threads).
 
 ### Barrier Flow
 
@@ -603,46 +596,25 @@ the same process id and occurrence number without ambiguity.
 
 ---
 
-## Per-Recipient Flush Tokens (CRITICAL for Correctness)
+## Reply-ring watermarks
 
-### The Problem
+All barrier completions travel through the coordinator's shared reply ring.
+There are two emission paths:
 
-**Before Fix**: The coordinator used a single global watermark:
-```cpp
-// WRONG: Same token for all recipients
-const auto flush_seq = s_mproc->m_out_rep_c->get_leading_sequence();
-for (auto recipient : recipients) {
-    // Embed flush_seq in message to recipient
-}
-```
+- **Ordinary last arrival:** `Process_group::barrier()` captures the reply-ring
+  watermark when returning. The ordinary RPC dispatcher sends that same result
+  to the deferred recipients and the final caller.
+- **Completions collected after member removal/draining:**
+  `Process_group::emit_barrier_completions()` captures a watermark immediately
+  before each completion write. It captures inside the recipient loop because
+  preceding writes advance that shared stream.
 
-**Issue**: `m_out_rep_c->get_leading_sequence()` is the watermark of the **coordinator's** reply ring. But each **recipient** reads from their **own** ring, not the coordinator's. Using a global token can cause:
-- Tokens ahead of a recipient's channel -> indefinite wait (hang)
-- Tokens from wrong channel -> delivery guarantee violations
-
-### The Solution
-
-**Per-Recipient Watermarks at Write Time**: Compute a flush token **per recipient** at message write time:
-
-```cpp
-// CORRECT: Token per recipient computed at write time
-for (auto recipient : completion.recipients) {
-    // Get watermark JUST BEFORE writing this recipient's message
-    const auto flush_seq = s_mproc->m_out_rep_c->get_leading_sequence();
-
-    auto* placed_msg = s_mproc->m_out_rep_c->write<return_message_type>(
-        vb_size<return_message_type>(flush_seq), flush_seq);
-
-    Transceiver::finalize_rpc_write(
-        placed_msg, recipient, completion.common_function_iid, this, ...);
-}
-```
-
-**Key Insight**: Even though all messages go through `m_out_rep_c`, each call to `write()` advances the `leading_sequence`, so taking the watermark **inside** the loop gives each recipient a token that's valid for **their specific message write time**.
-
-**Note on Return Value**: The barrier RPC itself returns a **single flush token** (the one embedded in the completion message sent to the caller). The "per-recipient" aspect applies to the **completion messages sent to all waiters**, not to the return value. Each waiter receives a token computed specifically for their message write time.
-
-**Future Enhancement**: If Sintra evolves to have per-recipient egress rings (instead of a single shared reply ring), the fix would need `s_mproc->rep_watermark_to(recipient)` to query the specific ring for that recipient.
+A returned watermark always names the coordinator reply stream, not a
+recipient's own outgoing ring. There are no per-recipient egress rings. The
+selected delivery or processing fence supplies its documented completion
+semantics; a ring position alone does not prove application-handler completion.
+See [barrier modes](reference/barrier_modes.md) and
+[barrier/drain ordering](barriers_and_shutdown.md).
 
 ---
 

@@ -398,9 +398,8 @@ inline void Process_group::emit_barrier_completions(
             continue;
         }
 
-        // Get per-recipient flush token: compute it INSIDE the loop so each recipient
-        // gets a watermark that's valid for their specific message write time.
-        // This prevents hangs where a global token is ahead of some recipient's channel.
+        // Each completion qualifies its own write in the coordinator's shared
+        // reply stream; preceding completions advance that stream's watermark.
         for (auto recipient : completion.recipients) {
             const auto flush_sequence = s_mproc->m_out_rep_c->get_leading_sequence();
 

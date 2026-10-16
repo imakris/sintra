@@ -273,14 +273,15 @@ mode.
   a barrier is in progress, the coordinator removes it from the pending set via
   `drop_from_inflight_barriers()` and immediately completes the barrier if no other
   participants remain. *(Coordinator::drop_from_inflight_barriers in coordinator_impl.h)*
-- **Barrier completion with per-recipient flush tokens:** Processes that already
-  reached the barrier continue to wait for their return value. When the barrier
-  resolves-either because the last active participant arrives or because every
-  remaining pending member began draining-the coordinator sends the result to each
-  waiting caller. **Critically, each recipient receives a flush token computed at
-  the moment their message is written** (not a global token), preventing hangs
-  where a global watermark might be ahead of a recipient's channel.
-  *(Process_group::barrier in coordinator_impl.h)*
+- **Barrier completion watermarks:** Processes that already reached the barrier
+  wait for their return value. Ordinary last-arrival completion captures one
+  coordinator reply-ring watermark and returns the same result to every waiter.
+  If removal of draining members completes the pending set, the collected
+  completion path captures a watermark immediately before each recipient's
+  completion write. Both paths use the coordinator's shared reply ring;
+  waiters do not have separate incoming reply rings.
+  *(Process_group::barrier and Process_group::emit_barrier_completions in
+  coordinator_impl.h; RPC response fan-out in transceiver_impl.h)*
 
 ## Barrier mode guardrails
 
