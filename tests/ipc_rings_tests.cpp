@@ -286,6 +286,138 @@ TEST_CASE(test_aligned_capacity_size_limits)
     ASSERT_EQ(0u, sintra::aligned_capacity(1, 0));
 }
 
+TEST_CASE(test_ring_construction_rejects_unrepresentable_sizes)
+{
+    using Data = sintra::Ring_data<uint64_t, false>;
+
+    Temp_ring_dir tmp("unrepresentable_ring_size");
+    const size_t size_limit = std::numeric_limits<size_t>::max();
+    const size_t rejected_counts[] = {
+        size_limit / sizeof(uint64_t) + 1,
+        size_limit / (2 * sizeof(uint64_t)) + 1
+    };
+
+    for (const size_t count : rejected_counts) {
+        ASSERT_THROW(sintra::Ring_W<uint64_t>(tmp.str(), "ring_data", count), std::invalid_argument);
+        ASSERT_TRUE(std::filesystem::is_empty(tmp.path));
+        ASSERT_THROW(sintra::Ring_R<uint64_t>(tmp.str(), "ring_data", count), std::invalid_argument);
+        ASSERT_TRUE(std::filesystem::is_empty(tmp.path));
+        ASSERT_THROW(
+            Data(tmp.str(), "ring_data", count, sintra::detail::ring_directory_policy::caller_directory),
+            std::invalid_argument);
+        ASSERT_TRUE(std::filesystem::is_empty(tmp.path));
+    }
+}
+
+class alignas(32) Tracked_payload
+{
+public:
+    explicit Tracked_payload(size_t& construction_count)
+
+    :
+        m_values{23, 29, 31, 37}
+    {
+        ++construction_count;
+    }
+
+    uint64_t m_values[4];
+};
+
+TEST_CASE(test_typed_write_rejects_oversized_reservations)
+{
+    struct oversized_payload_t
+    {
+        uint64_t values[65536];
+    };
+
+    const size_t ring_elements    = pick_ring_elements<uint64_t>(64);
+    const size_t octile_elements  = ring_elements / 8;
+    const size_t payload_elements = sizeof(Tracked_payload) / sizeof(uint64_t);
+    const size_t size_limit       = std::numeric_limits<size_t>::max();
+    const size_t rejected_extra_counts[] = {
+        octile_elements,
+        size_limit - payload_elements + 1,
+        size_limit
+    };
+    ASSERT_GT(sizeof(oversized_payload_t) / sizeof(uint64_t), octile_elements);
+
+    for (const bool have_pending_write : {false, true}) {
+        Temp_ring_dir tmp("oversized_typed_write");
+        sintra::Ring_W<uint64_t> writer(tmp.str(), "ring_data", ring_elements);
+        const uint64_t first = 17;
+        uint64_t* pending = have_pending_write ? writer.write(&first, 1) : nullptr;
+
+        const auto sequence = writer.m_pending_new_sequence;
+        const auto octile   = writer.m_octile;
+        const auto owner    = writer.m_writing_thread_index.load();
+        size_t construction_count = 0;
+        for (const size_t extra : rejected_extra_counts) {
+            ASSERT_THROW(writer.write<Tracked_payload>(extra, construction_count), std::invalid_argument);
+            ASSERT_EQ(size_t(0), construction_count);
+            ASSERT_EQ(sequence, writer.m_pending_new_sequence);
+            ASSERT_EQ(octile, writer.m_octile);
+            ASSERT_EQ(owner, writer.m_writing_thread_index.load());
+            ASSERT_EQ(sintra::sequence_counter_type(0), writer.get_leading_sequence());
+        }
+        ASSERT_THROW(writer.write<oversized_payload_t>(0), std::invalid_argument);
+        ASSERT_EQ(sequence, writer.m_pending_new_sequence);
+        ASSERT_EQ(octile, writer.m_octile);
+        ASSERT_EQ(owner, writer.m_writing_thread_index.load());
+
+        if (pending) {
+            ASSERT_EQ(first, *pending);
+            *pending = 19;
+            ASSERT_EQ(sequence, writer.done_writing());
+            ASSERT_EQ(uint64_t(19), *pending);
+        }
+        else {
+            ASSERT_EQ(sintra::sequence_counter_type(1), writer.write_commit(first));
+        }
+    }
+}
+
+TEST_CASE(test_typed_write_alignment_preserves_reservations)
+{
+    const size_t ring_elements = pick_ring_elements<uint8_t>(128);
+    for (const bool have_pending_write : {false, true}) {
+        Temp_ring_dir tmp("typed_write_alignment");
+        sintra::Ring_W<uint8_t> writer(tmp.str(), "ring_data", ring_elements);
+        ASSERT_EQ(uintptr_t(0), reinterpret_cast<uintptr_t>(writer.get_base_address()) % alignof(Tracked_payload));
+
+        const uint8_t first = 17;
+        auto* pending = writer.write(&first, 1);
+        if (!have_pending_write) {
+            writer.done_writing();
+        }
+
+        const auto sequence = writer.m_pending_new_sequence;
+        const auto leading  = writer.get_leading_sequence();
+        const auto octile   = writer.m_octile;
+        const auto owner    = writer.m_writing_thread_index.load();
+        size_t construction_count = 0;
+        ASSERT_THROW(writer.write<Tracked_payload>(0, construction_count), std::invalid_argument);
+        ASSERT_EQ(size_t(0), construction_count);
+        ASSERT_EQ(sequence, writer.m_pending_new_sequence);
+        ASSERT_EQ(leading, writer.get_leading_sequence());
+        ASSERT_EQ(octile, writer.m_octile);
+        ASSERT_EQ(owner, writer.m_writing_thread_index.load());
+        ASSERT_EQ(first, *pending);
+        if (have_pending_write) {
+            *pending = 19;
+        }
+
+        const uint8_t padding[alignof(Tracked_payload) - 1] = {};
+        writer.write(padding, sizeof(padding));
+        auto* payload = writer.write<Tracked_payload>(3, construction_count);
+        ASSERT_EQ(size_t(1), construction_count);
+        ASSERT_EQ(uintptr_t(0), reinterpret_cast<uintptr_t>(payload) % alignof(Tracked_payload));
+        ASSERT_EQ(uint64_t(23), payload->m_values[0]);
+        ASSERT_EQ(uint64_t(37), payload->m_values[3]);
+        ASSERT_EQ(alignof(Tracked_payload) + sizeof(Tracked_payload) + 3, writer.done_writing());
+        ASSERT_EQ(uint8_t(have_pending_write ? 19 : first), *pending);
+    }
+}
+
 TEST_CASE(test_mod_helpers)
 {
     ASSERT_EQ(sintra::mod_pos_i64(-1, 8), static_cast<size_t>(7));

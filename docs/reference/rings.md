@@ -238,7 +238,10 @@ Contract:
 - `num_elements` must be a multiple of 8 (octiles). Use
   `aligned_capacity<T>(requested)` to round a desired element count up
   to the nearest legal value, or `get_ring_configurations<T>(min, max,
-  count)` to enumerate page-aligned candidate sizes.
+  count)` to enumerate page-aligned candidate sizes. The data byte size and
+  the double-mapping reservation size (including Windows mapping granularity
+  padding) must fit in `size_t`. Construction rejects unrepresentable sizes
+  before acquiring lifecycle or data files.
 - `Ring_W::write(buffer, n)` reserves space for `n` elements and copies
   them in. It does not publish; the producer must call `done_writing()`
   to advance the leading sequence. Use the convenience
@@ -248,7 +251,11 @@ Contract:
   in-place constructs a `T2` whose footprint is a multiple of `T`. By
   default `T2` must be both trivially copyable and trivially
   destructible. Specialise `ring_payload_traits<T2>::allow_nontrivial =
-  true` to opt a specific payload type into non-trivial semantics.
+  true` to opt a specific payload type into non-trivial semantics. Its fixed
+  footprint plus `num_extra_elements` must fit one octile. The next write
+  address must satisfy `alignof(T2)`; the writer does not insert padding.
+  Size or alignment rejection leaves earlier unpublished writes and their
+  ownership unchanged.
 - `Ring_R::start_reading(n)` returns a `Range<T>` view of up to `n`
   trailing elements behind the current leading sequence. `n` must not
   exceed `max_trailing_elements`. Each `start_reading` must be paired
@@ -339,6 +346,8 @@ Threading and lifecycle:
 
 Failures:
 
+- `std::invalid_argument` from the constructors when the data byte size or
+  double-mapping reservation size cannot fit in `size_t`.
 - `ring_acquisition_failure_exception` from the constructors when the
   data file or control file cannot be mapped, when the size does not
   match, or when an exclusive writer slot cannot be obtained.
@@ -355,7 +364,8 @@ Failures:
   intervening `done_reading`.
 - `std::invalid_argument` from a writer attempting to commit more than
   `num_elements / 8` elements in a single write (the single-octile
-  limit).
+  limit), or from `Ring_W::write<T2>` when its write address does not meet
+  `alignof(T2)`.
 - `static_assert` from `Ring_W::write<T2>` when `T2` is not trivially
   copyable or destructible and `ring_payload_traits<T2>::allow_nontrivial`
   is `false`.

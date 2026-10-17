@@ -1676,7 +1676,7 @@ struct Ring_data
         const size_t       num_elements,
         detail::ring_directory_policy policy)
     :
-        m_data_directory(directory, policy),
+        m_data_directory((validate_num_elements(num_elements), directory), policy),
         m_num_elements(num_elements),
         m_data_region_size(num_elements * sizeof(T))
     {
@@ -1900,6 +1900,22 @@ private:
     std::unique_ptr<ipc::mapped_region>    m_data_region_1;
 
 protected:
+
+    static void validate_num_elements(size_t num_elements)
+    {
+        constexpr size_t size_limit = std::numeric_limits<size_t>::max();
+        if (num_elements > size_limit / sizeof(T)) {
+            throw std::invalid_argument("Ring data byte size cannot fit in size_t.");
+        }
+#ifdef _WIN32
+        const size_t region_limit = (size_limit - system_page_size()) / 2;
+#else
+        constexpr size_t region_limit = size_limit / 2;
+#endif
+        if (num_elements * sizeof(T) > region_limit) {
+            throw std::invalid_argument("Ring mapping reservation size cannot fit in size_t.");
+        }
+    }
 
     const size_t                           m_num_elements;
     const size_t                           m_data_region_size;
@@ -2707,7 +2723,10 @@ struct Ring:
         size_t             num_elements,
         detail::ring_directory_policy policy = detail::ring_directory_policy::caller_directory)
     :
-        lifecycle_base(directory, data_filename, policy),
+        // Validate before lifecycle acquisition can create or recover files.
+        lifecycle_base(
+            (Ring_data<T, READ_ONLY_DATA>::validate_num_elements(num_elements), directory),
+            data_filename, policy),
         Ring_data<T, READ_ONLY_DATA>(directory, data_filename, num_elements, policy)
     {
         detail::maybe_pause_after_ring_data_attach_for_test(this->m_data_filename);
@@ -4085,7 +4104,9 @@ struct Ring_W : Ring<T, false>
     /**
      * In-place construction variant for arbitrary payloads composed of T-sized
      * units. sizeof(T2) must be a multiple of sizeof(T). Returns the constructed
-     * T2* within the ring (still requires done_writing()).
+     * T2* within the ring (still requires done_writing()). The full reservation
+     * must fit one octile, and its starting address must satisfy alignof(T2).
+     * Invalid requests throw std::invalid_argument without changing pending writes.
      */
     template <typename T2, typename... Args>
     T2* write(size_t num_extra_elements, Args&&... args)
@@ -4099,9 +4120,16 @@ struct Ring_W : Ring<T, false>
             std::is_trivially_destructible_v<T2> || ring_payload_traits<T2>::allow_nontrivial,
             "Ring payload T2 must be trivially destructible or explicitly allowed by ring_payload_traits."
         );
-        auto num_elements = sizeof(T2) / sizeof(T) + num_extra_elements;
+        constexpr size_t payload_elements = sizeof(T2) / sizeof(T);
+        const size_t     octile_elements  = this->m_num_elements / 8;
+        if (payload_elements > octile_elements ||
+            num_extra_elements > octile_elements - payload_elements)
+        {
+            throw std::invalid_argument("Ring write size exceeds single-octile capacity (ring_size/8).");
+        }
+        const size_t num_elements = payload_elements + num_extra_elements;
         const bool already_owned = m_writing_thread_index.load() == thread_index();
-        T2* write_location = (T2*)prepare_write(num_elements);
+        T2* write_location = reinterpret_cast<T2*>(prepare_write(num_elements, alignof(T2)));
         try {
             return new (write_location) T2{std::forward<Args>(args)...};
         }
@@ -4522,7 +4550,7 @@ private:
      * Guarantees:
      *  * Returns a pointer to a contiguous range within the linearized mapping.
      */
-    T* prepare_write(size_t num_elements_to_write)
+    T* prepare_write(size_t num_elements_to_write, size_t required_alignment = alignof(T))
     {
         assert(num_elements_to_write <= this->m_num_elements / 8);
         if (num_elements_to_write > this->m_num_elements / 8) {
@@ -4551,6 +4579,13 @@ private:
         const auto saved_sequence = m_pending_new_sequence;
         const auto saved_octile   = m_octile;
         const size_t index = mod_u64(saved_sequence, this->m_num_elements);
+        T* write_location = this->m_data + index;
+        if (reinterpret_cast<uintptr_t>(write_location) % required_alignment != 0) {
+            if (acquired) {
+                m_writing_thread_index = 0;
+            }
+            throw std::invalid_argument("Ring write address does not satisfy the payload alignment.");
+        }
         try {
             m_pending_new_sequence += num_elements_to_write;
             const size_t head = mod_u64(m_pending_new_sequence, this->m_num_elements);
@@ -4565,7 +4600,7 @@ private:
             }
             throw;
         }
-        return this->m_data + index;
+        return write_location;
     }
 
     // Use uint32_t (trivial type) instead of std::thread::id for reliable atomic operations
