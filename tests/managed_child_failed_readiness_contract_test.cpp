@@ -34,11 +34,13 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 namespace {
@@ -131,6 +133,19 @@ bool write_complete_file(const fs::path& path, const std::string& contents)
     const auto temporary_path = path.string() + ".tmp";
 
 #ifdef _WIN32
+    auto report_write_failure = [
+            &path
+        ](
+            const char* stage,
+            DWORD error)
+        {
+            std::fprintf(
+                stderr,
+                "managed_child_failed_readiness: file publication failed stage=%s path='%s' native_error=%lu\n",
+                stage,
+                path.string().c_str(),
+                (unsigned long)error);
+        };
     const auto temporary_wide = fs::path(temporary_path).wstring();
     const auto final_wide = path.wstring();
     HANDLE file = CreateFileW(
@@ -142,6 +157,7 @@ bool write_complete_file(const fs::path& path, const std::string& contents)
         FILE_ATTRIBUTE_NORMAL,
         nullptr);
     if (file == INVALID_HANDLE_VALUE) {
+        report_write_failure("create", GetLastError());
         return false;
     }
 
@@ -154,6 +170,7 @@ bool write_complete_file(const fs::path& path, const std::string& contents)
             static_cast<size_t>(std::numeric_limits<DWORD>::max())));
         DWORD written = 0;
         if (!WriteFile(file, contents.data() + offset, chunk, &written, nullptr) || written == 0) {
+            report_write_failure("write", GetLastError());
             write_ok = false;
             break;
         }
@@ -161,6 +178,9 @@ bool write_complete_file(const fs::path& path, const std::string& contents)
     }
 
     const bool flush_ok = write_ok && FlushFileBuffers(file);
+    if (write_ok && !flush_ok) {
+        report_write_failure("flush", GetLastError());
+    }
     CloseHandle(file);
     if (!flush_ok ||
         !MoveFileExW(
@@ -168,6 +188,9 @@ bool write_complete_file(const fs::path& path, const std::string& contents)
             final_wide.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     {
+        if (flush_ok) {
+            report_write_failure("rename", GetLastError());
+        }
         DeleteFileW(temporary_wide.c_str());
         return false;
     }
@@ -319,19 +342,98 @@ bool wait_for_spawn_call(Spawn_call& call, std::chrono::milliseconds timeout)
 
 std::optional<Child_ledger> read_child_ledger(const fs::path& path)
 {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return std::nullopt;
+#ifdef _WIN32
+    std::istringstream in;
+#else
+    std::ifstream in;
+#endif
+    std::string observed_contents;
+    size_t line_number = 0;
+    auto read_failure = [
+            &path,
+            &in,
+            &observed_contents,
+            &line_number
+        ](
+            const char* stage,
+            const char* detail)
+        {
+            const int io_error = errno;
+#ifdef _WIN32
+            const auto native_error = GetLastError();
+#else
+            const unsigned long native_error = 0;
+#endif
+            std::fprintf(
+                stderr,
+                "managed_child_failed_readiness: ledger read failed stage=%s path='%s' "
+                "line=%zu errno=%d native_error=%lu stream_state=%u detail='%s' bytes_hex=",
+                stage,
+                path.string().c_str(),
+                line_number,
+                io_error,
+                (unsigned long)native_error,
+                (unsigned)in.rdstate(),
+                detail);
+            for (unsigned char byte : observed_contents) {
+                std::fprintf(stderr, "%02x", (unsigned)byte);
+            }
+            std::fputc('\n', stderr);
+            return std::optional<Child_ledger>{};
+        };
+
+    errno = 0;
+#ifdef _WIN32
+    SetLastError(ERROR_SUCCESS);
+    // Rename publication can expose the final name before its DELETE-access
+    // handle closes. The CRT file stream does not share delete access.
+    HANDLE file = CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return read_failure("open", "CreateFileW");
     }
+    std::unique_ptr<void, decltype(&CloseHandle)> owned_file(file, &CloseHandle);
+    char buffer[512];
+    for (;;) {
+        DWORD received = 0;
+        if (!ReadFile(file, buffer, sizeof(buffer), &received, nullptr)) {
+            return read_failure("read", "ReadFile");
+        }
+        if (received == 0) {
+            break;
+        }
+        observed_contents.append(buffer, received);
+    }
+    owned_file.reset();
+    in.str(observed_contents);
+#else
+    in.open(path, std::ios::binary);
+    if (!in) {
+        return read_failure("open", "");
+    }
+#endif
 
     Child_ledger ledger;
     bool complete = false;
     std::string line;
     try {
         while (std::getline(in, line)) {
+            ++line_number;
+#ifndef _WIN32
+            observed_contents += line;
+            if (!in.eof()) {
+                observed_contents += '\n';
+            }
+#endif
             const auto separator = line.find('=');
             if (separator == std::string::npos) {
-                return std::nullopt;
+                return read_failure("line_format", "missing '='");
             }
             const auto key = line.substr(0, separator);
             const auto value = line.substr(separator + 1);
@@ -368,15 +470,79 @@ std::optional<Child_ledger> read_child_ledger(const fs::path& path)
             }
         }
     }
-    catch (...) {
-        return std::nullopt;
+    catch (const std::exception& error) {
+        return read_failure("parse", error.what());
+    }
+
+    if (in.bad()) {
+        return read_failure("read", "stream read failed");
     }
 
     if (!complete || ledger.nonce.empty() || ledger.pid <= 0 || ledger.managed_name.empty()) {
-        return std::nullopt;
+        return read_failure("fields", "complete marker, nonce, positive pid or managed name missing");
     }
     return ledger;
 }
+
+std::string serialize_child_ledger(const Child_ledger& ledger)
+{
+    std::ostringstream marker;
+    marker << "nonce=" << ledger.nonce << '\n'
+           << "piid=" << (unsigned long long)ledger.process_iid << '\n'
+           << "occurrence=" << ledger.occurrence << '\n'
+           << "pid=" << ledger.pid << '\n'
+           << "start_stamp_available=" << (ledger.start_stamp_available ? 1 : 0) << '\n'
+           << "start_stamp=" << ledger.start_stamp << '\n'
+           << "managed_name=" << ledger.managed_name << '\n'
+           << "complete=1\n";
+    return marker.str();
+}
+
+#ifdef _WIN32
+bool check_child_ledger_during_rename(const fs::path& shared_dir)
+{
+    const auto source_path = shared_dir / "ledger_read.staged";
+    const auto final_path  = shared_dir / "ledger_read.complete";
+    const auto start_stamp = sintra::current_process_start_stamp();
+    Child_ledger expected;
+    expected.nonce                 = "ledger_read_contract";
+    expected.process_iid           = k_child_process_iid;
+    expected.occurrence            = 0;
+    expected.pid                   = sintra::test::get_pid();
+    expected.start_stamp_available = start_stamp.has_value();
+    expected.start_stamp           = start_stamp.value_or(0);
+    expected.managed_name          = "sintra_process_" + std::to_string(expected.pid);
+    if (!write_complete_file(source_path, serialize_child_ledger(expected))) {
+        return false;
+    }
+
+    // Retain the same access as MoveFileExW's rename handle after the new name
+    // becomes visible, making the reader's sharing contract deterministic.
+    HANDLE file = CreateFileW(
+        source_path.c_str(),
+        DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        std::fprintf(stderr, "managed_child_failed_readiness: rename probe open failed error=%lu\n", GetLastError());
+        return false;
+    }
+    std::unique_ptr<void, decltype(&CloseHandle)> owned_file(file, &CloseHandle);
+    if (!MoveFileExW(source_path.c_str(), final_path.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        std::fprintf(stderr, "managed_child_failed_readiness: rename probe failed error=%lu\n", GetLastError());
+        return false;
+    }
+    const auto observed = read_child_ledger(final_path);
+    if (!observed || serialize_child_ledger(*observed) != serialize_child_ledger(expected)) {
+        std::fprintf(stderr, "managed_child_failed_readiness: renamed ledger was not readable with exact contents\n");
+        return false;
+    }
+    return true;
+}
+#endif
 
 std::optional<sintra::instance_id_type> resolve_with_public_rpc(const std::string& name)
 {
@@ -476,17 +642,15 @@ int run_child(int argc, char* argv[], const fs::path& shared_dir)
     const auto start_stamp = sintra::current_process_start_stamp();
     const std::string managed_name = "sintra_process_" + std::to_string(pid);
 
-    std::ostringstream marker;
-    marker << "nonce=" << nonce << '\n'
-           << "piid=" << static_cast<unsigned long long>(sintra::s_mproc_id) << '\n'
-           << "occurrence=" << sintra::s_recovery_occurrence << '\n'
-           << "pid=" << pid << '\n'
-           << "start_stamp_available=" << (start_stamp.has_value() ? 1 : 0) << '\n'
-           << "start_stamp=" << start_stamp.value_or(0) << '\n'
-           << "managed_name=" << managed_name << '\n'
-           << "complete=1\n";
-
-    if (!write_complete_file(child_ledger_path(shared_dir), marker.str())) {
+    Child_ledger ledger;
+    ledger.nonce                 = nonce;
+    ledger.process_iid           = sintra::s_mproc_id;
+    ledger.occurrence            = sintra::s_recovery_occurrence;
+    ledger.pid                   = pid;
+    ledger.start_stamp_available = start_stamp.has_value();
+    ledger.start_stamp           = start_stamp.value_or(0);
+    ledger.managed_name          = managed_name;
+    if (!write_complete_file(child_ledger_path(shared_dir), serialize_child_ledger(ledger))) {
         std::fprintf(stderr, "managed_child_failed_readiness: child ledger write failed\n");
         sintra::detail::finalize();
         return 2;
@@ -528,6 +692,11 @@ int run_child(int argc, char* argv[], const fs::path& shared_dir)
 
 int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
 {
+#ifdef _WIN32
+    if (!check_child_ledger_during_rename(shared.path())) {
+        return 2;
+    }
+#endif
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
     if (binary_path.empty()) {
         std::fprintf(stderr, "managed_child_failed_readiness: binary path missing\n");
@@ -647,7 +816,10 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         ? read_child_ledger(child_ledger_path(shared.path()))
         : std::nullopt;
     if (!ledger) {
-        std::fprintf(stderr, "managed_child_failed_readiness: complete child ledger missing or invalid\n");
+        std::fprintf(
+            stderr,
+            "managed_child_failed_readiness: complete child ledger missing or invalid file_seen=%d\n",
+            ledger_file_seen ? 1 : 0);
         setup_valid = false;
     }
 
@@ -1059,6 +1231,21 @@ int run_root(int argc, char* argv[], sintra::test::Shared_directory& shared)
         root_finalized ? 1 : 0,
         child_reap_hook_cleared ? 1 : 0,
         reap_record.c_str());
+
+    // Shared_directory removes its files on return; retain the child-side
+    // evidence where the runner preserves this failed invocation's scratch.
+    std::error_code evidence_error;
+    const auto evidence_path = sintra::test::scratch_root() / ("failed_readiness_evidence_" + nonce);
+    fs::copy(shared.path(), evidence_path, fs::copy_options::recursive, evidence_error);
+    std::fprintf(
+        stderr,
+        "managed_child_failed_readiness: evidence path='%s' copy_error=%d "
+        "child_release_written=%d release_seen=%d child_finalized=%d\n",
+        evidence_path.string().c_str(),
+        evidence_error.value(),
+        child_release_written ? 1 : 0,
+        release_seen ? 1 : 0,
+        child_finalized ? 1 : 0);
     return 2;
 }
 
