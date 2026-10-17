@@ -336,63 +336,9 @@ constexpr auto invalid_sequence = ~sequence_counter_type(0);
 //==============================================================================
 
 /**
- * Compute candidate ring sizes (in element counts) between min_elements and the
- * maximum byte size constraint, with up to max_subdivisions sizes. The algorithm
- * aligns to the system's page size so that double-mapping constraints are
- * naturally satisfied, then steps down to smaller aligned sizes.
- *
- * Constraints embodied here:
- *  * The base size (bytes) is the LCM(sizeof(T), page_size).
- *  * The resulting region sizes are multiples of the page size.
- *  * The element count MUST be a multiple of 8 (octiles). We ensure the base
- *    size respects that when the caller chooses from the returned set.
- */
-template <typename T>
-std::vector<size_t> get_ring_configurations(
-    size_t min_elements,
-    size_t max_size,
-    size_t max_subdivisions)
-{
-    size_t page_size = system_page_size();
-    // Round up to a page-size multiple that is also a multiple of sizeof(T)
-    size_t base_size = std::lcm(sizeof(T), page_size);
-
-    // Respect caller's minimum element constraint
-    size_t min_size = std::max(min_elements * sizeof(T), base_size);
-
-    std::vector<size_t> ret;
-
-    if (base_size == 0 || max_size < base_size) {
-        return ret;
-    }
-
-    // Find the largest aligned size <= max_size
-    size_t tmp_size = (max_size / base_size) * base_size;
-    if (tmp_size < min_size) {
-        return ret;
-    }
-
-    // Produce up to max_subdivisions sizes by halving down, then re-aligning.
-    for (size_t i = 0; i < max_subdivisions && tmp_size >= min_size; i++) {
-        // (Caller must still ensure multiple-of-8 elements.)
-        ret.push_back(tmp_size / sizeof(T));
-
-        size_t next_size = tmp_size / 2;
-        next_size = (next_size / base_size) * base_size;
-        if (next_size == 0 || next_size >= tmp_size) {
-            break;
-        }
-        tmp_size = next_size;
-    }
-
-    std::reverse(ret.begin(), ret.end());
-    return ret;
-}
-
-/**
  * Return the smallest capacity >= requested that satisfies ring alignment
- * requirements for the given element size. Returns 0 if requested is 0 or
- * if the alignment cannot be computed safely.
+ * requirements for the given element size. Returns 0 for a zero request or
+ * element size, or if the aligned element count or byte size cannot fit size_t.
  */
 inline size_t aligned_capacity(size_t requested, size_t element_size)
 {
@@ -421,6 +367,10 @@ inline size_t aligned_capacity(size_t requested, size_t element_size)
         requested += padding;
     }
 
+    if (requested > (std::numeric_limits<size_t>::max() / element_size)) {
+        return 0;
+    }
+
     return requested;
 }
 
@@ -428,6 +378,41 @@ template <typename T>
 inline size_t aligned_capacity(size_t requested)
 {
     return aligned_capacity(requested, sizeof(T));
+}
+
+/**
+ * Compute up to max_subdivisions candidate ring sizes in ascending element
+ * counts, each at least min_elements and within the max_size byte limit.
+ * Counts are multiples of eight and their byte sizes are page-aligned.
+ * Candidates halve from the largest aligned size; an impossible range is empty.
+ */
+template <typename T>
+std::vector<size_t> get_ring_configurations(
+    size_t min_elements,
+    size_t max_size,
+    size_t max_subdivisions)
+{
+    const size_t alignment    = aligned_capacity<T>(1);
+    const size_t max_elements = max_size / sizeof(T);
+    std::vector<size_t> ret;
+
+    if (alignment == 0 || max_elements < alignment) {
+        return ret;
+    }
+
+    // Work in element counts so an unrepresentable minimum cannot wrap in bytes.
+    size_t count = (max_elements / alignment) * alignment;
+    for (size_t i = 0; i < max_subdivisions && count >= min_elements; ++i) {
+        ret.push_back(count);
+
+        count = ((count / 2) / alignment) * alignment;
+        if (count == 0) {
+            break;
+        }
+    }
+
+    std::reverse(ret.begin(), ret.end());
+    return ret;
 }
 
 //==============================================================================

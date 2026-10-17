@@ -199,6 +199,93 @@ TEST_CASE(test_get_ring_configurations_properties)
     }
 }
 
+TEST_CASE(test_get_ring_configurations_large_elements)
+{
+    struct payload_t
+    {
+        unsigned char bytes[65536];
+    };
+
+    const size_t page_size = sintra::system_page_size();
+    const size_t max_size  = sizeof(payload_t) * 64 - 1;
+    const auto configs = sintra::get_ring_configurations<payload_t>(1, max_size, 8);
+    ASSERT_FALSE(configs.empty());
+    ASSERT_LE(configs.size(), 8u);
+
+    size_t previous = 0;
+    for (const size_t count : configs) {
+        ASSERT_EQ(count % 8, 0u);
+        ASSERT_EQ((count * sizeof(payload_t)) % page_size, 0u);
+        ASSERT_LE(count * sizeof(payload_t), max_size);
+        ASSERT_GT(count, previous);
+        previous = count;
+    }
+
+    ASSERT_TRUE(sintra::get_ring_configurations<payload_t>(1, sizeof(payload_t), 1).empty());
+}
+
+TEST_CASE(test_get_ring_configurations_non_power_of_two_elements)
+{
+    struct payload_t
+    {
+        unsigned char bytes[3];
+    };
+
+    const size_t page_size    = sintra::system_page_size();
+    const size_t min_elements = page_size + 1;
+    const size_t max_size     = page_size * 24 - 1;
+    const auto configs = sintra::get_ring_configurations<payload_t>(min_elements, max_size, 8);
+    ASSERT_FALSE(configs.empty());
+
+    size_t previous = 0;
+    for (const size_t count : configs) {
+        ASSERT_EQ(count % 8, 0u);
+        ASSERT_EQ((count * sizeof(payload_t)) % page_size, 0u);
+        ASSERT_GE(count, min_elements);
+        ASSERT_LE(count * sizeof(payload_t), max_size);
+        ASSERT_GT(count, previous);
+        previous = count;
+    }
+}
+
+TEST_CASE(test_get_ring_configurations_size_limits)
+{
+    const size_t size_limit = std::numeric_limits<size_t>::max();
+    const size_t huge_min   = size_limit / sizeof(uint64_t) + 1;
+    const size_t page_size  = sintra::system_page_size();
+    ASSERT_TRUE(sintra::get_ring_configurations<uint64_t>(huge_min, page_size * 8, 6).empty());
+    ASSERT_TRUE(sintra::get_ring_configurations<uint64_t>(huge_min, size_limit, 6).empty());
+    ASSERT_TRUE(sintra::get_ring_configurations<uint64_t>(0, 0, 6).empty());
+    ASSERT_TRUE(sintra::get_ring_configurations<uint64_t>(0, page_size, 0).empty());
+    ASSERT_TRUE(sintra::get_ring_configurations<uint64_t>(page_size, page_size, 6).empty());
+
+    const auto configs = sintra::get_ring_configurations<uint64_t>(0, size_limit, 6);
+    ASSERT_FALSE(configs.empty());
+    ASSERT_LE(configs.size(), 6u);
+    for (const size_t count : configs) {
+        ASSERT_EQ(count % 8, 0u);
+        ASSERT_LE(count, size_limit / sizeof(uint64_t));
+        ASSERT_EQ((count * sizeof(uint64_t)) % page_size, 0u);
+    }
+}
+
+TEST_CASE(test_aligned_capacity_size_limits)
+{
+    const size_t size_limit = std::numeric_limits<size_t>::max();
+    const size_t max_count  = size_limit / sizeof(uint64_t);
+    const size_t alignment = sintra::aligned_capacity<uint64_t>(1);
+    ASSERT_GT(alignment, 0u);
+
+    const size_t last_aligned = (max_count / alignment) * alignment;
+    ASSERT_EQ(last_aligned, sintra::aligned_capacity<uint64_t>(last_aligned));
+    ASSERT_EQ(0u, sintra::aligned_capacity<uint64_t>(last_aligned + 1));
+    ASSERT_EQ(0u, sintra::aligned_capacity<uint64_t>(max_count + 1));
+    ASSERT_EQ(0u, sintra::aligned_capacity<uint8_t>(size_limit));
+    ASSERT_EQ(0u, sintra::aligned_capacity(1, size_limit));
+    ASSERT_EQ(0u, sintra::aligned_capacity(0, sizeof(uint64_t)));
+    ASSERT_EQ(0u, sintra::aligned_capacity(1, 0));
+}
+
 TEST_CASE(test_mod_helpers)
 {
     ASSERT_EQ(sintra::mod_pos_i64(-1, 8), static_cast<size_t>(7));

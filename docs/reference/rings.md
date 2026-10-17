@@ -183,12 +183,15 @@ Status enum returned by `try_snapshot_e`.
 
 ### aligned_capacity
 
-Rounds a requested element count up to a legal ring capacity.
+Rounds a requested element count up to a multiple of eight whose byte size is
+page-aligned. Returns zero for a zero request or element size, or if the aligned
+element count or byte size cannot fit in `size_t`.
 
 ### get_ring_configurations
 
-Returns candidate capacities for a requested element range and maximum mapped
-size.
+Returns ascending candidate element counts, each at least `min_elements` and
+within the `max_size` byte limit. Each count is a multiple of eight and its byte
+size is page-aligned. Returns an empty vector when no capacity fits the limits.
 
 ### make_snapshot
 
