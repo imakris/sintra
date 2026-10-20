@@ -1,24 +1,6 @@
 name: Stress Test - Linux (reusable)
 
 on:
-  workflow_dispatch:
-    inputs:
-      build_run_id:
-        description: "Actions run id of the existing build artifacts"
-        required: true
-        type: string
-      head_sha:
-        description: "Source revision matching those build artifacts"
-        required: true
-        type: string
-      branch:
-        description: "Source branch name for the result description"
-        required: false
-        type: string
-      pr_number:
-        description: "Pull request number for the result description"
-        required: false
-        type: string
   workflow_call:
     inputs:
       build_run_id:
@@ -41,6 +23,11 @@ on:
         description: "PR number if this came from a PR"
         required: false
         type: string
+      full_run:
+        description: "Complete the multiplier-1 Debug/Release schedule without a time budget"
+        required: false
+        type: boolean
+        default: false
       force_tests:
         description: "Run tests even when path filters do not match"
         required: false
@@ -60,7 +47,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: stress-${{ github.event_name == 'workflow_dispatch' && 'stability' || 'progress' }}-${{ inputs.head_sha }}-linux
+  group: stress-${{ inputs.head_sha }}-linux
   cancel-in-progress: false
 
 jobs:
@@ -68,7 +55,7 @@ jobs:
     name: Stress Test
     runs-on: ubuntu-latest
     env:
-      GITHUB_TOKEN: ${{ secrets.repository-token || secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.repository-token }}
 
     steps:
       - name: Set context env
@@ -207,7 +194,7 @@ jobs:
         with:
           name: linux-build-${{ env.HEAD_SHA }}
           path: build/
-          github-token: ${{ secrets.repository-token || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.repository-token }}
           run-id: ${{ env.RUN_ID }}
       - name: Verify artifacts present
         run: |
@@ -229,12 +216,14 @@ jobs:
           fi
 
       - name: Run stress tests with run_tests.py
-        if: github.event_name == 'workflow_dispatch' || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        if: inputs.full_run || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
+        env:
+          FULL_RUN: ${{ inputs.full_run }}
         run: |
           cd tests
           runner_args=(--timeout 30 --build-dir ../build --config Debug,Release --iteration-multiplier 1)
-          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+          if [ "$FULL_RUN" != true ]; then
             runner_args+=(--time-budget 7200)
           fi
           python run_tests.py "${runner_args[@]}"
@@ -248,9 +237,7 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
-            const statusContext = context.eventName === 'workflow_dispatch'
-              ? 'Stability Full (Linux)'
-              : 'Stress Test (Linux)';
+            const statusContext = 'Stress Test (Linux)';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'success',
@@ -268,9 +255,7 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
-            const statusContext = context.eventName === 'workflow_dispatch'
-              ? 'Stability Full (Linux)'
-              : 'Stress Test (Linux)';
+            const statusContext = 'Stress Test (Linux)';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'failure',
@@ -280,7 +265,7 @@ jobs:
             });
 
       - name: Update tests badge
-        if: github.event_name != 'workflow_dispatch' && always() && inputs.branch == 'master' && inputs.pr_number == ''
+        if: always() && inputs.branch == 'master' && inputs.pr_number == ''
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.gist-secret }}

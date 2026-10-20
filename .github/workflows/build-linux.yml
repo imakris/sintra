@@ -200,4 +200,5 @@ jobs:
       branch: ${{ github.head_ref || github.ref_name }}
       pr_number: ${{ github.event.pull_request.number || '' }}
       base_sha: ${{ github.event.pull_request.base.sha || '' }}
+      full_run: ${{ github.event_name == 'workflow_dispatch' }}
       force_tests: ${{ github.event_name == 'workflow_dispatch' }}

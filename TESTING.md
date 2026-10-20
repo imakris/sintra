@@ -374,20 +374,18 @@ Such a run is a broad/progress gate and must not be reported as stability-full
 certification. The repository is considered stable only after the untruncated
 multiplier-1 Debug and Release schedule completes on the stability-full lanes.
 
-To run that full schedule on existing CI binaries without rebuilding, dispatch
-`stress-test-linux.yml`, `stress-test-windows.yml` or `stress-test-macos.yml`.
-Supply the build workflow run id and its matching source revision; the named
-build artifact must still be retained. For example:
+To select the full schedule in CI, dispatch the normal platform pipeline:
+`build-linux.yml`, `build-windows.yml`, `build-windows-mingw.yml` or
+`build-macos.yml`. For example:
 
 ```bash
-gh workflow run stress-test-linux.yml --ref <workflow-branch> \
-  -f build_run_id=<build-run-id> -f head_sha=<built-source-revision>
+gh workflow run build-linux.yml --ref master
 ```
 
-Manual dispatch runs Debug and Release with multiplier `1` and no time budget.
-Automatic build callers retain their budgeted progress runs. Full results use
-separate `Stability Full` commit statuses. For Windows MinGW artifacts, also
-supply `-f lane=windows-mingw`.
+Each pipeline builds Debug and Release once, then calls its reusable test stage
+with `full_run: true` to complete the multiplier-1 schedule without a time budget.
+Automatic push and pull-request callers retain their budgeted progress runs.
+Windows MSVC and MinGW share the same reusable test workflow.
 
 ### Special Test Handling
 

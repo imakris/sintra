@@ -1,37 +1,6 @@
 name: Stress Test - Windows (reusable)
 
 on:
-  workflow_dispatch:
-    inputs:
-      build_run_id:
-        description: "Actions run id of the existing build artifacts"
-        required: true
-        type: string
-      head_sha:
-        description: "Source revision matching those build artifacts"
-        required: true
-        type: string
-      branch:
-        description: "Source branch name for the result description"
-        required: false
-        type: string
-      pr_number:
-        description: "Pull request number for the result description"
-        required: false
-        type: string
-      lane:
-        description: "Windows compiler lane used for the build artifacts"
-        required: false
-        type: choice
-        options:
-          - windows
-          - windows-mingw
-        default: windows
-      report_status:
-        description: "Update the Windows stability-full commit status"
-        required: false
-        type: boolean
-        default: true
   workflow_call:
     inputs:
       build_run_id:
@@ -54,6 +23,11 @@ on:
         description: "PR number if this came from a PR"
         required: false
         type: string
+      full_run:
+        description: "Complete the multiplier-1 Debug/Release schedule without a time budget"
+        required: false
+        type: boolean
+        default: false
       force_tests:
         description: "Run tests even when path filters do not match"
         required: false
@@ -83,7 +57,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: stress-${{ github.event_name == 'workflow_dispatch' && 'stability' || 'progress' }}-${{ inputs.head_sha }}-${{ inputs.lane || 'windows' }}
+  group: stress-${{ inputs.head_sha }}-${{ inputs.lane }}
   cancel-in-progress: false
 
 jobs:
@@ -91,8 +65,7 @@ jobs:
     name: Stress Test
     runs-on: windows-latest
     env:
-      GITHUB_TOKEN: ${{ secrets.repository-token || secrets.GITHUB_TOKEN }}
-      STRESS_LANE: ${{ inputs.lane || 'windows' }}
+      GITHUB_TOKEN: ${{ secrets.repository-token }}
 
     steps:
       - name: Set context env
@@ -179,7 +152,7 @@ jobs:
         with:
           name: windows-build-${{ env.HEAD_SHA }}
           path: build/
-          github-token: ${{ secrets.repository-token || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.repository-token }}
           run-id: ${{ env.RUN_ID }}
       - name: Verify artifacts present
         shell: bash
@@ -198,7 +171,7 @@ jobs:
           python-version: '3.x'
 
       - name: Ensure native Windows debugger
-        if: github.event_name == 'workflow_dispatch' || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        if: inputs.full_run || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: pwsh
         run: |
           function Find-NativeDebugger {
@@ -232,20 +205,21 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path $debugger)
 
       - name: Run stress tests with run_tests.py
-        if: github.event_name == 'workflow_dispatch' || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        if: inputs.full_run || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: pwsh
         env:
+          FULL_RUN: ${{ inputs.full_run }}
           SINTRA_PRESERVE_SCRATCH: "1"
         run: |
           Set-Location tests
           $runner_args = @('--timeout', '30', '--build-dir', '../build', '--config', 'Debug,Release', '--iteration-multiplier', '1')
-          if ($env:GITHUB_EVENT_NAME -ne 'workflow_dispatch') {
+          if ($env:FULL_RUN -ne 'true') {
             $runner_args += @('--time-budget', '7200')
           }
           python run_tests.py @runner_args
 
       - name: Check closed-handle process absence directly
-        if: github.event_name == 'workflow_dispatch' || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        if: inputs.full_run || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: pwsh
         run: |
           foreach ($config in @('Debug', 'Release')) {
@@ -299,9 +273,7 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
-            const statusContext = context.eventName === 'workflow_dispatch'
-              ? ('Stability Full (' + (process.env.STRESS_LANE === 'windows-mingw' ? 'MinGW' : 'Windows') + ')')
-              : 'Stress Test (Windows)';
+            const statusContext = 'Stress Test (Windows)';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'success',
@@ -319,9 +291,7 @@ jobs:
             const sha = process.env.HEAD_SHA;
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
-            const statusContext = context.eventName === 'workflow_dispatch'
-              ? ('Stability Full (' + (process.env.STRESS_LANE === 'windows-mingw' ? 'MinGW' : 'Windows') + ')')
-              : 'Stress Test (Windows)';
+            const statusContext = 'Stress Test (Windows)';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'failure',
@@ -331,7 +301,7 @@ jobs:
             });
 
       - name: Update tests badge
-        if: github.event_name != 'workflow_dispatch' && inputs.report_status && always() && inputs.branch == 'master' && inputs.pr_number == ''
+        if: inputs.report_status && always() && inputs.branch == 'master' && inputs.pr_number == ''
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.gist-secret }}
