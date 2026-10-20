@@ -260,15 +260,21 @@ bool is_service_instance(instance_id_type instance_id)
 }
 
 
+namespace detail {
+
+    // 1 is the wildcard for the local process
+    // thus process indices start from 2
+    inline atomic<uint64_t> s_process_index_counter(2);
+
+}
+
+
 inline
 instance_id_type make_process_instance_id()
 {
-    // 1 is the wildcard for the local process
-    // thus process indices start from 2
-    static atomic<uint64_t> process_index_counter(2);
     // Allocate and range-check in a single atomic step; a separate
     // check-then-increment would let concurrent callers slip past the limit.
-    const auto index = process_index_counter.fetch_add(1, std::memory_order_relaxed);
+    const auto index = detail::s_process_index_counter.fetch_add(1, std::memory_order_relaxed);
     if (index > max_process_index) {
         throw std::runtime_error("Sintra process index space exhausted");
     }

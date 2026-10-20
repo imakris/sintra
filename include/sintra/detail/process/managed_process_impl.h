@@ -3424,6 +3424,10 @@ void Managed_process::init(int argc, const char* const* argv)
 
     bool coordinator_is_local = false;
     if (swarm_id_arg.empty()) {
+        // A new coordinator owns a fresh swarm namespace. init() rejects an
+        // overlapping runtime, so no identity in this namespace is live yet.
+        // Joined and recovered swarms must never restart their allocation.
+        detail::s_process_index_counter.store(2, std::memory_order_relaxed);
         s_mproc_id = m_instance_id = make_process_instance_id();
 
 #ifdef _WIN32

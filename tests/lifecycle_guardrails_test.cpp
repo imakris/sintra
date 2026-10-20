@@ -24,6 +24,7 @@
 #include <array>
 #include <chrono>
 #include <exception>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -462,29 +463,75 @@ bool test_double_init_rejected(int argc, char* argv[])
 
 bool test_init_finalize_cycle(int argc, char* argv[])
 {
-    sintra::init(argc, argv);
-    sintra::detail::finalize();
+    bool ok = true;
+    std::set<std::uint64_t> swarm_ids;
+    for (int cycle = 0; cycle < sintra::max_process_index + 2; ++cycle) {
+        try {
+            sintra::init(argc, argv);
+        }
+        catch (const std::exception& error) {
+            sintra::test::print_test_message(k_prefix, error.what());
+            return false;
+        }
 
-    const auto mid_state =
-        sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
-    if (mid_state != sintra::detail::shutdown_protocol_state::idle) {
-        sintra::test::print_test_message(
+        ok &= sintra::test::assert_true(
+            swarm_ids.insert(sintra::s_mproc->m_swarm_id).second,
             k_prefix,
-            "state should be idle between cycles");
-        return false;
+            "each completed runtime cycle should create a distinct swarm");
+
+        std::set<sintra::instance_id_type> process_ids{sintra::s_mproc_id};
+        for (int index = 0; index < sintra::max_process_index - 2; ++index) {
+            try {
+                ok &= sintra::test::assert_true(
+                    process_ids.insert(sintra::make_process_instance_id()).second,
+                    k_prefix,
+                    "process ids must remain unique within a swarm");
+            }
+            catch (const std::exception& error) {
+                sintra::test::print_test_message(k_prefix, error.what());
+                sintra::detail::finalize();
+                return false;
+            }
+        }
+
+        bool double_init_rejected = false;
+        try {
+            sintra::init(argc, argv);
+        }
+        catch (const std::runtime_error&) {
+            double_init_rejected = true;
+        }
+        ok &= sintra::test::assert_true(
+            double_init_rejected,
+            k_prefix,
+            "double init must not start a new process-id namespace");
+
+        // Exhaustion cannot wrap or be cleared by a rejected second init.
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool exhausted = false;
+            try {
+                (void)sintra::make_process_instance_id();
+            }
+            catch (const std::runtime_error&) {
+                exhausted = true;
+            }
+            ok &= sintra::test::assert_true(
+                exhausted,
+                k_prefix,
+                "an active swarm must keep rejecting exhausted process ids");
+        }
+
+        ok &= sintra::test::assert_true(
+            sintra::detail::finalize() &&
+                sintra::detail::s_shutdown_state.load(std::memory_order_acquire) ==
+                    sintra::detail::shutdown_protocol_state::idle,
+            k_prefix,
+            "finalize must finish before the next process-id namespace starts");
+        if (!ok) {
+            return false;
+        }
     }
-
-    sintra::init(argc, argv);
-    sintra::detail::finalize();
-
-    const auto end_state =
-        sintra::detail::s_shutdown_state.load(std::memory_order_acquire);
-    return
-        sintra::test::assert_true(
-            end_state == sintra::detail::shutdown_protocol_state::idle,
-            k_prefix,
-            "state should be idle after second init/finalize cycle"
-        );
+    return ok;
 }
 
 bool test_teardown_admission_rejects_process_entry_points(int argc, char* argv[])
