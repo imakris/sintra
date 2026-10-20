@@ -1104,7 +1104,7 @@ private:
         std::array<char, detail::message_frame_size_limit> bytes;
     };
 
-    std::unique_ptr<frame_storage_t> m_frame = std::make_unique<frame_storage_t>();
+    std::unique_ptr<frame_storage_t> m_frame = std::make_unique_for_overwrite<frame_storage_t>();
     std::atomic<sequence_counter_type> m_message_reading_sequence{0};
     const std::string m_channel;
     std::function<void()> m_eviction_handler;
