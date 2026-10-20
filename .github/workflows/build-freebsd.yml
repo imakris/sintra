@@ -47,6 +47,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
+      - name: Restore compiler cache
+        id: restore_compiler_cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: freebsd-15.0-x86_64-release-ccache-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            freebsd-15.0-x86_64-release-ccache-
+
       - name: Build and test (FreeBSD 15.0)
         uses: vmactions/freebsd-vm@v1
         env:
@@ -60,8 +69,15 @@ jobs:
           envs: 'SINTRA_TEST_ITERATION_MULTIPLIER SINTRA_TEST_NAME SINTRA_TEST_REPETITIONS'
           prepare: |
             date +%s > /tmp/ci_start_time
-            pkg install -y cmake ninja python
+            pkg install -y cmake ninja python ccache
           run: |
+            export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+            export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+            export CCACHE_COMPILERCHECK=content
+            export CCACHE_MAXSIZE=1GiB
+            ccache --zero-stats
+            trap 'ccache --show-stats --verbose' EXIT
+
             if [ -n "$SINTRA_TEST_NAME" ]; then
               case "$SINTRA_TEST_NAME" in
                 *[!a-zA-Z0-9_]*) echo "Invalid top-level test name" >&2; exit 1 ;;
@@ -78,14 +94,35 @@ jobs:
                 exit 1
               fi
               printf '%s %s\n' "$SINTRA_TEST_NAME" "$SINTRA_TEST_REPETITIONS" > tests/active_tests.txt
-              cmake -S . -B build-focused -G Ninja -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_TESTS=ON
+              cmake -S . -B build-focused -G Ninja -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_TESTS=ON \
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
               cmake --build build-focused --target "sintra_$SINTRA_TEST_NAME" --parallel 2
               cd tests
               python3 run_tests.py --timeout 30 --build-dir ../build-focused --config Release --iteration-multiplier 1
               exit
             fi
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_TESTS=ON
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_TESTS=ON \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
             cmake --build build
             cd tests
             budget=$(( 7200 - $(date +%s) + $(cat /tmp/ci_start_time) ))
             python3 run_tests.py --timeout 30 --build-dir ../build --config Release --time-budget $budget
+
+      # The VM action skips copyback when its run fails. Export only the compiler
+      # cache from the still-running VM, including after a test failure.
+      - name: Export compiler cache
+        id: export_compiler_cache
+        if: always() && steps.restore_compiler_cache.outcome == 'success'
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.ccache"
+          rsync -a --delete --no-owner --no-group --timeout=60 \
+            --rsync-path=/usr/local/bin/rsync \
+            -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
+            "freebsd:$GITHUB_WORKSPACE/.ccache/" "$GITHUB_WORKSPACE/.ccache/"
+
+      - name: Save compiler cache
+        if: always() && steps.export_compiler_cache.outcome == 'success'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ steps.restore_compiler_cache.outputs.cache-primary-key }}

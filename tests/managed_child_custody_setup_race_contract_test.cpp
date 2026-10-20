@@ -1452,6 +1452,26 @@ bool run_post_native_recovery_occurrence_advance(
     const bool occurrence_2_seen = occurrence_1_crashed &&
         wait_for_file(occurrence_2_marker, 8s);
 
+    // The child marker can precede the parent's native custody handoff.
+    // Select the replacement only after that exact occurrence is retained.
+    bool occurrence_2_created = false;
+    const auto native_deadline = std::chrono::steady_clock::now() + 5s;
+    while (occurrence_2_seen) {
+        const auto native = custody.native_snapshot();
+        occurrence_2_created = std::any_of(
+            native.begin(), native.end(), [&](const auto& status) {
+                return status.occurrence.process_instance_id == piid &&
+                    status.occurrence.occurrence == 2 &&
+                    status.state == sintra::Managed_child_native_state::RUNNING;
+            });
+        if (occurrence_2_created ||
+            std::chrono::steady_clock::now() >= native_deadline)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+
     std::mutex exit_mutex;
     std::condition_variable exit_changed;
     sintra::Managed_child_exit exit_event;
@@ -1502,7 +1522,8 @@ bool run_post_native_recovery_occurrence_advance(
 
     const bool valid = custody && occurrence_0_seen && occurrence_0_crashed &&
         hook_seen && occurrence_1_initialized && occurrence_1_crashed &&
-        occurrence_2_seen && occurrence_2_observed && occurrence_2_released &&
+        occurrence_2_seen && occurrence_2_created && occurrence_2_observed &&
+        occurrence_2_released &&
         occurrence_2_exit_observed && exit_count == 1 && distinct_children &&
         released.admitted_occurrences == 3 &&
         released.created_occurrences == 3 &&
@@ -1513,7 +1534,7 @@ bool run_post_native_recovery_occurrence_advance(
         std::fprintf(
             stderr,
             "POST_NATIVE_RECOVERY_ADVANCE_INVALID accepted=%d occurrence0=%d "
-            "hook=%d marker1=%d crash1=%d occurrence2=%d observed2=%d "
+            "hook=%d marker1=%d crash1=%d occurrence2=%d created2=%d observed2=%d "
             "released2=%d exit2=%d exit_count=%u observed_occurrence=%u "
             "admitted=%zu created=%zu exited=%zu release_complete=%d "
             "failure_kind=%d failure_occurrence=%u failure_stage=%d "
@@ -1525,6 +1546,7 @@ bool run_post_native_recovery_occurrence_advance(
             occurrence_1_initialized ? 1 : 0,
             occurrence_1_crashed ? 1 : 0,
             occurrence_2_seen ? 1 : 0,
+            occurrence_2_created ? 1 : 0,
             occurrence_2_observed ? 1 : 0,
             occurrence_2_released ? 1 : 0,
             occurrence_2_exit_observed ? 1 : 0,
