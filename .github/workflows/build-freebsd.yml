@@ -76,7 +76,7 @@ jobs:
             export CCACHE_COMPILERCHECK=content
             export CCACHE_MAXSIZE=1GiB
             ccache --zero-stats
-            trap 'ccache --show-stats --verbose' EXIT
+            trap 'ccache --show-stats' EXIT
 
             if [ -n "$SINTRA_TEST_NAME" ]; then
               case "$SINTRA_TEST_NAME" in
