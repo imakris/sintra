@@ -7,6 +7,7 @@ from itertools import product
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from unittest import mock
@@ -72,6 +73,63 @@ class Runner_safety_test(unittest.TestCase):
             self.assertIn("exit code 0", result.error)
             self.assertNotIn("HANG", result.error)
             runner.cleanup()
+
+    def test_reader_drain_allows_an_active_debugger_capture_to_finish(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(run_tests, "get_debugger_strategy", return_value=NullDebuggerStrategy(False)):
+            runner = run_tests.TestRunner(Path(directory), "Debug", 5.0, False)
+            invocation = run_tests.TestInvocation(
+                Path(sys.executable), "slow_capture_probe",
+                ("-c", "import os,sys; "
+                 "print(f'[SINTRA_DEBUG_PAUSE] Process {os.getpid()} paused: fixture',file=sys.stderr,flush=True); "
+                 "print('stderr drained after capture',file=sys.stderr,flush=True)"))
+            captured = threading.Event()
+
+            def capture(*_):
+                captured.set()
+                # Debugger work can exceed the five-second pipe-drain budget.
+                threading.Event().wait(6.0)
+                return "fixture stack", ""
+
+            try:
+                with mock.patch.object(runner, "_capture_process_stacks", side_effect=capture):
+                    result = runner.run_test_once(invocation)
+                self.assertTrue(captured.is_set())
+                self.assertTrue(result.success, result.error)
+                self.assertIn("stderr drained after capture", result.error)
+                self.assertIn("fixture stack", result.error)
+            finally:
+                runner.cleanup()
+
+    def test_reader_drain_still_rejects_an_open_pipe_after_test_exit(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(run_tests, "get_debugger_strategy", return_value=NullDebuggerStrategy(False)):
+            runner = run_tests.TestRunner(Path(directory), "Debug", 5.0, False)
+            invocation = run_tests.TestInvocation(
+                Path(sys.executable), "held_pipe_probe", ("-c", "pass"))
+            read_fd, write_fd = os.pipe()
+            reader = os.fdopen(read_fd, "r", encoding="utf-8")
+            writer = os.fdopen(write_fd, "wb", buffering=0)
+            actual_popen = subprocess.Popen
+
+            def spawn(*args, **kwargs):
+                # Retain a writer exactly as an escaped descendant would.
+                kwargs["stderr"] = writer
+                child = actual_popen(*args, **kwargs)
+                child.stderr = reader
+                return child
+
+            release_writer = threading.Timer(7.0, writer.close)
+            release_writer.start()
+            try:
+                with mock.patch.object(run_tests.subprocess, "Popen", side_effect=spawn):
+                    result = runner.run_test_once(invocation)
+                self.assertFalse(result.success)
+                self.assertIn("log reader stalled after test exit (stderr)", result.error)
+            finally:
+                release_writer.join()
+                writer.close()
+                runner.cleanup()
 
     def test_windows_cleanup_excludes_other_parent_occurrences(self):
         api = mock.Mock()
