@@ -9,6 +9,8 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -42,6 +44,13 @@ inline std::string describe_windows_exit_code(DWORD exit_code)
 
 } // namespace detail
 #endif
+
+struct Exact_child_wait_result
+{
+    Exact_child_state observed_state;
+    bool              settled;
+    std::string       diagnostic;
+};
 
 class Exact_child
 {
@@ -316,6 +325,52 @@ public:
         close_handle();
 #endif
         return true;
+    }
+
+    Exact_child_wait_result wait_for_exit_and_settle(
+        std::chrono::milliseconds timeout,
+        std::chrono::milliseconds poll_interval = std::chrono::milliseconds(10))
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        auto observed_state = Exact_child_state::running;
+        while (std::chrono::steady_clock::now() < deadline) {
+            observed_state = poll();
+            if (observed_state != Exact_child_state::running) {
+                break;
+            }
+            std::this_thread::sleep_for(poll_interval);
+        }
+
+        // Cleanup can record a terminal status without establishing the exit
+        // the test waited for. Retain the observation and its diagnostic first.
+        std::string diagnostic;
+        if (observed_state == Exact_child_state::exited) {
+            diagnostic = describe_status();
+        }
+        else
+        if (observed_state == Exact_child_state::error) {
+            diagnostic = "observation failed: " + describe_status();
+        }
+        else {
+            diagnostic = "timed out";
+        }
+
+        std::string settlement_diagnostic;
+        const bool settled = observed_state == Exact_child_state::exited
+            ? settle_observed_exit(settlement_diagnostic)
+            : terminate_and_settle(settlement_diagnostic);
+        if (observed_state == Exact_child_state::exited) {
+            if (!settled) {
+                diagnostic += "; settlement failed: " + settlement_diagnostic;
+            }
+        }
+        else {
+            diagnostic += settled ? "; cleanup settled" : "; cleanup failed";
+            if (!settlement_diagnostic.empty()) {
+                diagnostic += ": " + settlement_diagnostic;
+            }
+        }
+        return {observed_state, settled, std::move(diagnostic)};
     }
 
     bool exited_with_code(std::uint32_t expected_code) const noexcept

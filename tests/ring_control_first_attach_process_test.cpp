@@ -120,55 +120,16 @@ bool wait_for_clean_child_exit(
     int                        index,
     std::chrono::milliseconds  timeout)
 {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto state = child.poll();
-        if (state == sintra::test::Exact_child_state::exited) {
-            const bool clean_exit = child.exited_with_code(0);
-            const auto status     = child.describe_status();
-            std::string settle_diagnostic;
-            const bool settled = child.settle_observed_exit(settle_diagnostic);
-            if (!clean_exit || !settled) {
-                std::fprintf(stderr,
-                    "%schild %d pid %d did not exit cleanly: %s%s%s\n",
-                    k_failure_prefix,
-                    index,
-                    child.pid(),
-                    status.c_str(),
-                    settled ? "" : "; settlement failed: ",
-                    settled ? "" : settle_diagnostic.c_str());
-            }
-            return clean_exit && settled;
-        }
-        if (state == sintra::test::Exact_child_state::error) {
-            const auto observation = child.describe_status();
-            std::string cleanup_diagnostic;
-            const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
-            std::fprintf(stderr,
-                "%schild %d pid %d observation failed: %s; cleanup %s%s%s\n",
-                k_failure_prefix,
-                index,
-                child.pid(),
-                observation.c_str(),
-                cleaned ? "settled" : "failed",
-                cleanup_diagnostic.empty() ? "" : ": ",
-                cleanup_diagnostic.c_str());
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const auto result = child.wait_for_exit_and_settle(timeout);
+    const bool clean_exit =
+        result.observed_state == sintra::test::Exact_child_state::exited &&
+        child.exited_with_code(0) && result.settled;
+    if (!clean_exit) {
+        std::fprintf(stderr,
+            "%schild %d pid %d did not exit cleanly: %s\n",
+            k_failure_prefix, index, child.pid(), result.diagnostic.c_str());
     }
-
-    std::string cleanup_diagnostic;
-    const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
-    std::fprintf(stderr,
-        "%schild %d pid %d timed out; cleanup %s%s%s\n",
-        k_failure_prefix,
-        index,
-        child.pid(),
-        cleaned ? "settled" : "failed",
-        cleanup_diagnostic.empty() ? "" : ": ",
-        cleanup_diagnostic.c_str());
-    return false;
+    return clean_exit;
 }
 
 bool read_control_state(

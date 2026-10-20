@@ -113,7 +113,7 @@ int second_peer() { return call_from_peer(); }
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
         "SINTRA_DELIVERY_FENCE_DEADLOCK_DIR",

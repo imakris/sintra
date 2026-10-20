@@ -357,75 +357,33 @@ bool wait_for_expected_exit(
     std::chrono::milliseconds timeout,
     const char*               message)
 {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto state = child.poll();
-        if (state == sintra::test::Exact_child_state::exited) {
-            bool expected_status = false;
-            if (expected == Expected_child_exit::clean) {
-                expected_status = child.exited_with_code(0);
-            }
-            else {
+    const auto result = child.wait_for_exit_and_settle(timeout, 20ms);
+    bool expected_status = false;
+    if (result.observed_state == sintra::test::Exact_child_state::exited) {
+        if (expected == Expected_child_exit::clean) {
+            expected_status = child.exited_with_code(0);
+        }
+        else {
 #ifdef _WIN32
-                // Sintra terminates an abort with 0xC0000409 when it owns the
-                // end of the chain; the harness's disabled debug-pause handler
-                // re-raises to UCRT's 3.
-                expected_status =
-                    child.exited_with_code(0xC0000409u) ||
-                    child.exited_with_code(3) ||
-                    child.exited_with_code(EXCEPTION_ACCESS_VIOLATION);
+            // Sintra terminates an abort with 0xC0000409 when it owns the
+            // end of the chain; the harness's disabled debug-pause handler
+            // re-raises to UCRT's 3.
+            expected_status =
+                child.exited_with_code(0xC0000409u) ||
+                child.exited_with_code(3) ||
+                child.exited_with_code(EXCEPTION_ACCESS_VIOLATION);
 #else
-                expected_status = child.exited_from_signal(SIGABRT);
+            expected_status = child.exited_from_signal(SIGABRT);
 #endif
-            }
-
-            const auto status = child.describe_status();
-            std::string settle_diagnostic;
-            const bool settled = child.settle_observed_exit(settle_diagnostic);
-            if (!expected_status || !settled) {
-                std::fprintf(
-                    stderr,
-                    "%s%s: %s%s%s\n",
-                    k_failure_prefix,
-                    message,
-                    status.c_str(),
-                    settled ? "" : "; settlement failed: ",
-                    settled ? "" : settle_diagnostic.c_str());
-            }
-            return sintra::test::assert_true(
-                expected_status && settled,
-                k_failure_prefix,
-                message);
         }
-        if (state == sintra::test::Exact_child_state::error) {
-            const auto observation = child.describe_status();
-            std::string cleanup_diagnostic;
-            const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
-            std::fprintf(
-                stderr,
-                "%s%s: observation failed: %s; cleanup %s%s%s\n",
-                k_failure_prefix,
-                message,
-                observation.c_str(),
-                cleaned ? "settled" : "failed",
-                cleanup_diagnostic.empty() ? "" : ": ",
-                cleanup_diagnostic.c_str());
-            return sintra::test::assert_true(false, k_failure_prefix, message);
-        }
-        std::this_thread::sleep_for(20ms);
     }
 
-    std::string cleanup_diagnostic;
-    const bool cleaned = child.terminate_and_settle(cleanup_diagnostic);
-    std::fprintf(
-        stderr,
-        "%s%s: timed out; cleanup %s%s%s\n",
-        k_failure_prefix,
-        message,
-        cleaned ? "settled" : "failed",
-        cleanup_diagnostic.empty() ? "" : ": ",
-        cleanup_diagnostic.c_str());
-    return sintra::test::assert_true(false, k_failure_prefix, message);
+    const bool passed = expected_status && result.settled;
+    if (!passed) {
+        std::fprintf(stderr, "%s%s: %s\n",
+            k_failure_prefix, message, result.diagnostic.c_str());
+    }
+    return sintra::test::assert_true(passed, k_failure_prefix, message);
 }
 
 bool has_argv_flag_or_value(int argc, char* argv[], std::string_view flag)

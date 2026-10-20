@@ -248,7 +248,7 @@ int client()
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc, argv, "SINTRA_RPC_WAIT_GUARD_DIR", "rpc_wait_guard", {client},
         [](const std::filesystem::path&) {
             Guard_service service;

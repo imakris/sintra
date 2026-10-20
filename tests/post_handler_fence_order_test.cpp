@@ -161,7 +161,7 @@ int coordinator(const std::filesystem::path&)
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(argc, argv,
+    return sintra::test::run_multi_process_shutdown_test(argc, argv,
         "SINTRA_POST_HANDLER_FENCE_DIR", "post_handler_fence_order",
         {slow_peer, fence_peer}, coordinator,
         [](const std::filesystem::path&) { return 0; });

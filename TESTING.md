@@ -208,10 +208,9 @@ shutdown point" pattern should prefer
 That helper runs the coordinator action, then calls `sintra::shutdown()` in
 every process.
 
-`run_multi_process_test(...)` is a convenience alias for the same collective
-shutdown helper. Use `run_multi_process_test_raw(...)` for crash or other
-abnormal-exit paths that cannot participate in symmetric shutdown; it uses
-`finalize_impl()` instead.
+Use `run_multi_process_test_raw(...)` for crash or other abnormal-exit paths
+that cannot participate in symmetric shutdown; it uses `finalize_impl()`
+instead.
 
 ### Change Iteration Counts
 

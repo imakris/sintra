@@ -651,7 +651,7 @@ void run_no_shutdown_cleanup_guard_child_process(char* binary_path)
 int main(int argc, char* argv[])
 {
     if (sintra::test::has_argv_flag(argc, argv, "--named-managed-only")) {
-        return sintra::test::run_multi_process_test(
+        return sintra::test::run_multi_process_shutdown_test(
             argc, argv, "SINTRA_TEST_SHARED_DIR", "named_managed_receiver",
             {sintra::Process_descriptor(
                 sintra::Entry_descriptor(run_managed_named_receiver), {"--named-managed-only"})},

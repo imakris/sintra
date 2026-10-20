@@ -156,7 +156,7 @@ bool check_coordinator_authority()
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc, argv, "SINTRA_NAME_CACHE_DIR", "name_cache", {client},
         [](const std::filesystem::path&) {
             sintra::barrier("name-cache-ready", "_sintra_all_processes");

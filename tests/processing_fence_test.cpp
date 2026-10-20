@@ -99,7 +99,7 @@ int worker_process()
 
 int main(int argc, char* argv[])
 {
-    return sintra::test::run_multi_process_test(
+    return sintra::test::run_multi_process_shutdown_test(
         argc,
         argv,
         "SINTRA_PROCESSING_FENCE_DIR",
