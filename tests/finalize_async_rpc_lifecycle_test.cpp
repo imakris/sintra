@@ -79,7 +79,7 @@ int main(int argc, char* argv[])
     bool cancelled = false;
     // Finalize cancels pending handles before waiting for active handlers.
     // Release this handler only after its caller observes that cancellation.
-    std::jthread observer([&] {
+    std::thread observer([&] {
         try {
             (void)handle.get_until(std::chrono::steady_clock::now() + 5s);
             std::fprintf(stderr, "Handle returned a value during finalize.\n");
