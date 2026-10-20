@@ -1,21 +1,47 @@
 #include <sintra/sintra.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 
 namespace {
 
+struct Reply_gate
+{
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    bool timed_out = false;
+
+    void release()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+
 struct Finalize_async_bus : sintra::Derived_transceiver<Finalize_async_bus>
 {
-    int delayed_reply(int value, int delay_ms)
+    explicit Finalize_async_bus(Reply_gate& gate) : m_gate(gate) {}
+
+    int delayed_reply(int value)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        std::unique_lock<std::mutex> lock(m_gate.mutex);
+        m_gate.entered = true;
+        m_gate.cv.notify_all();
+        m_gate.timed_out = !m_gate.cv.wait_for(
+            lock, std::chrono::seconds(10), [&] { return m_gate.released; });
         return value;
     }
 
     SINTRA_RPC_STRICT(delayed_reply)
+
+    Reply_gate& m_gate;
 };
 
 } // namespace
@@ -32,30 +58,48 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    Finalize_async_bus bus;
+    Reply_gate gate;
+    Finalize_async_bus bus(gate);
 
     auto handle = Finalize_async_bus::rpc_async_delayed_reply(
         bus.instance_id(),
-        515,
-        500);
+        515);
 
-    std::this_thread::sleep_for(40ms);
+    {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        if (!gate.cv.wait_for(lock, 5s, [&] { return gate.entered; })) {
+            std::fprintf(stderr, "RPC handler did not enter before finalize.\n");
+            lock.unlock();
+            gate.release();
+            sintra::detail::finalize();
+            return 1;
+        }
+    }
 
-    sintra::detail::finalize();
+    bool cancelled = false;
+    // Finalize cancels pending handles before waiting for active handlers.
+    // Release this handler only after its caller observes that cancellation.
+    std::thread observer([&] {
+        try {
+            (void)handle.get_until(std::chrono::steady_clock::now() + 5s);
+            std::fprintf(stderr, "Handle returned a value during finalize.\n");
+        }
+        catch (const sintra::rpc_cancelled&) {
+            cancelled = true;
+        }
+        catch (const std::exception& e) {
+            std::fprintf(stderr, "Handle threw unexpected exception during finalize: %s\n", e.what());
+        }
+        catch (...) {
+            std::fprintf(stderr, "Handle threw non-std exception during finalize.\n");
+        }
+        gate.release();
+    });
 
-    try {
-        (void)handle.get();
-        std::fprintf(stderr, "Handle returned a value after finalize.\n");
-        return 1;
-    }
-    catch (const sintra::rpc_cancelled&) {
-    }
-    catch (const std::exception& e) {
-        std::fprintf(stderr, "Handle threw unexpected exception after finalize: %s\n", e.what());
-        return 1;
-    }
-    catch (...) {
-        std::fprintf(stderr, "Handle threw non-std exception after finalize.\n");
+    const bool finalized = sintra::detail::finalize();
+    observer.join();
+    if (!finalized || !cancelled || gate.timed_out) {
+        std::fprintf(stderr, "Finalize did not cancel the pending RPC while its handler was held.\n");
         return 1;
     }
 

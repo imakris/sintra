@@ -16,7 +16,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <optional>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -37,6 +37,34 @@ struct phase_two_message_t
     int    value;
     double score;
 };
+
+template <typename Value>
+void wait_for_receive_slot()
+{
+    // Observe receive()'s real registration before releasing the senders,
+    // using the same registry witness as receive_owned_test.
+    using Message = sintra::Message<sintra::Enclosure<Value>>;
+    const auto message_id = Message::id();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (;;) {
+        {
+            std::lock_guard<std::recursive_mutex> lock(sintra::s_mproc->m_handlers_mutex);
+            const auto found = sintra::s_mproc->m_active_handlers.find(message_id);
+            if (found != sintra::s_mproc->m_active_handlers.end()) {
+                for (const auto& entry : found->second) {
+                    if (!entry.second.empty()) {
+                        return;
+                    }
+                }
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::fprintf(stderr, "FAIL: receive slot was not installed\n");
+            std::abort();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
 
 void write_sender_id(const std::filesystem::path& path, sintra::instance_id_type instance_id)
 {
@@ -69,8 +97,6 @@ int sender_a_process()
 
     sintra::barrier("sender-id-ready");
     sintra::barrier("start");
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     const int    expected_value = 57;
     const double expected_score = 2.718;
@@ -130,12 +156,16 @@ int receiver_process()
     const auto shared_dir = shared.path();
 
     sintra::barrier("sender-id-ready");
-    sintra::barrier("start");
-
     const auto sender_a_id = read_sender_id(shared_dir / "sender_a_id.txt");
 
-    auto msg = sintra::receive<data_message_t>(
-        sintra::Typed_instance_id<sintra::Managed_process>(sender_a_id));
+    data_message_t msg{};
+    std::thread receiver([&] {
+        msg = sintra::receive<data_message_t>(
+            sintra::Typed_instance_id<sintra::Managed_process>(sender_a_id));
+    });
+    wait_for_receive_slot<data_message_t>();
+    sintra::barrier("start");
+    receiver.join();
     sintra::test::write_lines(
         shared_dir / "received_value.txt",
         {std::to_string(msg.value)});
@@ -145,26 +175,13 @@ int receiver_process()
     }
     sintra::world() << ack_a_t{};
 
-    std::condition_variable second_cv;
-    std::mutex second_mtx;
-    std::optional<phase_two_message_t> second_message;
-    auto second_message_slot = sintra::activate_slot([&](phase_two_message_t msg) {
-        std::lock_guard<std::mutex> lock(second_mtx);
-        if (!second_message.has_value()) {
-            second_message.emplace(std::move(msg));
-            second_cv.notify_one();
-        }
-    });
-
-    sintra::barrier("phase-two");
-
     phase_two_message_t other_msg{};
-    {
-        std::unique_lock<std::mutex> lock(second_mtx);
-        second_cv.wait(lock, [&] { return second_message.has_value(); });
-        other_msg = std::move(*second_message);
-    }
-    second_message_slot();
+    std::thread unfiltered_receiver([&] {
+        other_msg = sintra::receive<phase_two_message_t>();
+    });
+    wait_for_receive_slot<phase_two_message_t>();
+    sintra::barrier("phase-two");
+    unfiltered_receiver.join();
 
     if (other_msg.value != 91) {
         std::fprintf(stderr, "FAIL: expected second value 91, got %d\n", other_msg.value);

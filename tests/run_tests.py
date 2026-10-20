@@ -1111,6 +1111,13 @@ class TestRunner:
                             capture_pause_total += capture_finished - capture_active_start
                             capture_active_start = None
 
+            def elapsed_stack_capture_time() -> float:
+                with capture_lock:
+                    elapsed = capture_pause_total
+                    if capture_active_start is not None:
+                        elapsed += time.monotonic() - capture_active_start
+                    return elapsed
+
             def terminate_process_group_members(reason: str) -> CleanupOutcome:
                 """Ensure helpers in the spawned process group terminate."""
 
@@ -1259,8 +1266,12 @@ class TestRunner:
 
                 for thread, stream, descriptor, stream_fd in threads:
                     join_deadline = time.monotonic() + max_join_time
+                    capture_baseline = elapsed_stack_capture_time()
                     while thread.is_alive():
-                        remaining = join_deadline - time.monotonic()
+                        # A reader can be capturing debugger output rather than
+                        # waiting for its pipe. Charge only pipe-drain time here.
+                        capture_elapsed = elapsed_stack_capture_time() - capture_baseline
+                        remaining = join_deadline + capture_elapsed - time.monotonic()
                         if remaining <= 0:
                             break
                         join_timeout = min(join_step, remaining)
@@ -1717,18 +1728,9 @@ class TestRunner:
             # Wait with timeout, extending the deadline for live stack captures
             try:
                 while True:
-                    with capture_lock:
-                        pause_total = capture_pause_total
-                        active_start = capture_active_start
-
+                    capture_elapsed = elapsed_stack_capture_time()
                     now_monotonic = time.monotonic()
-                    active_extra = 0.0
-                    if active_start is not None:
-                        active_extra = now_monotonic - active_start
-
-                    adjusted_deadline = (
-                        start_monotonic + timeout + pause_total + active_extra
-                    )
+                    adjusted_deadline = start_monotonic + timeout + capture_elapsed
 
                     if process.poll() is not None:
                         break

@@ -46,8 +46,8 @@
 //   4. Parent calls Child_service::rpc_ping(child_iid, ...) (blocking RPC)
 //      and asserts the reply was produced by the child handler.
 //   5. Parent calls Child_service::rpc_mark(child_iid, ...) (SINTRA_UNICAST,
-//      fire-and-forget).  This call must return without waiting for a remote
-//      round-trip.
+//      fire-and-forget). The child holds the handler at an independent fixture
+//      gate while the parent verifies that the call has already returned.
 //   6. Child's mark() handler invokes Parent_ack::rpc_mark_seen back on the
 //      parent.  Parent waits (with a bounded timeout) for the recorded value
 //      to match.
@@ -64,6 +64,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <future>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -76,6 +77,7 @@ namespace {
 
 constexpr const char* k_child_service_name = "child_service";
 constexpr const char* k_parent_ack_name    = "parent_ack";
+constexpr const char* k_shared_directory_env = "SINTRA_TARGETED_RPC_TEST_DIR";
 
 constexpr int k_ping_value = 123;
 constexpr int k_mark_value = 456;
@@ -145,6 +147,17 @@ struct Child_service : sintra::Derived_transceiver<Child_service>
     void mark(int value)
     {
         std::fprintf(stderr, "[CHILD] mark(%d) handler invoked\n", value);
+
+        // The file gate only controls the interleaving. The acknowledgement
+        // below still proves delivery through the actual targeted Sintra path.
+        sintra::test::Shared_directory shared(k_shared_directory_env, "targeted_rpc");
+        sintra::test::write_lines(shared.path() / "mark-entered", {"entered"});
+        if (!sintra::test::wait_for_file(
+                shared.path() / "release-mark", std::chrono::seconds(30)))
+        {
+            std::fprintf(stderr, "[CHILD] mark(): fixture did not release the handler\n");
+            return;
+        }
 
         sintra::instance_id_type ack_iid = cached_parent_ack_iid().load();
         if (ack_iid == sintra::invalid_instance_id) {
@@ -217,6 +230,7 @@ int run_child()
 
 int run_coordinator(const std::string& binary_path)
 {
+    sintra::test::Shared_directory shared(k_shared_directory_env, "targeted_rpc");
     std::fprintf(stderr, "[COORD] starting (mproc_id=%llu, coord_id=%llu)\n",
         static_cast<unsigned long long>(s_mproc_id),
         static_cast<unsigned long long>(s_coord_id));
@@ -261,6 +275,7 @@ int run_coordinator(const std::string& binary_path)
         static_cast<unsigned long long>(child_proc_iid));
 
     auto teardown_and_return = [&](int rv) {
+        sintra::test::write_lines(shared.path() / "release-mark", {"released"});
         sintra::world() << done_signal_t{};
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         return rv;
@@ -308,20 +323,28 @@ int run_coordinator(const std::string& binary_path)
     // ---- 4. fire-and-forget unicast to a specific remote instance ---------
     std::fprintf(stderr, "[COORD] calling Child_service::rpc_mark(%llu, %d)\n",
         static_cast<unsigned long long>(child_iid), k_mark_value);
-    const auto mark_start = std::chrono::steady_clock::now();
-    try {
+    auto mark_call = std::async(std::launch::async, [child_iid] {
         Child_service::rpc_mark(child_iid, k_mark_value);
+    });
+    const bool handler_entered = sintra::test::wait_for_file(
+        shared.path() / "mark-entered", std::chrono::seconds(5));
+    const bool returned_while_held =
+        mark_call.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    sintra::test::write_lines(shared.path() / "release-mark", {"released"});
+    if (mark_call.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        std::fprintf(stderr, "[COORD] rpc_mark did not settle after releasing the handler\n");
+        std::abort();
+    }
+    try {
+        mark_call.get();
     }
     catch (const std::exception& ex) {
         std::fprintf(stderr, "[COORD] rpc_mark threw: %s\n", ex.what());
         return teardown_and_return(1);
     }
-    const auto mark_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - mark_start
-    ).count();
-    // Fire-and-forget must not block on a remote round-trip.
     if (!sintra::test::assert_true(
-            mark_elapsed < 500, "[COORD] ", "fire-and-forget rpc_mark must return quickly (no remote wait)"))
+            handler_entered && returned_while_held, "[COORD] ",
+            "fire-and-forget rpc_mark must return while the child handler is held"))
     {
         return teardown_and_return(1);
     }
@@ -362,6 +385,7 @@ int main(int argc, char* argv[])
     std::set_terminate(sintra::test::custom_terminate_handler);
 
     const std::string binary_path = sintra::test::get_binary_path(argc, argv);
+    sintra::test::Shared_directory shared_directory(k_shared_directory_env, "targeted_rpc");
 
     if (is_child_mode(argc, argv)) {
         sintra::init(argc, argv);

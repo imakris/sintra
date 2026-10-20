@@ -237,6 +237,23 @@ python3 run_tests.py --iteration-multiplier 0.5 --build-dir ../build --config Re
 
 The same setting can be supplied through `SINTRA_TEST_ITERATION_MULTIPLIER`.
 
+### Quick Broad Pass
+
+For routine development feedback, run the existing roster at reduced repetition
+depth without editing `active_tests.txt`:
+
+```bash
+cd tests
+python3 run_tests.py --build-dir ../build --config Debug,Release --iteration-multiplier 0.01
+```
+
+Every active test and discovered IPC-ring case still runs at least once. The
+current maximum weight is 100, so this command runs each invocation once per
+configuration; higher future weights may produce more than one repetition.
+Use it for a quick broad pass, then run focused repetitions for concurrency
+changes. This is not a stability full run and does not replace the unchanged
+multiplier-1, Debug-and-Release, no-budget schedule described below.
+
 ### Extended Timeout
 
 Some tests (like `recovery_test`) need more time:
@@ -356,6 +373,21 @@ passed at least once, even when later scheduled repetitions were not executed.
 Such a run is a broad/progress gate and must not be reported as stability-full
 certification. The repository is considered stable only after the untruncated
 multiplier-1 Debug and Release schedule completes on the stability-full lanes.
+
+To run that full schedule on existing CI binaries without rebuilding, dispatch
+`stress-test-linux.yml`, `stress-test-windows.yml` or `stress-test-macos.yml`.
+Supply the build workflow run id and its matching source revision; the named
+build artifact must still be retained. For example:
+
+```bash
+gh workflow run stress-test-linux.yml --ref <workflow-branch> \
+  -f build_run_id=<build-run-id> -f head_sha=<built-source-revision>
+```
+
+Manual dispatch runs Debug and Release with multiplier `1` and no time budget.
+Automatic build callers retain their budgeted progress runs. Full results use
+separate `Stability Full` commit statuses. For Windows MinGW artifacts, also
+supply `-f lane=windows-mingw`.
 
 ### Special Test Handling
 
