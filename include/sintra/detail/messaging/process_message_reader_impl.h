@@ -367,14 +367,14 @@ private:
 class Handler_slot_invocation_scope
 {
 public:
-    explicit Handler_slot_invocation_scope(const std::shared_ptr<Handler_slot_state>& state) noexcept
+    explicit Handler_slot_invocation_scope(Handler_slot_state& state) noexcept
     :
-        m_state(state),
+        m_state(&state),
         m_previous_handler_state(tl_current_handler_slot_state),
         m_previous_in_handler_dispatch(tl_in_handler_dispatch)
     {
         m_state->invocations.fetch_add(1, std::memory_order_seq_cst);
-        tl_current_handler_slot_state             = m_state.get();
+        tl_current_handler_slot_state             = m_state;
         tl_in_handler_dispatch                    = true;
     }
 
@@ -389,7 +389,7 @@ public:
     Handler_slot_invocation_scope& operator=(const Handler_slot_invocation_scope&) = delete;
 
 private:
-    std::shared_ptr<Handler_slot_state>  m_state;
+    Handler_slot_state*                  m_state;
     const Handler_slot_state*            m_previous_handler_state;
     bool                                 m_previous_in_handler_dispatch;
 };
@@ -455,7 +455,9 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
                 continue;
             }
 
-            detail::Handler_slot_invocation_scope invocation(slot);
+            // The local slot keeps the state alive until after the scope and
+            // invocation lock are destroyed, including during unwinding.
+            detail::Handler_slot_invocation_scope invocation(*slot);
             // Admission and deactivation share one SC order: either this
             // invocation is counted by the deactivator or it observes inactive.
             if (slot->active.load(std::memory_order_seq_cst)) {
