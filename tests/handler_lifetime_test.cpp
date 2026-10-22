@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -97,11 +98,14 @@ struct Copied_slot_capture
     bool second_deactivated = false;
 };
 
-void run_deactivating_handler_skips_later_copied_slot()
+void run_deactivating_handler_skips_later_copied_slot(size_t intervening_slot_count)
 {
     Copied_slot_capture capture;
     sintra::Transceiver::handler_deactivator first_slot;
     sintra::Transceiver::handler_deactivator second_slot;
+    std::vector<sintra::Transceiver::handler_deactivator> intervening_slots;
+    auto lifetime = std::make_shared<int>(k_event_value);
+    const std::weak_ptr<int> second_lifetime = lifetime;
     bool first_slot_active  = false;
     bool second_slot_active = false;
 
@@ -111,22 +115,40 @@ void run_deactivating_handler_skips_later_copied_slot()
                 (void)message;
                 ++capture.first_entries;
                 second_slot();
+                second_slot = {};
                 capture.second_deactivated = true;
                 second_slot_active = false;
+                sintra::test::require_true(!second_lifetime.expired(), k_failure_prefix,
+                    "deactivation released a later handler still owned by the dispatch snapshot");
             });
         first_slot_active = true;
 
+        intervening_slots.reserve(intervening_slot_count);
+        for (size_t i = 0; i < intervening_slot_count; ++i) {
+            intervening_slots.push_back(sintra::activate_slot(
+                [](const Handler_lifetime_bus::Event_message&) {}));
+        }
+
         second_slot = sintra::activate_slot(
-            [&](const Handler_lifetime_bus::Event_message& message) {
-                (void)message;
-                ++capture.second_entries;
-            });
+            [
+                    &capture,
+                    lifetime
+                ](
+                    const Handler_lifetime_bus::Event_message& message)
+                {
+                    (void)message;
+                    ++capture.second_entries;
+                });
         second_slot_active = true;
+        lifetime.reset();
 
         dispatch_direct_event(k_event_value);
 
         first_slot();
         first_slot_active = false;
+        for (auto& slot : intervening_slots) {
+            slot();
+        }
 
         sintra::test::require_true(capture.first_entries == 1, k_failure_prefix,
             "first copied-slot handler did not run exactly once");
@@ -134,6 +156,8 @@ void run_deactivating_handler_skips_later_copied_slot()
             "first handler did not deactivate the later copied slot");
         sintra::test::require_true(capture.second_entries == 0, k_failure_prefix,
             "later copied slot ran after its deactivator returned");
+        sintra::test::require_true(second_lifetime.expired(), k_failure_prefix,
+            "dispatch retained a deactivated handler after returning");
     }
     catch (...) {
         if (first_slot_active) {
@@ -142,7 +166,79 @@ void run_deactivating_handler_skips_later_copied_slot()
         if (second_slot_active) {
             second_slot();
         }
+        for (auto& slot : intervening_slots) {
+            slot();
+        }
         throw;
+    }
+}
+
+void run_copied_handler_order_and_exception_unwind()
+{
+    for (const int slot_count : {0, 1, 4, 5, 9}) {
+        std::vector<sintra::Transceiver::handler_deactivator> slots;
+        std::vector<int> observed;
+        std::vector<int> expected;
+        bool throw_from_handler = false;
+
+        slots.reserve(slot_count);
+        try {
+            for (int i = 0; i < slot_count; ++i) {
+                expected.push_back(i);
+                slots.push_back(sintra::activate_slot(
+                    [
+                            &observed,
+                            &throw_from_handler,
+                            slot_count,
+                            i
+                        ](
+                            const Handler_lifetime_bus::Event_message&)
+                        {
+                            observed.push_back(i);
+                            if (throw_from_handler && i == slot_count / 2) {
+                                throw std::runtime_error("copied handler unwind sentinel");
+                            }
+                        }));
+            }
+
+            dispatch_direct_event(k_event_value);
+            sintra::test::require_true(observed == expected, k_failure_prefix,
+                "dispatch changed handler registration order or skipped a handler");
+
+            if (slot_count != 0) {
+                observed.clear();
+                throw_from_handler = true;
+                bool caught = false;
+                try {
+                    dispatch_direct_event(k_event_value);
+                }
+                catch (const std::runtime_error& ex) {
+                    caught = std::string_view(ex.what()) == "copied handler unwind sentinel";
+                }
+                sintra::test::require_true(caught, k_failure_prefix,
+                    "dispatch did not propagate the handler exception");
+                const std::vector<int> expected_prefix(
+                    expected.begin(), expected.begin() + slot_count / 2 + 1);
+                sintra::test::require_true(observed == expected_prefix, k_failure_prefix,
+                    "dispatch invoked a handler after an earlier handler threw");
+
+                observed.clear();
+                throw_from_handler = false;
+                dispatch_direct_event(k_event_value);
+                sintra::test::require_true(observed == expected, k_failure_prefix,
+                    "dispatch did not recover after a handler exception");
+            }
+
+            for (auto& slot : slots) {
+                slot();
+            }
+        }
+        catch (...) {
+            for (auto& slot : slots) {
+                slot();
+            }
+            throw;
+        }
     }
 }
 
@@ -696,7 +792,9 @@ int main(int argc, char* argv[])
             return 0;
         }
 
-        run_deactivating_handler_skips_later_copied_slot();
+        run_deactivating_handler_skips_later_copied_slot(0);
+        run_deactivating_handler_skips_later_copied_slot(4);
+        run_copied_handler_order_and_exception_unwind();
         run_external_deactivation_waits_for_active_invocation();
         run_self_deactivation_suppresses_queued_same_slot_dispatch();
         run_named_deactivation(false);
