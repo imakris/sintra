@@ -68,7 +68,6 @@ jobs:
           copyback: false
           envs: 'SINTRA_TEST_ITERATION_MULTIPLIER SINTRA_TEST_NAME SINTRA_TEST_REPETITIONS'
           prepare: |
-            date +%s > /tmp/ci_start_time
             pkg install -y cmake ninja python ccache
           run: |
             export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
@@ -105,8 +104,7 @@ jobs:
               -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
             cmake --build build
             cd tests
-            budget=$(( 7200 - $(date +%s) + $(cat /tmp/ci_start_time) ))
-            python3 run_tests.py --timeout 30 --build-dir ../build --config Release --time-budget $budget
+            python3 run_tests.py --timeout 30 --build-dir ../build --config Release
 
       # The VM action skips copyback when its run fails. Export only the compiler
       # cache from the still-running VM, including after a test failure.
