@@ -8,6 +8,7 @@
 #include "../thread_fault_guard.h"
 #include "../transceiver_impl.h"
 #include "../tls_post_handler.h"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -407,7 +408,10 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
     // thread trying to register a handler via activate_slot() / receive<T>().
     // Releasing before invocation gives waiting threads a chance to acquire the
     // lock between messages.
-    std::vector<std::shared_ptr<detail::Handler_slot_state>> collected;
+    // Keep the usual few owning references inline without limiting handler fan-out.
+    std::array<std::shared_ptr<detail::Handler_slot_state>, 4> inline_collected;
+    size_t inline_count = 0;
+    std::vector<std::shared_ptr<detail::Handler_slot_state>> overflow_collected;
     bool dispatch_registered = false;
 
     {
@@ -422,16 +426,18 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
         for (auto sid : scope_ids) {
             auto shl = sender_map->find(sid);
             if (shl != sender_map->end()) {
-                collected.insert(
-                    collected.end(),
-                    shl->second.begin(),
-                    shl->second.end());
+                auto slot = shl->second.begin();
+                while (slot != shl->second.end() && inline_count < inline_collected.size()) {
+                    inline_collected[inline_count++] = *slot++;
+                }
+                overflow_collected.insert(
+                    overflow_collected.end(), slot, shl->second.end());
             }
         }
 
         // Preserve the existing dispatch-depth bookkeeping while callbacks run
         // outside the handler mutex.
-        if (!collected.empty()) {
+        if (inline_count != 0) {
             s_mproc->m_handlers_dispatch_depth.fetch_add(1, std::memory_order_acq_rel);
             dispatch_registered = true;
         }
@@ -443,7 +449,11 @@ SINTRA_DETAIL_DECL void dispatch_event_handlers(
     detail::Handler_dispatch_depth_scope dispatch_depth_scope(dispatch_registered);
 
     try {
-        for (auto& collected_slot : collected) {
+        const size_t collected_count = inline_count + overflow_collected.size();
+        for (size_t i = 0; i < collected_count; ++i) {
+            auto& collected_slot = i < inline_count
+                ? inline_collected[i]
+                : overflow_collected[i - inline_count];
             auto slot = std::move(collected_slot);
             if (!slot || !slot->active.load(std::memory_order_acquire)) {
                 continue;
