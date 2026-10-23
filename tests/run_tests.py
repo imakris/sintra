@@ -815,16 +815,6 @@ class TestRunner:
 
                 detected_config = config_hint
                 base_name = normalized_name
-                legacy_suffixed_name = False
-
-                # Keep compatibility with older suffixed artifacts.
-                for config in configurations:
-                    suffix = f"_{config}"
-                    if normalized_name.endswith(suffix):
-                        detected_config = config
-                        base_name = normalized_name[:-len(suffix)]
-                        legacy_suffixed_name = True
-                        break
 
                 if detected_config is None:
                     if len(configurations) != 1:
@@ -838,9 +828,7 @@ class TestRunner:
                 if base_name.startswith("sintra_"):
                     base_name = base_name[len("sintra_"):]
 
-                available_by_config = available_tests.setdefault(base_name, {})
-                if detected_config not in available_by_config or not legacy_suffixed_name:
-                    available_by_config[detected_config] = entry
+                available_tests.setdefault(base_name, {})[detected_config] = entry
 
         # Now match active_tests entries with available binaries
         discovered_tests: Dict[str, List[TestInvocation]] = {
