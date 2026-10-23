@@ -822,73 +822,30 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     int           last_errno    = 0;
     unsigned long last_doserrno = 0;
 
-    using init_proc_thread_attribute_list_fn   = BOOL (WINAPI*)(
-        LPPROC_THREAD_ATTRIBUTE_LIST,
-        DWORD,
-        DWORD,
-        PSIZE_T);
-    using update_proc_thread_attribute_list_fn = BOOL (WINAPI*)(
-        LPPROC_THREAD_ATTRIBUTE_LIST,
-        DWORD,
-        DWORD_PTR,
-        PVOID,
-        SIZE_T,
-        PVOID,
-        PSIZE_T);
-    using delete_proc_thread_attribute_list_fn = VOID (WINAPI*)(
-        LPPROC_THREAD_ATTRIBUTE_LIST);
-
-    const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
-    const auto init_proc_thread_attribute_list = kernel32
-        ? reinterpret_cast<init_proc_thread_attribute_list_fn>(
-            GetProcAddress(kernel32, "InitializeProcThreadAttributeList"))
-        : nullptr;
-    const auto update_proc_thread_attribute_list = kernel32
-        ? reinterpret_cast<update_proc_thread_attribute_list_fn>(
-            GetProcAddress(kernel32, "UpdateProcThreadAttribute"))
-        : nullptr;
-    const auto delete_proc_thread_attribute_list = kernel32
-        ? reinterpret_cast<delete_proc_thread_attribute_list_fn>(
-            GetProcAddress(kernel32, "DeleteProcThreadAttributeList"))
-        : nullptr;
-    const bool has_attribute_list_api = init_proc_thread_attribute_list &&
-        update_proc_thread_attribute_list &&
-        delete_proc_thread_attribute_list;
-
     SIZE_T attr_list_size = 0;
     std::vector<unsigned char> attr_buffer;
     STARTUPINFOEXW si_ex {};
-    bool use_handle_list = !inherited_handles.empty() && has_attribute_list_api;
+    bool use_handle_list = !inherited_handles.empty();
     const bool use_family_job = options.native_family_job != nullptr;
     HANDLE family_job = options.native_family_job;
-    if (use_family_job && !has_attribute_list_api) {
-        reset_child_outputs();
-        _set_errno(ENOTSUP);
-        _set_doserrno(ERROR_NOT_SUPPORTED);
-        for (const auto& guard : handle_guards) {
-            SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT,
-                guard.flags & HANDLE_FLAG_INHERIT);
-        }
-        return false;
-    }
 
     if (use_handle_list || use_family_job) {
         const DWORD attribute_count = static_cast<DWORD>(use_handle_list) +
             static_cast<DWORD>(use_family_job);
-        init_proc_thread_attribute_list(nullptr, attribute_count, 0, &attr_list_size);
+        InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &attr_list_size);
         if (attr_list_size != 0) {
             attr_buffer.resize(attr_list_size);
             si_ex.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buffer.data());
-            if (!init_proc_thread_attribute_list(si_ex.lpAttributeList, attribute_count, 0, &attr_list_size)) {
+            if (!InitializeProcThreadAttributeList(si_ex.lpAttributeList, attribute_count, 0, &attr_list_size)) {
                 attr_buffer.clear();
                 si_ex.lpAttributeList = nullptr;
             }
             if (si_ex.lpAttributeList && use_handle_list) {
-                if (!update_proc_thread_attribute_list(
+                if (!UpdateProcThreadAttribute(
                         si_ex.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited_handles.data(),
                         inherited_handles.size() * sizeof(HANDLE), nullptr, nullptr))
                 {
-                    delete_proc_thread_attribute_list(si_ex.lpAttributeList);
+                    DeleteProcThreadAttributeList(si_ex.lpAttributeList);
                     si_ex.lpAttributeList = nullptr;
                     use_handle_list = false;
                 }
@@ -905,13 +862,13 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         constexpr DWORD_PTR k_job_list_attribute = ProcThreadAttributeValue(13, FALSE, TRUE, FALSE);
         // Assignment is part of CreateProcess, before its first instruction.
         // Failure therefore never leaves an unassigned suspended child behind.
-        if (!si_ex.lpAttributeList || !update_proc_thread_attribute_list(
+        if (!si_ex.lpAttributeList || !UpdateProcThreadAttribute(
                 si_ex.lpAttributeList, 0, k_job_list_attribute,
                 &family_job, sizeof(family_job), nullptr, nullptr))
         {
             const DWORD error = GetLastError();
             if (si_ex.lpAttributeList) {
-                delete_proc_thread_attribute_list(si_ex.lpAttributeList);
+                DeleteProcThreadAttributeList(si_ex.lpAttributeList);
             }
             for (const auto& guard : handle_guards) {
                 SetHandleInformation(guard.handle, HANDLE_FLAG_INHERIT,
@@ -998,7 +955,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
             CloseHandle(pi.hThread);
 
             if (si_ex.lpAttributeList) {
-                delete_proc_thread_attribute_list(si_ex.lpAttributeList);
+                DeleteProcThreadAttributeList(si_ex.lpAttributeList);
             }
             restore_handle_flags();
             return true;
@@ -1036,7 +993,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
     if (last_errno != 0) { _set_errno(last_errno); }
 
     if (last_doserrno != 0)                       { _set_doserrno(last_doserrno);                             }
-    if (si_ex.lpAttributeList) { delete_proc_thread_attribute_list(si_ex.lpAttributeList); }
+    if (si_ex.lpAttributeList) { DeleteProcThreadAttributeList(si_ex.lpAttributeList); }
     restore_handle_flags();
     return false;
 }
