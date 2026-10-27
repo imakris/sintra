@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -921,7 +922,8 @@ private:
 };
 
 
-// Typed exception: thrown when an RPC is unblocked/cancelled (e.g., coordinator loss)
+// Typed exception: thrown when an RPC wait ends through runtime cancellation
+// (e.g., coordinator loss) or a caller-requested stop.
 struct rpc_cancelled : std::runtime_error
 {
     explicit rpc_cancelled(const char* what_arg) : std::runtime_error(what_arg) {}
@@ -929,7 +931,7 @@ struct rpc_cancelled : std::runtime_error
 
 // Typed exception: thrown when an RPC cannot be delivered because the target
 // is unpublished, shutting down, or its process is gone. Distinct from
-// rpc_cancelled (which signals teardown of the *caller's* runtime). Inherits
+// rpc_cancelled (which signals cancellation of the caller's wait). Inherits
 // from std::runtime_error, so a catch (const std::runtime_error&) handler
 // also matches.
 struct rpc_unavailable : std::runtime_error
@@ -1011,6 +1013,13 @@ public:
     // If completion wins that race, preserves get()'s outcome.
     template<typename Clock, typename Duration>
     auto get_until(const std::chrono::time_point<Clock, Duration>& deadline) -> RT;
+
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+    // Wait for completion or a caller-requested stop, without a deadline.
+    // A stop that wins caller-side abandonment throws rpc_cancelled and leaves
+    // remote work running. A terminal outcome committed first is preserved.
+    auto get(std::stop_token stop) -> RT;
+#endif
 
     // Block if needed, then return the value or rethrow the terminal failure.
     // - returned: yields the reply value

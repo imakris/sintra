@@ -16,8 +16,9 @@ struct rpc_cancelled : std::runtime_error
 ```
 
 Description: Exception type thrown when an in-flight RPC is unblocked by
-the Sintra runtime instead of completing normally. It indicates that no
-remote reply will be observed for the call.
+the Sintra runtime or its caller abandons the wait through
+`Rpc_handle<R>::get(std::stop_token)`. It indicates that no remote reply
+will be observed for the call.
 
 ## Throws
 
@@ -26,8 +27,8 @@ remote reply will be observed for the call.
 
 ## Use when
 
-- Distinguishing runtime-driven cancellation from a remote-side exception
-  or from caller-side timeout abandonment.
+- Distinguishing runtime cancellation or a caller-requested stop from a
+  remote-side exception or caller-side timeout abandonment.
 
 ## Contract
 
@@ -39,12 +40,17 @@ remote reply will be observed for the call.
 - `Rpc_handle<R>::get()` is the primary call site that throws this type.
   Synchronous `rpc_<method>(...)` may also surface it when the underlying
   wait is unblocked.
+- `Rpc_handle<R>::get(stop)` also throws it when a requested stop wins
+  caller-side abandonment. The remote work is not cancelled; if a terminal
+  result or failure commits before abandonment, the overload preserves that
+  outcome.
 
 ## Threading and lifecycle
 
 - The exception is constructed on the calling thread when it consumes
-  the cancelled state of a handle. It is never thrown from a Sintra
-  reader thread directly into user code.
+  the cancelled state of a handle or abandons it after a stop request. It
+  is never thrown from a Sintra reader thread or stop callback directly
+  into user code.
 
 ## Example source
 

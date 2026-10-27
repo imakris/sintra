@@ -22,6 +22,7 @@ public:
     auto get_until(
         const std::chrono::time_point<Clock, Duration>& deadline) -> R;
 
+    auto get(std::stop_token stop) -> R;
     auto get() const -> R;
 };
 
@@ -41,6 +42,13 @@ registration that lets the local reader thread resolve the call.
   wins the caller-side abandon race, throws [`sintra::rpc_timeout`](rpc_timeout.md).
   If a terminal outcome wins before abandonment, returns or throws
   exactly as `get()` would.
+- `get(stop)` — wait for completion or a caller-requested stop, without a
+  deadline. If a stop is requested and this handle wins caller-side
+  abandonment, throws [`sintra::rpc_cancelled`](rpc_cancelled.md). If a
+  terminal outcome commits before abandonment, preserves it exactly as
+  `get()` would.
+  Available when the standard library supplies cooperative stop tokens
+  (`__cpp_lib_jthread >= 201911L`).
 - `get()` — block if necessary, then return the reply value, rethrow the
   remote exception locally, or throw based on the terminal state (see
   *Throws* below).
@@ -49,7 +57,8 @@ registration that lets the local reader thread resolve the call.
 
 - The remote exception type, when the remote handler throws.
 - [`sintra::rpc_cancelled`](rpc_cancelled.md) — when `get()` is called on
-  a cancelled handle.
+  a cancelled handle, or `get(stop)` abandons a pending handle after a stop
+  request.
 - [`sintra::rpc_timeout`](rpc_timeout.md) — when `get_until(deadline)`
   reaches its deadline and this handle successfully abandons the pending
   caller-side result.
@@ -59,6 +68,8 @@ registration that lets the local reader thread resolve the call.
 ## Use when
 
 - A caller needs to issue a remote method invocation without blocking.
+- A caller needs to wait without a deadline while allowing its own lifetime
+  cancellation to stop waiting. Use `get(stop)`.
 - A bounded result is required. Use `get_until(deadline)` for the normal
   "wait up to this deadline, then either get the result or time out" path.
 - A caller wants to abandon local interest without cancelling remote work;
@@ -73,6 +84,11 @@ registration that lets the local reader thread resolve the call.
   the race against abandonment after the deadline, that outcome is
   preserved.
 - Destroying a still-pending handle abandons caller-side interest.
+- `get(stop)` abandons only caller-side interest when a stop request wins.
+  It does not cancel remote execution. An already-requested stop can abandon
+  a pending call immediately; a terminal outcome already committed is
+  preserved. A handle abandoned by this overload remains abandoned, so a
+  later `get()` throws `std::runtime_error`.
 - Late-arriving remote results for abandoned or cancelled calls are
   discarded by the runtime.
 
@@ -86,8 +102,8 @@ registration that lets the local reader thread resolve the call.
   such a wait, or consume the result after the handler returns. The runtime
   does not infer dispatch status from a pending handle.
 - A pending handle keeps an internal return-handler entry alive until it
-  reaches a terminal state. `get_until(deadline)` timeout and the destructor
-  release that entry promptly.
+  reaches a terminal state. `get_until(deadline)` timeout, `get(stop)`
+  caller-stop abandonment, and the destructor release that entry promptly.
 - During Sintra teardown the runtime unblocks outstanding RPCs; consuming
   such a handle throws [`sintra::rpc_cancelled`](rpc_cancelled.md).
 

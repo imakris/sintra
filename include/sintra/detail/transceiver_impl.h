@@ -1118,6 +1118,37 @@ auto Rpc_handle<RT>::get_until(const std::chrono::time_point<Clock, Duration>& d
     return get();
 }
 
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+template<typename RT>
+auto Rpc_handle<RT>::get(std::stop_token stop) -> RT
+{
+    if (!m_state) {
+        return get();
+    }
+
+    {
+        // Unregistering a callback may wait for it to release this same mutex.
+        std::stop_callback wake(stop, [
+                state = m_state
+            ]()
+            {
+                lock_guard<mutex> lock(state->control.keep_waiting_mutex);
+                state->control.keep_waiting_condition.notify_all();
+            });
+        unique_lock<mutex> lock(m_state->control.keep_waiting_mutex);
+        m_state->control.keep_waiting_condition.wait(lock, [&] {
+            return !m_state->control.keep_waiting || stop.stop_requested();
+        });
+    }
+
+    if (stop.stop_requested() && abandon()) {
+        throw rpc_cancelled("rpc cancelled");
+    }
+
+    return get();
+}
+#endif
+
 template<typename RT>
 detail::Rpc_completion_state Rpc_handle<RT>::state() const
 {

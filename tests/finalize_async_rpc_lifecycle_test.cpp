@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 
 namespace {
@@ -81,7 +82,11 @@ int main(int argc, char* argv[])
     // Release this handler only after its caller observes that cancellation.
     std::thread observer([&] {
         try {
+#if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
+            (void)handle.get(std::stop_token{});
+#else
             (void)handle.get_until(std::chrono::steady_clock::now() + 5s);
+#endif
             std::fprintf(stderr, "Handle returned a value during finalize.\n");
         }
         catch (const sintra::rpc_cancelled&) {
