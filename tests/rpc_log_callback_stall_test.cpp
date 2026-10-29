@@ -8,8 +8,8 @@
 // Rejection: the coordinator process hosts Stall_service, and two children call
 // into it, so each child's request ring has its own reader thread there. One
 // child calls a function that nothing exports; its reader rejects the request
-// and logs a warning, which the coordinator's log callback blocks. Meanwhile the
-// other child keeps calling an exported function, which its reader dispatches
+// and logs a diagnostic, which the coordinator's log callback blocks. Meanwhile
+// the other child keeps calling an exported function, which its reader dispatches
 // through the same RPC handler map. Those calls must be served while the
 // callback blocks, and the rejection must still reach the caller.
 //
@@ -36,10 +36,10 @@
 
 namespace {
 
-constexpr std::string_view k_failure_prefix     = "rpc_log_callback_stall_test: ";
-constexpr const char*      k_service_name       = "rpc_log_callback_stall_service";
-constexpr std::string_view k_rejection_warning  = "Received RPC for unknown message type";
-constexpr std::string_view k_shutdown_warning   = "Transceiver shutdown is waiting for";
+constexpr std::string_view k_failure_prefix       = "rpc_log_callback_stall_test: ";
+constexpr const char*      k_service_name         = "rpc_log_callback_stall_service";
+constexpr std::string_view k_rejection_diagnostic = "Received RPC for unknown message type";
+constexpr std::string_view k_shutdown_warning     = "Transceiver shutdown is waiting for";
 
 // The block lasts at least 3 s of wall time and until a concurrent call is
 // served during it, up to the limit.
@@ -294,7 +294,7 @@ int main(int argc, char* argv[])
         "rpc_log_callback_stall",
         {run_rejected_caller, run_pinger, run_shutdown_warning_stall},
         [](const std::filesystem::path&) {
-            install_blocking_log_callback(k_rejection_warning);
+            install_blocking_log_callback(k_rejection_diagnostic);
             bool published = false;
             {
                 Stall_service service;

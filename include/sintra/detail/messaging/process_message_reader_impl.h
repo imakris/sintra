@@ -32,25 +32,6 @@ using std::thread;
 void install_signal_handler();
 
 
-SINTRA_DETAIL_DECL const char* Process_message_reader::reader_state_name(State state)
-{
-    switch (state) {
-        case READER_NORMAL:   return "normal";
-        case READER_SERVICE:  return "service";
-        case READER_STOPPING: return "stopping";
-        default:              return "unknown";
-    }
-}
-
-SINTRA_DETAIL_DECL const char* Process_message_reader::delivery_stream_name(Delivery_stream stream)
-{
-    switch (stream) {
-        case Delivery_stream::Request: return "request";
-        case Delivery_stream::Reply:   return "reply";
-        default:                       return "unknown";
-    }
-}
-
 SINTRA_DETAIL_DECL const char* Process_message_reader::communication_state_name(int communication_state)
 {
     switch (communication_state) {
@@ -71,35 +52,6 @@ SINTRA_DETAIL_DECL void append_instance_id_value(std::ostringstream& out, instan
     out << static_cast<unsigned long long>(value);
 }
 
-SINTRA_DETAIL_DECL void append_sequence_value(std::ostringstream& out, sequence_counter_type value)
-{
-    if (value == invalid_sequence) {
-        out << "invalid";
-        return;
-    }
-
-    out << value;
-}
-
-SINTRA_DETAIL_DECL void append_sequence_lag(
-    std::ostringstream&    out,
-    sequence_counter_type  reading_sequence,
-    sequence_counter_type  leading_sequence)
-{
-    out << " lag=";
-    if (reading_sequence == invalid_sequence || leading_sequence == invalid_sequence) {
-        out << "unknown";
-        return;
-    }
-
-    if (leading_sequence < reading_sequence) {
-        out << "regressed";
-        return;
-    }
-
-    out << (leading_sequence - reading_sequence);
-}
-
 SINTRA_DETAIL_DECL void append_current_communication_state(std::ostringstream& out)
 {
     if (!s_mproc) {
@@ -109,152 +61,6 @@ SINTRA_DETAIL_DECL void append_current_communication_state(std::ostringstream& o
 
     out << " communication_state="
         << Process_message_reader::communication_state_name(s_mproc->communication_state());
-}
-
-SINTRA_DETAIL_DECL void append_message_ring_summary(
-    std::ostringstream&                         out,
-    const char*                                 label,
-    const std::shared_ptr<Message_ring_R>&      ring,
-    bool                                        running,
-    bool                                        progress_available,
-    sequence_counter_type                       published_sequence,
-    bool                                        progress_stopped)
-{
-    out << " " << label
-        << "{running=" << (running ? 1 : 0)
-        << " progress_stopped=" << (progress_stopped ? 1 : 0);
-
-    out << " published=";
-    if (progress_available) {
-        append_sequence_value(out, published_sequence);
-    }
-    else {
-        out << "missing";
-    }
-
-    if (!ring) {
-        out << " ring=missing}";
-        return;
-    }
-
-    // Diagnostics can run on a control thread while a handler owns m_range.
-    // Use the last completed position published atomically by that reader.
-    const auto reading_sequence = progress_available ? published_sequence : invalid_sequence;
-    const auto leading_sequence = ring->get_leading_sequence();
-    const auto ring_diagnostics = ring->get_diagnostics();
-
-    out << " ring_stopping=" << (ring->is_stopping() ? 1 : 0)
-        << " read=";
-    append_sequence_value(out, reading_sequence);
-    out << " lead=";
-    append_sequence_value(out, leading_sequence);
-    append_sequence_lag(out, reading_sequence, leading_sequence);
-    out << " capacity=" << message_ring_size
-        << " max_lag=" << ring_diagnostics.max_reader_lag
-        << " overflow_count=" << ring_diagnostics.reader_lag_overflow_count
-        << " worst_overflow_lag=" << ring_diagnostics.worst_overflow_lag
-        << " evictions=" << ring_diagnostics.reader_eviction_count
-        << " regressions=" << ring_diagnostics.reader_sequence_regressions
-        << "}";
-}
-
-SINTRA_DETAIL_DECL const char* Process_message_reader::reader_condition_name() const
-{
-    if (m_reader_state.load() == READER_STOPPING) {
-        return "stopping";
-    }
-
-    if (m_req_running.load() || m_rep_running.load()) {
-        return "running";
-    }
-
-    return "stopped";
-}
-
-SINTRA_DETAIL_DECL std::string Process_message_reader::diagnostic_summary() const
-{
-    std::ostringstream out;
-
-    out << "condition=" << reader_condition_name()
-        << " state=" << reader_state_name(m_reader_state.load())
-        << " target_process_id=";
-    append_instance_id_value(out, m_process_instance_id);
-    append_current_communication_state(out);
-
-    const auto progress           = m_delivery_progress;
-    const bool progress_available = static_cast<bool>(progress);
-
-    const auto request_published = progress_available
-        ? progress->request_sequence.load()
-        : invalid_sequence;
-    const auto reply_published = progress_available
-        ? progress->reply_sequence.load()
-        : invalid_sequence;
-
-    const bool request_stopped = progress_available && progress->request_stopped.load();
-    const bool reply_stopped   = progress_available && progress->reply_stopped.load();
-
-    append_message_ring_summary(
-        out,
-        "request",
-        m_in_req_c,
-        m_req_running.load(),
-        progress_available,
-        request_published,
-        request_stopped);
-    append_message_ring_summary(
-        out,
-        "reply",
-        m_in_rep_c,
-        m_rep_running.load(),
-        progress_available,
-        reply_published,
-        reply_stopped);
-
-    return out.str();
-}
-
-SINTRA_DETAIL_DECL std::string Process_message_reader::delivery_target_summary(
-    Delivery_stream        stream,
-    sequence_counter_type  target_sequence) const
-{
-    std::ostringstream out;
-
-    out << "stream=" << delivery_stream_name(stream)
-        << " target_sequence=";
-    append_sequence_value(out, target_sequence);
-
-    const auto progress = m_delivery_progress;
-    if (!progress) {
-        out << " observed=missing stream_stopped=unknown ";
-        out << diagnostic_summary();
-        return out.str();
-    }
-
-    const auto observed_sequence = (stream == Delivery_stream::Request)
-        ? progress->request_sequence.load()
-        : progress->reply_sequence.load();
-    const bool stream_stopped = (stream == Delivery_stream::Request)
-        ? progress->request_stopped.load()
-        : progress->reply_stopped.load();
-
-    out << " observed=";
-    append_sequence_value(out, observed_sequence);
-    out << " stream_stopped=" << (stream_stopped ? 1 : 0)
-        << " target_lag=";
-    if (target_sequence == invalid_sequence || observed_sequence == invalid_sequence) {
-        out << "unknown";
-    }
-    else
-    if (target_sequence > observed_sequence) {
-        out << (target_sequence - observed_sequence);
-    }
-    else {
-        out << 0;
-    }
-
-    out << " " << diagnostic_summary();
-    return out.str();
 }
 
 SINTRA_DETAIL_DECL std::string Process_message_reader::missing_reader_summary(instance_id_type target_process_id)
@@ -268,10 +74,9 @@ SINTRA_DETAIL_DECL std::string Process_message_reader::missing_reader_summary(in
 }
 
 SINTRA_DETAIL_DECL bool validate_relay_sender(
-    Message_prefix&                  message,
-    instance_id_type                 ring_owner,
-    const char*                      ring_name,
-    const Process_message_reader&    reader)
+    Message_prefix&  message,
+    instance_id_type ring_owner,
+    const char*      ring_name)
 {
     const instance_id_type sender_process      = process_of(message.sender_instance_id);
     const instance_id_type coordinator_process = process_of(s_coord_id);
@@ -279,32 +84,22 @@ SINTRA_DETAIL_DECL bool validate_relay_sender(
         return true;
     }
 
-    Log_stream(log_level::warning)
-        << "Sintra dropped a message on the " << ring_name
-        << " ring because sender_instance_id="
-        << static_cast<unsigned long long>(message.sender_instance_id)
-        << " does not belong to ring owner "
-        << static_cast<unsigned long long>(ring_owner)
-        << " or coordinator process "
-        << static_cast<unsigned long long>(coordinator_process)
-        << ". " << reader.diagnostic_summary() << "\n";
+    Log_stream(log_level::debug)
+        << "Dropped " << ring_name << " message with a sender outside its ring owner.\n";
     return false;
 }
 
 SINTRA_DETAIL_DECL bool validate_request_message(
-    Message_prefix&                  message,
-    instance_id_type                 ring_owner,
-    const Process_message_reader&    reader)
+    Message_prefix&  message,
+    instance_id_type ring_owner)
 {
-    if (!validate_relay_sender(message, ring_owner, "request", reader)) {
+    if (!validate_relay_sender(message, ring_owner, "request")) {
         return false;
     }
 
     if (message.message_type_id == not_defined_type_id) {
-        Log_stream(log_level::warning)
-            << "Sintra dropped a request message with undefined message_type_id from sender_instance_id="
-            << static_cast<unsigned long long>(message.sender_instance_id)
-            << ". " << reader.diagnostic_summary() << "\n";
+        Log_stream(log_level::debug)
+            << "Dropped request message with an undefined message type.\n";
         return false;
     }
 
@@ -312,19 +107,16 @@ SINTRA_DETAIL_DECL bool validate_request_message(
 }
 
 SINTRA_DETAIL_DECL bool validate_reply_message(
-    Message_prefix&                  message,
-    instance_id_type                 ring_owner,
-    const Process_message_reader&    reader)
+    Message_prefix&  message,
+    instance_id_type ring_owner)
 {
-    if (!validate_relay_sender(message, ring_owner, "reply", reader)) {
+    if (!validate_relay_sender(message, ring_owner, "reply")) {
         return false;
     }
 
     if (message.receiver_instance_id == any_local) {
-        Log_stream(log_level::warning)
-            << "Sintra dropped a reply message with invalid any_local receiver from sender_instance_id="
-            << static_cast<unsigned long long>(message.sender_instance_id)
-            << ". " << reader.diagnostic_summary() << "\n";
+        Log_stream(log_level::debug)
+            << "Dropped reply message with an invalid local receiver.\n";
         return false;
     }
 
@@ -773,8 +565,7 @@ bool Process_message_reader::stop_and_wait(double waiting_period)
         wait_for_readers();
         if (!no_readers()) {
             Log_stream(log_level::warning)
-                << "Process_message_reader::stop_and_wait timeout: "
-                << diagnostic_summary() << "\n";
+                << "Sintra message reader could not stop before the deadline.\n";
         }
     }
     return no_readers();
@@ -909,7 +700,7 @@ void Process_message_reader::request_reader_function()
         if (m == nullptr) {
             break;
         }
-        if (!validate_request_message(*m, m_in_req_c->m_id, *this)) {
+        if (!validate_request_message(*m, m_in_req_c->m_id)) {
             publish_request_progress(m_in_req_c->get_message_reading_sequence());
             continue;
         }
@@ -1004,11 +795,10 @@ void Process_message_reader::request_reader_function()
                     }
 
                     if (!handler_fn) {
-                        Log_stream(log_level::warning)
+                        Log_stream(log_level::debug)
                             << "Received RPC for unknown message type "
                             << static_cast<unsigned long long>(m->message_type_id)
-                            << "; rejecting the request. "
-                            << diagnostic_summary() << "\n";
+                            << "; rejecting the request.\n";
 
                         if (m->function_instance_id == invalid_instance_id) {
                             publish_request_progress(m_in_req_c->get_message_reading_sequence());
@@ -1227,7 +1017,7 @@ void Process_message_reader::reply_reader_function()
         if (m == nullptr) {
             break;
         }
-        if (!validate_reply_message(*m, m_in_rep_c->m_id, *this)) {
+        if (!validate_reply_message(*m, m_in_rep_c->m_id)) {
             publish_reply_progress(m_in_rep_c->get_message_reading_sequence());
             continue;
         }
@@ -1249,15 +1039,12 @@ void Process_message_reader::reply_reader_function()
                 // The Transceiver destructor erases from this map, so holding the lock ensures
                 // the pointer remains valid while we access it.
                 Transceiver::Return_handler handler_copy;
-                bool have_handler        = false;
-                bool object_found        = false;
-                bool handler_was_retired = false;
+                bool have_handler = false;
                 {
                     auto scoped_map = s_mproc->m_local_pointer_of_instance_id.scoped();
                     auto it         = scoped_map.get().find(m->receiver_instance_id);
 
                     if (it != scoped_map.get().end()) {
-                        object_found = true;
                         auto &return_handlers = it->second->m_active_return_handlers;
 
                         {
@@ -1267,61 +1054,24 @@ void Process_message_reader::reply_reader_function()
                                 handler_copy = it2->second;
                                 have_handler = true;
                             }
-                            else {
-                                handler_was_retired =
-                                    it->second->m_retired_return_handler_ids.find(m->function_instance_id) !=
-                                    it->second->m_retired_return_handler_ids.end();
-                            }
                         }
                     }
                     // Spinlock released here automatically when scoped_map goes out of scope
                 }
 
                 // Now invoke handlers with spinlock released to avoid holding it during
-                // potentially long-running user code.
-                if (object_found) {
-                    if (have_handler) {
-                        if (m->exception_type_id == not_defined_type_id) {
-                            handler_copy.return_handler(*m);
-                        }
-                        else
-                        if (m->exception_type_id != (type_id_type)detail::reserved_id::deferral) {
-                            handler_copy.exception_handler(*m);
-                        }
-                        else {
-                            handler_copy.deferral_handler(*m);
-                        }
+                // potentially long-running user code. Late replies can outlive their
+                // handler or target after cancellation or shutdown.
+                if (have_handler) {
+                    if (m->exception_type_id == not_defined_type_id) {
+                        handler_copy.return_handler(*m);
+                    }
+                    else
+                    if (m->exception_type_id != (type_id_type)detail::reserved_id::deferral) {
+                        handler_copy.exception_handler(*m);
                     }
                     else {
-                        // No active return handler - can happen if the caller already cleaned up
-                        // (e.g., after cancellation/shutdown) and a late/duplicate message arrived.
-                        // Drop it quietly unless we're fully RUNNING; in RUNNING emit a diagnostic
-                        // but do not hard-assert to avoid modal dialogs on Windows Debug.
-                        if (!handler_was_retired &&
-                            s_mproc &&
-                            s_mproc->communication_state() == Managed_process::COMMUNICATION_RUNNING)
-                        {
-                            Log_stream(log_level::warning)
-                                << "Warning: Reply reader received message for function_instance_id="
-                                << static_cast<unsigned long long>(m->function_instance_id)
-                                << " but no active handler found (receiver_instance_id="
-                                << static_cast<unsigned long long>(m->receiver_instance_id)
-                                << ") " << diagnostic_summary() << "\n";
-                        }
-                    }
-                }
-                else {
-                    // The target object no longer exists locally. During shutdown or after
-                    // coordinator loss, late replies can legitimately arrive after objects
-                    // have been torn down. Do not hard-assert; drop unless we're fully RUNNING.
-                    if (s_mproc && s_mproc->communication_state() == Managed_process::COMMUNICATION_RUNNING) {
-                        Log_stream(log_level::warning)
-                            << "Warning: Reply reader received message for receiver_instance_id="
-                            << static_cast<unsigned long long>(m->receiver_instance_id)
-                            << " but object no longer exists (sender="
-                            << static_cast<unsigned long long>(m->sender_instance_id)
-                            << ", function=" << static_cast<unsigned long long>(m->function_instance_id)
-                            << ") " << diagnostic_summary() << "\n";
+                        handler_copy.deferral_handler(*m);
                     }
                 }
             }

@@ -357,21 +357,6 @@ bool test_process_message_reader_diagnostic_helpers()
 
     bool ok = true;
     ok &= sintra::test::assert_true(
-        std::string(Reader::reader_state_name(Reader::READER_NORMAL)) == "normal" &&
-        std::string(Reader::reader_state_name(Reader::READER_SERVICE)) == "service" &&
-        std::string(Reader::reader_state_name(Reader::READER_STOPPING)) == "stopping" &&
-        std::string(Reader::reader_state_name(static_cast<Reader::State>(99))) == "unknown",
-        k_prefix,
-        "reader_state_name() should cover known and unknown states");
-
-    ok &= sintra::test::assert_true(
-        std::string(Reader::delivery_stream_name(Reader::Delivery_stream::Request)) == "request" &&
-        std::string(Reader::delivery_stream_name(Reader::Delivery_stream::Reply)) == "reply" &&
-        std::string(Reader::delivery_stream_name(static_cast<Reader::Delivery_stream>(99))) == "unknown",
-        k_prefix,
-        "delivery_stream_name() should cover known and unknown streams");
-
-    ok &= sintra::test::assert_true(
         std::string(Reader::communication_state_name(sintra::Managed_process::COMMUNICATION_STOPPED)) == "stopped" &&
         std::string(Reader::communication_state_name(sintra::Managed_process::COMMUNICATION_PAUSED)) == "paused" &&
         std::string(Reader::communication_state_name(sintra::Managed_process::COMMUNICATION_RUNNING)) == "running" &&

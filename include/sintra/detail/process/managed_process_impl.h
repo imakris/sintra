@@ -6286,14 +6286,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
     }
 
     if (spawn_ready) {
-        Log_stream(log_level::debug)
-            << "spawn_swarm_process: launching OS process"
-            << " process_instance_id=" << static_cast<unsigned long long>(s.piid)
-            << " occurrence=" << s.occurrence
-            << " binary='" << s.binary_name << "'"
-            << " lifeline=" << (s.lifetime.enable_lifeline ? "enabled" : "disabled")
-            << "\n";
-
         const auto native_result =
             detail::spawn_detached_with_result(spawn_options);
         if (native_result.error) {
@@ -6409,13 +6401,6 @@ inline Managed_process::Spawn_result Managed_process::spawn_swarm_process_impl(
             s.piid,
             s.occurrence);
 #endif
-
-        Log_stream(log_level::debug)
-            << "spawn_swarm_process: OS spawn succeeded"
-            << " process_instance_id=" << static_cast<unsigned long long>(s.piid)
-            << " pid=" << result.os_pid
-            << " binary='" << s.binary_name << "'"
-            << "\n";
 
         // Create an entry in the coordinator's transceiver registry.
         // This is essential for the implementation of publish_transceiver()

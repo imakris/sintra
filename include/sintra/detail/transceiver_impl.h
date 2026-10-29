@@ -1579,7 +1579,6 @@ Transceiver::activate_return_handler(const Return_handler &rh)
 {
     instance_id_type function_instance_id = make_instance_id();
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    m_retired_return_handler_ids.erase(function_instance_id);
     m_active_return_handlers[function_instance_id] = rh;
     return function_instance_id;
 }
@@ -1591,18 +1590,7 @@ void
 Transceiver::deactivate_return_handler(instance_id_type function_instance_id)
 {
     lock_guard<mutex> sl(m_return_handlers_mutex);
-    if (m_active_return_handlers.erase(function_instance_id) == 0) {
-        return;
-    }
-
-    if (m_retired_return_handler_ids.insert(function_instance_id).second) {
-        m_retired_return_handler_fifo.push_back(function_instance_id);
-        while (m_retired_return_handler_fifo.size() > max_retired_return_handlers) {
-            const auto retired_id = m_retired_return_handler_fifo.front();
-            m_retired_return_handler_fifo.pop_front();
-            m_retired_return_handler_ids.erase(retired_id);
-        }
-    }
+    m_active_return_handlers.erase(function_instance_id);
 }
 
 
@@ -1626,7 +1614,6 @@ Transceiver::replace_return_handler_id(instance_id_type old_id, instance_id_type
         throw std::logic_error(
             "Attempted to remap an RPC return handler onto an already-active function_instance_id.");
     }
-    m_retired_return_handler_ids.erase(new_id);
     m_active_return_handlers[new_id] = std::move(handler);
 }
 

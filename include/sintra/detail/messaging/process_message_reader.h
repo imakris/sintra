@@ -342,16 +342,7 @@ struct Process_message_reader
 
     State state() const { return m_reader_state.load(); }
 
-    static const char* reader_state_name(State state);
-    static const char* delivery_stream_name(Delivery_stream stream);
     static const char* communication_state_name(int communication_state);
-
-    const char* reader_condition_name() const;
-    std::string diagnostic_summary() const;
-    std::string delivery_target_summary(
-        Delivery_stream        stream,
-        sequence_counter_type  target_sequence) const;
-
     static std::string missing_reader_summary(instance_id_type target_process_id);
 
 private:

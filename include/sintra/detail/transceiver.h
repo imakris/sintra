@@ -10,7 +10,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <list>
 #include <map>
@@ -21,7 +20,6 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -29,7 +27,6 @@
 namespace sintra {
 
 using std::condition_variable;
-using std::deque;
 using std::enable_if_t;
 using std::function;
 using std::is_base_of;
@@ -40,7 +37,6 @@ using std::mutex;
 using std::remove_reference;
 using std::string;
 using std::unordered_map;
-using std::unordered_set;
 
 namespace detail {
 
@@ -755,11 +751,6 @@ private:
     mutex                       m_return_handlers_mutex;
     unordered_map<instance_id_type, Return_handler>
                                 m_active_return_handlers;
-    deque<instance_id_type>     m_retired_return_handler_fifo;
-    unordered_set<instance_id_type>
-                                m_retired_return_handler_ids;
-    static constexpr size_t     max_retired_return_handlers = 1024;
-
     mutex                       m_rpc_lifecycle_mutex;
     condition_variable          m_rpc_lifecycle_condition;
     size_t                      m_active_rpc_calls          = 0;
