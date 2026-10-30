@@ -199,8 +199,8 @@ any retirement, only record intent and never discard committed messages.
 Retiring a live process waits for its writer to close or to be terminated.
 This covers processes other than the coordinator, whose death remains swarm
 death (principle 3). The
-[writer-death and watchdog plan](writer_death_and_wait_watchdog_plan.md) is
-the canonical record and lists what remains to be designed.
+[writer-death contract](writer_death_contract.md) is
+the canonical record of the deferred requirements and unresolved design work.
 
 ## Adopted design direction (under review, not implemented)
 

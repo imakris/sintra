@@ -48,7 +48,3 @@ with equal payload sizes, process counts and message counts. Report incomplete
 or eviction-heavy runs separately as saturation, and explain material
 single-reader or tail regressions rather than changing the workload to hide
 them.
-
-The [copying-mark comparison](copying_mark_results.md) records one complete
-Windows matrix and its bounded confirmation samples. The accompanying CSV
-keeps every sample's metrics, including the slower cohorts and host load.
