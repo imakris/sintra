@@ -1144,7 +1144,7 @@ inline bool shutdown(const shutdown_options& options)
             detail::shutdown_protocol_state::collective_shutdown_entered,
             std::memory_order_release);
 
-        // Step 1: Collective processing fence — all participants synchronize here.
+        // Step 1: Collective processing fence - all participants synchronize here.
         detail::internal_processing_fence_barrier(shutdown_barrier_name, group_name);
 
         // Step 2: The hook-done rendezvous is always part of the shutdown protocol.

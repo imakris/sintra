@@ -26,12 +26,12 @@ transceiver instance.
 
 ## Parameters
 
-- `MESSAGE_T` (template parameter) — the body type accepted by the slot.
+- `MESSAGE_T` (template parameter) - the body type accepted by the slot.
   For values broadcast through [`sintra::world`](world.md),
   [`sintra::local`](local.md), or [`sintra::remote`](remote.md), this is
   the value type itself (for example `int` or `std::string`). For typed
   messages declared via `SINTRA_MESSAGE` it is the nested message type.
-- `sender_id` (filtered overload) — the transceiver whose messages this
+- `sender_id` (filtered overload) - the transceiver whose messages this
   receive call accepts. Other senders are ignored.
 
 ## Returns

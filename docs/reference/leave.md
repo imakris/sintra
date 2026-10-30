@@ -21,12 +21,12 @@ by [`sintra::shutdown`](shutdown.md), but it does not enter the collective
 
 ## Throws
 
-- `std::logic_error` — when called from inside a message handler or
+- `std::logic_error` - when called from inside a message handler or
   post-handler callback.
-- `std::logic_error` — when the calling coordinator is not the sole
+- `std::logic_error` - when the calling coordinator is not the sole
   remaining known process. Use [`sintra::shutdown`](shutdown.md) for
   collective termination.
-- `std::logic_error` — when another lifecycle teardown is already in
+- `std::logic_error` - when another lifecycle teardown is already in
   progress.
 - Other exceptions raised by internal teardown propagate after the protocol
   state has been reset to idle.

@@ -13,7 +13,7 @@ namespace sintra {
 namespace detail {
 
 // ---------------------------------------------------------------------------
-// Shutdown protocol state (detail — not part of the public API)
+// Shutdown protocol state (detail - not part of the public API)
 // ---------------------------------------------------------------------------
 // Tracks the lifecycle phase of the standard shutdown protocol within a single
 // process.  The runtime uses this to reject illegal compositions such as

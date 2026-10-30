@@ -86,12 +86,12 @@ jobs:
             if [ -n "${PR_NUMBER}" ]; then
               echo "- PR: #${PR_NUMBER}";
             else
-              echo "- PR: —";
+              echo "- PR: -";
             fi
             if [ -n "${HEAD_BRANCH}" ]; then
               echo "- Branch: ${HEAD_BRANCH}";
             else
-              echo "- Branch: —";
+              echo "- Branch: -";
             fi
             echo "- Commit: ${HEAD_SHA}";
           } >> "$GITHUB_STEP_SUMMARY"

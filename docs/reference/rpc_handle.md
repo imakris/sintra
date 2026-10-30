@@ -37,32 +37,32 @@ registration that lets the local reader thread resolve the call.
 
 ## Members
 
-- `get_until(deadline)` — wait until the deadline, then retrieve the value
+- `get_until(deadline)` - wait until the deadline, then retrieve the value
   or rethrow the terminal failure. If the deadline expires and this handle
   wins the caller-side abandon race, throws [`sintra::rpc_timeout`](rpc_timeout.md).
   If a terminal outcome wins before abandonment, returns or throws
   exactly as `get()` would.
-- `get(stop)` — wait for completion or a caller-requested stop, without a
+- `get(stop)` - wait for completion or a caller-requested stop, without a
   deadline. If a stop is requested and this handle wins caller-side
   abandonment, throws [`sintra::rpc_cancelled`](rpc_cancelled.md). If a
   terminal outcome commits before abandonment, preserves it exactly as
   `get()` would.
   Available when the standard library supplies cooperative stop tokens
   (`__cpp_lib_jthread >= 201911L`).
-- `get()` — block if necessary, then return the reply value, rethrow the
+- `get()` - block if necessary, then return the reply value, rethrow the
   remote exception locally, or throw based on the terminal state (see
   *Throws* below).
 
 ## Throws
 
 - The remote exception type, when the remote handler throws.
-- [`sintra::rpc_cancelled`](rpc_cancelled.md) — when `get()` is called on
+- [`sintra::rpc_cancelled`](rpc_cancelled.md) - when `get()` is called on
   a cancelled handle, or `get(stop)` abandons a pending handle after a stop
   request.
-- [`sintra::rpc_timeout`](rpc_timeout.md) — when `get_until(deadline)`
+- [`sintra::rpc_timeout`](rpc_timeout.md) - when `get_until(deadline)`
   reaches its deadline and this handle successfully abandons the pending
   caller-side result.
-- `std::runtime_error` — when `get()` is called on an abandoned handle
+- `std::runtime_error` - when `get()` is called on an abandoned handle
   or on a handle that holds no state.
 
 ## Use when

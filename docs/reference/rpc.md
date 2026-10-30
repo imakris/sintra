@@ -31,42 +31,42 @@ to take a direct in-process shortcut and whether a reply is produced.
 
 ## Parameters
 
-- `method` (macro argument) — the name of an existing member function on
+- `method` (macro argument) - the name of an existing member function on
   the enclosing transceiver. The export macro must be placed inside the
   class body; the named function must already be declared.
-- `target` (generated wrappers) — a [`sintra::Resolvable_instance_id`](resolvable_instance_id.md).
+- `target` (generated wrappers) - a [`sintra::Resolvable_instance_id`](resolvable_instance_id.md).
   Accepts a raw `instance_id_type` (including `Typed_instance_id<T>::id`
   and the local id from `instance_id()`), a `std::string`, or a
   `const char*`. String forms resolve through the coordinator on first
   use.
-- `args...` (generated wrappers) — forwarded to the exported member
+- `args...` (generated wrappers) - forwarded to the exported member
   function on the target instance.
 
 ## Returns
 
-- `rpc_<method>(...)` — the value returned by the remote handler, with
+- `rpc_<method>(...)` - the value returned by the remote handler, with
   type `R` (the exported function's return type). For `SINTRA_UNICAST`,
   `R` is `void` and the call returns immediately after writing the
   request to the ring.
-- `rpc_async_<method>(...)` — a move-only [`sintra::Rpc_handle<R>`](rpc_handle.md)
+- `rpc_async_<method>(...)` - a move-only [`sintra::Rpc_handle<R>`](rpc_handle.md)
   that resolves to the remote outcome. For `SINTRA_UNICAST`, the wrapper
   is generated but rejected at compile time with a `static_assert`.
 
 ## Throws
 
-- `std::runtime_error` — when called before [`sintra::init`](init.md) or
+- `std::runtime_error` - when called before [`sintra::init`](init.md) or
   after teardown.
-- `std::runtime_error` — when the target id is `invalid_instance_id` in
+- `std::runtime_error` - when the target id is `invalid_instance_id` in
   `SINTRA_RPC_STRICT` or `rpc_async_<method>` calls. The fire-and-forget
   `SINTRA_UNICAST` blocking wrapper writes to the selected target id and
   does not perform this validation.
-- `std::runtime_error` — when same-process `rpc_async_<method>` is
+- `std::runtime_error` - when same-process `rpc_async_<method>` is
   attempted against a `SINTRA_RPC` (non-strict) export. Use
   `SINTRA_RPC_STRICT` for transported same-process async RPC.
-- [`sintra::rpc_unavailable`](rpc_unavailable.md) — when the target
+- [`sintra::rpc_unavailable`](rpc_unavailable.md) - when the target
   instance has been unpublished, destroyed, is shutting down, or its
   process is gone.
-- [`sintra::rpc_cancelled`](rpc_cancelled.md) — when the wait is
+- [`sintra::rpc_cancelled`](rpc_cancelled.md) - when the wait is
   unblocked by coordinator loss or shutdown drain logic before a reply
   arrives.
 - The remote-side exception (any of the recognised `std::` types) when

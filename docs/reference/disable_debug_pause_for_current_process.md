@@ -11,7 +11,7 @@ void disable_debug_pause_for_current_process() noexcept;
 Description: Disable the debug pause-on-exit behaviour for the current
 process. When Sintra is built with `SINTRA_DEBUG_PAUSE_ON_EXIT`, processes
 hold at exit so a debugger can be attached. Call this from a process that
-should opt out — typically a long-running headless worker or a test that
+should opt out - typically a long-running headless worker or a test that
 must terminate cleanly.
 
 ## Returns

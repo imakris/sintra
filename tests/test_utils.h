@@ -155,7 +155,7 @@ public:
             return;
         }
 
-        // We're the coordinator — create a unique directory.
+        // We're the coordinator - create a unique directory.
         auto base = sintra::test::scratch_subdirectory(test_name);
 
         auto unique_suffix = std::chrono::duration_cast<std::chrono::nanoseconds>(

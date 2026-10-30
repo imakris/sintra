@@ -3353,16 +3353,16 @@ struct Ring_R : Ring<T, true>
             // If the writer has closed the ring and there is no unread data,
             // set m_stopping so fetch_message() returns nullptr, cleanly
             // exiting the reader loop.  Each Ring_R reads from exactly one
-            // ring — if that writer is gone, this reader has nothing left
+            // ring - if that writer is gone, this reader has nothing left
             // to do.  Other rings have their own Ring_R instances with
             // independent m_stopping flags.
             //
             // Check writer_closed FIRST (with acquire) so that all prior
-            // writer stores — including the final leading_sequence from
-            // done_writing() — are visible before sequences_equal() runs.
+            // writer stores - including the final leading_sequence from
+            // done_writing() - are visible before sequences_equal() runs.
             // Reversing the order would be a TOCTOU race: the reader could
             // see stale leading_sequence, conclude there's no data, then
-            // see writer_closed and exit — losing the last message.
+            // see writer_closed and exit - losing the last message.
             if (c.writer_closed.load(std::memory_order_acquire) &&
                 sequences_equal())
             {

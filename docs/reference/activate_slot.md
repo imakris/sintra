@@ -20,13 +20,13 @@ instance.
 
 ## Parameters
 
-- `slot_function` — a callable with a single deducible argument. The
+- `slot_function` - a callable with a single deducible argument. The
   argument type selects the message type. Free functions, lambdas,
   functors, and member function references are all accepted.
-- `sender_id` — restricts the slot to messages emitted by a specific
+- `sender_id` - restricts the slot to messages emitted by a specific
   transceiver. Defaults to a wildcard accepting any local or remote
   sender.
-- `SENDER_T` (template parameter) — the transceiver type expected as the
+- `SENDER_T` (template parameter) - the transceiver type expected as the
   sender. Normally deduced from `sender_id`.
 
 ## Returns

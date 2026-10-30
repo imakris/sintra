@@ -169,7 +169,7 @@ protocol explicit and only enter `shutdown()` after it completes.
 
 `detail::finalize()` is the low-level teardown path for single-process
 programs, exceptional/error paths, or test code that cannot participate in a
-symmetric shutdown. It lives in the `sintra::detail` namespace — ordinary
+symmetric shutdown. It lives in the `sintra::detail` namespace - ordinary
 multi-process callers should use `shutdown()` instead. The internal
 implementation (`detail::finalize_impl()`) is also available for deliberate
 low-level work in tests and experiments. Ordinary code that needs a clean
@@ -242,8 +242,8 @@ diverges in both directions:
 `tests/process_reader_service_dispatch_policy_test.cpp` pins both behaviours,
 at the level of the predicates and against the real runtime. They are recorded
 as current behaviour rather than as a contract. Narrowing service-mode event
-eligibility — for example by classifying handlers explicitly instead of
-comparing type ids — is a deliberate change to teardown semantics and needs its
+eligibility - for example by classifying handlers explicitly instead of
+comparing type ids - is a deliberate change to teardown semantics and needs its
 own remote-teardown coverage before it is worth making.
 
 ### `pause()` publishes a mode; it is not a fence

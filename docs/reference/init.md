@@ -23,14 +23,14 @@ slots, barriers, lifecycle helpers) is usable.
 
 ## Parameters
 
-- `argc`, `argv` — the original program arguments from `main`. Both must be
+- `argc`, `argv` - the original program arguments from `main`. Both must be
   passed unchanged. Sintra appends its own `--swarm_id`, `--instance_id`, and
   `--coordinator_id` arguments for children it spawns and for external
   process invitations.
-- `branches` (vector overload) — the swarm topology declared by the starter.
+- `branches` (vector overload) - the swarm topology declared by the starter.
   Each `Process_descriptor` becomes one spawned process; the index of the
   descriptor in the vector becomes the branch index of that process.
-- `Args&&... args` (variadic overload) — descriptors and per-descriptor
+- `Args&&... args` (variadic overload) - descriptors and per-descriptor
   multiplicities forwarded through `make_branches(...)` to the vector
   overload. An integer in the pack is read as a multiplicity that applies
   to the next descriptor.
@@ -42,11 +42,11 @@ slots, barriers, lifecycle helpers) is usable.
 
 ## Throws
 
-- `sintra::init_error` — when one or more child processes cannot be spawned
+- `sintra::init_error` - when one or more child processes cannot be spawned
   or fail to reach the initialisation barrier. The exception's `failures()`
   and `successful_spawns()` describe what happened, and `diagnostic_report()`
   returns a formatted multi-line summary.
-- `std::runtime_error` — when called twice in the same process without a
+- `std::runtime_error` - when called twice in the same process without a
   matching teardown.
 - Other exceptions during managed-process startup propagate as the original
   exception type from the runtime.

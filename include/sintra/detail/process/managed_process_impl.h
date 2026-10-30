@@ -6695,7 +6695,7 @@ void Managed_process::go()
         // hitting std::terminate (which would cascade-kill remaining
         // processes and destroy diagnostics).
         // Outside of shutdown, rpc_cancelled indicates a real
-        // infrastructure failure — let it propagate.
+        // infrastructure failure - let it propagate.
         if (detail::s_shutdown_state.load(std::memory_order_acquire) ==
             detail::shutdown_protocol_state::idle &&
             !m_must_stop.load(std::memory_order_acquire))

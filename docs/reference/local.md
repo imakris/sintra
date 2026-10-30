@@ -10,7 +10,7 @@ sintra::Maildrop<sintra::any_local>& sintra::local();
 
 Description: Return the maildrop bound to handlers in the current process
 only. The shape of every operation matches [`sintra::world`](world.md);
-the difference is purely locality — messages emitted through `local` are
+the difference is purely locality - messages emitted through `local` are
 not delivered to peer processes.
 
 ## Returns

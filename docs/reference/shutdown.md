@@ -18,7 +18,7 @@ lets the coordinator run a bounded side effect inside the protocol.
 
 ## Parameters
 
-- `options` (second overload) — controls coordinator-side behaviour. Pass a
+- `options` (second overload) - controls coordinator-side behaviour. Pass a
   `coordinator_shutdown_hook` to run a bounded side effect (write a summary
   file, flush metrics) at a defined point inside the protocol.
 
@@ -31,7 +31,7 @@ lets the coordinator run a bounded side effect inside the protocol.
 
 ## Throws
 
-- `std::logic_error` — for a detectable, non-resumable lifecycle phase
+- `std::logic_error` - for a detectable, non-resumable lifecycle phase
   conflict. Detection is phase-dependent; callers must serialize teardown
   rather than use this exception as an overlap guard.
 - Exceptions thrown by `coordinator_shutdown_hook` propagate to the caller

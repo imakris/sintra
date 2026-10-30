@@ -18,30 +18,30 @@ a delivery or processing fence according to the selected
 
 ## Parameters
 
-- `barrier_name` — the name shared by every participant for this round.
+- `barrier_name` - the name shared by every participant for this round.
   Must not begin with the reserved `_sintra_` prefix.
-- `group_name` — the named process group whose live members must arrive
+- `group_name` - the named process group whose live members must arrive
   before the barrier completes. Defaults to `_sintra_external_processes`,
   which excludes the coordinator. Use `_sintra_all_processes` to include
   the coordinator (subject to the teardown restriction in *Contract*).
-- `BarrierMode` (template parameter) — selects the strength of the fence
+- `BarrierMode` (template parameter) - selects the strength of the fence
   applied after the rendezvous. See
   [barrier modes](barrier_modes.md).
 
 ## Returns
 
-- `sequence_counter_type` — the reply-ring watermark for the completed
+- `sequence_counter_type` - the reply-ring watermark for the completed
   barrier.
-- `invalid_sequence` — returned when the barrier was treated as satisfied
+- `invalid_sequence` - returned when the barrier was treated as satisfied
   during shutdown or drain handling. The bypass is logged as a warning so
   callers can proceed without re-entering teardown. Test
   `seq != invalid_sequence` for a normal completion.
 
 ## Throws
 
-- `std::invalid_argument` — when `barrier_name` starts with the reserved
+- `std::invalid_argument` - when `barrier_name` starts with the reserved
   `_sintra_` prefix.
-- `std::logic_error` — when called on `_sintra_all_processes` while a
+- `std::logic_error` - when called on `_sintra_all_processes` while a
   lifecycle teardown is in progress.
 - Other coordinator-side errors propagate as the original exception type.
 

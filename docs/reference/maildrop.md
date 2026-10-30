@@ -37,13 +37,13 @@ the `LOCALITY` template parameter.
 
 ## Members
 
-- `operator<<(const char (&)[N])` — accept a string literal and emit a
+- `operator<<(const char (&)[N])` - accept a string literal and emit a
   `std::string` payload.
-- `operator<<(const char*)` — accept a C string and emit a `std::string`
+- `operator<<(const char*)` - accept a C string and emit a `std::string`
   payload.
-- `operator<<(const T (&)[N])` — accept a fixed-size array and emit a
+- `operator<<(const T (&)[N])` - accept a fixed-size array and emit a
   `std::vector<T>` payload.
-- `operator<<(const T&)` — accept any value satisfying the serialiser
+- `operator<<(const T&)` - accept any value satisfying the serialiser
   contract and emit a `Message<Enclosure<T>>`.
 
 ## Throws

@@ -10,7 +10,7 @@ sintra::Maildrop<sintra::any_remote>& sintra::remote();
 
 Description: Return the maildrop bound to handlers in other managed
 processes only. The shape of every operation matches [`sintra::world`](world.md);
-the difference is purely locality — messages emitted through `remote`
+the difference is purely locality - messages emitted through `remote`
 are not echoed back to handlers in the current process.
 
 ## Returns
