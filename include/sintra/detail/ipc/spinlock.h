@@ -116,19 +116,8 @@ inline void spinlock_event_for_test(const void* lock, test_hooks::spinlock_event
 #define SINTRA_SPINLOCK_HOOK(event) ((void)0)
 #endif
 
-inline bool read_spinlock_thread_cpu(spinlock_cpu_sample& sample) noexcept
+inline bool read_native_thread_cpu(spinlock_cpu_sample& sample) noexcept
 {
-#if defined(SINTRA_ENABLE_TEST_HOOKS)
-    if (auto callback = test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
-        try {
-            return callback(sample);
-        }
-        catch (...) {
-            defer_observation_failure("spinlock_cpu");
-            return false;
-        }
-    }
-#endif
 #if defined(_WIN32)
     FILETIME created{}, exited{}, kernel{}, user{};
     if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {
@@ -165,18 +154,42 @@ inline bool read_spinlock_thread_cpu(spinlock_cpu_sample& sample) noexcept
 #endif
 }
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline bool read_test_thread_cpu(
+    test_hooks::spinlock_cpu_callback callback, spinlock_cpu_sample& sample) noexcept
+{
+    try {
+        return callback(sample);
+    }
+    catch (...) {
+        defer_observation_failure("spinlock_cpu");
+        return false;
+    }
+}
+#endif
+
+inline bool read_spinlock_thread_cpu(spinlock_cpu_sample& sample) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
+        return read_test_thread_cpu(callback, sample);
+    }
+#endif
+    return read_native_thread_cpu(sample);
+}
+
 // A waiter's effort: its OS-reported thread CPU plus the credit for its
 // backoff sleeps. A test CPU provider supplies the whole sample.
 inline bool read_spinlock_waiter_effort(spinlock_cpu_sample& sample, uint64_t backoff_ns) noexcept
 {
-    if (!read_spinlock_thread_cpu(sample)) {
-        return false;
-    }
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
-    if (test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
-        return true;
+    if (auto callback = test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
+        return read_test_thread_cpu(callback, sample);
     }
 #endif
+    if (!read_native_thread_cpu(sample)) {
+        return false;
+    }
     if (sample.ns > UINT64_MAX - backoff_ns) {
         return false;
     }

@@ -570,9 +570,13 @@ bool waiter_site_is_named()
 
 sintra::spinlock* g_backoff_lock = nullptr;
 std::atomic<unsigned> g_backoff_sleeps{0};
+std::atomic<unsigned> g_sleeps_at_poll{0};
+std::atomic<unsigned> g_sleeps_at_previous_poll{0};
 
-// Each backoff sleep reports a ten-second suspension. Its credit is capped,
-// so the live-stall abort still needs many sleeps, yet arrives without CPU.
+// Each backoff sleep reports a ten-second suspension. Its credit is capped at
+// 20 ms, so the live-stall abort must come at the first poll after about 100
+// sleeps. Without the cap it would come at the first poll after one sleep;
+// without the credit, only after two seconds of CPU, some 20000 sleeps.
 int backoff_cap_mode()
 {
     if (!prepare_abort_child()) {
@@ -586,17 +590,30 @@ int backoff_cap_mode()
             return 0;
         }
         ++g_backoff_sleeps;
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        // Wait exactly, so that at most 50 sleeps fit between 5 ms polls.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
+        while (std::chrono::steady_clock::now() < until) {}
         return 10 * k_ns_per_second;
     });
     sintra::detail::test_hooks::s_spinlock_event.store([](const void* address, spinlock_event event) {
-        if (address != g_backoff_lock || event != spinlock_event::before_liveness) {
+        if (address != g_backoff_lock) {
             return;
         }
-        const unsigned sleeps = g_backoff_sleeps.load();
-        if (sleeps < 90 || sleeps > 400) {
+        if (event == spinlock_event::poll) {
+            g_sleeps_at_previous_poll = g_sleeps_at_poll.load();
+            g_sleeps_at_poll = g_backoff_sleeps.load();
+            return;
+        }
+        if (event != spinlock_event::before_liveness) {
+            return;
+        }
+        // The witness baseline is the first poll, before any sleep. Allow up
+        // to 200 ms of waiter CPU, including these waits, to stand in for credit.
+        const unsigned now = g_sleeps_at_poll.load();
+        const unsigned previous = g_sleeps_at_previous_poll.load();
+        if (now < 90 || previous >= 100) {
             std::fprintf(stderr, "spinlock_recovery_test: backoff credit reached the timeout "
-                "after %u sleeps\n", sleeps);
+                "at %u sleeps, previous poll at %u\n", now, previous);
             std::exit(2);
         }
     });

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -72,10 +73,15 @@ int worker()
 
     const std::string peer = echo_name(index % k_workers + 1);
     for (int round = 0; round < k_rounds && failure.empty(); ++round) {
-        const int reply = Mass_join_echo::rpc_echo(peer, round);
-        if (reply != round + 1) {
-            failure = "peer " + peer + " replied " + std::to_string(reply) +
-                " to " + std::to_string(round);
+        try {
+            const int reply = Mass_join_echo::rpc_echo(peer, round);
+            if (reply != round + 1) {
+                failure = "peer " + peer + " replied " + std::to_string(reply) +
+                    " to " + std::to_string(round);
+            }
+        }
+        catch (const std::exception& e) {
+            failure = "RPC to " + peer + " failed: " + e.what();
         }
         sintra::world() << note_t{index, round};
     }
