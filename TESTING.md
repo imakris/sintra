@@ -203,9 +203,9 @@ the normal messaging path, including target delivery and uninvolved processes.
 ### Mass join
 
 `mass_join_test` starts 40 workers in one swarm at once. Each names an RPC
-target, calls a peer and broadcasts to all others; a processing fence then
-checks every reply and every peer broadcast. The coordinator prints the elapsed
-time to stderr. On hosts with fewer processors than workers this exercises
+target, calls a peer and checks each reply, and broadcasts to all others; after
+a processing fence, each worker checks that it handled every peer broadcast.
+The coordinator prints the elapsed time to stderr. On hosts with fewer processors than workers this exercises
 shared ring spinlocks whose waiters outnumber the processors. The test fails on
 lost traffic or on the runner's 60-second limit, not on a latency threshold.
 

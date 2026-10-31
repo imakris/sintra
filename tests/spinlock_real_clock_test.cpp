@@ -34,7 +34,7 @@ int main(int argc, char* argv[])
         std::thread waiter([&] {
 #ifdef _WIN32
             // The suite runs many child tests concurrently. Give this waiter
-            // enough CPU to reach its CPU-time threshold under the runner's
+            // enough CPU to reach its effort threshold under the runner's
             // fixed 30-second per-test limit.
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 #endif

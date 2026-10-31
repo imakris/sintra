@@ -32,6 +32,7 @@
 
 #include "../debug_pause.h"
 #include "../logging.h"
+#include "../time_utils.h"
 #include "process_utils.h"
 
 namespace sintra {
@@ -184,8 +185,9 @@ inline bool read_spinlock_waiter_effort(spinlock_cpu_sample& sample, uint64_t ba
 }
 
 // Sleeps once and returns the measured duration in ns. Waiters that outnumber
-// the processors would otherwise keep a preempted holder from running.
-inline uint64_t spinlock_backoff_sleep(const void* lock) noexcept
+// the processors would otherwise keep a preempted holder from running. On
+// Windows the sleeper uses a high-resolution waitable timer when available.
+inline uint64_t spinlock_backoff_sleep(const void* lock, Precision_sleeper& sleeper) noexcept
 {
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
     if (auto callback = test_hooks::s_spinlock_backoff.load(std::memory_order_acquire)) {
@@ -200,12 +202,12 @@ inline uint64_t spinlock_backoff_sleep(const void* lock) noexcept
 #endif
     (void)lock;
     const auto before = std::chrono::steady_clock::now();
-#if defined(_WIN32)
-    ::Sleep(1);
-#else
-    timespec request{0, 100'000};
-    (void)::nanosleep(&request, nullptr);
-#endif
+    try {
+        sleeper.sleep_for(std::chrono::microseconds(100));
+    }
+    catch (...) {
+        // A failed sleep only shortens this backoff; the elapsed time is credited.
+    }
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - before).count();
     return elapsed > 0 ? uint64_t(elapsed) : 0;
@@ -315,6 +317,7 @@ struct alignas(16) spinlock
         bool reported_unknown = false;
         size_t spin_count = 0;
         uint64_t backoff_ns = 0;
+        Precision_sleeper sleeper;
 
         while (true) {
             uint64_t unowned = 0;
@@ -339,7 +342,7 @@ struct alignas(16) spinlock
                 }
             }
             else {
-                const uint64_t slept = detail::spinlock_backoff_sleep(this);
+                const uint64_t slept = detail::spinlock_backoff_sleep(this, sleeper);
                 const uint64_t credit = slept < k_backoff_credit_cap_ns
                     ? slept : k_backoff_credit_cap_ns;
                 backoff_ns = backoff_ns < UINT64_MAX - credit
@@ -430,7 +433,8 @@ private:
     static constexpr auto k_spin_phase = std::chrono::microseconds(200);
     // One sleep credits at most this much effort, so a waiter suspended in
     // its sleep cannot reach the live-stall timeout from that sleep alone.
-    // It exceeds the default 15.6 ms Windows timer period of Sleep(1).
+    // It exceeds the default 15.6 ms Windows timer period, which bounds a
+    // sleep when no high-resolution timer is available.
     static constexpr uint64_t k_backoff_credit_cap_ns = 20'000'000;
     static constexpr auto k_owner_liveness_poll = std::chrono::milliseconds(5);
     static constexpr uint64_t k_live_owner_timeout_ns = 2'000'000'000;
