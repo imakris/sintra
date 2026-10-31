@@ -23,6 +23,11 @@
   `UnhandledExceptionFilter` before declaring a death, so a fault the host repairs
   no longer broadcasts `terminated_abnormally` or stops the ring readers, and a
   crash watchdog still guarantees that a faulted peer cannot linger.
+- Stopped shared ring spinlock convoys when many processes join a swarm at
+  once. A waiter now sleeps between attempts after a brief spin, so a preempted
+  lock holder can run even when waiters outnumber the processors. The
+  live-stall diagnostic counts these sleeps, capped per sleep, as waiter
+  effort, and spinlock diagnostics name the waiting call site.
 
 ### Compatibility
 

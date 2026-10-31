@@ -37,6 +37,9 @@ TEST_TIMEOUT_OVERRIDES = {
     "managed_child_crash_provenance_reuse_contract_test_debug": 130.0,
     "managed_child_crash_provenance_reuse_contract_test_release": 130.0,
     "spinlock_recovery_test": 45.0,
+    # Forty workers join at once; leave headroom for Debug builds and slow
+    # runners to start them all and tear the swarm down.
+    "mass_join_test": 60.0,
     # Shutdown logs its first waiting warning after 5 s, and the blocking log
     # callback then holds it for 3 s to 15 s; add four processes' setup and
     # collective teardown.

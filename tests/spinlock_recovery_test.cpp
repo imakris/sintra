@@ -465,6 +465,42 @@ int fake_abort_mode(std::string_view owner_arg, Schedule mode)
     return owner_arg != "self" && excluded ? 0 : 1;
 }
 
+sintra::spinlock* g_backoff_lock = nullptr;
+std::atomic<unsigned> g_backoff_sleeps{0};
+
+// Each backoff sleep reports a ten-second suspension. Its credit is capped,
+// so the live-stall abort still needs many sleeps, yet arrives without CPU.
+int backoff_cap_mode()
+{
+    if (!prepare_abort_child()) {
+        return 2;
+    }
+    sintra::spinlock lock;
+    lock.test_install_owner(sintra::detail::current_process_instance(), 1);
+    g_backoff_lock = &lock;
+    sintra::detail::test_hooks::s_spinlock_backoff.store([](const void* address) -> uint64_t {
+        if (address != g_backoff_lock) {
+            return 0;
+        }
+        ++g_backoff_sleeps;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        return 10 * k_ns_per_second;
+    });
+    sintra::detail::test_hooks::s_spinlock_event.store([](const void* address, spinlock_event event) {
+        if (address != g_backoff_lock || event != spinlock_event::before_liveness) {
+            return;
+        }
+        const unsigned sleeps = g_backoff_sleeps.load();
+        if (sleeps < 50 || sleeps > 400) {
+            std::fprintf(stderr, "spinlock_recovery_test: backoff credit reached the timeout "
+                "after %u sleeps\n", sleeps);
+            std::exit(2);
+        }
+    });
+    lock.lock();
+    return 1;
+}
+
 #ifdef _WIN32
 DWORD injected_liveness_error = ERROR_ACCESS_DENIED;
 
@@ -644,6 +680,9 @@ int main(int argc, char* argv[])
     if (argc == 3 && std::string_view(argv[1]) == "--fake-abort-multiple") {
         return fake_abort_mode(argv[2], Schedule::multiple_samples);
     }
+    if (argc == 3 && std::string_view(argv[1]) == "--backoff-cap") {
+        return backoff_cap_mode();
+    }
 
     const uint32_t self_pid = uint32_t(sintra::detail::get_current_process_id());
     const uint32_t dead_pid = find_dead_pid(self_pid);
@@ -742,7 +781,8 @@ int main(int argc, char* argv[])
         !run_abort_child(argv[0], "--fake-abort-jump", "self") ||
         !run_abort_child(argv[0], "--fake-abort-jump", self.c_str()) ||
         !run_abort_child(argv[0], "--fake-abort-multiple", "self") ||
-        !run_abort_child(argv[0], "--fake-abort-multiple", self.c_str()))
+        !run_abort_child(argv[0], "--fake-abort-multiple", self.c_str()) ||
+        !run_abort_child(argv[0], "--backoff-cap", "self"))
     {
         return 1;
     }
