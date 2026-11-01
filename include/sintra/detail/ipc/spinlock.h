@@ -53,19 +53,37 @@ inline void spin_pause() noexcept
 #endif
 }
 
+// Process-local busy wait: pauses, then yields, then sleeps between attempts.
+// A thread waiting for one that is itself blocked, for example on a shared
+// spinlock, must not keep the processors from the holders it waits for.
 struct Spin_backoff
 {
     void spin() noexcept
     {
-        spin_pause();
-        if (++m_spin_count >= 1024) {
+        if (m_spin_count < k_pause_spins) {
+            ++m_spin_count;
+            spin_pause();
+            return;
+        }
+        if (m_spin_count < k_pause_spins + k_yields) {
+            ++m_spin_count;
             std::this_thread::yield();
-            m_spin_count = 0;
+            return;
+        }
+        try {
+            m_sleeper.sleep_for(std::chrono::microseconds(100));
+        }
+        catch (...) {
+            std::this_thread::yield();
         }
     }
 
 private:
-    unsigned m_spin_count = 0;
+    static constexpr unsigned k_pause_spins = 1024;
+    static constexpr unsigned k_yields = 64;
+
+    unsigned          m_spin_count = 0;
+    Precision_sleeper m_sleeper;
 };
 
 struct spinlock_cpu_sample

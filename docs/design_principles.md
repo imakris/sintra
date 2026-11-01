@@ -159,6 +159,10 @@ requirements):
 - The cap is 20 ms per sleep, above the default 15.6 ms Windows timer period.
 - The site is captured with `std::source_location`. A toolchain without it
   omits the site; the lock word is unchanged either way.
+- Process-local busy waits (`Spin_backoff`), such as threads queued for a
+  ring's writer slot, pause 1024 times, yield 64 times, then sleep 100
+  microseconds per attempt. Threads queued behind a writer that waits for a
+  shared spinlock otherwise keep that lock's holder from running.
 
 The shared spinlock's live-stall diagnostic requires an unchanged odd
 generation and owner across a baseline and later waiter-effort samples. It

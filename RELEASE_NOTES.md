@@ -26,11 +26,13 @@
 - Stopped shared ring spinlock convoys when many processes join a swarm at
   once. Every `sintra::spinlock` waiter, shared or process-local, now sleeps
   between attempts after a brief spin, so a preempted lock holder can run even
-  when waiters outnumber the processors. The live-stall diagnostic counts these
-  sleeps, capped per sleep, as waiter effort: a stall by a same-process owner
-  now aborts after about two seconds of waiting, however contended the
-  processors are. Where the toolchain provides `std::source_location`,
-  spinlock diagnostics name the waiting call site.
+  when waiters outnumber the processors. Process-local busy waits, such as
+  threads queued for a ring's writer slot, also sleep after a brief spin. The
+  live-stall diagnostic counts spinlock sleeps, capped per sleep, as waiter
+  effort: a stall by a same-process owner now aborts after about two seconds
+  of waiting, however contended the processors are. Where the toolchain
+  provides `std::source_location`, spinlock diagnostics name the waiting call
+  site.
 
 ### Compatibility
 
