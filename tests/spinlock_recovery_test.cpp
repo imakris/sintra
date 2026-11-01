@@ -13,15 +13,24 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#if __has_include(<source_location>)
+#include <source_location>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
 #include "windows_liveness_child.h"
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -465,6 +474,153 @@ int fake_abort_mode(std::string_view owner_arg, Schedule mode)
     return owner_arg != "self" && excluded ? 0 : 1;
 }
 
+// Redirects the native standard error handle, which spinlock diagnostics use.
+class Native_stderr_capture
+{
+public:
+    explicit Native_stderr_capture(const std::filesystem::path& path)
+    {
+        std::fflush(stderr);
+#ifdef _WIN32
+        m_saved = ::GetStdHandle(STD_ERROR_HANDLE);
+        m_file = ::CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        m_active = m_file != INVALID_HANDLE_VALUE &&
+            ::SetStdHandle(STD_ERROR_HANDLE, m_file) != FALSE;
+#else
+        const int file = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (file >= 0) {
+            m_saved = ::dup(STDERR_FILENO);
+            m_active = m_saved >= 0 && ::dup2(file, STDERR_FILENO) >= 0;
+            ::close(file);
+        }
+#endif
+    }
+
+    ~Native_stderr_capture()
+    {
+#ifdef _WIN32
+        if (m_active) {
+            ::SetStdHandle(STD_ERROR_HANDLE, m_saved);
+        }
+        if (m_file != INVALID_HANDLE_VALUE) {
+            ::CloseHandle(m_file);
+        }
+#else
+        if (m_saved >= 0) {
+            ::dup2(m_saved, STDERR_FILENO);
+            ::close(m_saved);
+        }
+#endif
+    }
+
+    Native_stderr_capture(const Native_stderr_capture&) = delete;
+    Native_stderr_capture& operator=(const Native_stderr_capture&) = delete;
+
+    bool active() const { return m_active; }
+
+private:
+#ifdef _WIN32
+    HANDLE m_saved = nullptr;
+    HANDLE m_file = INVALID_HANDLE_VALUE;
+#else
+    int m_saved = -1;
+#endif
+    bool m_active = false;
+};
+
+// A waiter that acquires through spinlock::locker names its file and line in
+// the diagnostic. Recovering an earlier instance of this PID emits one.
+bool waiter_site_is_named()
+{
+    const auto path = sintra::test::unique_scratch_directory("spinlock_site") / "stderr.txt";
+    const uint32_t self_pid = uint32_t(sintra::detail::get_current_process_id());
+    const uint32_t other_token = uint32_t(sintra::detail::current_process_instance()) + 1;
+    sintra::spinlock lock;
+    lock.test_install_owner(owner_instance(self_pid, other_token), 1);
+    unsigned line = 0;
+    bool captured = false;
+    {
+        Native_stderr_capture capture(path);
+        captured = capture.active();
+        line = __LINE__ + 1;
+        sintra::spinlock::locker locked(lock);
+    }
+    if (!expect(captured, "could not capture native standard error")) {
+        return false;
+    }
+    std::string text;
+    {
+        std::ifstream input(path, std::ios::binary);
+        text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(path.parent_path(), ignored);
+    std::fprintf(stderr, "%s", text.c_str());
+    const bool recovered = text.find("Exited owner PID ") != std::string::npos;
+#if defined(__cpp_lib_source_location) && __cpp_lib_source_location >= 201907L
+    const std::string site = " Waiter at spinlock_recovery_test.cpp:" + std::to_string(line) + ".";
+    return expect(recovered && text.find(site) != std::string::npos,
+        "spinlock diagnostic did not name the waiter's file and line");
+#else
+    return expect(recovered && text.find(" Waiter at ") == std::string::npos,
+        "spinlock diagnostic named a site without std::source_location");
+#endif
+}
+
+sintra::spinlock* g_backoff_lock = nullptr;
+std::atomic<unsigned> g_backoff_sleeps{0};
+std::atomic<unsigned> g_sleeps_at_poll{0};
+std::atomic<unsigned> g_sleeps_at_previous_poll{0};
+
+// Each backoff sleep reports a ten-second suspension. Its credit is capped at
+// 20 ms, so the live-stall abort must come at the first poll after about 100
+// sleeps. Without the cap it would come at the first poll after one sleep;
+// without the credit, only after two seconds of CPU, some 20000 sleeps.
+int backoff_cap_mode()
+{
+    if (!prepare_abort_child()) {
+        return 2;
+    }
+    sintra::spinlock lock;
+    lock.test_install_owner(sintra::detail::current_process_instance(), 1);
+    g_backoff_lock = &lock;
+    sintra::detail::test_hooks::s_spinlock_backoff.store([](const void* address) -> uint64_t {
+        if (address != g_backoff_lock) {
+            return 0;
+        }
+        ++g_backoff_sleeps;
+        // Wait exactly, so that at most 50 sleeps fit between 5 ms polls.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
+        while (std::chrono::steady_clock::now() < until) {}
+        return 10 * k_ns_per_second;
+    });
+    sintra::detail::test_hooks::s_spinlock_event.store([](const void* address, spinlock_event event) {
+        if (address != g_backoff_lock) {
+            return;
+        }
+        if (event == spinlock_event::poll) {
+            g_sleeps_at_previous_poll = g_sleeps_at_poll.load();
+            g_sleeps_at_poll = g_backoff_sleeps.load();
+            return;
+        }
+        if (event != spinlock_event::before_liveness) {
+            return;
+        }
+        // The witness baseline is the first poll, before any sleep. Allow up
+        // to 200 ms of waiter CPU, including these waits, to stand in for credit.
+        const unsigned now = g_sleeps_at_poll.load();
+        const unsigned previous = g_sleeps_at_previous_poll.load();
+        if (now < 90 || previous >= 100) {
+            std::fprintf(stderr, "spinlock_recovery_test: backoff credit reached the timeout "
+                "at %u sleeps, previous poll at %u\n", now, previous);
+            std::exit(2);
+        }
+    });
+    lock.lock();
+    return 1;
+}
+
 #ifdef _WIN32
 DWORD injected_liveness_error = ERROR_ACCESS_DENIED;
 
@@ -644,6 +800,9 @@ int main(int argc, char* argv[])
     if (argc == 3 && std::string_view(argv[1]) == "--fake-abort-multiple") {
         return fake_abort_mode(argv[2], Schedule::multiple_samples);
     }
+    if (argc == 3 && std::string_view(argv[1]) == "--backoff-cap") {
+        return backoff_cap_mode();
+    }
 
     const uint32_t self_pid = uint32_t(sintra::detail::get_current_process_id());
     const uint32_t dead_pid = find_dead_pid(self_pid);
@@ -742,8 +901,12 @@ int main(int argc, char* argv[])
         !run_abort_child(argv[0], "--fake-abort-jump", "self") ||
         !run_abort_child(argv[0], "--fake-abort-jump", self.c_str()) ||
         !run_abort_child(argv[0], "--fake-abort-multiple", "self") ||
-        !run_abort_child(argv[0], "--fake-abort-multiple", self.c_str()))
+        !run_abort_child(argv[0], "--fake-abort-multiple", self.c_str()) ||
+        !run_abort_child(argv[0], "--backoff-cap", "self"))
     {
+        return 1;
+    }
+    if (!waiter_site_is_named()) {
         return 1;
     }
     constexpr auto hook_count = static_cast<unsigned>(spinlock_event::poll) + 1;

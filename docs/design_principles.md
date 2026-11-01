@@ -143,22 +143,51 @@ or raw process creation that bypasses that handler. This does not detect a
 descendant that never used Sintra and later receives the cached ancestor's
 PID; that inherited-instance ABA remains unresolved.
 
+Owner decision, 2026-10-31: a shared spinlock waiter spins only briefly, then
+sleeps between attempts. Waiters that outnumber the processors must not keep a
+preempted holder from running. The waiter's effort, not its thread CPU alone,
+drives the live-stall diagnostic. Each backoff sleep adds its measured
+duration, capped per sleep, to the OS-reported thread CPU. A waiter that
+acquires through `spinlock::locker` names its source file and line in each
+spinlock diagnostic.
+
+Implementation at the time of that decision (`spinlock.h`, not owner
+requirements):
+- A waiter spins for up to 200 microseconds, then requests a 100-microsecond
+  sleep per attempt through `Precision_sleeper`. On Windows that is a
+  high-resolution waitable timer where available, otherwise `Sleep(1)`.
+- The cap is 20 ms per sleep, above the default 15.6 ms Windows timer period.
+- The site is captured with `std::source_location`. A toolchain without it
+  omits the site; the lock word is unchanged either way.
+- Process-local busy waits (`Spin_backoff`), such as threads queued for a
+  ring's writer slot, pause 1024 times, yield 64 times, then sleep 100
+  microseconds per attempt. Threads queued behind a writer that waits for a
+  shared spinlock otherwise keep that lock's holder from running.
+
 The shared spinlock's live-stall diagnostic requires an unchanged odd
-generation and owner across a baseline and later OS-reported waiter thread-CPU
-samples. It aborts when their direct difference reaches two seconds, the owner
-is still live, debug pause is inactive, and a final owner/generation check
-agrees. This is an approximate diagnostic timeout: one reported two-second
-jump can reach it, including if a system charges a suspended or descheduled
-interval to thread CPU. Wall time alone does not count. Death recovery requires
-process-instance death evidence and an owner-word CAS; time never licenses a
-takeover. A holder stopped between its acquisition CAS and odd mark, or between
-its even mark and release store, may escape live-stall diagnosis while stopped.
-Those publication gaps are permitted misses; death remains recoverable.
+generation and owner across a baseline and later waiter-effort samples. It
+aborts when their direct difference reaches two seconds, the owner is still
+live, debug pause is inactive, and a final owner/generation check agrees. This
+is an approximate diagnostic timeout: one reported two-second jump can reach
+it, including if a system charges a suspended or descheduled interval to thread
+CPU.
+
+A measured sleep includes timer slack and any run-queue delay before the waiter
+resumes, up to the cap. A waiter that is backing off therefore gains effort at
+about wall-clock rate, and a same-process owner's stall aborts after about two
+seconds of waiting, however contended the processors are. Wall time alone does
+not count in one sense only: a waiter that does not run, such as a suspended
+one, gains no effort beyond one capped sleep, and a capped sleep cannot make a
+two-second jump. Death recovery requires process-instance death evidence and an
+owner-word CAS; time never licenses a takeover. A holder stopped between its
+acquisition CAS and odd mark, or between its even mark and release store, may
+escape live-stall diagnosis while stopped. Those publication gaps are
+permitted misses; death remains recoverable.
 
 Only an owner matching the waiter's own process instance is confirmed LIVE
 for this diagnostic. A foreign PID without a recorded start stamp cannot
 confirm the recorded incarnation, even when that PID is live. After the same
-CPU threshold and final witness checks, such a waiter writes one diagnostic
+effort threshold and final witness checks, such a waiter writes one diagnostic
 to stderr per lock call and continues waiting; it neither aborts nor takes
 over on that evidence. This diagnostic bypasses application log callbacks.
 

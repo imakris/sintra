@@ -724,10 +724,9 @@ private:
     // ensure_rpc_shutdown and release_rpc_execution never take the spinlock,
     // so this cannot deadlock.
     //
-    // Every other caller of the same exported function spins on that spinlock
-    // meanwhile, and an unchanged marked hold spanning two seconds of
-    // OS-reported waiting-thread CPU time
-    // aborts the process. m_rpc_lifecycle_mutex must therefore only ever be
+    // Every other caller of the same exported function waits on that spinlock
+    // meanwhile, and an unchanged marked hold spanning two seconds of waiter
+    // effort (thread CPU plus capped backoff sleeps) aborts the process. m_rpc_lifecycle_mutex must therefore only ever be
     // held briefly: never across user code such as the log callback.
     //
     // Callers distinguish two failure modes via the returned struct:

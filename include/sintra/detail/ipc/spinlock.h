@@ -12,6 +12,15 @@
 #include <cstdio>
 #include <thread>
 
+#if __has_include(<source_location>)
+    #include <source_location>
+#endif
+#if defined(__cpp_lib_source_location) && __cpp_lib_source_location >= 201907L
+    #define SINTRA_SPINLOCK_SOURCE_LOCATION 1
+#else
+    #define SINTRA_SPINLOCK_SOURCE_LOCATION 0
+#endif
+
 #if defined(_WIN32)
     #include "../sintra_windows.h"
     #if defined(_MSC_VER)
@@ -23,6 +32,7 @@
 
 #include "../debug_pause.h"
 #include "../logging.h"
+#include "../time_utils.h"
 #include "process_utils.h"
 
 namespace sintra {
@@ -43,24 +53,49 @@ inline void spin_pause() noexcept
 #endif
 }
 
+// Process-local busy wait: pauses, then yields, then sleeps between attempts.
+// A thread waiting for one that is itself blocked, for example on a shared
+// spinlock, must not keep the processors from the holders it waits for.
 struct Spin_backoff
 {
     void spin() noexcept
     {
-        spin_pause();
-        if (++m_spin_count >= 1024) {
+        if (m_spin_count < k_pause_spins) {
+            ++m_spin_count;
+            spin_pause();
+            return;
+        }
+        if (m_spin_count < k_pause_spins + k_yields) {
+            ++m_spin_count;
             std::this_thread::yield();
-            m_spin_count = 0;
+            return;
+        }
+        try {
+            m_sleeper.sleep_for(std::chrono::microseconds(100));
+        }
+        catch (...) {
+            std::this_thread::yield();
         }
     }
 
 private:
-    unsigned m_spin_count = 0;
+    static constexpr unsigned k_pause_spins = 1024;
+    static constexpr unsigned k_yields = 64;
+
+    unsigned          m_spin_count = 0;
+    Precision_sleeper m_sleeper;
 };
 
 struct spinlock_cpu_sample
 {
     uint64_t ns = 0;
+};
+
+// Where a waiter acquires a lock. Diagnostics name it; the lock word does not.
+struct spinlock_site
+{
+    const char* file = nullptr;
+    uint32_t    line = 0;
 };
 
 #if defined(SINTRA_ENABLE_TEST_HOOKS)
@@ -78,9 +113,13 @@ enum class spinlock_event {
     before_final_generation, after_final_generation, poll
 };
 using spinlock_event_callback = void (*)(const void*, spinlock_event);
+// Supplies the complete waiter-effort sample; backoff credit is not added.
 using spinlock_cpu_callback = bool (*)(spinlock_cpu_sample&);
+// Replaces one backoff sleep and returns its measured duration in ns.
+using spinlock_backoff_callback = uint64_t (*)(const void*);
 inline std::atomic<spinlock_event_callback> s_spinlock_event{nullptr};
 inline std::atomic<spinlock_cpu_callback> s_spinlock_cpu{nullptr};
+inline std::atomic<spinlock_backoff_callback> s_spinlock_backoff{nullptr};
 }
 
 inline void spinlock_event_for_test(const void* lock, test_hooks::spinlock_event event) noexcept
@@ -95,19 +134,8 @@ inline void spinlock_event_for_test(const void* lock, test_hooks::spinlock_event
 #define SINTRA_SPINLOCK_HOOK(event) ((void)0)
 #endif
 
-inline bool read_spinlock_thread_cpu(spinlock_cpu_sample& sample) noexcept
+inline bool read_native_thread_cpu(spinlock_cpu_sample& sample) noexcept
 {
-#if defined(SINTRA_ENABLE_TEST_HOOKS)
-    if (auto callback = test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
-        try {
-            return callback(sample);
-        }
-        catch (...) {
-            defer_observation_failure("spinlock_cpu");
-            return false;
-        }
-    }
-#endif
 #if defined(_WIN32)
     FILETIME created{}, exited{}, kernel{}, user{};
     if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {
@@ -144,6 +172,127 @@ inline bool read_spinlock_thread_cpu(spinlock_cpu_sample& sample) noexcept
 #endif
 }
 
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+inline bool read_test_thread_cpu(
+    test_hooks::spinlock_cpu_callback callback, spinlock_cpu_sample& sample) noexcept
+{
+    try {
+        return callback(sample);
+    }
+    catch (...) {
+        defer_observation_failure("spinlock_cpu");
+        return false;
+    }
+}
+#endif
+
+inline bool read_spinlock_thread_cpu(spinlock_cpu_sample& sample) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
+        return read_test_thread_cpu(callback, sample);
+    }
+#endif
+    return read_native_thread_cpu(sample);
+}
+
+// A waiter's effort: its OS-reported thread CPU plus the credit for its
+// backoff sleeps. A test CPU provider supplies the whole sample.
+inline bool read_spinlock_waiter_effort(spinlock_cpu_sample& sample, uint64_t backoff_ns) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_spinlock_cpu.load(std::memory_order_acquire)) {
+        return read_test_thread_cpu(callback, sample);
+    }
+#endif
+    if (!read_native_thread_cpu(sample)) {
+        return false;
+    }
+    if (sample.ns > UINT64_MAX - backoff_ns) {
+        return false;
+    }
+    sample.ns += backoff_ns;
+    return true;
+}
+
+// Sleeps once and returns the measured duration in ns. Waiters that outnumber
+// the processors would otherwise keep a preempted holder from running. On
+// Windows the sleeper uses a high-resolution waitable timer when available.
+inline uint64_t spinlock_backoff_sleep(const void* lock, Precision_sleeper& sleeper) noexcept
+{
+#if defined(SINTRA_ENABLE_TEST_HOOKS)
+    if (auto callback = test_hooks::s_spinlock_backoff.load(std::memory_order_acquire)) {
+        try {
+            return callback(lock);
+        }
+        catch (...) {
+            defer_observation_failure("spinlock_backoff");
+            return 0;
+        }
+    }
+#endif
+    (void)lock;
+    const auto before = std::chrono::steady_clock::now();
+    try {
+        sleeper.sleep_for(std::chrono::microseconds(100));
+    }
+    catch (...) {
+        // A failed sleep only shortens this backoff; the elapsed time is credited.
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - before).count();
+    return elapsed > 0 ? uint64_t(elapsed) : 0;
+}
+
+// Builds one spinlock diagnostic line and writes it with a single native
+// write, without allocating or invoking an application log callback.
+class Spinlock_diagnostic
+{
+public:
+    Spinlock_diagnostic& text(const char* part) noexcept
+    {
+        while (part && *part && m_length + 1 < sizeof(m_line)) {
+            m_line[m_length++] = *part++;
+        }
+        return *this;
+    }
+
+    Spinlock_diagnostic& number(uint64_t value) noexcept
+    {
+        char digits[20];
+        size_t count = 0;
+        do {
+            digits[count++] = char('0' + value % 10);
+            value /= 10;
+        } while (value != 0);
+        while (count != 0 && m_length + 1 < sizeof(m_line)) {
+            m_line[m_length++] = digits[--count];
+        }
+        return *this;
+    }
+
+    // Names the waiter's acquisition site by file name and line, if known.
+    void print(const spinlock_site& site) noexcept
+    {
+        if (site.file) {
+            const char* file = site.file;
+            for (const char* p = site.file; *p; ++p) {
+                if (*p == '/' || *p == '\\') {
+                    file = p + 1;
+                }
+            }
+            text(" Waiter at ").text(file).text(":").number(site.line).text(".");
+        }
+        text("\n");
+        m_line[m_length] = '\0';
+        native_diagnostic(m_line, 0, "", false);
+    }
+
+private:
+    char   m_line[512];
+    size_t m_length = 0;
+};
+
 struct alignas(16) spinlock_words
 {
     std::atomic<uint64_t> owner{0};
@@ -161,10 +310,17 @@ struct alignas(16) spinlock
 {
     struct locker
     {
+#if SINTRA_SPINLOCK_SOURCE_LOCATION
+        locker(spinlock& sl, const std::source_location& where = std::source_location::current())
+        :
+            m_sl(sl), m_pid(uint32_t(get_current_pid()))
+        { m_sl.lock(detail::spinlock_site{where.file_name(), uint32_t(where.line())}); }
+#else
         locker(spinlock& sl)
         :
             m_sl(sl), m_pid(uint32_t(get_current_pid()))
         { m_sl.lock(); }
+#endif
         ~locker() noexcept
         {
             if (m_pid == uint32_t(get_current_pid())) {
@@ -179,13 +335,20 @@ struct alignas(16) spinlock
         uint32_t m_pid;
     };
 
-    void lock()
+    void lock() { lock(detail::spinlock_site{}); }
+
+    // Spins briefly, then sleeps between attempts. The live-stall witness
+    // counts the waiter's effort: thread CPU plus each sleep, capped.
+    void lock(const detail::spinlock_site& site)
     {
         const uint64_t self = detail::current_process_instance();
-        auto next_poll = std::chrono::steady_clock::now();
+        const auto wait_start = std::chrono::steady_clock::now();
+        auto next_poll = wait_start;
         witness_t witness{};
         bool reported_unknown = false;
         size_t spin_count = 0;
+        uint64_t backoff_ns = 0;
+        Precision_sleeper sleeper;
 
         while (true) {
             uint64_t unowned = 0;
@@ -202,30 +365,40 @@ struct alignas(16) spinlock
                 }
             }
 
-            detail::spin_pause();
-            if ((++spin_count & k_spin_yield_mask) == 0) {
-                std::this_thread::yield();
+            auto now = std::chrono::steady_clock::now();
+            if (now - wait_start < k_spin_phase) {
+                detail::spin_pause();
+                if ((++spin_count & k_spin_yield_mask) == 0) {
+                    std::this_thread::yield();
+                }
             }
-            const auto now = std::chrono::steady_clock::now();
+            else {
+                const uint64_t slept = detail::spinlock_backoff_sleep(this, sleeper);
+                const uint64_t credit = slept < k_backoff_credit_cap_ns
+                    ? slept : k_backoff_credit_cap_ns;
+                backoff_ns = backoff_ns < UINT64_MAX - credit
+                    ? backoff_ns + credit : UINT64_MAX;
+                now = std::chrono::steady_clock::now();
+            }
             if (now < next_poll) {
                 continue;
             }
             next_poll = now + k_owner_liveness_poll;
             SINTRA_SPINLOCK_HOOK(poll);
 
-            if (try_take_over_exited_owner(self)) {
+            if (try_take_over_exited_owner(self, site)) {
                 return;
             }
             if (!witness.active) {
-                start_witness(witness);
+                start_witness(witness, backoff_ns);
                 continue;
             }
-            uint64_t elapsed_cpu_ns = 0;
-            if (!advance_witness(witness, elapsed_cpu_ns)) {
+            uint64_t elapsed_effort_ns = 0;
+            if (!advance_witness(witness, backoff_ns, elapsed_effort_ns)) {
                 witness.active = false;
                 continue;
             }
-            if (elapsed_cpu_ns < k_live_owner_timeout_ns) {
+            if (elapsed_effort_ns < k_live_owner_timeout_ns) {
                 continue;
             }
 
@@ -249,14 +422,16 @@ struct alignas(16) spinlock
             SINTRA_SPINLOCK_HOOK(after_final_generation);
             if (final_owner == witness.owner && final_generation == witness.generation) {
                 if (live) {
-                    report_live_owner_stall(owner_pid, elapsed_cpu_ns);
+                    report_live_owner_stall(owner_pid, elapsed_effort_ns, site);
                 }
                 if (!reported_unknown) {
                     reported_unknown = true;
                     // Do not invoke an application log callback from this wait.
-                    detail::native_diagnostic("[sintra][spinlock] Owner PID ", owner_pid,
-                        " incarnation cannot be confirmed after sustained waiter CPU; "
-                        "continuing to wait without taking over the shared spinlock.\n");
+                    detail::Spinlock_diagnostic()
+                        .text("[sintra][spinlock] Owner PID ").number(owner_pid)
+                        .text(" incarnation cannot be confirmed after sustained waiter effort; "
+                              "continuing to wait without taking over the shared spinlock.")
+                        .print(site);
                 }
             }
             witness.active = false;
@@ -285,6 +460,13 @@ struct alignas(16) spinlock
 
 private:
     static constexpr size_t k_spin_yield_mask = 0x3ff;
+    // A wait longer than this sleeps between attempts instead of spinning.
+    static constexpr auto k_spin_phase = std::chrono::microseconds(200);
+    // One sleep credits at most this much effort, so a waiter suspended in
+    // its sleep cannot reach the live-stall timeout from that sleep alone.
+    // It exceeds the default 15.6 ms Windows timer period, which bounds a
+    // sleep when no high-resolution timer is available.
+    static constexpr uint64_t k_backoff_credit_cap_ns = 20'000'000;
     static constexpr auto k_owner_liveness_poll = std::chrono::milliseconds(5);
     static constexpr uint64_t k_live_owner_timeout_ns = 2'000'000'000;
 
@@ -292,12 +474,12 @@ private:
     {
         uint64_t generation = 0;
         uint64_t owner = 0;
-        uint64_t start_cpu_ns = 0;
-        uint64_t last_cpu_ns = 0;
+        uint64_t start_effort_ns = 0;
+        uint64_t last_effort_ns = 0;
         bool active = false;
     };
 
-    void start_witness(witness_t& witness)
+    void start_witness(witness_t& witness, uint64_t backoff_ns)
     {
         SINTRA_SPINLOCK_HOOK(before_start_generation);
         const uint64_t generation = m_words.generation.load(std::memory_order_acquire);
@@ -306,19 +488,19 @@ private:
         const uint64_t owner = m_words.owner.fetch_add(0, std::memory_order_acq_rel);
         SINTRA_SPINLOCK_HOOK(after_start_owner);
         SINTRA_SPINLOCK_HOOK(before_start_cpu);
-        detail::spinlock_cpu_sample cpu{};
-        const bool valid = detail::read_spinlock_thread_cpu(cpu);
+        detail::spinlock_cpu_sample effort{};
+        const bool valid = detail::read_spinlock_waiter_effort(effort, backoff_ns);
         SINTRA_SPINLOCK_HOOK(after_start_cpu);
         if ((generation & 1) && owner != 0 && valid) {
-            witness = {generation, owner, cpu.ns, cpu.ns, true};
+            witness = {generation, owner, effort.ns, effort.ns, true};
         }
     }
 
-    bool advance_witness(witness_t& witness, uint64_t& elapsed_cpu_ns)
+    bool advance_witness(witness_t& witness, uint64_t backoff_ns, uint64_t& elapsed_effort_ns)
     {
         SINTRA_SPINLOCK_HOOK(before_end_cpu);
-        detail::spinlock_cpu_sample cpu{};
-        const bool valid = detail::read_spinlock_thread_cpu(cpu);
+        detail::spinlock_cpu_sample effort{};
+        const bool valid = detail::read_spinlock_waiter_effort(effort, backoff_ns);
         SINTRA_SPINLOCK_HOOK(after_end_cpu);
         SINTRA_SPINLOCK_HOOK(before_end_owner);
         const uint64_t owner = m_words.owner.fetch_add(0, std::memory_order_acq_rel);
@@ -326,24 +508,27 @@ private:
         SINTRA_SPINLOCK_HOOK(before_end_generation);
         const uint64_t generation = m_words.generation.load(std::memory_order_acquire);
         SINTRA_SPINLOCK_HOOK(after_end_generation);
-        if (!valid || cpu.ns < witness.last_cpu_ns || owner != witness.owner ||
+        if (!valid || effort.ns < witness.last_effort_ns || owner != witness.owner ||
             generation != witness.generation)
         {
             return false;
         }
-        witness.last_cpu_ns = cpu.ns;
-        elapsed_cpu_ns = cpu.ns - witness.start_cpu_ns;
+        witness.last_effort_ns = effort.ns;
+        elapsed_effort_ns = effort.ns - witness.start_effort_ns;
         return true;
     }
 
-    bool try_take_over_exited_owner(uint64_t self)
+    bool try_take_over_exited_owner(uint64_t self, const detail::spinlock_site& site)
     {
         const uint64_t owner = m_words.owner.load(std::memory_order_acquire);
         if (owner == 0 || !detail::process_instance_has_exited(owner, self)) {
             return false;
         }
-        detail::native_diagnostic("[sintra][spinlock] Exited owner PID ",
-            detail::process_instance_pid(owner), "; attempting shared-lock recovery.\n");
+        detail::Spinlock_diagnostic()
+            .text("[sintra][spinlock] Exited owner PID ")
+            .number(detail::process_instance_pid(owner))
+            .text("; attempting shared-lock recovery.")
+            .print(site);
         SINTRA_SPINLOCK_HOOK(before_takeover_bump);
         m_words.generation.fetch_add(2, std::memory_order_acq_rel);
         SINTRA_SPINLOCK_HOOK(after_takeover_bump);
@@ -364,12 +549,15 @@ private:
         return true;
     }
 
-    [[noreturn]] void report_live_owner_stall(uint32_t owner, uint64_t elapsed_cpu_ns) const
+    [[noreturn]] void report_live_owner_stall(
+        uint32_t owner, uint64_t elapsed_effort_ns, const detail::spinlock_site& site) const
     {
-        detail::native_diagnostic("[sintra][spinlock] Shared spinlock stuck after waiter CPU ns ",
-            elapsed_cpu_ns, "; ");
-        detail::native_diagnostic("owner PID ", owner,
-            " is still alive. Aborting to avoid corruption.\n");
+        detail::Spinlock_diagnostic()
+            .text("[sintra][spinlock] Shared spinlock stuck after waiter effort ns ")
+            .number(elapsed_effort_ns)
+            .text("; owner PID ").number(owner)
+            .text(" is still alive. Aborting to avoid corruption.")
+            .print(site);
         detail::native_debug_aware_abort();
     }
 
@@ -381,3 +569,4 @@ static_assert(sizeof(spinlock) == 16 && alignof(spinlock) == 16);
 } // namespace sintra
 
 #undef SINTRA_SPINLOCK_HOOK
+#undef SINTRA_SPINLOCK_SOURCE_LOCATION

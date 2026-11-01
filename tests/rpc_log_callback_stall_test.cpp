@@ -3,7 +3,7 @@
 //
 // The log callback is user code and may block. Concurrent RPC service and
 // shutdown refusal must continue while it runs. The shared spinlock's live-owner
-// stall diagnostic measures waiter thread CPU, not callback wall time.
+// stall diagnostic measures a waiter's effort on a held lock, not callback wall time.
 //
 // Rejection: the coordinator process hosts Stall_service, and two children call
 // into it, so each child's request ring has its own reader thread there. One

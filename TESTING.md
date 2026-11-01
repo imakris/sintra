@@ -200,6 +200,24 @@ workload when comparing changes. This mode measures raw ring readers. Measuring
 managed swarm behavior additionally requires an application workload that uses
 the normal messaging path, including target delivery and uninvolved processes.
 
+### Mass join
+
+`mass_join_test` starts 40 workers in one swarm at once. Each names an RPC
+target, calls a peer and checks each reply, and broadcasts to all others; after
+a processing fence, each worker checks that it handled every peer broadcast.
+The coordinator prints the elapsed time to stderr. On hosts with fewer
+processors than workers this exercises shared ring spinlocks whose waiters
+outnumber the processors. The test fails on lost traffic, a failed RPC or the
+runner's 60-second limit, not on a latency threshold.
+
+### Qt keyword macros
+
+`qt_keyword_macros_test` defines `emit`, `signals`, `slots`, `foreach` and
+`forever` the way Qt does without `QT_NO_KEYWORDS`, then includes
+`<sintra/sintra.h>`. It fails at compile time if a Sintra header uses one of
+these words as an identifier, which would break applications that include Qt
+headers before Sintra's.
+
 ### Multi-process teardown helpers
 
 Tests that end with the ordinary "all participants reach the same top-level
@@ -413,6 +431,7 @@ Default timeout is 5 seconds per test run. Some tests override this:
 - `barrier_processing_fence_backlog_test`: 120 seconds on macOS, 90 seconds elsewhere
   (runs 64 internal backlog rounds)
 - `lifecycle_reaper_contract_test`: 20 seconds (includes a 5-second shared-fate watchdog)
+- `mass_join_test`: 60 seconds (starts and tears down 40 workers)
 
 The [native macOS completion diagnostic](https://github.com/imakris/sintra/actions/runs/37126983600)
 reused the binaries from `6aca68f1` and passed two runs per configuration in
