@@ -210,6 +210,14 @@ processors than workers this exercises shared ring spinlocks whose waiters
 outnumber the processors. The test fails on lost traffic, a failed RPC or the
 runner's 60-second limit, not on a latency threshold.
 
+### Qt keyword macros
+
+`qt_keyword_macros_test` defines `emit`, `signals`, `slots`, `foreach` and
+`forever` the way Qt does without `QT_NO_KEYWORDS`, then includes
+`<sintra/sintra.h>`. It fails at compile time if a Sintra header uses one of
+these words as an identifier, which would break applications that include Qt
+headers before Sintra's.
+
 ### Multi-process teardown helpers
 
 Tests that end with the ordinary "all participants reach the same top-level
