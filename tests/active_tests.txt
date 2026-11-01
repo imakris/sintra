@@ -110,6 +110,7 @@ process_reader_constructor_rollback_test                 5
 process_reader_service_dispatch_policy_test              1
 process_reader_stop_ownership_test                       1
 process_identity_test                                   1
+qt_keyword_macros_test                                   1
 receive_test                                            20
 receive_owned_test                                       1
 receive_value_contract_test                              1

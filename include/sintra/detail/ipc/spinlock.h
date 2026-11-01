@@ -272,7 +272,7 @@ public:
     }
 
     // Names the waiter's acquisition site by file name and line, if known.
-    void emit(const spinlock_site& site) noexcept
+    void print(const spinlock_site& site) noexcept
     {
         if (site.file) {
             const char* file = site.file;
@@ -431,7 +431,7 @@ struct alignas(16) spinlock
                         .text("[sintra][spinlock] Owner PID ").number(owner_pid)
                         .text(" incarnation cannot be confirmed after sustained waiter effort; "
                               "continuing to wait without taking over the shared spinlock.")
-                        .emit(site);
+                        .print(site);
                 }
             }
             witness.active = false;
@@ -528,7 +528,7 @@ private:
             .text("[sintra][spinlock] Exited owner PID ")
             .number(detail::process_instance_pid(owner))
             .text("; attempting shared-lock recovery.")
-            .emit(site);
+            .print(site);
         SINTRA_SPINLOCK_HOOK(before_takeover_bump);
         m_words.generation.fetch_add(2, std::memory_order_acq_rel);
         SINTRA_SPINLOCK_HOOK(after_takeover_bump);
@@ -557,7 +557,7 @@ private:
             .number(elapsed_effort_ns)
             .text("; owner PID ").number(owner)
             .text(" is still alive. Aborting to avoid corruption.")
-            .emit(site);
+            .print(site);
         detail::native_debug_aware_abort();
     }
 
