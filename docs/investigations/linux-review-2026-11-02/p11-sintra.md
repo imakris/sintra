@@ -2,21 +2,29 @@
 
 ## Outcome and continuation
 
-This is the initial, source-verified investigation checkpoint for package P11.
-Implementation and focused Linux validation are in progress. No production
-design has been adopted at this checkpoint. The two fresh, independent,
-highest-reasoning, read-only design reviews required by the assignment remain
-pending.
+The draft PR is [#876](https://github.com/imakris/sintra/pull/876), on branch
+`work/linux-review-20261102-p11-sintra`, based on
+`dbdd0ecdb972bd8c924272a6c3be879fdf4e46fd`. The canonical checkout remains clean
+on `master`; there was no pre-existing task work to overwrite.
 
-- Owner: `imakris/sintra`.
-- Source baseline: `dbdd0ecdb972bd8c924272a6c3be879fdf4e46fd` (`master` at task start).
-- Branch: `work/linux-review-20261102-p11-sintra`.
-- The canonical checkout was clean and remains on `master`; changes use a
-  dedicated worktree. There was no pre-existing task work to overwrite.
-- Next actions: finish the RPC cancellation/registration and caller-site
-  proposals, obtain the required independent reviews, reproduce the defects,
-  implement accepted corrections, and run the focused Linux gates. Prepare
-  bounded performance probes without adopting unmeasured policy changes.
+Two fresh, independent, highest-reasoning read-only reviewers examined the RPC
+and caller-attribution designs separately. Both reported **NO BLOCKERS** for
+both proposals before implementation. A subsequent independent implementation
+review also found no blocker in the caller-attribution change. These are design
+and source-review results, not native-platform certification.
+
+The named-container attribution correction is implemented and its enabled and
+disabled source-location fixtures pass. The coordinator-loss fixture reproduces
+five cancellation/admission failures against the unchanged RPC implementation;
+the reviewed two-file correction is the next step. Optional ring, spinlock and
+handler measurements have run. Windows handle reclamation and the macOS header
+floor remain native follow-up; no wait-policy change is included.
+
+This checkpoint preserves implementation and fixtures while final RPC correction
+and candidate gates continue. Native baseline gates: **59/59 passed**, including
+all 50 raw-ring cases. The exact same binaries initially produced four failing
+invocations in an unsupported PID/procfs sandbox; all passed after moving to a
+matching native namespace, without a production or expectation change.
 
 The owner requirements are the package's scope and
 [Sintra design principles](../../design_principles.md). The code observations
@@ -131,8 +139,12 @@ validate or refute the macOS floor. No floor/guard change is included here.
 | Current source refresh | Fresh public Git clone at `dbdd0ecd` | Clean `master`; task worktree created without pre-existing modifications. |
 | Governing instructions | `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `TESTING.md`, `docs/design_principles.md`; current Logonomic Linux SDK guidance | Read before proposing changes. Task-specific draft publication and focused gates govern this assignment. |
 | Source revalidation | Owner modules and maintained focused tests | Observations above reproduced by inspection; not runtime proof. |
-| SDK archive | `logonomic-linux-development-sdk-2026.10.23.1` | Release `SHA256SUMS` and pinned SHA-256 `56100ede7b00bd7faf06a7b64c57b94106f63e3ba1b77c0bbdf5d61d7ca220c2` match. Extraction/preflight and builds pending. |
-| Linux/native execution | Ubuntu 24.04 x86-64 host | No C++ gate has run at this initial checkpoint. |
+| SDK archive | `logonomic-linux-development-sdk-2026.10.23.1` | Release `SHA256SUMS` and pinned SHA-256 `56100ede7b00bd7faf06a7b64c57b94106f63e3ba1b77c0bbdf5d61d7ca220c2` match. Preflight passed after adding missing local launchers pointing to the already bundled CMake 3.31.10, CTest/CPack and Ninja 1.13.2 binaries. No SDK source was changed. |
+| Build configuration | Ubuntu 24.04 x86-64, GCC 13.3, CMake 3.31.10, Ninja 1.13.2; standalone Release, examples off, manual targets on, debug symbols off | Compiler-invoking configuration used one queue slot; explicit focused targets used four slots and `--parallel 4`. `ccache` launcher and persistent task cache were active. No Qt-dependent target was built. |
+| Baseline focused execution | Native PID/procfs coordinates checked before execution; maintained `TestRunner.run_test_once`, serial | 59/59 passed: 50 `ipc_rings_tests` subcases plus RPC lifecycle, reader-stop ownership, finalize lifecycle, semaphore, wakeup ownership, spinlock recovery/real clock, mass join and handler lifetime. |
+| Caller-site reproduction/candidate | Two consistent header-only fixtures | Original enabled fixture failed all 12 location assertions while recovery/operations passed; fallback passed. Corrected enabled/fallback fixtures pass all 13 cases including explicit forwarding. |
+| Coordinator-stop reproduction | Three actual external leaves, no lifeline; unchanged RPC headers | Failed in 1.219 s: async peer timed out, sync peer needed rescue, and late/new-peer/strict-local invocation rejection was absent. The fixture records failure before cleanup rescue. Candidate pending. |
+| CTest registration | `ctest --show-only=json-v1` | Only the installed-package gate is a CTest entry. The selected native executables were run through Sintra's maintained Python harness; no empty CTest selection is credited. |
 
 ## Native and otherwise pending follow-up
 
@@ -145,8 +157,63 @@ validate or refute the macOS floor. No floor/guard change is included here.
   spinlock/real-clock/mass-join and handler-lifetime tests, plus the bounded
   optional measurement modes. Record actual registrations; Sintra's test
   executables are not necessarily CTest entries.
-- Design adoption: two fresh independent highest-reasoning read-only reviewers
-  must report no blockers for each proposed production design.
+- Design adoption: the two required independent reviewers have both reported no
+  blockers for the RPC and named-caller proposals. New production wait/lifetime
+  designs would require their own reviews.
 
 No private hosted workflow is dispatched by this assignment, and no live-user
 UI, native device or application recovery qualification is performed.
+
+
+## Executed optional measurements
+
+These are bounded component observations on this host, not application
+throughput or cross-platform performance qualification. No performance threshold
+was added to the normal suite, and no probe/backoff/wait policy was changed.
+Manual probes are opt-in through `SINTRA_BUILD_MANUAL_TESTS=ON`.
+
+| Command (under `build/tests/`) | Native result |
+|---|---|
+| `manual/sintra_manual_ring_resource_probe --stall 1 10` | Each held-guard trial evicted exactly 10 times and delivered all 10 later markers to the original readers. Summed writer CPU: 51.20–51.96 ms, versus 0.0431–0.0433 ms with guards released. Full trial wall time: 78.88–78.94 ms versus 23.27–28.84 ms; file/mapping setup is included in that latter metric. |
+| `manual/sintra_manual_ring_resource_probe --stall 16 4` | 16 workers on 9 exposed CPUs: exactly 64 evictions and 64 post-gap deliveries per held trial, no guard accounting mismatch. Summed writer CPU: 311.40–319.94 ms held versus 0.629–0.689 ms released. Full trial wall: 111.88–115.15 ms held versus 61.31–67.21 ms released. |
+| `manual/sintra_manual_spinlock_contention_probe --measure` | All 12 protected-value checks pass. A real thread or foreign child holds the mapped lock for 30 ms after the first waiter poll. Each acquisition observed six poll opportunities. Acquisition wall: 30.20–30.42 ms same-process and 30.23–30.39 ms foreign; waiter CPU: 2.06–4.49 ms and 2.10–2.55 ms respectively. |
+| `sintra_handler_lifetime_test --measure-deactivation` | Eight external waits and eight self-deactivations pass the existing lifetime assertions, with 0/4/4/0 contention workers. External wait wall: 100.16–100.26 ms; thread CPU: 99.72–100.26 ms. Self-deactivation itself: 0.0041–0.0052 ms wall, preserving queued-invocation suppression. |
+| `sintra_mass_join_test` (two quiet baseline runs) | All 40 workers join, exchange RPCs/broadcasts and finalize. Reported exchange times: 526 ms and 506 ms. Candidate comparison pending; two observations are not a performance distribution. |
+
+The ring fixture measures deliberately held ordinary guards, not pending-guard
+probe amplification or application throughput. The original reader receives a
+marker after the gap; the probe never dereferences a snapshot after eviction.
+Spinlock hooks count **poll opportunities**, not exact native syscall counts.
+The same-process ownership fast path skips foreign-process liveness lookup;
+the observed overlap does not justify changing native probe cadence.
+
+The handler fixture deliberately holds an external callback for about 100 ms
+and stages queued self-dispatch for about 200 ms. Its external deactivation
+therefore demonstrates a real CPU cost for that controlled blocked callback;
+the full invocation-to-deactivation time of about 200 ms in the self case is
+fixture choreography, not a slow self-deactivation call. A replacement wait
+still needs its own admission/wakeup/exception-unwind design and latency review.
+
+The Windows-only `--handle-retention 64` mode compares warmed repeated
+attach/detach of one ring with fresh ring names, checks delivery and live cached
+handles, and reports `GetProcessHandleCount` plus cache-name counts. It has not
+run on Windows. It is a raw-ring fixture, not a repeated managed-child test.
+
+## Why the first sandbox runs are not native evidence
+
+The default sandbox returned a PID of 6 while `/proc/self/stat` identified
+18472; `/proc/6/stat` described another start time. This violates design
+principle 6's explicit PID/procfs coordinate requirement. Lifecycle attachment
+scavenging can then mistake a live attachment for a different incarnation and
+recreate its backing files. Two orderly replacement-writer assertions failed,
+one snapshot test timed out, and wakeup ownership timed out. The replacement
+assertions entered the diagnostic pause; their timeouts were not separate
+proof of cleanup deadlock.
+
+The native execution profile was checked for matching PID and start-stamp
+coordinates. **The identical binaries then passed all 59 selected invocations**,
+including those four. No test expectation, production identity rule or ring
+ownership logic was changed to accommodate the unsupported sandbox. All timing
+numbers above are from fresh runs in the matching native profile, with no
+compiler work running concurrently. The native checks used owned isolated
+fixtures only.

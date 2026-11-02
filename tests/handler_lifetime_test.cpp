@@ -253,7 +253,41 @@ struct External_deactivation_capture
     bool                    deactivator_exception = false;
 };
 
-void run_external_deactivation_waits_for_active_invocation()
+struct Deactivation_measurement
+{
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point invocation_start;
+    Clock::time_point deactivation_start;
+    sintra::detail::spinlock_cpu_sample cpu_start{};
+    uint64_t cpu_ns = 0;
+    uint64_t wall_ns = 0;
+    uint64_t invocation_to_deactivation_ns = 0;
+    bool cpu_available = false;
+
+    void begin_deactivation()
+    {
+        cpu_available = sintra::detail::read_native_thread_cpu(cpu_start);
+        deactivation_start = Clock::now();
+    }
+
+    void finish_deactivation()
+    {
+        const auto finished = Clock::now();
+        sintra::detail::spinlock_cpu_sample cpu_end{};
+        cpu_available = sintra::detail::read_native_thread_cpu(cpu_end) &&
+            cpu_available && cpu_end.ns >= cpu_start.ns;
+        if (cpu_available) {
+            cpu_ns = cpu_end.ns - cpu_start.ns;
+        }
+        wall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            finished - deactivation_start).count();
+        invocation_to_deactivation_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            finished - invocation_start).count();
+    }
+};
+
+void run_external_deactivation_waits_for_active_invocation(
+    Deactivation_measurement* measurement = nullptr)
 {
     External_deactivation_capture capture;
     sintra::Transceiver::handler_deactivator slot;
@@ -286,6 +320,9 @@ void run_external_deactivation_waits_for_active_invocation()
         dispatch_thread = std::thread([&]() {
             Thread_completion_marker completion(dispatch_thread_done);
             try {
+                if (measurement) {
+                    measurement->invocation_start = Deactivation_measurement::Clock::now();
+                }
                 dispatch_direct_event(k_event_value);
             }
             catch (...) {
@@ -314,7 +351,13 @@ void run_external_deactivation_waits_for_active_invocation()
 
             bool failed = false;
             try {
+                if (measurement) {
+                    measurement->begin_deactivation();
+                }
                 slot();
+                if (measurement) {
+                    measurement->finish_deactivation();
+                }
             }
             catch (...) {
                 failed = true;
@@ -387,7 +430,8 @@ struct Self_deactivation_capture
     bool                    abort_wait = false;
 };
 
-void run_self_deactivation_suppresses_queued_same_slot_dispatch()
+void run_self_deactivation_suppresses_queued_same_slot_dispatch(
+    Deactivation_measurement* measurement = nullptr)
 {
     Self_deactivation_capture capture;
     sintra::Transceiver::handler_deactivator slot;
@@ -422,7 +466,13 @@ void run_self_deactivation_suppresses_queued_same_slot_dispatch()
                     lock.unlock();
                     bool failed = false;
                     try {
+                        if (measurement) {
+                            measurement->begin_deactivation();
+                        }
                         slot();
+                        if (measurement) {
+                            measurement->finish_deactivation();
+                        }
                     }
                     catch (...) {
                         failed = true;
@@ -441,6 +491,9 @@ void run_self_deactivation_suppresses_queued_same_slot_dispatch()
         first_thread = std::thread([&]() {
             Thread_completion_marker completion(first_thread_done);
             try {
+                if (measurement) {
+                    measurement->invocation_start = Deactivation_measurement::Clock::now();
+                }
                 dispatch_direct_event(k_event_value);
             }
             catch (...) {
@@ -510,6 +563,93 @@ void run_self_deactivation_suppresses_queued_same_slot_dispatch()
             slot();
         }
         throw;
+    }
+}
+
+void run_deactivation_measurements()
+{
+    // Fixed bounds keep this optional experiment short. These workers add
+    // modest CPU competition; they do not claim to oversubscribe every host.
+    class Contention_workers
+    {
+    public:
+        explicit Contention_workers(unsigned count)
+        {
+            try {
+                for (unsigned i = 0; i != count; ++i) {
+                    threads.emplace_back([&, i] {
+                        uint64_t value = i + 1;
+                        ready.fetch_add(1, std::memory_order_release);
+                        while (!stop.load(std::memory_order_relaxed)) {
+                            for (unsigned work = 0; work != 1024; ++work) {
+                                value ^= value << 13;
+                                value ^= value >> 7;
+                                value ^= value << 17;
+                            }
+                        }
+                        sink.fetch_xor(value, std::memory_order_relaxed);
+                    });
+                }
+                sintra::test::require_true(wait_until([&] {
+                    return ready.load(std::memory_order_acquire) == count;
+                }, std::chrono::seconds(2)), k_failure_prefix,
+                    "contention measurement workers did not start");
+            }
+            catch (...) {
+                finish();
+                throw;
+            }
+        }
+
+        ~Contention_workers() { finish(); }
+
+    private:
+        void finish()
+        {
+            stop.store(true, std::memory_order_relaxed);
+            for (auto& thread : threads) {
+                if (thread.joinable()) {
+                    thread.join();
+                }
+            }
+        }
+        std::atomic<bool> stop{false};
+        std::atomic<unsigned> ready{0};
+        std::atomic<uint64_t> sink{0};
+        std::vector<std::thread> threads;
+    };
+
+    const auto print = [](const char* mode, unsigned workers, unsigned round,
+                         const Deactivation_measurement& measurement) {
+        std::cout << "mode=" << mode << " contention_workers=" << workers
+                  << " round=" << round
+                  << " hardware_threads=" << std::thread::hardware_concurrency()
+                  << " deactivator_wall_ms=" << measurement.wall_ns / 1e6
+                  << " cpu_available=" << measurement.cpu_available
+                  << " deactivator_cpu_ms=";
+        if (measurement.cpu_available) {
+            std::cout << measurement.cpu_ns / 1e6;
+        }
+        else {
+            std::cout << "unavailable";
+        }
+        std::cout << " invocation_to_deactivation_ms="
+                  << measurement.invocation_to_deactivation_ns / 1e6
+                  << " lifetime_checks=passed\n";
+    };
+
+    // Reverse the order on the second pair to reveal simple ordering bias.
+    unsigned round = 0;
+    for (const unsigned workers : {0u, 4u, 4u, 0u}) {
+        Contention_workers contention(workers);
+        for (unsigned repetition = 0; repetition != 2; ++repetition) {
+            ++round;
+            Deactivation_measurement external, self;
+            run_external_deactivation_waits_for_active_invocation(&external);
+            print("external_blocked", workers, round, external);
+            run_self_deactivation_suppresses_queued_same_slot_dispatch(&self);
+            print("self_deactivation", workers, round, self);
+        }
     }
 }
 
@@ -776,6 +916,11 @@ int main(int argc, char* argv[])
         sintra::init(argc, const_cast<const char* const*>(argv));
         initialized = true;
 
+        if (sintra::test::has_argv_flag(argc, argv, "--measure-deactivation")) {
+            run_deactivation_measurements();
+            sintra::shutdown();
+            return 0;
+        }
         if (sintra::test::has_argv_flag(argc, argv, "--named-immediate-only")) {
             run_named_deactivation(false);
             sintra::shutdown();
