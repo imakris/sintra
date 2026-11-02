@@ -210,6 +210,55 @@ processors than workers this exercises shared ring spinlocks whose waiters
 outnumber the processors. The test fails on lost traffic, a failed RPC or the
 runner's 60-second limit, not on a latency threshold.
 
+### Coordinator stop and lock caller sites
+
+`coordinator_loss_rpc_test` uses external leaves without lifelines to check
+pending and late-registering RPCs when the coordinator's unpublication stops
+their reply route. It also checks unrelated-peer isolation, completed results,
+direct local calls and leaf finalization. This exercises the explicit stop
+notification path, not abrupt-death detection.
+
+`spinlocked_caller_site_test` checks exact named-container acquisition sites in
+nonfatal recovery diagnostics. `spinlocked_caller_site_no_source_location_test`
+checks the intentional no-location fallback. Both targets are header-only so
+feature selections remain consistent throughout each executable.
+
+### Optional resource measurements
+
+Configure with `SINTRA_BUILD_MANUAL_TESTS=ON`, then build the selected probes:
+
+```bash
+queued-build --slots 4 -- cmake --build build --parallel 4 --target \
+    sintra_manual_ring_resource_probe sintra_manual_spinlock_contention_probe \
+    sintra_handler_lifetime_test
+```
+
+Run each through a process-owning harness or an external deadline. These bounded
+modes report observations, with correctness assertions but no CPU/time thresholds:
+
+```bash
+build/tests/manual/sintra_manual_ring_resource_probe --stall 1 10
+build/tests/manual/sintra_manual_ring_resource_probe --stall 16 4
+build/tests/manual/sintra_manual_spinlock_contention_probe --measure
+build/tests/sintra_handler_lifetime_test --measure-deactivation
+```
+
+The ring probe compares released/held guards, checks eviction and subsequent
+delivery to the same reader, and reports writer CPU/wall time. Choose a worker
+count above the host's available CPUs only when measuring oversubscription.
+The Linux spinlock probe compares thread/foreign-process holders and counts poll
+opportunities, not exact native syscalls. The handler mode reuses the externally
+blocked and self-deactivation lifetime cases under modest CPU competition; their
+deliberate 100 ms and 200 ms fixture holds are part of its full latency figures.
+
+On Windows, `sintra_manual_ring_resource_probe --handle-retention 64` compares a
+warmed reused ring against fresh ring names and reports native handle/cache-name
+counts. It does not measure managed-child lifecycle overhead. The Windows mode
+returns unavailable status 77 elsewhere; the spinlock probe likewise returns 77
+outside Linux. Use the configuration subdirectory and `.exe` suffix where needed.
+Linux process/PID-namespace and procfs coordinates must satisfy the documented
+process-visibility contract for all lifecycle and native-liveness measurements.
+
 ### Qt keyword macros
 
 `qt_keyword_macros_test` defines `emit`, `signals`, `slots`, `foreach` and
