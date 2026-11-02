@@ -358,10 +358,12 @@ bool run_coordinator(int argc, char* argv[])
         sintra::s_coord_id, sintra::s_mproc_id),
         "coordinator process must unpublish through the existing notification path");
     const auto result_path = sintra::test::invitation::marker_path(directory, "caller-result");
-    ok &= check(sintra::test::wait_for_file(result_path, 4s),
+    std::string caller_result;
+    ok &= check(sintra::test::wait_for_first_line_until(
+        result_path, {"passed", "failed"}, caller_result,
+        std::chrono::steady_clock::now() + 4s),
         "caller must report its result before the held handler is released");
-    ok &= check(sintra::test::read_lines(result_path) ==
-        std::vector<std::string>{"passed"}, "caller must pass every route-loss assertion");
+    ok &= check(caller_result == "passed", "caller must pass every route-loss assertion");
     mark(directory, "loss-release");
     mark(directory, "loss-sync-release");
     mark(directory, "owner-exit");

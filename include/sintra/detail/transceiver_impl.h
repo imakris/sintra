@@ -1496,6 +1496,13 @@ Transceiver::rpc_async_impl(instance_id_type instance_id, Args... args)
     // s_outstanding_rpcs_mutex first, then keep_waiting_mutex).
     {
         unique_lock<mutex> orpclock(s_outstanding_rpcs_mutex());
+        if (!s_coord && s_mproc->m_must_stop.load(std::memory_order_acquire)) {
+            // A leaf's only transported reply route has stopped. Check under
+            // the cancellation scan's mutex so a registration cannot miss the
+            // once-only reader-stop scan. Direct non-strict local calls bypass
+            // this transported path and remain available.
+            throw rpc_cancelled("RPC transport has stopped.");
+        }
         s_outstanding_rpcs().insert(&rpc_state->control);
     }
 

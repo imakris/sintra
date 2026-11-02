@@ -17,8 +17,9 @@ struct rpc_cancelled : std::runtime_error
 
 Description: Exception type thrown when an in-flight RPC is unblocked by
 the Sintra runtime or its caller abandons the wait through
-`Rpc_handle<R>::get(std::stop_token)`. It indicates that no remote reply
-will be observed for the call.
+`Rpc_handle<R>::get(std::stop_token)`. It is also thrown at invocation when
+a leaf attempts a transported RPC after its communication starts stopping.
+It indicates that no remote reply will be observed for the call.
 
 ## Throws
 
@@ -40,6 +41,10 @@ will be observed for the call.
 - `Rpc_handle<R>::get()` is the primary call site that throws this type.
   Synchronous `rpc_<method>(...)` may also surface it when the underlying
   wait is unblocked.
+- A transported `rpc_async_<method>(...)` invocation in a stopping leaf can
+  throw before returning its handle. This includes strict same-process
+  calls, because they still need the coordinator route. Direct non-strict
+  local calls do not use that route.
 - `Rpc_handle<R>::get(stop)` also throws it when a requested stop wins
   caller-side abandonment. The remote work is not cancelled; if a terminal
   result or failure commits before abandonment, the overload preserves that
@@ -48,14 +53,18 @@ will be observed for the call.
 ## Threading and lifecycle
 
 - The exception is constructed on the calling thread when it consumes
-  the cancelled state of a handle or abandons it after a stop request. It
-  is never thrown from a Sintra reader thread or stop callback directly
-  into user code.
+  the cancelled state of a handle, abandons it after a stop request, or
+  attempts to register a transported call after the leaf starts stopping.
+  That caller can itself be a handler running on a Sintra reader thread.
+  Cancellation notifications and stop callbacks only update or wake the
+  pending state; they do not inject an exception into user code. Invocation
+  or result retrieval reports the cancellation on its calling thread.
 
 ## Example source
 
 - [tests/rpc_async_lifecycle_test.cpp](../../tests/rpc_async_lifecycle_test.cpp)
 - [tests/finalize_async_rpc_lifecycle_test.cpp](../../tests/finalize_async_rpc_lifecycle_test.cpp)
+- [tests/coordinator_loss_rpc_test.cpp](../../tests/coordinator_loss_rpc_test.cpp)
 
 ## See also
 
