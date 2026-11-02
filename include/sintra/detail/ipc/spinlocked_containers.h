@@ -51,9 +51,10 @@ struct spinlocked
 
     struct scoped_access
     {
-        scoped_access(spinlock& sl, CT<Args...>& c)
+        scoped_access(spinlock& sl, CT<Args...>& c,
+            const spinlock_source_location& where = spinlock_source_location::current())
         :
-            m_lock(sl),
+            m_lock(sl, where),
             m_c(c)
         {}
 
@@ -77,9 +78,10 @@ struct spinlocked
 
     struct const_scoped_access
     {
-        const_scoped_access(spinlock& sl, const CT<Args...>& c)
+        const_scoped_access(spinlock& sl, const CT<Args...>& c,
+            const spinlock_source_location& where = spinlock_source_location::current())
         :
-            m_lock(sl),
+            m_lock(sl, where),
             m_c(c)
         {}
 
@@ -100,27 +102,56 @@ struct spinlocked
     };
 
     template <typename Fn>
-    decltype(auto) with_lock(Fn&& fn)
+    decltype(auto) with_lock(Fn&& fn,
+        const spinlock_source_location& where = spinlock_source_location::current())
     {
-        locker l(m_sl);
+        locker l(m_sl, where);
         return fn(m_c);
     }
 
-    void clear() noexcept                          {locker l(m_sl); m_c.clear();                  }
-    bool empty() const noexcept                    {locker l(m_sl); return m_c.empty();           }
-    auto pop_front()                               {locker l(m_sl); m_c.pop_front();              }
+    void clear(const spinlock_source_location& where = spinlock_source_location::current()) noexcept
+    {
+        locker l(m_sl, where);
+        m_c.clear();
+    }
 
+    bool empty(const spinlock_source_location& where = spinlock_source_location::current()) const noexcept
+    {
+        locker l(m_sl, where);
+        return m_c.empty();
+    }
+
+    auto pop_front(const spinlock_source_location& where = spinlock_source_location::current())
+    {
+        locker l(m_sl, where);
+        m_c.pop_front();
+    }
+
+    auto size(const spinlock_source_location& where = spinlock_source_location::current()) const noexcept
+    {
+        locker l(m_sl, where);
+        return m_c.size();
+    }
+
+    // Operators cannot take another argument; a trailing one after a variadic
+    // pack changes deduction. Preserve these interfaces and their wrapper sites.
     template <typename... FArgs>
     auto push_back(FArgs&&... v)                   {locker l(m_sl); m_c.push_back(std::forward<FArgs>(v)...);   }
-
-    auto size()  const noexcept                    {locker l(m_sl); return m_c.size();            }
 
     operator CT<Args...>() const                   {locker l(m_sl); return m_c;                   }
     spinlocked& operator=(const CT<Args...>& x)    {locker l(m_sl); m_c = x; return *this; }
     spinlocked& operator=(CT<Args...>&& x)         {locker l(m_sl); m_c = std::move(x); return *this; }
 
-    scoped_access scoped() noexcept                {return scoped_access(m_sl, m_c);              }
-    const_scoped_access scoped() const noexcept    {return const_scoped_access(m_sl, m_c);        }
+    scoped_access scoped(const spinlock_source_location& where = spinlock_source_location::current()) noexcept
+    {
+        return scoped_access(m_sl, m_c, where);
+    }
+
+    const_scoped_access scoped(
+        const spinlock_source_location& where = spinlock_source_location::current()) const noexcept
+    {
+        return const_scoped_access(m_sl, m_c, where);
+    }
 
 protected:
     CT<Args...>        m_c;
@@ -165,16 +196,18 @@ struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
     struct has_value_type<U, std::void_t<typename U::value_type>> : std::true_type
     {};
 
-    bool contains_key(const Key& key) const
+    bool contains_key(const Key& key,
+        const detail::spinlock_source_location& where = detail::spinlock_source_location::current()) const
     {
-        locker l(this->m_sl);
+        locker l(this->m_sl, where);
         return this->m_c.find(key) != this->m_c.end();
     }
 
     template <typename U = T, typename = std::enable_if_t<has_value_type<U>::value>>
-    bool copy_value(const Key& key, std::vector<typename U::value_type>& out) const
+    bool copy_value(const Key& key, std::vector<typename U::value_type>& out,
+        const detail::spinlock_source_location& where = detail::spinlock_source_location::current()) const
     {
-        locker l(this->m_sl);
+        locker l(this->m_sl, where);
         auto it = this->m_c.find(key);
         if (it == this->m_c.end()) {
             return false;
@@ -184,9 +217,10 @@ struct spinlocked_umap: detail::spinlocked<unordered_map, Key, T>
     }
 
     template <typename K, typename V>
-    void set_value(K&& key, V&& value)
+    void set_value(K&& key, V&& value,
+        const detail::spinlock_source_location& where = detail::spinlock_source_location::current())
     {
-        locker l(this->m_sl);
+        locker l(this->m_sl, where);
         this->m_c[std::forward<K>(key)] = std::forward<V>(value);
     }
 };

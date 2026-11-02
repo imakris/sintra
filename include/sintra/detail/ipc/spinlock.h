@@ -91,6 +91,17 @@ struct spinlock_cpu_sample
     uint64_t ns = 0;
 };
 
+// Named wrappers forward this optional caller location. The fallback keeps
+// ordinary call syntax available on toolchains without source_location.
+#if SINTRA_SPINLOCK_SOURCE_LOCATION
+using spinlock_source_location = std::source_location;
+#else
+struct spinlock_source_location
+{
+    static constexpr spinlock_source_location current() noexcept { return {}; }
+};
+#endif
+
 // Where a waiter acquires a lock. Diagnostics name it; the lock word does not.
 struct spinlock_site
 {
@@ -310,17 +321,18 @@ struct alignas(16) spinlock
 {
     struct locker
     {
+        locker(spinlock& sl,
+            const detail::spinlock_source_location& where = detail::spinlock_source_location::current())
+        :
+            m_sl(sl), m_pid(uint32_t(get_current_pid()))
+        {
 #if SINTRA_SPINLOCK_SOURCE_LOCATION
-        locker(spinlock& sl, const std::source_location& where = std::source_location::current())
-        :
-            m_sl(sl), m_pid(uint32_t(get_current_pid()))
-        { m_sl.lock(detail::spinlock_site{where.file_name(), uint32_t(where.line())}); }
+            m_sl.lock(detail::spinlock_site{where.file_name(), uint32_t(where.line())});
 #else
-        locker(spinlock& sl)
-        :
-            m_sl(sl), m_pid(uint32_t(get_current_pid()))
-        { m_sl.lock(); }
+            (void)where;
+            m_sl.lock();
 #endif
+        }
         ~locker() noexcept
         {
             if (m_pid == uint32_t(get_current_pid())) {
