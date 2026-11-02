@@ -115,6 +115,8 @@ foreach(FULL_TEST_PATH IN LISTS TEST_FILES)
     if(TEST_NAME STREQUAL "lifecycle_header_only_test" OR
        TEST_NAME STREQUAL "fixed_rpc_registration_header_only_test" OR
        TEST_NAME STREQUAL "receive_owned_header_only_test" OR
+       TEST_NAME STREQUAL "spinlocked_caller_site_test" OR
+       TEST_NAME STREQUAL "spinlocked_caller_site_no_source_location_test" OR
        TEST_NAME STREQUAL "lifeline_ownership_test" OR
        TEST_NAME STREQUAL "copying_mark_no_eviction_test")
         target_link_libraries(${TARGET_NAME} PRIVATE sintra sintra_test_config)

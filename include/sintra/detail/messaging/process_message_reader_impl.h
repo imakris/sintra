@@ -451,7 +451,19 @@ void Process_message_reader::unblock_rpc_once()
             detail::test_hooks::k_process_reader_rpc_unblock_claimed,
             m_process_instance_id,
             m_occurrence);
-        s_mproc->unblock_rpc(m_process_instance_id);
+        if (!s_coord && m_process_instance_id == process_of(s_coord_id)) {
+            // A leaf receives every transported reply through its coordinator,
+            // including replies from peers and strict same-process calls. After
+            // this route stops, pending calls cannot rely on reply delivery.
+            // Publish the terminal state before the outstanding-set scan so a
+            // caller registering after that scan cannot escape cancellation.
+            s_mproc->m_must_stop.store(true, std::memory_order_release);
+            s_mproc->unblock_rpc();
+        }
+        else {
+            // A coordinator retiring one leaf must preserve every other route.
+            s_mproc->unblock_rpc(m_process_instance_id);
+        }
         detail::process_reader_rpc_unblock_for_test(
             detail::test_hooks::k_process_reader_rpc_unblock_complete,
             m_process_instance_id,
@@ -490,16 +502,13 @@ void Process_message_reader::stop_nowait()
         m_in_rep_c->request_stop();
     }
     else {
-        // The purpose of the lambda below is the following scenario:
-        // 1. This function is called from a handler, thus from within the request
-        //    reading function.
-        // 2. The very same handler also calls some RPC, whose reply is sent through
-        //    the reply ring, in the corresponding thread.
-        // If we force the reply ring to exit, there will be no ring to get the
-        // reply from, leading to a deadlock. Thus if the function is determined
-        // to be called from within the request reading thread, forcing the reply
-        // reading thread to exit will happen only after the request reading loop
-        // exits.
+        // Keep reply-reader shutdown ordered after the current request handler.
+        // A coordinator can retire one reader while other RPC routes remain
+        // live; those replies must still be processed during that handler.
+        // This deferral does not reopen a leaf's stopped coordinator route:
+        // its pending transported calls were cancelled above, and new ones
+        // reject before registering. The owning reader still releases its own
+        // session after the handler returns.
 
         auto rep_ring = m_in_rep_c;
         if (!tl_post_handler_function_ready()) {

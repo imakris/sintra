@@ -68,7 +68,9 @@ to take a direct in-process shortcut and whether a reply is produced.
   process is gone.
 - [`sintra::rpc_cancelled`](rpc_cancelled.md) - when the wait is
   unblocked by coordinator loss or shutdown drain logic before a reply
-  arrives.
+  arrives. A leaf also throws this at invocation once its communication starts
+  stopping and a transported call can no longer rely on a reply; the async
+  wrapper can therefore throw before returning a handle.
 - The remote-side exception (any of the recognised `std::` types) when
   the exported function throws.
 
@@ -100,7 +102,10 @@ to take a direct in-process shortcut and whether a reply is produced.
   `rpc_<method>` invocations whose target resolves to the same process.
 - `SINTRA_RPC_STRICT` always sends the request over the transport, even
   when the target is local. Use this when local async behaviour must
-  match the remote async behaviour.
+  match the remote async behaviour. In a leaf this route still depends on
+  the coordinator, so a strict local call is rejected after that transport
+  stops. A non-strict blocking call to an already-resolved local target can
+  still use its direct shortcut while the target remains live.
 - `SINTRA_UNICAST` requires a `void` return type. No reply is generated;
   calling its generated `rpc_async_<method>` wrapper is rejected at
   compile time. Exceptions thrown by the handler are not visible to the
@@ -119,6 +124,13 @@ to take a direct in-process shortcut and whether a reply is produced.
   handlers observe the calling object's lifetime; an instance that is
   being destroyed refuses new RPCs and replies with an unavailability
   exception to in-flight callers.
+- Stopping a leaf's coordinator reader cancels all pending transported
+  calls in that leaf, including peer-targeted calls. An already-completed
+  reply keeps its result. Retiring an ordinary leaf reader in the
+  coordinator cancels only calls targeting that leaf. This describes the
+  existing reader-stop/departure paths; it does not add a detector for an
+  abrupt coordinator death when no stop notification or lifeline reaches
+  the leaf.
 - A `SINTRA_UNICAST` send completes locally as soon as the message has
   been written to the request ring; there is no reply or cross-process
   synchronisation.
@@ -129,6 +141,7 @@ to take a direct in-process shortcut and whether a reply is produced.
 - [example/sintra/sintra_example_6_unicast_send_to.cpp](../../example/sintra/sintra_example_6_unicast_send_to.cpp)
 - [tests/rpc_bounded_result_test.cpp](../../tests/rpc_bounded_result_test.cpp)
 - [tests/rpc_async_lifecycle_test.cpp](../../tests/rpc_async_lifecycle_test.cpp)
+- [tests/coordinator_loss_rpc_test.cpp](../../tests/coordinator_loss_rpc_test.cpp)
 
 ## See also
 
