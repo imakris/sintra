@@ -1545,6 +1545,12 @@ template <
 typename RPCTC::r_type
 Transceiver::rpc_impl(instance_id_type instance_id, Args... args)
 {
+    if (!s_mproc) {
+        throw runtime_error(
+            "Attempted to make an RPC call after teardown "
+            "or before sintra::init().");
+    }
+
     if constexpr (RPCTC::may_be_called_directly) {
         if (is_local_instance(instance_id)) {
             // Local target shortcut: skip the request-ring round trip and call

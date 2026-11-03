@@ -14,13 +14,46 @@ struct Finalize_bus : sintra::Derived_transceiver<Finalize_bus>
         return 42;
     }
 
+    void unicast_value(int value)
+    {
+        received_value = value;
+    }
+
     SINTRA_RPC(rpc_noop)
+    SINTRA_UNICAST(unicast_value)
+
+    int received_value = 0;
 };
+
+bool unicast_throws_without_runtime(sintra::instance_id_type target, const char* phase)
+{
+    try {
+        Finalize_bus::rpc_unicast_value(target, 7);
+    }
+    catch (const std::runtime_error&) {
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::fprintf(stderr, "Unicast threw unexpected exception %s: %s\n", phase, e.what());
+        return false;
+    }
+    catch (...) {
+        std::fprintf(stderr, "Unicast threw non-std exception %s.\n", phase);
+        return false;
+    }
+
+    std::fprintf(stderr, "Unicast did not throw %s.\n", phase);
+    return false;
+}
 
 } // namespace
 
 int main(int argc, char* argv[])
 {
+    if (!unicast_throws_without_runtime(sintra::invalid_instance_id, "before init")) {
+        return 1;
+    }
+
     try {
         sintra::init(argc, const_cast<const char* const*>(argv));
     }
@@ -34,7 +67,17 @@ int main(int argc, char* argv[])
         std::fprintf(stderr, "Failed to assign transceiver name.\n");
         return 1;
     }
+    const auto target = bus.instance_id();
+    Finalize_bus::rpc_unicast_value(target, 73);
+    if (bus.received_value != 73) {
+        std::fprintf(stderr, "Unicast did not reach the live local target.\n");
+        return 1;
+    }
     sintra::detail::finalize();
+
+    if (!unicast_throws_without_runtime(target, "after finalize")) {
+        return 1;
+    }
 
     try {
         bus.emit_remote<Finalize_bus::ping>(1);
