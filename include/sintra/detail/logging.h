@@ -124,7 +124,7 @@ public:
         if (!m_postfix.empty()) {
             m_stream << m_postfix;
         }
-        const auto text = m_stream.str();
+        const auto text = std::move(m_stream).str();
         if (!text.empty()) {
             log_raw(m_level, text.c_str());
         }

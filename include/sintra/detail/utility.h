@@ -14,6 +14,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -475,25 +476,28 @@ inline StringT env_key_of(const StringT& entry)
     return entry.substr(0, pos);
 }
 
-inline bool env_key_equal(const std::string& lhs, const std::string& rhs)
+inline bool env_key_equal(std::string_view lhs, std::string_view rhs)
 {
     return lhs == rhs;
 }
 
 #ifdef _WIN32
-inline int compare_env_keys(const std::wstring& lhs, const std::wstring& rhs)
+inline int compare_env_keys(std::wstring_view lhs, std::wstring_view rhs)
 {
-    const auto lhs_key = env_key_of(lhs);
-    const auto rhs_key = env_key_of(rhs);
+    auto lhs_key = env_key_of(lhs);
+    auto rhs_key = env_key_of(rhs);
+    // Retain the terminating-NUL semantics of the original native comparison.
+    lhs_key = lhs_key.substr(0, lhs_key.find(L'\0'));
+    rhs_key = rhs_key.substr(0, rhs_key.find(L'\0'));
     return CompareStringOrdinal(
-        lhs_key.c_str(),
-        -1,
-        rhs_key.c_str(),
-        -1,
+        lhs_key.empty() ? L"" : lhs_key.data(),
+        lhs_key.empty() ? -1 : static_cast<int>(lhs_key.size()),
+        rhs_key.empty() ? L"" : rhs_key.data(),
+        rhs_key.empty() ? -1 : static_cast<int>(rhs_key.size()),
         TRUE);
 }
 
-inline bool env_key_equal(const std::wstring& lhs, const std::wstring& rhs)
+inline bool env_key_equal(std::wstring_view lhs, std::wstring_view rhs)
 {
     return compare_env_keys(lhs, rhs) == CSTR_EQUAL;
 }
@@ -504,14 +508,15 @@ inline void merge_env_overrides(
     std::vector<StringT>&          env,
     const std::vector<StringT>&    overrides)
 {
+    using Entry_view = std::basic_string_view<typename StringT::value_type>;
     for (const auto& override_entry : overrides) {
-        const auto override_key = env_key_of(override_entry);
+        const auto override_key = env_key_of(Entry_view(override_entry));
         env.erase(
             std::remove_if(
                 env.begin(),
                 env.end(),
                 [&](const StringT& entry) {
-                    return env_key_equal(env_key_of(entry), override_key);
+                    return env_key_equal(env_key_of(Entry_view(entry)), override_key);
                 }),
             env.end());
         env.push_back(override_entry);
@@ -520,26 +525,23 @@ inline void merge_env_overrides(
 
 #ifdef _WIN32
 
-inline std::wstring to_wide_utf8(const std::string& value)
-{
-    if (value.empty()) {
-        return {};
-    }
-    const int len = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
-    if (len <= 0) {
-        return {};
-    }
-    std::wstring wide(static_cast<size_t>(len - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, &wide[0], len);
-    return wide;
-}
-
 inline std::wstring to_wide_utf8(const char* value)
 {
     if (!value || !*value) {
         return {};
     }
-    return to_wide_utf8(std::string(value));
+    const int len = MultiByteToWideChar(CP_UTF8, 0, value, -1, nullptr, 0);
+    if (len <= 0) {
+        return {};
+    }
+    std::wstring wide(static_cast<size_t>(len - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value, -1, &wide[0], len);
+    return wide;
+}
+
+inline std::wstring to_wide_utf8(const std::string& value)
+{
+    return to_wide_utf8(value.c_str());
 }
 
 inline std::vector<wchar_t> build_environment_block(const std::vector<std::string>& overrides)
@@ -759,9 +761,6 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
         return false;
     }
 
-    std::vector<wchar_t> cmdline_buf(cmdline_str.begin(), cmdline_str.end());
-    cmdline_buf.push_back(L'\0'); // Null-terminate
-
     constexpr unsigned k_max_attempts = 5;
     const auto         retry_delay    = std::chrono::milliseconds(50);
 
@@ -928,7 +927,7 @@ bool spawn_detached_win32(const Spawn_detached_options& options)
 
         BOOL success = CreateProcessW(
             full_path_w.c_str(),        // Application name - explicit resolved path (more secure)
-            cmdline_buf.data(),         // Command line (mutable, includes program name at [0])
+            cmdline_str.data(),         // Command line (mutable, includes program name at [0])
             nullptr,                    // Process security attributes
             nullptr,                    // Thread security attributes
             TRUE,                       // Inherit handles (for stdout/stderr)

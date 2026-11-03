@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <exception>
 #include <sstream>
+#include <utility>
 
 namespace sintra {
 
@@ -28,7 +29,7 @@ public:
         // construction and string materialization can themselves throw
         // (e.g., std::bad_alloc).
         try {
-            Coordinator::rpc_print(s_coord_id, m_stream.str());
+            Coordinator::rpc_print(s_coord_id, std::move(m_stream).str());
         }
         catch (const std::exception& e) {
             try {
