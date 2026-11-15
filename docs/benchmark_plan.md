@@ -1,0 +1,725 @@
+# Sintra benchmark plan: first iteration
+
+**Status:** design adopted after independent review. Phase 1 (harness, runner, broadcast port) is
+implemented, with acceptance item 4 still pending (section 11); phases 2 and 3 are not. Facts were
+verified at commit `3666206f`. No library change.
+
+As `AGENTS.md` requires, three things are kept apart:
+- owner requirements and recorded decisions (section 1);
+- facts verified in the code (section 2);
+- the adopted design (sections 3 to 13), this plan's own work rather than owner requirements.
+  Section 14 lists choices implemented with the stated default that remain the owner's to change.
+
+## 1. Owner requirements, agreed scope and recorded decisions
+
+### 1.1 Owner requirements
+- Sintra has many tests that assert correctness but no proper benchmark. The owner uses the tests
+  as an unreliable, rough benchmark.
+- First establish which characteristics of the library make sense to test, then a concrete set of
+  benchmarks.
+- Measure latency, throughput and scalability, not latency alone.
+- It runs on a dedicated Linux host: "system specs are not so important. we will have some
+  reference system."
+- "leave futex tests... only system independent stuff."
+  - Working reading (an interpretation, not the owner's words): no scenario, metric or code path
+    depends on futexes, syscall tracing, hardware or kernel counters, or another OS-specific API.
+    Only wall-clock timestamps, counts, and process CPU seconds (as the existing broadcast tool
+    reports them) are used.
+  - This plan applies that reading to what is measured: the executables' only OS-specific
+    measurement code is the CPU-time mapping. Registering a process ID for cleanup and the
+    runner's per-OS cleanup (open decision 5) are operational, not measurement.
+- "both cpu seconds and latencies are important", "please don't overcomplicate it", "first
+  attempt", "starting point". The first iteration finds hotspots to a basic degree and serves as
+  a regression reference; it is not final.
+- The settled principles of `docs/design_principles.md` apply: the rings and the star topology
+  stay; the coordinator is trusted infrastructure; exactly one complete-frame copy comes out of
+  the ring; only what was lost may fail.
+
+### 1.2 Agreed scope (lean first iteration; not to be widened)
+- **Reported by every run:**
+  - latency: p50 and p99, plus p99.9 and the maximum where the sample count supports them, with
+    the sample count always shown;
+  - throughput: publication and aggregate delivery rates in messages/s and MB/s, with
+    application and framed bytes kept separate;
+  - process CPU seconds per role, and CPU µs per message;
+  - loss and eviction counts: sequence gaps are primary, the log text corroborates;
+  - build and host facts.
+- **Workloads:** broadcast; request/response RTT (sync RPC on two routes at four gaps, plus one
+  windowed async case for request throughput); swarm formation and shutdown.
+- **Modes:** windowed; open-loop (three fixed offered rates); closed-loop (sync RPC).
+- **Comparisons:** paired A/B runs with alternating order (5 pairs), plus an A/A run per workload
+  as the noise floor.
+- **Phases:** (1) harness, schema, paired runner, broadcast port, A/A; (2) request/response;
+  (3) swarm formation.
+
+### 1.3 Decisions recorded for this plan (the owner can change them)
+- **Plan location:** `docs/benchmark_plan.md`.
+- **Results:** JSONL kept outside git history. Runs happen on demand on the reference host, never
+  on shared CI runners.
+- **Validation builds** on the development machine check function, not numbers. This host
+  inventory was given to the plan and was not verified from the repository:
+  - Linux: WSL `Ubuntu-24.04` (GCC 13.3, Clang 18.1, CMake 3.31, Ninja, 16 cores), built through
+    `queued-build`;
+  - Windows: Visual Studio 2026 / MSVC v145 / FASTBuild, from a short path under `C:\w`.
+- **Reference host:** the owner's; the only OS-specific measurement code is the CPU-time mapping.
+- **Swarm sizes:** this plan chooses them and the oversubscribed N (section 5.3); the owner can
+  tune them.
+- **Default broadcast grid:** R ∈ {1, 4, 16} for windowed and open-loop cells. R = 2 and 8 stay
+  defined in the workloads file and run only when selected.
+
+## 2. Verified facts (commit `3666206f`)
+
+Paths without a top-level directory are under `include/sintra/detail/`.
+
+### 2.1 The existing benchmark (`benchmarks/`)
+
+All `benchmarks/` citations in this document refer to those files as they were at commit
+`3666206f`, before Phase 1 replaced them.
+
+**Build**
+- `benchmarks/` holds `CMakeLists.txt`, `README.md`, `broadcast_benchmark.cpp` and
+  `run_broadcast_benchmark.py`. `SINTRA_BUILD_BENCHMARKS` adds it (`CMakeLists.txt:152-156`).
+- The target links only the interface target `sintra` and `sintra_dev_flags`
+  (`benchmarks/CMakeLists.txt:1-2`; `CMakeLists.txt:67`). It does not enable test hooks, and it is
+  header-only while `SINTRA_SEPARATE_COMPILATION` is undefined (`include/sintra/sintra.h:110-112`).
+- Test hooks are defined by `sintra_test_core` (`CMakeLists.txt:204-209`) and `sintra_test_config`
+  (`tests/CMakeLists.txt:1-7`). Hook guards test the macro's presence (`ipc/rings.h:3275`), so an
+  external definition, even `=0`, enables them.
+- A top-level configure with neither a build type nor configuration types defaults to Debug.
+  Multi-configuration generators get Debug and Release (`CMakeLists.txt:55-64`).
+
+**Publishing and fences**
+- Only the coordinator publishes, with `world() << message`
+  (`benchmarks/broadcast_benchmark.cpp:148-156`, `:272-274`).
+- Leaves receive in a slot that takes `const std::string&` (`:107`).
+- By default a processing fence closes each burst of `max(1, (message_ring_size/4)/(bytes+512))`
+  messages and a final fence closes the run; `--burst` overrides the size, and `--burst 0` runs
+  unpaced (`:176-182`, `:257-259`, `:89`, `:160`; `benchmarks/README.md:26`).
+- Every process in `_sintra_all_processes` calls each named fence the same number of times:
+  ready, one per warm-up burst, warm, one per measured burst, complete, results (`:82-96`,
+  `:131-135`, `:144`, `:157-185`).
+
+**Validation and eviction count**
+- A wrong-size message is counted as an error and dropped (`:110-113`); warm-up messages return
+  before the sequence check (`:116-118`). Measured messages are checked with
+  `sequence != received || message.back() != 'x'` (`:122`), so after one loss every later
+  message counts as an error, and gaps are not counted.
+- Evictions are counted from log text containing "evict" (`:63-67`). The publisher resets its
+  count after warm-up (`:165`); receivers never do (`:138-139`).
+- `complete` ignores evictions (`:217-218`).
+
+**Timestamps, CPU and throughput**
+- The clock is `steady_clock` (`:22`). The payload string is built and filled once (`:150`); the
+  send stamp precedes writing the sequence and timestamp fields and serialization (`:152-155`).
+  The receive stamp follows the `std::string` argument (`:107`, `:125`).
+- All receivers' latencies are pooled (`:212-215`); the percentile index is `floor(q*(n-1))`
+  (`:73-80`).
+- CPU is user plus system time, from `getrusage(RUSAGE_SELF)` or `GetProcessTimes` (`:42-61`).
+  Writer CPU is the coordinator process over the measured interval (`:170`, `:184`).
+- Reader CPU spans the first to the last measured handler only on complete reception: `last_cpu`
+  is set only at `received == messages` (`:119-129`). After a loss, the span can be negative
+  (`:138`).
+- Throughput counts aggregate deliveries (`:228`).
+- Windows CPU values may be zero, or advance in 15.625 ms steps (`benchmarks/README.md:42-44`).
+
+**Runner**
+
+| `run_broadcast_benchmark.py` setting | Value | Lines |
+|---|---|---|
+| Pairs; receivers; timeout | 3; 1/2/4/8/16; 30 s | `:68-70` |
+| Payload/messages | 64/1,000,000; 4096/100,000; 261632/4096 | `:72` |
+| Warm-up; order | `max(64, n/20)`; alternating | `:32`, `:79` |
+| Comparable pair | both samples complete with exit 0 | `:85-86` |
+| Host CPU | Windows-only, via `GetSystemTimes` | `:16-27`, `:57-59` |
+| Timeout kill | Windows `taskkill /T` (process tree); POSIX `killpg` (one process group) | `:43-47` |
+| Summary | median delivered/s | `:93-101` |
+
+**Related helpers.** `Shared_directory` reuses a path from its environment variable and never
+deletes it (`tests/test_utils.h:149-156`, `:181-184`). `sintra_ring_wait_hint_test --benchmark`
+measures raw-ring readers within one process (`tests/ring_wait_hint_test.cpp:487-493`;
+`TESTING.md:180-201`); it is outside this plan.
+
+### 2.2 Library behaviour the plan depends on
+
+**Topology**
+- Every process reads the coordinator's rings (`process/managed_process_impl.h:3545-3554`); the
+  coordinator adds one reader per peer (`:7036-7041`, from `:6150-6152` and
+  `process/coordinator_impl.h:623`). Each reader runs a request and a reply thread
+  (`messaging/process_message_reader_impl.h:378-400`).
+- The coordinator relays into its own rings: leaf events (`:865-868`), requests to other
+  processes (`:875-880`), requests to its own service instances (`:744-753`), and replies
+  (`:1093-1096`).
+- The coordinator's reader for the caller's ring dispatches a request to an ordinary transceiver
+  hosted in the coordinator directly, without a relay (`:722-833`).
+- So leaf-origin broadcast and leaf-to-leaf RPC pass through the relay, while coordinator-origin
+  broadcast and leaf-to-coordinator RPC to a user transceiver do not.
+
+**Reader waits**
+- An ADAPTIVE wait spins for 50 µs (`config.h:45`; `ipc/rings.h:3376-3381`), then sleeps in 1 ms
+  cycles for up to 1 s (`config.h:49-53`; `:3386-3400`), then parks on a semaphore, nominally
+  1.00005 s after the wait began (`:3405-3533`), re-checking on a 1 s watchdog (`:3273`,
+  `:3523-3531`). A BLOCKING wait parks at once (`:3345`, `:3373`).
+- Managed readers start in BLOCKING (`messaging/process_message_reader_impl.h:694`, `:994`).
+- After relevant traffic, a managed reader stores ADAPTIVE for the next wait (`:718-720`, `:728`,
+  `:743`, `:844`, `:1034-1036`). For the coordinator, every message that passes validation
+  (`:712-715`, `:1029-1032`) is relevant.
+- Each wait uses the stored hint. Catching up stores BLOCKING for the following wait
+  (`messaging/message.h:961-967`).
+- The 1 ms sleep on Linux is `std::this_thread::sleep_for` (`time_utils.h:260-268`).
+
+**Frames and the writer**
+- The ring is 2 MiB (`messaging/message.h:40`); a frame is aligned to at least 16 bytes and must
+  be strictly smaller than ring/8 = 262144 bytes (`:145-148`, `:183`).
+- The frame size is `Message_prefix::bytes_to_next_message` (`:435`). The dispatched frame is
+  `sintra::s_tl_current_message` (`messaging/process_message_reader.h:137`, set at
+  `messaging/process_message_reader_impl.h:708`).
+- One thread at a time writes a ring (`ipc/rings.h:4559-4578`, `:4608`); each commit flushes the
+  wakeups of parked readers under the ring spinlock (`:4171-4186`).
+
+**Eviction**
+- Eviction is on by default (`ipc/rings.h:161-164`) and considered only while the writer is
+  blocked entering an octile that a reader still guards (`:4226-4247`, `:4423`).
+- The writer runs a reclamation pass when the configurable budget (default 5000 µs) expires
+  (`:166-173`, `:4409`, `:4519-4527`; a zero budget scans at once, `:4515-4517`), or after a spin
+  count when `SINTRA_EVICTION_SPIN_THRESHOLD` is defined and positive (`:4404-4406`).
+- A reader is eligible if it is active and guarded, and either guards the new octile or lags the
+  writer's pending sequence by more than `SINTRA_EVICTION_LAG_RINGS` rings, default 1
+  (`:175-177`, `:4297-4310`).
+- A reader that is copying, or has a pending guard, is not evicted in that pass (`:4366-4378`).
+  Each eviction is counted in the ring control block (`:4382`).
+- The evicted reader resynchronises at the published head (`:3725-3750`). Its process then logs a
+  warning containing "reader evicted on" through the log callback (`messaging/message.h:1087-1099`;
+  `logging.h:87-99`).
+- Overload loss is by design (`docs/architecture.md:89-99`).
+
+**Launch budget**
+- Process indexes have 8 bits (`config.h:32`), so the maximum index is 127 (`id_types.h:164`).
+- A new coordinator resets the counter and takes index 2
+  (`process/managed_process_impl.h:3430-3431`).
+- Each automatic allocation takes the next index and throws above 127 (`id_types.h:267`,
+  `:277-279`). Allocations come from branches (`process/managed_process_impl.h:6528`), spawned or
+  invited processes without an explicit ID (`runtime.h:1258-1261`, `:1377-1379`), and joins
+  (`process/coordinator_impl.h:2054`).
+- Recovery reuses an identity (`process/managed_process_impl.h:6133-6135`). So a coordinator can
+  allocate 125 fresh indexes automatically, however many processes are alive at once.
+
+**Lifecycle, RPC, ring files and clock**
+- The coordinator's `init` spawns every branch and returns after a startup barrier of all
+  processes (`process/managed_process_impl.h:6517-6580`, `:6613-6614`). In a branch, `init` runs
+  the entry function before returning (`runtime.h:672-675`; `process/managed_process_impl.h:6690`).
+- `shutdown()` runs a processing fence, the coordinator hook, a drain wait for peers, then teardown
+  (`docs/reference/shutdown.md:53-58`). On POSIX, `init` calls `setsid()` (`runtime.h:638-644`).
+- `SINTRA_RPC_STRICT` always uses the transport (`docs/reference/rpc.md:101-108`). For a
+  same-process target, a non-strict blocking call takes a direct shortcut
+  (`transceiver_impl.h:1554-1568`) and a non-strict async call throws (`:1417-1423`).
+- A `Resolvable_instance_id` built from a name asks the coordinator on every construction
+  (`resolvable_instance.h:20-23`; `resolvable_instance_impl.h:13-16`). The phrase "on first use"
+  in `docs/reference/rpc.md:40-41` is imprecise.
+- Ring files live in a private directory under `std::filesystem::temp_directory_path()`
+  (`process/managed_process_impl.h:6832`; `ipc/private_resources.h:322-328`).
+- On Linux, the library's cross-process timeline uses `CLOCK_MONOTONIC` (`time_utils.h:6-9`,
+  `:66-71`), and a swarm shares one time namespace (`docs/design_principles.md:88-89`).
+
+**Processing fence after a leaf's sends** (leaf-origin pacing relies on this)
+1. A processing fence is a rendezvous, a local delivery fence, then a second rendezvous
+   (`barrier.h:85-123`, `:153-171`, `:189-198`).
+2. The delivery fence captures each reader's leading sequences after the rendezvous. It waits
+   until the reader's published progress reaches them
+   (`process/managed_process_impl.h:7265-7350`, `:7362-7382`).
+3. Progress is published after the handlers and the post-handler run
+   (`messaging/process_message_reader_impl.h:858-862`, `:883-890`).
+4. A leaf writes its events and its barrier request to its own request ring, in call order
+   (`transceiver_impl.h:741-757`, `:787`, `:1517`, `:1581-1584`).
+5. The barrier targets a `Process_group` service instance (`process/coordinator.h:51-55`).
+6. The coordinator's reader for the leaf relays the barrier request into the coordinator's ring
+   (`messaging/process_message_reader_impl.h:744-753`). It does so after relaying the leaf's
+   earlier events from the same ring (`:865-868`).
+7. `relay()` publishes before it returns (`messaging/message.h:1129-1139`).
+
+So the sender's arrival is processed only after its earlier events are in the coordinator's ring,
+and every receiver captures its fence target after that point. A receiver that has not been
+evicted therefore runs its handlers for those copies before the second rendezvous completes. This
+matches `docs/reference/barrier_modes.md:49-53` and `docs/barriers_and_shutdown.md:24-26`.
+
+**After an eviction**
+- The reader resumes at the head (`messaging/message.h:1087-1099`); its eviction handler only
+  clears the name cache (`messaging/process_message_reader_impl.h:335-339`).
+- A fence wait ends when published progress reaches the target, the progress record is gone, the
+  stream has stopped, or communication is no longer running
+  (`process/managed_process_impl.h:7306-7350`). Progress is published after a fetched frame's
+  handlers run (`messaging/process_message_reader_impl.h:883-890`).
+- So a live reader with an unsatisfied target can stall when recovery produces no later progress
+  publication.
+
+## 3. What to measure (adopted design)
+
+| Characteristic | Why it costs (section 2) | Where measured |
+|---|---|---|
+| Fan-out | Every receiver reads the coordinator ring and copies each frame | W1, receivers (R) axis |
+| Frame size | Frame copy out of the ring, string materialization, relay copy | W1, payload axis |
+| Coordinator relay | The coordinator reads every ring and relays | W1 leaf vs coordinator origin; W2 routes |
+| Wake-up | ADAPTIVE and BLOCKING reader waits | W2, gap axis |
+| Request path capacity | One request-reader thread per hop | W2, windowed async |
+| Writer backpressure | The writer waits for readers, may evict, and wakes parked readers | W1 send-call time, lateness, loss |
+| Lifecycle | Spawning, per-peer readers, startup barrier, shutdown protocol | W3, N axis |
+
+## 4. Harness and executables (adopted design)
+
+### 4.1 Files
+
+The plan extends `benchmarks/` and keeps `SINTRA_BUILD_BENCHMARKS`. Outside `benchmarks/`, it
+changes only the option's description at `CMakeLists.txt:152`.
+
+| File | Content |
+|---|---|
+| `benchmarks/harness.h` | `steady_clock` ns (as now); `cpu_seconds()` moved unchanged, the only OS-specific measurement code (registering the process ID for cleanup through the library's `sintra::get_current_pid()`, `ipc/platform_defs.h:103`, is operational; no test header is included); build facts; per-process result files; aggregation; JSON output |
+| `benchmarks/broadcast_benchmark.cpp` | W1, target `sintra_broadcast_benchmark`, rewritten on the harness |
+| `benchmarks/rpc_benchmark.cpp` | W2, target `sintra_rpc_benchmark` (phase 2) |
+| `benchmarks/swarm_benchmark.cpp` | W3, target `sintra_swarm_benchmark` (phase 3) |
+| `benchmarks/workloads.json` | Cells, windowed counts, stored open-loop rates, per-cell calibration metadata |
+| `benchmarks/run_benchmarks.py` | Paired runner; replaces `run_broadcast_benchmark.py`, which is deleted |
+| `benchmarks/CMakeLists.txt` | The three targets, linked as now, plus `SINTRA_BENCHMARK_CONFIG="$<CONFIG>"` |
+| `benchmarks/README.md` | Rewritten as the usage guide |
+
+The committed `benchmarks/workloads.json` carries no open-loop rates until calibration has run on
+the reference host. Until then, the windowed counts are the existing ones (section 2.1).
+
+### 4.2 Executable modes
+- **`<exe> <cell options> --run-id <id>`** runs one sample as a swarm. Processes keep raw data in
+  memory and do no aggregation while measuring. Each writes `<role>-<branch index>.bin` (a
+  versioned fixed header plus fixed-size sample records, read only by the same executable) into
+  the run directory named by `SINTRA_BENCHMARK_DIR`. W1 and W2 write it right after the last
+  rendezvous of section 4.4, before `shutdown()`, whose opening processing fence
+  (`docs/reference/shutdown.md:53-58`) can stall on an evicted receiver (section 2.2) and would
+  otherwise lose the counts. W3 writes it after `shutdown()` returns, because W3 measures shutdown.
+- **`<exe> --aggregate <dir>`** checks the run ID and the expected roles, computes every metric
+  and prints one JSON object, exiting 0 whenever it can produce a record, valid or not.
+  **`<exe> --build-facts`** prints the build facts.
+
+### 4.3 Build facts
+
+Compiled in: the configuration (`SINTRA_BENCHMARK_CONFIG`); `NDEBUG`; optimization
+(`__OPTIMIZE__`, or on MSVC Release without `_DEBUG`, a proxy rather than proof:
+`CMakeLists.txt:118-138`); the compiler (`__VERSION__` or `_MSC_FULL_VER`);
+`SINTRA_ENABLE_TEST_HOOKS`, `SINTRA_SEPARATE_COMPILATION`, `SINTRA_ENABLE_SLOW_READER_EVICTION`,
+`SINTRA_EVICTION_LAG_RINGS`, and `SINTRA_EVICTION_SPIN_BUDGET_US` (or
+`SINTRA_EVICTION_SPIN_THRESHOLD` when defined and positive); `message_ring_size` and
+`k_sintra_ring_abi_version`. Read at run time: `temp_directory_path()` and
+`hardware_concurrency()`. A build is valid only if it is Release, `NDEBUG` is defined,
+optimization is on (or the MSVC proxy holds) and test hooks are off.
+
+### 4.4 Measurement boundaries and CPU per role (W1 and W2)
+
+- **Begin.** After the warm-up fence `benchmark-warm` returns, every process resets its counters
+  (including the eviction-log count) and takes its begin snapshot (clock and CPU), then calls the
+  rendezvous `benchmark-begin`. The sender starts measured publication or calls only after it
+  returns; its throughput interval starts there.
+- **End.** After the mode's end barrier returns (windowed: the final fence `benchmark-complete`;
+  open-loop: the rendezvous `benchmark-drained`; closed-loop: the rendezvous after the last call),
+  every process deactivates its receive slot, takes its end snapshot, then calls `benchmark-end`.
+  Deactivation waits for a running handler, so reception ends at the end snapshot; the counters
+  belong to the handler thread (no per-message lock) and are read only after it. No process writes
+  result files, tears down or shuts down before `benchmark-end` returns.
+- **Coverage.** Every CPU interval, the sender's included, contains the begin rendezvous, because
+  the snapshot precedes it; non-senders' intervals also contain their waiting for measured
+  traffic. The value covers every thread, including Sintra's readers while they spin, poll, or
+  enter and leave waits; parked time is not CPU.
+- **Roles.** A process with two roles (the coordinator as sender or callee) is reported once,
+  under a combined role name. CPU is never split by thread. These boundaries replace the
+  existing first-to-last-handler span for receivers.
+
+## 5. Workloads and parameter grids (adopted design)
+
+**Modes.** Every record carries one mode label: `windowed`, `open_loop`, `closed_loop` or
+`lifecycle` (W3). Open-loop applies to W1 only.
+
+**Open-loop schedule**
+- The measured messages are all i with `i/rate < 3 s`, intended at `t0 + i/rate`, where `t0` is
+  10 ms after the sender's begin rendezvous returns. The 3 s is the offered schedule; completion
+  may take longer.
+- The generator sleeps (`sleep_until`) until 100 µs before each arrival, then polls the clock. It
+  never skips a message: a late generator sends at once, so backlog shows up as lateness and as
+  latency from the intended arrival.
+
+**Open-loop rates**
+- Each cell stores three absolute rates: 0.1X, 0.5X and 0.8X, rounded to two significant digits.
+- X is the cell's median windowed **publication** rate over three baseline calibration runs on
+  the reference host: messages the sender published per second over its measured interval, never
+  the aggregate delivery rate. Both arms of a pair use the stored rates.
+
+**Windowed counts.** Calibration scales each count so the measured interval is about 3 s. That
+does not by itself make Windows CPU values usable (section 12).
+
+### 5.1 W1: Broadcast (18 windowed + 54 open-loop cells by default; 30 + 90 defined)
+
+**Grid**
+- Origin `coordinator`: the coordinator publishes to R receiver leaves.
+- Origin `leaf`: branch 1 publishes without a slot to R receiver leaves; the coordinator relays.
+- R ∈ {1, 4, 16} by default (R = 2 and 8 only when selected); payloads {64, 4096, 261632} bytes,
+  as `std::string` (as now).
+
+**Windowed mode**
+- It keeps the existing burst formula, fences and strict validation.
+- Every process in `_sintra_all_processes` calls each named fence the same number of times, as
+  today. In leaf origin, that includes the coordinator (which publishes nothing), the sender leaf
+  and every receiver.
+- The sender's fence after a burst covers the relayed copies at every receiver that has not been
+  evicted (section 2.2). The protocol therefore carries over to leaf origin unchanged.
+- A sample in which an eviction occurs may end by timeout, because the evicted receiver's fence
+  can stall (section 2.2).
+
+**Open-loop drain**
+1. After the last measured message, the sender stays quiet for 100 ms, so a receiver that fell
+   behind or was evicted can resynchronise, then writes a sentinel (sequence `UINT64_MAX-1`).
+2. A control rendezvous `benchmark-published` follows: non-senders enter it right after
+   `benchmark-begin`, the sender after publication, the quiet period and the sentinel.
+3. Each receiver's 10 s drain allowance starts when `benchmark-published` returns, so a late
+   sender cannot cause `sentinel_missed`. Then come `benchmark-drained` and section 4.4's end.
+
+The sentinel is not a measured message; the publication interval still ends when the last
+measured publish call returns.
+
+**Payload, handler, sampling and framed bytes**
+- As now, the payload holds the sequence, the send start in ns, filler and a final `'x'`. Warm-up
+  sends `max(64, n/20)` messages carrying `UINT64_MAX`, always paced with the default burst, also
+  when `--burst 0` unpaces the measured part.
+- The receiver handler checks size and final byte, applies the loss accounting of section 6,
+  tracks its latest receive time over all measured messages, and stores the sequence, send start
+  and receive time of sampled ones.
+- A sequence is sampled when `splitmix64(sequence) mod k == 0`, `k = max(1, ceil(n/100000))`: a
+  budget of about 100k (all messages when n ≤ 100000, roughly 50k to 100k above). Every process
+  and both arms sample the same sequences, so slowest-receiver latency joins on the sequence.
+- The first measured handler reads `s_tl_current_message->bytes_to_next_message`, an internal
+  coupling isolated in the harness. In leaf origin each frame is written twice (sender ring and
+  relay).
+
+**Validation-only options:** `--handler-delay-us` (receiver leaves only, never the coordinator;
+principle 3) and `--burst`, including the existing unpaced `--burst 0`. A record is
+`validation_only` (section 8) when they change the effective workload: a non-zero handler delay,
+or a measured burst other than the formula's value. Mere presence of an option does not count.
+
+**Port of the existing benchmark**
+- Kept: the coordinator-origin workload and payloads; the burst formula, fences and warm-up rule;
+  alternating order.
+- Changed: gap accounting, with strict validation only in windowed mode; resets before the begin
+  rendezvous; CPU at common boundaries; nearest-rank percentiles; aggregation after the swarm
+  exits; 5 pairs instead of 3.
+- Removed: the Windows-only host CPU field (an OS-specific API); p95; `complete`, which
+  `outcome.valid` replaces.
+
+### 5.2 W2: Request/response (10 cells: 2 routes × (4 closed-loop gaps + 1 windowed))
+
+**Setup**
+- The callee is a transceiver with `uint64_t echo(uint64_t)`, exported with `SINTRA_RPC_STRICT`
+  and named with `assign_name`. Every call must return its argument.
+- One caller thread, always in another process, resolves the callee's name once and passes the
+  retained instance ID in all 1000 back-to-back warm-up calls and every measured call; a name
+  argument would be resolved again on every call (section 2.2).
+
+**Routes:** `leaf_to_coordinator` (the callee is a user transceiver in the coordinator; leaf 1
+calls) and `leaf_to_leaf` (the callee is leaf 1; leaf 2 calls through the relay).
+
+**Closed-loop cells (sync `rpc_echo`)**
+- The gap is the idle time between a reply and the next call. It is made with `sleep_for` and
+  recorded as `actual_gap`.
+- The regimes in the table are expected, not guaranteed for every hop (section 2.2).
+
+| Gap | Calls | Expected wait regime |
+|---|---|---|
+| 0 | calibrated to about 3 s | spin |
+| 200 µs | 5000 | 1 ms sleep phase |
+| 20 ms | 500 | 1 ms sleep phase |
+| 2 s | 60 | parked (the sleep phase ends nominally after 1.00005 s); with 60 calls, p99 is the sample maximum |
+
+**Windowed cell**
+- The caller keeps W = 32 `rpc_async_echo` handles outstanding and waits on the oldest, with
+  `get_until(issue + 10 s)`, when the window is full; a timeout counts as a lost call. Its
+  latency is `issue_to_observation` (section 6).
+
+### 5.3 W3: Swarm formation and shutdown (4 points)
+
+**Run.** Each run is a fresh coordinator process with N leaf branches whose entry functions are
+empty; it uses N of the 125 automatically allocated indexes and yields one scalar per run, not a
+percentile population.
+
+**Sizes**
+- N ∈ {1, 8, 40, N_over}, `N_over = min(125, max(80, 2C))`, where C is the runner's `--cpus` or
+  else `hardware_concurrency()`; with C = 0 the runner skips that point and reports why.
+- N_over is 80 for C < 40, 2C for 40 ≤ C ≤ 62, and 125 for C ≥ 63. For C ≥ 126 even
+  `N_over+1` does not exceed C, and the point is labelled `not_oversubscribed`.
+- 40 matches `mass_join_test` (`TESTING.md:205`). Threads oversubscribe earlier than processes:
+  each leaf adds 2 reader threads in the coordinator and 2 of its own. Every point records
+  `(N+1)/C`. The sizes are owner-tunable.
+
+**Timestamps and CPU**
+- Each process takes its formation snapshot (clock and CPU) immediately after its top-level
+  `init` returns, which with empty entry functions is right after formation (section 2.2). The
+  coordinator's `time_to_ready` runs from just before `init` to that snapshot.
+- All processes then meet in a rendezvous that neither phase's CPU interval includes. Each process
+  takes its shutdown begin snapshot after that rendezvous and its end snapshot after `shutdown()`
+  returns; the coordinator's pair gives `time_to_shutdown`. Leaves also record their `main` entry
+  and their `shutdown()` result.
+- Per role, formation CPU is the cumulative CPU at the formation snapshot (including start-up);
+  shutdown CPU is the change between the shutdown snapshots.
+
+## 6. Metric definitions (adopted design)
+
+**Percentiles**
+- Nearest rank over each metric's own observations, `x[ceil(q*n_obs)-1]` in µs; each latency
+  object reports `n_obs` (observations) and `n_messages` (distinct items) separately.
+- p50 and p99 are always reported; p99.9 and the maximum only when `n_messages` ≥ 10000, else null.
+- The receive timestamp is taken at handler entry, before any bookkeeping; the send-end timestamp
+  immediately after the publish call returns.
+
+| Name | `n_obs` | `n_messages` | Definition |
+|---|---|---|---|
+| `delivery_from_send` | receiver × sampled message | sampled messages | receive − send start |
+| `slowest_from_send` | sampled messages delivered to every receiver | same | maximum over receivers |
+| `delivery_from_intended`, `slowest_from_intended` | as above | as above | as above, from the intended arrival (open-loop) |
+| `send_call` | sampled sends | same | send end − send start; includes serialization, reservation waits and API overhead (`benchmarks/README.md:34-36` at `3666206f`) |
+| `lateness` | sampled sends | same | send start − intended arrival (open-loop) |
+| `fence` | bursts | bursts | each burst fence (windowed) |
+| `rtt` | calls | calls | return − call start (W2 closed-loop) |
+| `issue_to_observation` | calls | calls | `get_until` returning the result − issue start (W2 windowed); a result may be complete before `get_until` observes it (`transceiver_impl.h:1071-1095`) |
+| `actual_gap` | calls | calls | measured idle time between calls (W2 closed-loop) |
+
+**Throughput**
+- Intervals: windowed, from the sender's begin rendezvous to its end snapshot; open-loop
+  publication, from `t0` until the last measured publish call returns; open-loop delivery, from
+  `t0` to the latest measured-message handler timestamp across receivers, tracked for every
+  measured message regardless of sampling. The sentinel is excluded.
+- Each interval yields messages/s, application MB/s (messages × payload / 10^6 / s) and framed MB/s
+  (messages × framed bytes / 10^6 / s).
+- W2 reports calls/s.
+
+**CPU**
+- `cpu_s` is summed over a role's processes; `max_process_cpu_s` is its largest process;
+  `us_per_message` is `cpu_s` × 10^6 divided by the messages published or calls made. Receivers
+  also report `us_per_delivery`, and `total` sums all roles.
+
+**Loss**
+- Per receiver, with e the next expected sequence and s the received one: s > e adds `s-e` to
+  `lost` and one to `gap_intervals`; s < e adds one to `order_errors`; then e = s+1. At the end,
+  if e < n, `lost += n-e` and `gap_intervals++` — except in a record with `sentinel_missed`, where
+  `lost` holds only confirmed gaps up to the last received message and `unresolved_tail` holds the
+  not-yet-observed tail (0 otherwise).
+- `eviction_log_matches` counts log lines containing "reader evicted on" after the reset. It
+  corroborates the loss counts and is never used alone.
+
+## 7. Record schema (adopted design)
+
+The runner writes one JSON line per sample, with `schema: "sintra-bench/1"`. Units are s, µs and
+MB (10^6 bytes). Values that do not apply, or that lack sample support, are null.
+
+| Field | Meaning |
+|---|---|
+| `run_id`, `pair_id`, `arm`, `order`, `aa` | Sample ID (also in every process file); pair key; `"A"`/`"B"`; 0 if this sample ran first in its pair; A/A flag |
+| `commit`, `note` | Operator-supplied commit for this arm; operator note |
+| `host` | `{label, os, hardware_concurrency, cpus_effective}`; `os` is Python's `platform.platform()` |
+| `build` | Facts of section 4.3, plus `ring_parent_dir` and `valid_build` |
+| `cell` | `{id, workload, mode, origin\|route, receivers, payload_bytes, framed_bytes, gap_us, window, n_leaves, offered_rate, planned, warmup, drain_timeout_s, validation_only, calibration}`; `calibration` is the cell's `{host_label, commit, date}` or null |
+| `counts` | `{published, deliveries_expected, deliveries, lost, unresolved_tail, gap_intervals, order_errors, size_errors, call_errors, eviction_log_matches, sentinel_missed}`; `unresolved_tail` is nonzero only with `sentinel_missed` (section 6) |
+| `throughput` | `{interval_s, delivery_interval_s, publication_msg_s, publication_app_mb_s, publication_framed_mb_s, delivery_msg_s, delivery_app_mb_s, delivery_framed_mb_s, calls_s}` |
+| `latency.<name>` | `{n_obs, n_messages, p50_us, p99_us, p999_us, max_us}` for the names in section 6 |
+| `cpu.<role>` | `{processes, cpu_s, max_process_cpu_s, us_per_message, us_per_delivery}` |
+| `lifecycle` | `{time_to_ready_s, time_to_shutdown_s, leaf_start_max_s, leaf_shutdown_max_s, formation_cpu, shutdown_cpu, oversubscription}`; the two CPU fields map each role to seconds |
+| `outcome` | `{exit_code, timed_out, missing_files, valid, reasons[], warnings[]}` |
+| `runner` | `{started_unix, wall_s, timeout_s, ring_dir_sintra_entries}` |
+
+Roles: `coordinator`, `coordinator_sender`, `coordinator_callee`, `sender`, `receivers`, `caller`,
+`callee`, `leaves`, `total`.
+
+## 8. Validity (adopted design)
+
+**Invalid samples.** An invalid sample has `valid=false` and lists its reasons. It is written,
+but excluded from comparisons. A sample is invalid when any of these holds:
+- the build is not valid (section 4.3);
+- the run timed out (`timeout`), the coordinator exited non-zero, a process file is missing or
+  belongs to another run, aggregation failed (`aggregation_failed`, also for a damaged report:
+  bad length or an unterminated string), or cleanup could not be completed
+  (`cleanup_incomplete`, which also stops the session);
+- a duplicate or surplus report for a role or branch (`unexpected_reports`), or a report with
+  other cell settings (`inconsistent_reports`);
+- any order, size or final-byte error, any RPC exception, or a wrong echo value;
+- windowed or closed-loop mode: any loss (`loss`, including a timed-out call), or any eviction
+  log match;
+- open-loop mode: a receiver missed the sentinel within the drain allowance (`sentinel_missed`;
+  its tail is reported as `unresolved_tail`). Loss itself is a result there, not an invalidity;
+- lifecycle mode: `init` threw, or a process's `shutdown()` returned false or threw.
+
+**Validation-only records.** `validation_only` is a flag that excludes a record from comparisons
+and summaries. It does not by itself make the record invalid; validity follows the rules above.
+
+**Warnings.** A warning leaves the sample valid but flagged:
+
+| Warning | Condition |
+|---|---|
+| `cpu_low_confidence` | The interval is under 2 s |
+| `cpu_not_advancing` | Some process's CPU delta over the measured interval is exactly zero; the sample's CPU metrics are treated as unavailable in summaries |
+| `stray_participants` | Participants survived the coordinator's normal exit and had to be terminated (section 9) |
+| `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
+| `not_oversubscribed` | `N_over+1 <= C` |
+| `ring_dir_not_empty` | `sintra-*` entries already existed in the ring parent directory |
+
+**Comparable pairs.** Both samples are valid, neither is `validation_only`, and their effective
+parameters are equal: cell ID, planned message or call counts and warm-up counts (never the
+observed `counts` object), offered rate, calibration metadata, build facts other than the commit,
+host label and C.
+
+## 9. Runner (adopted design)
+
+```text
+python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build-dir> --b-commit <sha>]
+    --output <results.jsonl> [--workloads <file>] [--pairs 5] [--select <cell-id glob>]
+    [--note <text>] [--cpus N] [--aa <aa.jsonl>] [--calibrate <new-workloads.json>] [--keep]
+```
+
+**Session**
+- Without `--b`, the session is A/A: the A binaries run as both arms, with `aa=true`.
+- Before any run, the runner compares both arms' `--build-facts`. Any difference other than the
+  commit aborts the session.
+- Selected open-loop cells that have no stored rate are skipped. They are listed with the reason
+  at the start and in the summary, and no record is written for them.
+- In pair p, A runs first when p is even and B runs first when p is odd.
+
+**Each sample.** The runner owns each sample in one guarded scope, so an interrupt or exception
+also terminates the swarm, and it never signals a process it cannot identify as its own.
+1. Create a fresh run directory, set `SINTRA_BENCHMARK_DIR` to it, and start the coordinator with
+   a timeout of 60 s plus three times the planned duration.
+2. On timeout, interrupt or exception, terminate the swarm. On Windows the runner reuses
+   `tests/runner/platform/windows_process_tree.py` (retained handles of the coordinator and each
+   descendant), and refuses to start if that file is missing; recorded PIDs are not signalled. On
+   POSIX, leaves start their own sessions (section 2.2), so the coordinator's process group does
+   not reach them. On Linux each recorded PID is pinned with a pidfd when first observed, accepted
+   only if its command line names this executable and this run ID, and signalled through that
+   pidfd. Other POSIX systems verify the same with `ps` immediately before signalling.
+3. After a normal exit, surviving participants are terminated the same way, with the warning
+   `stray_participants`.
+4. The runner waits for owned participants to terminate before removing evidence or starting the
+   next sample. If cleanup cannot be completed, the record gets `cleanup_incomplete` and the
+   session stops. Cleanup measures nothing (open decision 5).
+5. Wait up to 10 s for all expected files; run `--aggregate`; add the runner fields and the cell's
+   calibration metadata; append and flush the line; delete the run directory unless `--keep`.
+   An interrupt (Ctrl+C, SIGTERM, Ctrl+Break) terminates the running sample, which has no record.
+
+**Summary**
+- Per cell: comparable pairs used, per-arm invalid-sample counts, and latency sample support
+  (`n_obs`, `n_messages`).
+- Per headline metric: the median within-pair B/A ratio with its minimum and maximum, and beside
+  it the observed A/A range, or "unavailable" when no matching A/A records exist (same output file
+  or `--aa`). The observed A/A range is the minimum-maximum of the within-pair ratios over
+  comparable A/A pairs with equal effective parameters (section 8).
+- Metrics that can be zero or unavailable (lost fraction, error counts, CPU, which is unavailable
+  under `cpu_not_advancing`,
+  slowest-receiver latency when no sample reached every receiver) are shown as raw per-arm values
+  with the absolute difference, or as unavailable, never as a ratio over a zero or null baseline;
+  their observed A/A range uses absolute differences.
+- Nothing is flagged automatically, and no other statistics are computed.
+
+| Mode | Headline metrics |
+|---|---|
+| Windowed | W1: publication and delivery rates. W2: calls/s. Both: CPU µs per message, total and per role; `slowest_from_send` (W1) or `issue_to_observation` (W2) p50 and p99 |
+| Open-loop (W1) | `slowest_from_intended` p50 and p99; lost fraction; lateness p99 |
+| Closed-loop | `rtt` p50 and p99; CPU µs per call per role |
+| Lifecycle | `time_to_ready_s`, `time_to_shutdown_s`; formation and shutdown CPU per role |
+
+**Calibration (`--calibrate`)** runs each selected windowed cell three times with `--a`, rescales
+counts to about 3 s, derives the three open-loop rates from the median publication rate, and
+writes a new workloads file with per-cell calibration metadata. The operator commits it only from
+a reference-host run. On the development machine `--calibrate` writes only to a temporary file, to
+check function, and validation runs there use that file through `--workloads`.
+
+## 10. Reading hotspots (adopted design)
+
+The runner prints axis tables for one arm. Each reading is a hypothesis about role costs and
+end-to-end differences, not an isolated cost.
+
+- **W1: CPU µs per message by role against R**, for each payload and origin. Sender growth along
+  R suggests reader-dependent publication work, such as waking parked readers; growth per delivery
+  suggests receiver-side cost; in leaf origin the coordinator role also includes reading its own
+  ring and control work, not just relaying.
+- **W1: CPU per MB against payload, and open-loop latency and loss against offered rate.**
+- **W2: rtt p50 and p99, and CPU per call, against gap**, for each route. The difference between
+  `leaf_to_leaf` and `leaf_to_coordinator` is end-to-end: the routes also differ in placement,
+  readers and scheduling.
+- **W3: time to ready and CPU per leaf against N.** Comparing N_over with 40 changes swarm size as
+  well as oversubscription.
+- **For each cell: each role's share of total CPU.**
+
+A cost that grows faster than the work it serves is a hotspot candidate, not a diagnosis.
+
+## 11. Phases, acceptance and cost (adopted design)
+
+Each phase lands as one change, after independent review.
+
+**Phase 1** covers the harness, schema and aggregation; the runner with pairs, A/A and
+calibration; the broadcast port for both origins, windowed and open-loop; and deleting
+`run_broadcast_benchmark.py` and rewriting the README. It is done when:
+1. **Development builds.** It builds and runs on WSL (GCC and Clang, Release) and on Windows (MSVC,
+   Release), using a temporary calibrated file and keeping no numbers.
+2. **Invalid builds.** A Debug build, and a build whose compiler definitions include
+   `SINTRA_ENABLE_TEST_HOOKS=1` (for example through `CMAKE_CXX_FLAGS`), produce records marked
+   invalid for those reasons.
+3. **Forced-loss checks.** All three cases are `validation_only` records:
+   1. *Windowed pacing with a bounded handler delay*, chosen so the run completes within the
+      runner timeout: it completes with `lost = 0` and a valid record. The delay only lengthens
+      fences, because each burst fits in a quarter ring (`benchmarks/README.md:22-25` at `3666206f`).
+   2. *Open-loop overload fixture*: a handler delay and an offered rate that overrun the receiver,
+      with the sentinel/rendezvous drain. Expected: `lost > 0`, `gap_intervals > 0`,
+      `eviction_log_matches > 0` and a valid record. A missed sentinel or a timeout is recorded
+      as such. A loss-free completion means the fixture did not induce overload, and the check
+      does not count as exercised.
+   3. *Windowed-strictness overload fixture*: unpaced `--burst 0`, a message volume well beyond
+      the ring, and a delay long enough to obstruct the writer. A completed sample with observed
+      loss must be invalid (`loss`); a timeout is recorded as `timeout`. A loss-free completion
+      means the fixture did not induce overload, and the check does not count as exercised.
+4. **Reference host (still pending).** The cross-process `steady_clock` assumption (section 12)
+   is established for the reference toolchain before any one-way latency reference is accepted.
+   Calibration is committed, and a 5-pair A/A over the default broadcast cells is stored as the
+   first reference. Until then, Phase 1 results are development evidence, not the reference.
+
+**Phase 2** (`rpc_benchmark`): calibration and A/A for W2. **Phase 3** (`swarm_benchmark`): A/A
+for W3; its first run confirms that the N_over swarm forms on the reference host (the index budget
+allows it, but it has not been run).
+
+**Estimated cost** (estimates, not measurements; about 2 s of fixed overhead per sample). One pass
+over the default cells takes about 6 min for W1 (72 cells), about 5 min for W2 (10 cells; the 2 s
+gap alone takes 2 min per route) and probably under 1 min for W3 (unmeasured). A full A/B run with
+5 pairs is 10 passes, about 2 h; A/A doubles that. `--select` limits a session to affected cells.
+
+## 12. What the first iteration does not claim
+
+- **No capacity claim:** no maximum sustainable rate or saturation point; open-loop rates are
+  fixed probes.
+- **No universal maximum or cross-host comparison:** numbers describe the reference host, its
+  toolchain and each run's process placement.
+- **No host tuning:** no pinning, affinity, frequency control or isolation; the OS places processes.
+- **No thresholds, pass/fail, CI gate or significance testing** beyond the observed A/A range;
+  five pairs show direction and size, not certainty. Results are not a latency or loss contract,
+  and open-loop loss under overload is documented behaviour (`docs/architecture.md:89-99`).
+- **No per-thread, futex, syscall, hardware-counter or memory metrics.** A 2-3 s interval does not
+  establish usable CPU accounting on Windows: zero CPU has been observed for whole 3 s samples
+  (`cpu_not_advancing`, section 8). Linux `getrusage` is the reference.
+- **Slowest-receiver latency conditions on delivery to every receiver**, so loss can remove the
+  slowest observations; read it together with loss.
+- **A clock assumption.** Cross-process latency assumes that `std::chrono::steady_clock` on the
+  reference toolchain reads one system-wide monotonic clock; the library's `CLOCK_MONOTONIC`
+  helper does not prove that mapping. Establishing it is a prerequisite of phase 1 acceptance
+  item 4. Nanosecond values do not mean nanosecond accuracy, and broadcast latency is sampled
+  within a budget of about 100k messages.
+
+## 13. Phase 2 candidates (listed, not designed)
+
+Capacity search; fan-in and bystander axes; mesh; barriers; cross-process raw ring; registry
+scale; slow-reader isolation; handler-count axis; request/response open-loop.
+
+## 14. Open decisions for the owner
+
+| # | Decision | Recommendation |
+|---|---|---|
+| 1 | Open-loop rates at 0.1, 0.5 and 0.8 of the calibrated windowed publication rate | Adopt |
+| 2 | Oversubscribed point `N_over = min(125, max(80, 2C))` | Adopt; revisit once C of the reference host is known |
+| 3 | A/A cadence: every comparison session for the selected cells (doubles the time), or once per host or toolchain change | Every session at first, until the stored observed A/A ranges prove stable |
+| 4 | Calibrated counts and rates: in git (`benchmarks/workloads.json`) or beside the results | In git, so both arms and later sessions use identical absolute rates |
+| 5 | Runner cleanup is per-OS and measures nothing: a Windows tree kill through the held coordinator handle; on POSIX, recorded PIDs signalled only after an identity check (a pidfd on Linux) | Keep |
+| 6 | Size of the default sweep: as planned, or a smaller start (for example, deferring the open-loop grid), which would also satisfy the requirements | Keep the open-loop cells: the owner approved the open-loop/windowed methodology, and every cell is selectable |

@@ -149,7 +149,7 @@ option(SINTRA_BUILD_TESTS "Build Sintra tests" ${sintra_developer_targets_defaul
 option(SINTRA_BUILD_ACTIVE_TESTS_ONLY "Build only tests listed in tests/active_tests.txt" OFF)
 option(SINTRA_BUILD_MANUAL_TESTS "Build Sintra manual/reproduction tests" OFF)
 option(SINTRA_BUILD_QT_EXAMPLES "Build Qt examples (requires Qt6 Widgets)" OFF)
-option(SINTRA_BUILD_BENCHMARKS "Build public broadcast-to-handler benchmarks" OFF)
+option(SINTRA_BUILD_BENCHMARKS "Build the Sintra benchmarks" OFF)
 
 if(SINTRA_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
