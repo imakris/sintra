@@ -658,7 +658,6 @@ and summaries. It does not by itself make the record invalid; validity follows t
 |---|---|
 | `cpu_low_confidence` | W1 and W2: the measured interval is under 2 s. Not emitted for W3 (section 5.3) |
 | `cpu_not_advancing` | Some process's CPU delta over the measured interval (W3: over formation or shutdown) is exactly zero; the sample's CPU metrics are treated as unavailable in summaries |
-| `stray_participants` | A process of the run is still alive 10 s after the coordinator's normal exit; the wait for the reports ends at the same deadline. On POSIX it is not terminated; if it is still there when cleanup ends, the record also gets `cleanup_incomplete` (section 9) |
 | `shutdown_retried` | W3: some process needed more than one `shutdown()` call |
 | `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
 | `not_oversubscribed` | `N_over+1 <= C` |
@@ -714,21 +713,19 @@ ends the swarm, and the runner never signals a process it does not hold by more 
    (the owner of `/proc/<pid>`), as every participant runs as that user. A process that has
    disappeared is gone. One of the user's processes whose command line cannot be read does not
    end the scan, but leaves the look inconclusive; a failed `ps` fails the look. Cleanup is
-   complete only after two consecutive empty looks. A leftover, an unreadable process, failing
-   looks, or a deadline reached before the second empty look give `cleanup_incomplete`; the
-   session stops and names the processes, an unreadable one as "could not be inspected". The
-   runner never signals a PID taken from a file or from the scan; PID files only count the
-   expected reports. A process that is still alive 10 s after the coordinator's normal exit
-   gives `stray_participants` (section 8); when no look at that deadline is conclusive, so does
-   one that the cleanup then finds. The runner waits for the swarm before removing evidence or
-   starting the next sample.
+   complete only after two consecutive empty looks that both end before its 10 s deadline. A
+   leftover, an unreadable process, failing looks, or a deadline reached before two such looks
+   give `cleanup_incomplete`; the session stops and names the processes, an unreadable one as
+   "could not be inspected". The runner never signals a PID taken from a file or from the scan;
+   PID files only count the expected reports. The runner waits for the swarm before removing
+   evidence or starting the next sample.
 5. **Interrupts.** SIGINT, SIGTERM, SIGHUP, SIGQUIT (where they exist) and Ctrl+Break only set a
    flag; a signal the runner was started to ignore stays ignored. Cleanup cannot be aborted, and
    an interrupted sample writes no record. Cleanup measures nothing (open decision 6).
-6. After a normal exit, wait for the expected reports until 10 s after the coordinator's exit,
-   the deadline of step 4. Run `--aggregate`, for at most 60 s; if it produces no record, the
-   runner writes its own (section 8). Add the runner fields and the cell's calibration metadata;
-   append and flush the line; delete the run directory unless `--keep`.
+6. After a normal exit, wait up to 10 s for the expected reports, then clean up (step 4). Run
+   `--aggregate`, for at most 60 s; if it produces no record, the runner writes its own
+   (section 8). Add the runner fields and the cell's calibration metadata; append and flush the
+   line; delete the run directory unless `--keep`.
 
 **Summary**
 - Per cell: comparable pairs used, per-arm invalid-sample counts, and latency sample support

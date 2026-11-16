@@ -32,8 +32,7 @@ TIMEOUT_BASE_S = 60         # a sample's timeout is this plus a multiple of its 
 TIMEOUT_FACTOR = 3          # three times it, or, for a windowed broadcast cell that was never
 UNCALIBRATED_TIMEOUT_FACTOR = 30    # calibrated, whose count is only an estimate, thirty times it
 CALIBRATION_TIMEOUT_S = 900 # under --calibrate: an estimate may be far off on a slow host
-AFTER_EXIT_S = 10           # after the coordinator's normal exit, one deadline for the reports
-                            # of every participant and for the other processes to exit
+REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
 EXIT_WAIT_S = 10            # in the cleanup, for the processes of the run to exit
 AGGREGATE_TIMEOUT_S = 60    # for --aggregate, which only reads the reports of one sample
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
@@ -466,7 +465,6 @@ class Participants:
     def __init__(self, run_id):
         self.run_id = run_id
         self.process = None
-        self.found_by_cleanup = False   # whether a look of clean_up() found a process alive
 
     def launch(self, command, run_dir):
         """Starts the coordinator and takes ownership of its swarm."""
@@ -489,9 +487,8 @@ class Participants:
         raise NotImplementedError
 
     def alive(self):
-        """Looks afresh. Returns two lists of descriptions: each process of the run that is
-        alive, the coordinator until it is reaped; and whatever keeps the look from being
-        conclusive."""
+        """Looks afresh and describes each process of the run that is alive, the coordinator
+        until it is reaped, and whatever keeps the look from being conclusive."""
         raise NotImplementedError
 
     def close(self):
@@ -512,35 +509,13 @@ class Participants:
                 if time.monotonic() >= deadline:
                     return "timeout"
 
-    def wait_for_exit(self, deadline):
-        """After the coordinator's own exit: waits until the deadline for the other processes
-        of the run to exit by themselves. It looks at least once, also when the deadline has
-        passed. Returns [] once a look finds none; otherwise, at the end, those that the last
-        look found alive, or None when that look found none but was not conclusive.
-
-        A look that fails, or that is not conclusive, establishes nothing, so the wait goes
-        on. A failure that lasts reaches clean_up(), whose looks fail as well and leave the
-        cleanup incomplete.
-        """
-        while True:
-            try:
-                alive, unresolved = self.alive()
-                if not alive and not unresolved:
-                    return []
-            except Exception:
-                alive = []
-            if interrupt_requested or time.monotonic() >= deadline:
-                return alive or None
-            time.sleep(0.05)
-
     def clean_up(self):
         """Terminates what is owned, reaps the coordinator and waits until no process of the
         run is left, for at most EXIT_WAIT_S.
 
         It does not raise, and a step that fails does not keep the others from running. It
         returns a description of whatever is left or could not be established; the cleanup
-        is complete when that is empty. It sets found_by_cleanup when a look finds a process
-        of the run alive.
+        is complete when that is empty.
         """
         if self.process is None:
             return []   # the launch failed, so there is nothing to clean up
@@ -553,19 +528,18 @@ class Participants:
             except Exception as error:
                 remaining.append(f"the termination failed: {error!r}")
             try:
-                alive, unresolved = self.alive()
-                self.found_by_cleanup = self.found_by_cleanup or bool(alive)
-                remaining += alive + unresolved
+                remaining += self.alive()
             except Exception as error:
                 remaining.append(f"the processes of the run could not be listed: {error!r}")
             # On POSIX a process is invisible to a look for a moment while it starts its
-            # executable, so the cleanup is complete only after two consecutive empty looks.
+            # executable, so the cleanup is complete only after two consecutive empty looks,
+            # both of which end before the deadline.
             empty_looks = 0 if remaining else empty_looks + 1
-            if empty_looks == 2:
-                return []
             if time.monotonic() >= deadline:
                 return remaining or [
-                    "no second look confirmed the last empty one before the deadline"]
+                    "no two consecutive empty looks ended before the deadline"]
+            if empty_looks == 2:
+                return []
             time.sleep(0.05)
 
 
@@ -606,12 +580,12 @@ class Windows_participants(Participants):
         if self.process.poll() is None:
             alive.append(f"pid {self.process.pid}: the coordinator")
         if self.tree is None:
-            return alive, ["descendants unknown: their process tree could not be established"]
+            return alive + ["descendants unknown: their process tree could not be established"]
         alive += [f"pid {pid}" for pid in self.tree.live_descendants()]
         if self.tree.enumeration_error is not None:
-            return alive, ["descendants unknown: the process table could not be read "
-                           f"({self.tree.enumeration_error})"]
-        return alive, []
+            alive.append("descendants unknown: the process table could not be read "
+                         f"({self.tree.enumeration_error})")
+        return alive
 
     def close(self):
         if self.tree is not None:
@@ -647,15 +621,18 @@ def load_windows_process_tree():
 
 
 class Posix_participants(Participants):
-    """Owns the coordinator as the runner's child, and signals nothing else.
+    """Owns the coordinator as the runner's child, and signals only the coordinator's process
+    group.
 
-    A leaf starts its own session, and the runner knows it only by its PID, so the runner
-    does not signal it. Once the coordinator is gone, a leaf exits by itself: every spawned
-    Sintra process holds a lifeline to the coordinator and hard-exits about 100 ms after it
-    closes (docs/architecture.md, "Lifeline ownership"). The runner waits for that and looks
-    at the process table for processes that name this run. A leaf that cannot run, such as a
-    stopped one, cannot exit that way: the cleanup reports it as left, and the operator ends
-    it (owner decision, plan section 14).
+    That group holds the coordinator and those of its children that have not left it for a
+    session of their own yet; such a child receives the group's signal too. A leaf that has
+    entered its own session is never signalled, and neither is any PID that a scan finds:
+    the runner knows those only by their PIDs. Once the coordinator is gone, a leaf exits by
+    itself: every spawned Sintra process holds a lifeline to the coordinator and hard-exits
+    about 100 ms after it closes (docs/architecture.md, "Lifeline ownership"). The runner
+    waits for that and looks at the process table for processes that name this run. A leaf
+    that cannot run, such as a stopped one, cannot exit that way: the cleanup reports it as
+    left, and the operator ends it (owner decision, plan section 14).
     """
 
     def kill_owned(self):
@@ -676,9 +653,9 @@ class Posix_participants(Participants):
         found, unread = run_processes(self.run_id)
         if self.process.poll() is None:
             found.setdefault(self.process.pid, "the coordinator")
-        return ([f"pid {pid}: {command}" for pid, command in sorted(found.items())],
-                [f"pid {pid}: could not be inspected ({error})"
-                 for pid, error in sorted(unread.items())])
+        return ([f"pid {pid}: {command}" for pid, command in sorted(found.items())]
+                + [f"pid {pid}: could not be inspected ({error})"
+                   for pid, error in sorted(unread.items())])
 
 
 # --- Samples -----------------------------------------------------------------
@@ -747,9 +724,10 @@ def cell_command(executable, cell, run_id):
     return command
 
 
-def wait_for_reports(run_dir, deadline):
-    """Waits until the deadline for one report per participant that recorded its PID."""
+def wait_for_reports(run_dir):
+    """Waits up to REPORT_WAIT_S for one report per participant that recorded its PID."""
     expected = len(list(run_dir.glob("*.pid")))
+    deadline = time.monotonic() + REPORT_WAIT_S
     while (len(list(run_dir.glob("*.bin"))) < expected and time.monotonic() < deadline
            and not interrupt_requested):
         time.sleep(0.05)
@@ -878,8 +856,7 @@ class Session:
         requested, and cleans up after it in every case, also when the runner itself fails.
 
         Returns the coordinator's exit code, how the wait for it ended ("exited", "timeout" or
-        "interrupted"), whether a process of the run was still alive AFTER_EXIT_S after a
-        normal exit, and a description of whatever the cleanup left behind or could not
+        "interrupted"), and a description of whatever the cleanup left behind or could not
         establish.
         """
         if os.name == "nt":
@@ -891,18 +868,10 @@ class Session:
             # and no signal raises (see request_interrupt), so nothing can separate them.
             participants.launch(cell_command(executable, cell, run_id), run_dir)
             ending = participants.wait_for_coordinator(timeout)
-            left = []
             if ending == "exited":
-                # One deadline from the coordinator's exit: a process that is still alive at
-                # it is a stray, however long the wait for the reports took.
-                deadline = time.monotonic() + AFTER_EXIT_S
-                wait_for_reports(run_dir, deadline)
-                left = participants.wait_for_exit(deadline)
+                wait_for_reports(run_dir)
             remaining = participants.clean_up()
-            # When no look at the deadline was conclusive (None), a process of the run that
-            # the cleanup finds afterwards was alive past the deadline as well.
-            stray = bool(left) or (left is None and participants.found_by_cleanup)
-            return participants.process.returncode, ending, stray, remaining
+            return participants.process.returncode, ending, remaining
         except BaseException:
             # A failure of the runner itself must not leave the swarm running either.
             remaining = participants.clean_up()
@@ -944,7 +913,7 @@ class Session:
                 UNCALIBRATED_TIMEOUT_FACTOR if estimated else TIMEOUT_FACTOR))
         started = time.time()
         begin = time.monotonic()
-        exit_code, ending, stray, remaining = self.run_swarm(
+        exit_code, ending, remaining = self.run_swarm(
             executable, cell, run_id, run_dir, timeout)
         wall = time.monotonic() - begin
         timed_out = ending == "timeout"
@@ -990,8 +959,6 @@ class Session:
         outcome = record["outcome"]
         outcome["reasons"] = reasons + outcome["reasons"]
         outcome["valid"] = not outcome["reasons"]
-        if stray:
-            outcome["warnings"].append("stray_participants")
         if ring_entries:
             outcome["warnings"].append("ring_dir_not_empty")
         if cell.get("not_oversubscribed"):

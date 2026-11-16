@@ -147,31 +147,32 @@ and the session stops (see the POSIX paragraph below).
   runner polls while a sample runs, so a further interrupt cannot cut a cleanup
   short. A signal that the runner was started to ignore, as under `nohup`,
   stays ignored.
-- **After a normal exit,** the runner waits for the reports and for the other
-  processes of the run to exit, both until 10 s after the coordinator's exit.
-  The record gets the warning `stray_participants` if a process of the run is
-  still alive then, or, when no look then is conclusive, if the cleanup finds
-  one afterwards. The cleanup follows.
+- **After a normal exit,** the runner waits up to 10 s for the reports, then
+  cleans up as in the other cases.
 - **If the cleanup is not complete within 10 s,** the record gets the reason
   `cleanup_incomplete`, the run directory is kept, and the session stops with a
   message that lists the PID and the command line of every process that is
-  left, so that nothing is measured beside a stray process. The cleanup is
-  complete when the coordinator is reaped and two consecutive looks find no
-  other process of the run; one empty look at the deadline is not enough. A
-  look that fails or is inconclusive is not empty: `ps` fails, or the command
-  line of one of the runner's own processes cannot be read for another reason
-  than that the process has gone. The message names such a process as "could
-  not be inspected".
+  left, so that nothing is measured beside a leftover process. The cleanup is
+  complete when the coordinator is reaped and two consecutive looks, both ending
+  before the deadline, find no other process of the run. A look that fails or
+  is inconclusive is not empty: `ps` fails, or the command line of one of the
+  runner's own processes cannot be read for another reason than that the
+  process has gone. The message names such a process as "could not be
+  inspected". That does not mean the process belongs to the run: an unrelated
+  process of the runner's user whose command line cannot be read, such as a
+  non-dumpable one under `hidepid`, stops the session too.
 
 The runner never signals a process that it knows only by its PID, not even
 right after checking that PID: between the check and the signal, the PID can
 pass to another process. This is what it signals, and how it finds the rest:
 
-- **POSIX.** The runner signals only the coordinator, which is its own child:
-  it kills the coordinator's process group while the coordinator is unreaped.
-  That group holds the coordinator and those of its children that have not
-  started their own session yet. A leaf is never signalled. It exits by itself
-  through Sintra's lifeline about 100 ms after the coordinator is gone
+- **POSIX.** The runner signals only the process group of the coordinator,
+  which is its own child: it kills that group while the coordinator is
+  unreaped. The group holds the coordinator and those of its children that have
+  not started their own session yet; such a child receives the group's signal
+  too. A leaf that has entered its own session is never signalled, and no PID
+  that a scan finds is ever signalled. A leaf exits by itself through Sintra's
+  lifeline about 100 ms after the coordinator is gone
   ([docs/architecture.md](../docs/architecture.md), "Lifeline ownership"). The
   runner waits for that. It looks for processes of the run by scanning the
   process table for command lines that carry `--run-id` with this run's ID,
@@ -629,7 +630,6 @@ These are the reasons and warnings that the executable and the runner write:
 |---|---|
 | `cpu_low_confidence` | The measured interval is under 2 s |
 | `cpu_not_advancing` | The CPU delta of some process over the measured interval is exactly zero |
-| `stray_participants` | A process of the run was still alive 10 s after the coordinator's normal exit |
 | `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
 | `ring_dir_not_empty` | `sintra-*` entries were already present in the ring parent directory |
 | `not_oversubscribed` | Lifecycle mode: the oversubscribed cell has `N_over + 1 <= C` |
