@@ -1,0 +1,23 @@
+{
+  "schema": "sintra-bench-workloads/1",
+  "target_interval_s": 1,
+  "default_receivers": [1, 2],
+  "open_loop": {"duration_s": 1, "rate_fractions": [0.1]},
+  "swarm": {"leaves": [1, 8], "oversubscribed_least": 80, "oversubscribed_per_cpu": 2},
+  "cells": [
+    {"workload": "broadcast", "origin": "coordinator", "receivers": 1, "payload_bytes": 64, "messages": 20000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "broadcast", "origin": "coordinator", "receivers": 1, "payload_bytes": 4096, "messages": 2000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "broadcast", "origin": "coordinator", "receivers": 2, "payload_bytes": 64, "messages": 20000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "broadcast", "origin": "coordinator", "receivers": 2, "payload_bytes": 4096, "messages": 2000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "broadcast", "origin": "leaf", "receivers": 1, "payload_bytes": 64, "messages": 20000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "broadcast", "origin": "leaf", "receivers": 1, "payload_bytes": 4096, "messages": 2000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "broadcast", "origin": "leaf", "receivers": 2, "payload_bytes": 64, "messages": 20000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "broadcast", "origin": "leaf", "receivers": 2, "payload_bytes": 4096, "messages": 2000, "open_loop_rates": [500], "calibration": null},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "closed_loop", "gap_us": 0, "calls": 1000},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "closed_loop", "gap_us": 200, "calls": 300},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "windowed", "window": 32, "calls": 2000},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "closed_loop", "gap_us": 0, "calls": 1000},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "closed_loop", "gap_us": 200, "calls": 300},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "windowed", "window": 32, "calls": 2000}
+  ]
+}

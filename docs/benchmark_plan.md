@@ -3,9 +3,12 @@
 **Status:** design adopted. All three phases are implemented: the
 harness, runner and broadcast workload (W1), request/response (W2), and swarm formation and
 shutdown (W3). They were exercised on the development machine with WSL Ubuntu-24.04 (GCC, Clang)
-and Windows (MSVC). Pending on the reference host: the clock check, calibration of the windowed
-broadcast cells, the stored A/A reference, and the first runs of W2 and W3 (section 11). Library
-facts were verified at commit `3666206f`; the benchmarks change no library code.
+and Windows (MSVC). The benchmarks run in GitHub CI on hosted runners (owner decision, section
+1.1). Level 1 is implemented: every CI platform builds them and runs a smoke pass that fails only
+on breakage or an invalid record (section 1.3). Level 2, the comparison methodology for hosted
+runners, is not yet designed; the clock check, calibration, the stored A/A reference and the
+first comparison runs of W1 to W3 wait for it (section 11). Library facts were verified at commit
+`3666206f`; the benchmarks change no library code.
 
 As `AGENTS.md` requires, three things are kept apart:
 - owner requirements and recorded decisions (section 1);
@@ -22,8 +25,10 @@ As `AGENTS.md` requires, three things are kept apart:
 - First establish which characteristics of the library make sense to test, then a concrete set of
   benchmarks.
 - Measure latency, throughput and scalability, not latency alone.
-- It runs on a dedicated Linux host: "system specs are not so important. we will have some
-  reference system."
+- Where it runs. Owner decision, 2026-11-16: "my reference host is not relevant. i want
+  automation and things happening elsewhere, not on my hosts." The benchmarks run in GitHub CI on
+  hosted runners, never on the owner's machines. This replaces the earlier dedicated Linux
+  reference host ("system specs are not so important. we will have some reference system.").
 - "leave futex tests... only system independent stuff."
   - Working reading (an interpretation, not the owner's words): no scenario, metric or code path
     depends on futexes, syscall tracing, hardware or kernel counters, or another OS-specific API.
@@ -62,14 +67,19 @@ As `AGENTS.md` requires, three things are kept apart:
 
 ### 1.3 Decisions recorded for this plan (the owner can change them)
 - **Plan location:** `docs/benchmark_plan.md`.
-- **Results:** JSONL kept outside git history. Runs happen on demand on the reference host, never
-  on shared CI runners.
+- **Results:** JSONL kept outside git history; in CI, as workflow artifacts.
+- **CI levels** (section 1.1). Level 1, implemented: `.github/workflows/benchmarks.yml` builds the
+  benchmarks on every CI platform and runs one A/A pair of the cells of
+  `benchmarks/workloads_smoke.json` with `--require-valid`. A job fails on breakage or an invalid
+  record, never on a number or a warning. Level 2, not yet designed: a paired A/B comparison
+  against the previous master on hosted runners, reported and not gating.
 - **Validation builds** on the development machine check function, not numbers. This host
   inventory was given to the plan and was not verified from the repository:
   - Linux: WSL `Ubuntu-24.04` (GCC 13.3, Clang 18.1, CMake 3.31, Ninja, 16 cores), built through
     `queued-build`;
   - Windows: Visual Studio 2026 / MSVC v145 / FASTBuild, from a short path under `C:\w`.
-- **Reference host:** the owner's; the only OS-specific measurement code is the CPU-time mapping.
+- **Hosts:** GitHub-hosted runners: Linux (GCC, Clang), macOS, Windows (MSVC, MinGW) and FreeBSD
+  in a VM. The only OS-specific measurement code is the CPU-time mapping.
 - **Swarm sizes:** this plan chooses them and the oversubscribed N (section 5.3); the owner can
   tune them.
 - **Default broadcast grid:** R ∈ {1, 4, 16} for windowed and open-loop cells. R = 2 and 8 stay
@@ -287,7 +297,8 @@ matches `docs/reference/barrier_modes.md:49-53` and `docs/barriers_and_shutdown.
 ### 4.1 Files
 
 The plan extends `benchmarks/` and keeps `SINTRA_BUILD_BENCHMARKS`. Outside `benchmarks/`, it
-changes only the option's description at `CMakeLists.txt:152`.
+changes only the option's description at `CMakeLists.txt:152` and adds the CI workflow
+`.github/workflows/benchmarks.yml` (section 1.3).
 
 | File | Content |
 |---|---|
@@ -296,12 +307,14 @@ changes only the option's description at `CMakeLists.txt:152`.
 | `benchmarks/rpc_benchmark.cpp` | W2, target `sintra_rpc_benchmark` (phase 2) |
 | `benchmarks/swarm_benchmark.cpp` | W3, target `sintra_swarm_benchmark` (phase 3) |
 | `benchmarks/workloads.json` | Cells, windowed counts, stored open-loop rates, per-cell calibration metadata |
+| `benchmarks/workloads_smoke.json` | The CI smoke cells (section 1.3): tiny fixed counts, a low explicit open-loop rate |
 | `benchmarks/run_benchmarks.py` | Paired runner; replaces `run_broadcast_benchmark.py`, which is deleted |
 | `benchmarks/CMakeLists.txt` | The three targets, linked as now, plus `SINTRA_BENCHMARK_CONFIG="$<CONFIG>"` |
 | `benchmarks/README.md` | Rewritten as the usage guide |
 
-The committed `benchmarks/workloads.json` carries no open-loop rates until calibration has run on
-the reference host. Until then, the windowed counts are the existing ones (section 2.1).
+The committed `benchmarks/workloads.json` carries no open-loop rates until level 2 (section 1.3)
+defines calibration for hosted runners. Until then, the windowed counts are the existing ones
+(section 2.1).
 
 ### 4.2 Executable modes
 - **`<exe> <cell options> --run-id <id>`** runs one sample as a swarm. Processes keep raw data in
@@ -370,9 +383,10 @@ hooks are off.
 
 **Open-loop rates**
 - Each cell stores three absolute rates: 0.1X, 0.5X and 0.8X, rounded to two significant digits.
-- X is the cell's median windowed **publication** rate over three baseline calibration runs on
-  the reference host: messages the sender published per second over its measured interval, never
-  the aggregate delivery rate. Both arms of a pair use the stored rates.
+- X is the cell's median windowed **publication** rate over three baseline calibration runs:
+  messages the sender published per second over its measured interval, never the aggregate
+  delivery rate. Both arms of a pair use the stored rates. Where those runs happen on hosted
+  runners is part of level 2 (section 1.3), not yet designed.
 - Because the windowed rate is fence-bound, these rates are light loads (section 12).
 
 **Windowed counts.** Calibration scales each count so the measured interval is about 3 s. That
@@ -680,6 +694,7 @@ notice: an A/B of a library constant is a legitimate use.
 python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build-dir> --b-commit <sha>]
     --output <results.jsonl> [--workloads <file>] [--pairs 5] [--select <cell-id glob>]
     [--note <text>] [--cpus N] [--aa <aa.jsonl>] [--calibrate <new-workloads.json>] [--keep]
+    [--require-valid]
 ```
 
 **Session**
@@ -692,6 +707,9 @@ python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build
 - Selected open-loop cells that have no stored rate are skipped. They are listed with the reason
   at the start and in the summary, and no record is written for them.
 - In pair p, A runs first when p is even and B runs first when p is odd.
+- With `--require-valid` (not with `--calibrate`), the runner exits non-zero after the summary
+  when a record of the session is invalid; a warning does not count. The CI smoke pass uses it
+  (section 1.3).
 
 **Each sample.** The launch is inside one guarded scope, so an interrupt or an exception also
 ends the swarm, and the runner never signals a process it does not hold by more than a PID.
@@ -761,9 +779,9 @@ ends the swarm, and the runner never signals a process it does not hold by more 
 **Calibration (`--calibrate`)** runs each selected windowed broadcast cell three times with `--a`,
 rescales its count to about 3 s, derives its three open-loop rates from the median publication
 rate, and writes a new workloads file with per-cell calibration metadata. W2 and W3 are not
-calibrated. The operator commits the file only from a reference-host run. On the development
-machine `--calibrate` writes only to a temporary file, to check function, and validation runs
-there use that file through `--workloads`.
+calibrated. Which run may produce a committed file is part of level 2 (section 1.3), not yet
+designed. Until then `--calibrate` writes only to a temporary file, to check function, and
+validation runs use that file through `--workloads`.
 
 ## 10. Reading hotspots (adopted design)
 
@@ -817,17 +835,22 @@ calibration; the broadcast port for both origins, windowed and open-loop; and de
       the ring, and a delay long enough to obstruct the writer. A completed sample with observed
       loss must be invalid (`loss`); a timeout is recorded as `timeout`. A loss-free completion
       means the fixture did not induce overload, and the check does not count as exercised.
-4. **Reference host.** The cross-process `steady_clock` assumption (section 12) is established
-   for the reference toolchain before any one-way latency reference is accepted. Calibration is
-   committed, and a 5-pair A/A over the default broadcast cells is stored as the first
-   reference. Until then, results are development evidence, not the reference.
+4. **Comparison on hosted runners (level 2, section 1.3; not yet designed).** The cross-process
+   `steady_clock` assumption (section 12) must be established for a toolchain before any one-way
+   latency reference from it is accepted. Calibration and a stored A/A reference over the default
+   broadcast cells belong to level 2. Until then, results are development and CI smoke evidence,
+   not a reference.
 
-**Phase 2** (`rpc_benchmark`): W2 with fixed counts; on the reference host, a 5-pair A/A over the
-W2 cells.
+**Phase 2** (`rpc_benchmark`): W2 with fixed counts; its A/A reference belongs to level 2.
 
-**Phase 3** (`swarm_benchmark`): W3; on the reference host, a 5-pair A/A over the W3 cells at the
-host's C. The N_over swarm formed on the development machine at 80 leaves, and at 125 with
-`--cpus 126` (WSL).
+**Phase 3** (`swarm_benchmark`): W3; its A/A reference at the runner's C belongs to level 2. The
+N_over swarm formed on the development machine at 80 leaves, and at 125 with `--cpus 126` (WSL).
+
+**CI smoke pass (level 1).** On every CI platform, the workflow builds the three targets and runs
+one A/A pair of each cell of `benchmarks/workloads_smoke.json` except `w3.lifecycle.n_over`, with
+`--require-valid`. Its cells and counts are chosen to stay well clear of loss and timeouts on a
+loaded 3 to 4 core runner, and the pass aims at about 3 min of benchmark time per job; on the
+development machine one pass took 56 to 69 s.
 
 **Estimated cost** (estimates, not measurements; about 2 s of fixed overhead per sample). One pass
 over the default cells takes about 6 min for W1 (72 cells), about 6 min for W2 (10 cells; the 2 s
@@ -838,11 +861,12 @@ gap alone takes 2 min per route) and probably under 1 min for W3. A full A/B run
 
 - **No capacity claim:** no maximum sustainable rate or saturation point; open-loop rates are
   fixed probes.
-- **No universal maximum or cross-host comparison:** numbers describe the reference host, its
-  toolchain and each run's process placement.
+- **No universal maximum or cross-host comparison:** numbers describe the host that produced
+  them, its toolchain and each run's process placement.
 - **No host tuning:** no pinning, affinity, frequency control or isolation; the OS places processes.
-- **No thresholds, pass/fail, CI gate or significance testing** beyond the A/A spread;
-  five pairs show direction and size, not certainty. Results are not a latency or loss contract,
+- **No thresholds, performance gate or significance testing** beyond the A/A spread;
+  five pairs show direction and size, not certainty. The CI smoke pass fails only on breakage or
+  an invalid record, never on a number. Results are not a latency or loss contract,
   and open-loop loss under overload is documented behaviour (`docs/architecture.md:89-99`).
 - **No per-thread, futex, syscall, hardware-counter or memory metrics.** On Windows process CPU
   often does not advance over a whole sample (zero for whole 3 s samples; every W3 sample has
@@ -863,8 +887,8 @@ gap alone takes 2 min per route) and probably under 1 min for W3. A full A/B run
   `Process32NextW` as the end of the table, so that look misses a descendant after that point.
 - **Slowest-receiver latency conditions on delivery to every receiver**, so loss can remove the
   slowest observations; read it together with loss.
-- **A clock assumption.** Cross-process latency assumes that `std::chrono::steady_clock` on the
-  reference toolchain reads one system-wide monotonic clock; the library's `CLOCK_MONOTONIC`
+- **A clock assumption.** Cross-process latency assumes that `std::chrono::steady_clock` on each
+  toolchain reads one system-wide monotonic clock; the library's `CLOCK_MONOTONIC`
   helper does not prove that mapping. Establishing it is a prerequisite of phase 1 acceptance
   item 4. Nanosecond values do not mean nanosecond accuracy, and broadcast latency is sampled
   within a budget of about 100k messages.
@@ -942,10 +966,10 @@ Each entry gives the default that is implemented and the alternative.
 | 1 | Windowed broadcast is fence-bound (section 12, finding 3); the largest payload (261632 B) has a two-message burst. Keep the windowed mode as it is? | Keep: a lossless paced rate, with the fence share shown | Larger bursts where the ring allows; or treat the fence as its own measured item |
 | 2 | The open-loop rates are light loads (section 12, finding 4). Keep 0.1, 0.5 and 0.8 of the calibrated windowed publication rate? | Keep, and read them as light loads | Derive them from the fence-free rate; the top probe may then exceed receiver capacity, and loss becomes the result |
 | 3 | The W2 cells mostly report the wait policy (section 12, finding 2). Keep them? | Keep the cells as they are and read them by the reading rule | Jitter the gap by up to one poll period; a larger window for a capacity-bound `leaf_to_leaf` cell |
-| 4 | Size of the default sweep, and whether open-loop waits for the reference host | Keep the open-loop cells defined: they run only once calibration has stored their rates, so they wait for the reference host anyway; every cell is selectable | A smaller default grid |
+| 4 | Size of the default sweep, and whether open-loop waits for calibration | Keep the open-loop cells defined: they run only once calibration has stored their rates, so they wait for level 2 (section 1.3) anyway; every cell is selectable | A smaller default grid |
 | 5 | Fixed count for the W2 gap-0 cells | 10000 | Another fixed count |
 | 6 | Is the runner's operational cleanup acceptable under "only system independent stuff"? On POSIX it signals only the launched coordinator's process group, leaves exit through Sintra's lifeline (a leaf that cannot run is reported; see the decision below), and a `--run-id` scan only detects leftovers; on Windows it terminates a retained-handle process tree. It measures nothing | Keep | Drop the per-OS parts and rely on the lifeline alone |
-| 7 | Oversubscribed point `N_over = min(125, max(80, 2C))` | Keep; revisit once C of the reference host is known | Another formula |
+| 7 | Oversubscribed point `N_over = min(125, max(80, 2C))` | Keep; revisit with level 2, once C of the comparison runners is known | Another formula |
 | 8 | Maximum swarm size: 125, the automatic index budget, reached by N_over from C = 63 | 125 | A lower cap |
 | 9 | A/A cadence | An operator procedure: the runner runs no A/A pass by itself and reads A/A records from the output file or `--aa`. The operator runs an A/A session for the selected cells with every comparison session, until the stored A/A spreads prove stable | Once per host or toolchain change |
 | 10 | Where calibrated counts and rates live | In git (`benchmarks/workloads.json`), so both arms and later sessions use identical absolute rates | Beside the results |

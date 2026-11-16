@@ -1598,10 +1598,23 @@ def parse_arguments():
     parser.add_argument("--calibrate", type=Path, metavar="NEW_WORKLOADS",
                         help="calibrate the selected windowed cells into this workloads file")
     parser.add_argument("--keep", action="store_true", help="keep the run directories")
+    parser.add_argument("--require-valid", action="store_true",
+                        help="exit non-zero when a record of this session is invalid")
     args = parser.parse_args()
     if args.b is not None and args.b_commit is None:
         parser.error("--b needs --b-commit")
+    if args.require_valid and args.calibrate is not None:
+        parser.error("--require-valid does not apply to --calibrate")
     return args
+
+
+def require_valid(records):
+    """Fails the session when one of its records is invalid. A warning does not count."""
+    invalid = [record for record in records if not record["outcome"]["valid"]]
+    if invalid:
+        fail(f"{len(invalid)} of {len(records)} records are invalid:\n  " + "\n  ".join(
+            f"{record['cell']['id']} arm={record['arm']} run={record['run_id']} "
+            f"reasons={record['outcome']['reasons']}" for record in invalid))
 
 
 def lacks_rate(cell):
@@ -1652,6 +1665,8 @@ def main():
     print_summary(records, earlier_aa + (records if session.aa else []), skipped)
     report_unsized(unsized)
     print_axis_tables(records)
+    if args.require_valid:
+        require_valid(records)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,397 @@
+name: Benchmarks
+
+# Builds the three benchmarks on every platform and runs a short smoke pass with
+# benchmarks/workloads_smoke.json. A job fails when the build or the runner fails, or when a
+# record is invalid (--require-valid). It never judges a number: warnings and speed do not count.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'benchmarks/**'
+      - 'tests/runner/platform/**'
+      - '.github/workflows/benchmarks.yml'
+  pull_request:
+    branches: [ '*' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'benchmarks/**'
+      - 'tests/runner/platform/**'
+      - '.github/workflows/benchmarks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cxx: g++
+          - compiler: clang
+            cxx: clang++
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Compute build parallelism
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v nproc >/dev/null 2>&1; then
+            total=$(nproc)
+          else
+            total=$(getconf _NPROCESSORS_ONLN || echo 2)
+          fi
+          if [ -z "$total" ] || [ "$total" -lt 1 ]; then
+            total=2
+          fi
+          jobs=$(( total - 2 ))
+          if [ "$jobs" -lt 2 ]; then
+            jobs=2
+          fi
+          if [ "$jobs" -gt "$total" ]; then
+            jobs="$total"
+          fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "Using $jobs build jobs (detected $total cores)."
+
+      - name: Ensure Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build
+          fi
+
+      - name: Ensure Clang
+        if: matrix.compiler == 'clang'
+        run: |
+          if ! command -v clang++ >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y clang
+          fi
+
+      - name: Configure CMake
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }} --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
+
+      - name: Run the smoke pass
+        shell: bash
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          smoke="$RUNNER_TEMP/benchmark-smoke"
+          mkdir -p "$smoke"
+          # A private ring parent directory for the swarms of the pass.
+          TMPDIR="$(mktemp -d "$RUNNER_TEMP/benchmark-tmp.XXXXXX")"
+          export TMPDIR
+          python -u benchmarks/run_benchmarks.py --a build --a-commit "$COMMIT" \
+            --output "$smoke/smoke.jsonl" --workloads benchmarks/workloads_smoke.json --pairs 1 \
+            --select 'w1.*' --select 'w2.*' --select 'w3.lifecycle.n[0-9]*' \
+            --note "CI smoke, linux-${{ matrix.compiler }}" --require-valid 2>&1 | tee "$smoke/runner.log"
+
+      - name: Upload the smoke records
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-smoke-linux-${{ matrix.compiler }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/benchmark-smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+  macos:
+    name: macOS
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Compute build parallelism
+        shell: bash
+        run: |
+          set -euo pipefail
+          total=$(sysctl -n hw.logicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+          if [ -z "$total" ] || [ "$total" -lt 1 ]; then
+            total=2
+          fi
+          jobs=$(( total - 2 ))
+          if [ "$jobs" -lt 2 ]; then
+            jobs=2
+          fi
+          if [ "$jobs" -gt "$total" ]; then
+            jobs="$total"
+          fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "Using $jobs build jobs (detected $total cores)."
+
+      - name: Ensure Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+
+      - name: Configure CMake
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }} --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
+
+      - name: Run the smoke pass
+        shell: bash
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          smoke="$RUNNER_TEMP/benchmark-smoke"
+          mkdir -p "$smoke"
+          # A private ring parent directory for the swarms of the pass.
+          TMPDIR="$(mktemp -d "$RUNNER_TEMP/benchmark-tmp.XXXXXX")"
+          export TMPDIR
+          python -u benchmarks/run_benchmarks.py --a build --a-commit "$COMMIT" \
+            --output "$smoke/smoke.jsonl" --workloads benchmarks/workloads_smoke.json --pairs 1 \
+            --select 'w1.*' --select 'w2.*' --select 'w3.lifecycle.n[0-9]*' \
+            --note "CI smoke, macos" --require-valid 2>&1 | tee "$smoke/runner.log"
+
+      - name: Upload the smoke records
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-smoke-macos-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/benchmark-smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+  windows-msvc:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up MSVC environment
+        uses: TheMrMilchmann/setup-msvc-dev@79dac248aac9d0059f86eae9d8b5bfab4e95e97c # v4.0.0
+        with:
+          arch: x64
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Compute build parallelism
+        shell: pwsh
+        run: |
+          $total = [int]($env:NUMBER_OF_PROCESSORS)
+          if ($total -lt 1) { $total = 2 }
+          $jobs = $total - 2
+          if ($jobs -lt 2) { $jobs = 2 }
+          if ($jobs -gt $total) { $jobs = $total }
+          Add-Content -Path $env:GITHUB_ENV -Value "BUILD_JOBS=$jobs"
+          Write-Host "Using $jobs build jobs (detected $total cores)."
+
+      - name: Configure CMake
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }} --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
+
+      # On Windows the runner owns each swarm through tests/runner/platform/windows_process_tree.py.
+      - name: Run the smoke pass
+        shell: pwsh
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP 'benchmark-smoke'
+          # A private ring parent directory for the swarms of the pass.
+          $env:TEMP = Join-Path $env:RUNNER_TEMP 'benchmark-tmp'
+          $env:TMP = $env:TEMP
+          New-Item -ItemType Directory -Force -Path $smoke, $env:TEMP | Out-Null
+          python -u benchmarks/run_benchmarks.py --a build --a-commit $env:COMMIT `
+            --output (Join-Path $smoke 'smoke.jsonl') --workloads benchmarks/workloads_smoke.json --pairs 1 `
+            --select 'w1.*' --select 'w2.*' --select 'w3.lifecycle.n[0-9]*' `
+            --note 'CI smoke, windows-msvc' --require-valid 2>&1 | Tee-Object -FilePath (Join-Path $smoke 'runner.log')
+          exit $LASTEXITCODE
+
+      - name: Upload the smoke records
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-smoke-windows-msvc-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/benchmark-smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+  windows-mingw:
+    name: Windows (MinGW)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Compute build parallelism
+        shell: pwsh
+        run: |
+          $total = [int]($env:NUMBER_OF_PROCESSORS)
+          if ($total -lt 1) { $total = 2 }
+          $jobs = $total - 2
+          if ($jobs -lt 2) { $jobs = 2 }
+          if ($jobs -gt $total) { $jobs = $total }
+          Add-Content -Path $env:GITHUB_ENV -Value "BUILD_JOBS=$jobs"
+          Write-Host "Using $jobs build jobs (detected $total cores)."
+
+      - name: Configure CMake
+        run: cmake -G "Ninja Multi-Config" -B build -S . -DCMAKE_CXX_COMPILER=g++.exe -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel ${{ env.BUILD_JOBS }} --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
+
+      # On Windows the runner owns each swarm through tests/runner/platform/windows_process_tree.py.
+      - name: Run the smoke pass
+        shell: pwsh
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP 'benchmark-smoke'
+          # A private ring parent directory for the swarms of the pass.
+          $env:TEMP = Join-Path $env:RUNNER_TEMP 'benchmark-tmp'
+          $env:TMP = $env:TEMP
+          New-Item -ItemType Directory -Force -Path $smoke, $env:TEMP | Out-Null
+          python -u benchmarks/run_benchmarks.py --a build --a-commit $env:COMMIT `
+            --output (Join-Path $smoke 'smoke.jsonl') --workloads benchmarks/workloads_smoke.json --pairs 1 `
+            --select 'w1.*' --select 'w2.*' --select 'w3.lifecycle.n[0-9]*' `
+            --note 'CI smoke, windows-mingw' --require-valid 2>&1 | Tee-Object -FilePath (Join-Path $smoke 'runner.log')
+          exit $LASTEXITCODE
+
+      - name: Upload the smoke records
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-smoke-windows-mingw-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/benchmark-smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+  freebsd:
+    name: FreeBSD
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Build and run the smoke pass (FreeBSD 15.0)
+        uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        with:
+          release: "15.0"
+          usesh: true
+          copyback: false
+          envs: 'COMMIT'
+          prepare: |
+            pkg install -y cmake ninja python
+          run: |
+            set -eu
+            set -o pipefail
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
+            cmake --build build --parallel 2 \
+              --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
+            smoke="$GITHUB_WORKSPACE/benchmark-smoke"
+            mkdir -p "$smoke"
+            # A private ring parent directory for the swarms of the pass.
+            TMPDIR="$(mktemp -d /tmp/benchmark-tmp.XXXXXX)"
+            export TMPDIR
+            python3 -u benchmarks/run_benchmarks.py --a build --a-commit "$COMMIT" \
+              --output "$smoke/smoke.jsonl" --workloads benchmarks/workloads_smoke.json --pairs 1 \
+              --select 'w1.*' --select 'w2.*' --select 'w3.lifecycle.n[0-9]*' \
+              --note "CI smoke, freebsd" --require-valid < /dev/null 2>&1 | tee "$smoke/runner.log"
+
+      # The VM action skips copyback when its run fails. Export the smoke output from the
+      # still-running VM, including after a failure.
+      - name: Export the smoke output
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/benchmark-smoke"
+          rsync -a --no-owner --no-group --timeout=60 \
+            --rsync-path=/usr/local/bin/rsync \
+            -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
+            "freebsd:$GITHUB_WORKSPACE/benchmark-smoke/" "$GITHUB_WORKSPACE/benchmark-smoke/"
+
+      - name: Upload the smoke records
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-smoke-freebsd-${{ github.event.pull_request.head.sha || github.sha }}
+          path: benchmark-smoke/
+          if-no-files-found: warn
+          retention-days: 7

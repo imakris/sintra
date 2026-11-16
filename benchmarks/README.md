@@ -1,8 +1,9 @@
 # Sintra benchmarks
 
 The benchmarks measure latency, throughput, process CPU and loss through the
-public API. They run on demand on a reference host, and their results are JSONL
-records kept outside git.
+public API. They run in GitHub CI on hosted runners, not on the owner's
+machines (see [Continuous integration](#continuous-integration)), and their
+results are JSONL records kept outside git.
 
 This file is the usage guide. [docs/benchmark_plan.md](../docs/benchmark_plan.md)
 defines what is measured and how:
@@ -28,6 +29,7 @@ defines what is measured and how:
 | `harness.h` | Clock, process CPU time, build facts, per-process report files, aggregation helpers |
 | `run_benchmarks.py` | Paired runner: A/B and A/A sessions, calibration, summary and axis tables |
 | `workloads.json` | Cells, windowed counts, stored open-loop rates and calibration metadata |
+| `workloads_smoke.json` | The CI smoke cells: tiny fixed counts and a low explicit open-loop rate |
 
 ## Build
 
@@ -62,6 +64,7 @@ that differ in a notice at the start of the session and in the summary.
 python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build-dir> --b-commit <sha>]
     --output <results.jsonl> [--workloads <file>] [--pairs 5] [--select <cell-id glob>]
     [--note <text>] [--cpus N] [--aa <aa.jsonl>] [--calibrate <new-workloads.json>] [--keep]
+    [--require-valid]
 ```
 
 - **A/B session.** With `--b`, every selected cell runs as pairs of one A and one
@@ -90,6 +93,9 @@ python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build
   effective CPU count C of the session and defaults to `hardware_concurrency()`.
 - **`--keep`** keeps each sample's run directory under `<output>.runs/`: the
   process reports, the recorded PIDs and the coordinator's output.
+- **`--require-valid`** makes the runner exit non-zero after the summary when a
+  record of the session is invalid, and list those records. A warning does not
+  count. It does not apply to `--calibrate`.
 
 Cell IDs:
 
@@ -303,9 +309,52 @@ significant digits), stores the open-loop rates as the `rate_fractions` of the
 median windowed **publication** rate (two significant digits), and records the
 host label, commit and date. Cells that were not calibrated keep their values.
 
-Commit a calibrated `workloads.json` only from a run on the reference host, so
-that both arms and later sessions use the same absolute counts and rates.
-Anywhere else, calibrate into a temporary file and pass it with `--workloads`.
+How calibration applies to hosted runners belongs to the comparison
+methodology of level 2 (see below), which is not designed yet. Until then,
+calibrate into a temporary file and pass it with `--workloads`.
+
+## Continuous integration
+
+Owner decision (plan section 1.1): the benchmarks run in GitHub CI on hosted
+runners, not on the owner's machines. `.github/workflows/benchmarks.yml` is
+level 1: it runs on demand and on every push and pull request that changes the
+library, the build, `benchmarks/`, the runner's Windows helper
+(`tests/runner/platform/`) or the workflow itself. It has one job per platform:
+Linux with GCC and with Clang, macOS, Windows with MSVC and with MinGW, and
+FreeBSD in a VM. Each job:
+
+1. builds the three targets in Release, with tests and examples off;
+2. runs one A/A pair of every cell of `workloads_smoke.json` except the
+   oversubscribed swarm cell, with `--require-valid`, and with an empty private
+   directory as the ring parent directory;
+3. uploads the JSONL and the runner's console output as the artifact
+   `benchmark-smoke-<platform>-<commit>`, also after a failure.
+
+The pass checks function, not speed. A job fails when the build or the runner
+fails, for example on an incomplete cleanup, or when a record is invalid.
+Numbers and warnings (`cpu_low_confidence`, `cpu_not_advancing`,
+`ring_dir_not_empty` and the others) never fail it. The smoke cells have tiny
+fixed counts: windowed broadcast from both origins at R = 1 and 2 with 64 and
+4096 bytes, each also open-loop at 500 messages/s for 1 s; closed-loop
+request/response at gaps 0 and 200 µs and windowed, on both routes; swarms of 1
+and 8 leaves. One pass took about a minute on the development machine.
+
+Level 2, a paired comparison against the previous master on hosted runners that
+is reported and does not gate, is a later step and not designed yet.
+
+To run the smoke pass locally, from the repository root, against a Release
+build directory:
+
+```text
+python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <label> --output <new.jsonl>
+    --workloads benchmarks/workloads_smoke.json --pairs 1
+    --select "w1.*" --select "w2.*" --select "w3.lifecycle.n[0-9]*" --require-valid
+```
+
+Give each pass a new output file: the runner appends to it, and an earlier
+session's A/A records join the summary. To keep other `sintra-*` entries out of
+the ring parent directory (`ring_dir_not_empty`), point `TMPDIR` (POSIX) or
+`TEMP` and `TMP` (Windows) at an empty directory.
 
 ## Workloads file
 
