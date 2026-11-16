@@ -650,8 +650,9 @@ def read_build_facts(executable):
 
 
 def configuration(build):
-    """The toolchain and configuration of a build: what both arms must share."""
-    return {key: build[key] for key in CONFIGURATION_FACTS}
+    """The toolchain and configuration of a build: what both arms must share. The name of
+    the configuration counts in any letter case, as it does for the validity of a build."""
+    return dict({key: build[key] for key in CONFIGURATION_FACTS}, config=build["config"].lower())
 
 
 def library_notice(build_a, build_b):

@@ -212,7 +212,9 @@ and maximum and, beside it, the A/A spread. Nothing is flagged automatically.
   after every burst and once at the end. The measured interval includes those
   waits, so windowed rates and CPU per message include fence time.
   `throughput.fence_s` holds their sum. The duration of the publish call,
-  `send_call`, does not include it, so it follows the publish path alone.
+  `send_call`, does not include it, so it follows the publish path alone. On
+  Windows the clock ticks in steps of 100 ns, which quantises `send_call`: the
+  p50 of two arms is often exactly equal.
 - **Open-loop sender CPU.** An open-loop sender polls the clock for the last
   100 µs before each intended arrival, so its CPU is mostly the generator's
   own. Do not read it as the cost of publishing. The summary shows the CPU
@@ -498,8 +500,9 @@ before its first `sintra::shutdown()` call and after the call that returns
 true. It writes `<role>-<branch index>.bin` after that, because the sample
 measures shutdown. The run directory and `--aggregate` work as for the broadcast
 executable, and so does the rendezvous: a process whose rendezvous was bypassed
-writes no report. A swarm sample has no planned duration, so the runner gives
-it the 60 s base timeout.
+leaves the swarm through `sintra::shutdown()`, writes no report and exits
+non-zero. A swarm sample has no planned duration, so the runner gives it the
+60 s base timeout.
 
 Keep `--output`, and with it the run directories, on a local filesystem. A leaf
 writes its PID file during its start-up and its report before it exits, and

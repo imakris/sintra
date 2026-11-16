@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -162,14 +161,21 @@ int run(int argc, char* argv[], uint64_t main_entry_ns)
         throw;
     }
     mark_ready();
-    if (sintra::process_index() != branch_index) {
-        throw std::runtime_error("--branch_index is not the library's index of this process");
-    }
 
     // Neither phase's CPU interval includes the rendezvous. If it was bypassed,
     // the shutdown snapshots would not follow a formed swarm, so the process
-    // fails the sample: this throws, and the process writes no report.
-    bench::rendezvous(k_formed);
+    // fails the sample: it leaves the swarm, writes no report and exits
+    // non-zero. It fails the same way when the library's index of this process
+    // is not --branch_index.
+    bench::run_protocol([&] {
+        if (sintra::process_index() != branch_index) {
+            throw std::runtime_error("--branch_index is not the library's index of this process");
+        }
+        bench::rendezvous(k_formed);
+    });
+    if (bench::protocol_failure) {
+        bench::shut_down_and_rethrow();
+    }
 
     // A shutdown() that returns false has retained the runtime for a retry,
     // which resumes the teardown (docs/reference/shutdown.md). The shutdown
@@ -237,31 +243,21 @@ double first_shutdown_call_s(const Report& process)
     return seconds(process.header.measure_begin_ns, process.workload.first_shutdown_end_ns);
 }
 
+// The report header holds the shutdown snapshots, so a process's CPU over its
+// measured interval is its shutdown CPU.
 double shutdown_cpu_s(const Report& process)
 {
-    return process.header.cpu_end_s - process.header.cpu_begin_s;
+    return bench::process_cpu_s(process);
 }
 
 void append_cell(bench::Json_writer& json, const swarm_cell_t& cell)
 {
-    json.begin_object("cell");
-    json.text("workload", "swarm");
-    json.text("mode", "lifecycle");
-    json.null("origin");
-    json.null("receivers");
-    json.null("payload_bytes");
-    json.null("framed_bytes");
-    json.null("gap_us");
-    json.null("window");
-    json.count("n_leaves", cell.leaves);
-    json.null("offered_rate");
-    json.null("planned");
-    json.null("warmup");
-    json.null("burst");
-    json.null("handler_delay_us");
-    json.null("drain_timeout_s");
-    json.flag("validation_only", is_validation_only(cell));
-    json.end_object();
+    bench::record_cell_t record;
+    record.workload        = "swarm";
+    record.mode            = "lifecycle";
+    record.n_leaves        = cell.leaves;
+    record.validation_only = is_validation_only(cell);
+    bench::append_cell(json, record);
 }
 
 // Maps each role to the seconds that `process_cpu_s` yields for its processes.
@@ -325,9 +321,8 @@ int aggregate(const std::filesystem::path& directory)
         [](const swarm_cell_t&, int branch_index) { return role_name(branch_index); });
     const auto& processes = set.processes;
 
-    auto                     reasons = bench::build_invalid_reasons();
+    auto                     reasons = bench::record_reasons(set);
     std::vector<std::string> warnings;
-    reasons.insert(reasons.end(), set.reasons.begin(), set.reasons.end());
     const auto any_process = [&](auto&& predicate) {
         return std::any_of(processes.begin(), processes.end(), predicate);
     };
@@ -335,18 +330,11 @@ int aggregate(const std::filesystem::path& directory)
         [](const Report& process) { return process.workload.init_failed != 0; });
     const bool shutdown_threw = any_process(
         [](const Report& process) { return process.workload.shutdown_threw != 0; });
-    if (init_failed) {
-        reasons.push_back("init_failed");
-    }
-    if (shutdown_threw) {
-        reasons.push_back("shutdown_threw");
-    }
+    bench::invalid_if(reasons, init_failed, "init_failed");
+    bench::invalid_if(reasons, shutdown_threw, "shutdown_threw");
 
     bench::Json_writer json;
-    json.begin_object();
-    json.text("schema", "sintra-bench/1");
-    json.text("run_id", set.run_id);
-    bench::append_build_facts(json, "build");
+    bench::begin_record(json, set.run_id);
     append_cell(json, set.cell);
     json.null("counts");
     json.null("throughput");
@@ -375,14 +363,7 @@ int aggregate(const std::filesystem::path& directory)
     else {
         json.null("lifecycle");
     }
-    json.begin_object("outcome");
-    bench::append_names(json, "missing_files", set.missing);
-    json.flag("valid", reasons.empty());
-    bench::append_names(json, "reasons", reasons);
-    bench::append_names(json, "warnings", warnings);
-    json.end_object();
-    json.end_object();
-    std::printf("%s\n", json.str().c_str());
+    bench::end_record(json, set.missing, reasons, warnings);
     return 0;
 }
 
@@ -392,20 +373,7 @@ int main(int argc, char* argv[])
 {
     // A leaf's start-up time runs from here to its formation snapshot.
     const auto main_entry_ns = bench::now_ns();
-    try {
-        if (bench::has_option(argc, argv, "--build-facts")) {
-            bench::Json_writer json;
-            bench::append_build_facts(json);
-            std::printf("%s\n", json.str().c_str());
-            return 0;
-        }
-        if (bench::has_option(argc, argv, "--aggregate")) {
-            return aggregate(bench::option_value(argc, argv, "--aggregate"));
-        }
-        return run(argc, argv, main_entry_ns);
-    }
-    catch (const std::exception& error) {
-        std::fprintf(stderr, "swarm_benchmark: %s\n", error.what());
-        return 1;
-    }
+    return bench::benchmark_main(
+        argc, argv, "swarm_benchmark", aggregate,
+        [&](int argc, char* argv[]) { return run(argc, argv, main_entry_ns); });
 }

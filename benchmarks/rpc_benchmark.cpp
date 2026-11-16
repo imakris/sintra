@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -31,8 +30,11 @@ namespace {
 
 namespace bench = sintra::bench;
 
+using bench::has_role;
+using bench::invalid_if;
 using bench::processing_barrier;
 using bench::rendezvous;
+using bench::run_protocol;
 
 constexpr char     k_callee_name[] = "benchmark-callee";
 constexpr uint64_t k_warmup_value  = UINT64_MAX;
@@ -89,10 +91,6 @@ using Report = bench::Process_report<rpc_block_t>;
 // caller thread writes the counters and the samples.
 Report                report;
 std::filesystem::path run_directory;
-
-// A failure of this process's part of the protocol. It is kept until the
-// process has left the swarm through sintra::shutdown().
-std::exception_ptr failure;
 
 const char* mode_name(Mode mode)
 {
@@ -163,18 +161,6 @@ struct Callee : sintra::Derived_transceiver<Callee>
 // ---------------------------------------------------------------------------
 // Run mode
 // ---------------------------------------------------------------------------
-
-// Runs this process's part of the measurement protocol.
-template <typename Protocol>
-void run_protocol(Protocol protocol)
-{
-    try {
-        protocol();
-    }
-    catch (...) {
-        failure = std::current_exception();
-    }
-}
 
 // Called after the warm-up fence. Every process resets its eviction-log count
 // and takes its begin snapshot before the rendezvous, and the caller makes its
@@ -441,13 +427,7 @@ int run(int argc, char* argv[])
     if (sintra::process_index() == 0) {
         run_protocol([&] { follow_caller(cell.route == Route::LEAF_TO_COORDINATOR); });
     }
-    const bool torn_down = bench::shutdown_with_retries();
-    if (failure) {
-        std::rethrow_exception(failure);
-    }
-    if (!torn_down) {
-        throw std::runtime_error("sintra::shutdown() did not complete");
-    }
+    bench::shut_down_and_rethrow();
     return 0;
 }
 
@@ -456,37 +436,24 @@ int run(int argc, char* argv[])
 // Aggregate mode
 // ---------------------------------------------------------------------------
 
-bool has_role(const Report& process, std::string_view role)
-{
-    return std::string_view(process.header.role) == role;
-}
-
-double process_cpu_s(const Report& process)
-{
-    return process.header.cpu_end_s - process.header.cpu_begin_s;
-}
-
 void append_cell(bench::Json_writer& json, const rpc_cell_t& cell)
 {
-    const bool closed_loop = cell.mode == Mode::CLOSED_LOOP;
-    json.begin_object("cell");
-    json.text("workload", "rpc");
-    json.text("mode", mode_name(cell.mode));
-    json.text("route", route_name(cell.route));
-    json.null("receivers");
-    json.null("payload_bytes");
-    json.null("framed_bytes");
-    json.count("gap_us", closed_loop ? std::optional<uint64_t>(cell.gap_us) : std::nullopt);
-    json.count("window", closed_loop ? std::nullopt : std::optional<uint64_t>(cell.window));
-    json.count("n_leaves", leaf_count(cell));
-    json.null("offered_rate");
-    json.count("planned", cell.planned);
-    json.count("warmup", cell.warmup);
-    json.null("burst");
-    json.count("handler_delay_us", cell.handler_delay_us);
-    json.null("drain_timeout_s");
-    json.flag("validation_only", is_validation_only(cell));
-    json.end_object();
+    bench::record_cell_t record;
+    record.workload         = "rpc";
+    record.mode             = mode_name(cell.mode);
+    record.route            = route_name(cell.route);
+    record.n_leaves         = leaf_count(cell);
+    record.planned          = cell.planned;
+    record.warmup           = cell.warmup;
+    record.handler_delay_us = cell.handler_delay_us;
+    record.validation_only  = is_validation_only(cell);
+    if (cell.mode == Mode::CLOSED_LOOP) {
+        record.gap_us = cell.gap_us;
+    }
+    else {
+        record.window = cell.window;
+    }
+    bench::append_cell(json, record);
 }
 
 // A call is delivered when it returned a value; a call error is an RPC
@@ -564,26 +531,6 @@ void append_latencies(bench::Json_writer& json, const Report& caller)
     json.end_object();
 }
 
-void append_cpu(bench::Json_writer& json, const std::vector<Report>& processes, uint64_t calls)
-{
-    json.begin_object("cpu");
-    bench::Role_cpu total{"total"};
-    for (const std::string_view name : {"coordinator", "coordinator_callee", "callee", "caller"}) {
-        bench::Role_cpu role{std::string(name)};
-        for (const auto& process : processes) {
-            if (has_role(process, name)) {
-                bench::add_process_cpu(role, process_cpu_s(process));
-                bench::add_process_cpu(total, process_cpu_s(process));
-            }
-        }
-        if (role.processes != 0) {
-            bench::append_role_cpu(json, role, calls);
-        }
-    }
-    bench::append_role_cpu(json, total, calls);
-    json.end_object();
-}
-
 int aggregate(const std::filesystem::path& directory)
 {
     const auto set = bench::read_report_set<rpc_block_t>(
@@ -594,20 +541,11 @@ int aggregate(const std::filesystem::path& directory)
         });
     const auto& processes = set.processes;
 
-    auto                     reasons = bench::build_invalid_reasons();
+    auto                     reasons = bench::record_reasons(set);
     std::vector<std::string> warnings;
-    reasons.insert(reasons.end(), set.reasons.begin(), set.reasons.end());
-    const auto invalid_if = [&](bool condition, const char* reason) {
-        if (condition) {
-            reasons.push_back(reason);
-        }
-    };
 
     bench::Json_writer json;
-    json.begin_object();
-    json.text("schema", "sintra-bench/1");
-    json.text("run_id", set.run_id);
-    bench::append_build_facts(json, "build");
+    bench::begin_record(json, set.run_id);
     append_cell(json, set.cell);
     if (set.complete) {
         const auto& caller = *std::find_if(processes.begin(), processes.end(),
@@ -618,28 +556,21 @@ int aggregate(const std::filesystem::path& directory)
             eviction_log_matches += process.header.eviction_log_matches;
         }
         // Every call must return its argument, and none may be lost.
-        invalid_if(counts.exceptions + counts.wrong_echoes != 0, "call_errors");
-        invalid_if(counts.timed_out != 0, "loss");
-        invalid_if(eviction_log_matches != 0, "eviction_log_matches");
+        invalid_if(reasons, counts.exceptions + counts.wrong_echoes != 0, "call_errors");
+        invalid_if(reasons, counts.timed_out != 0, "loss");
+        invalid_if(reasons, eviction_log_matches != 0, "eviction_log_matches");
 
         // From the return of the caller's begin rendezvous to its end snapshot.
         const double interval_s =
             (double)(caller.header.measure_end_ns - counts.calls_begin_ns) / 1.0e9;
-        if (interval_s < 2.0) {
-            warnings.push_back("cpu_low_confidence");
-        }
-        // A process CPU clock that did not move over the interval says nothing
-        // about the role's cost.
-        if (std::any_of(processes.begin(), processes.end(),
-                [](const Report& process) { return process_cpu_s(process) == 0; }))
-        {
-            warnings.push_back("cpu_not_advancing");
-        }
+        bench::add_cpu_warnings(warnings, processes, interval_s);
 
         append_counts(json, caller, eviction_log_matches);
         append_throughput(json, counts.issued, interval_s);
         append_latencies(json, caller);
-        append_cpu(json, processes, counts.issued);
+        bench::append_cpu(
+            json, processes, {"coordinator", "coordinator_callee", "callee", "caller"},
+            counts.issued);
     }
     else {
         json.null("counts");
@@ -648,14 +579,7 @@ int aggregate(const std::filesystem::path& directory)
         json.null("cpu");
     }
     json.null("lifecycle");
-    json.begin_object("outcome");
-    bench::append_names(json, "missing_files", set.missing);
-    json.flag("valid", reasons.empty());
-    bench::append_names(json, "reasons", reasons);
-    bench::append_names(json, "warnings", warnings);
-    json.end_object();
-    json.end_object();
-    std::printf("%s\n", json.str().c_str());
+    bench::end_record(json, set.missing, reasons, warnings);
     return 0;
 }
 
@@ -663,20 +587,5 @@ int aggregate(const std::filesystem::path& directory)
 
 int main(int argc, char* argv[])
 {
-    try {
-        if (bench::has_option(argc, argv, "--build-facts")) {
-            bench::Json_writer json;
-            bench::append_build_facts(json);
-            std::printf("%s\n", json.str().c_str());
-            return 0;
-        }
-        if (bench::has_option(argc, argv, "--aggregate")) {
-            return aggregate(bench::option_value(argc, argv, "--aggregate"));
-        }
-        return run(argc, argv);
-    }
-    catch (const std::exception& error) {
-        std::fprintf(stderr, "rpc_benchmark: %s\n", error.what());
-        return 1;
-    }
+    return bench::benchmark_main(argc, argv, "rpc_benchmark", aggregate, run);
 }

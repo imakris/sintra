@@ -24,8 +24,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -240,6 +242,41 @@ inline bool shutdown_with_retries()
         }
     }
     return false;
+}
+
+
+// ---------------------------------------------------------------------------
+// Protocol frame
+// ---------------------------------------------------------------------------
+
+/// A failure of this process's part of the measurement protocol. It is kept
+/// until the process has left the swarm through sintra::shutdown().
+inline std::exception_ptr protocol_failure;
+
+/// Runs this process's part of the measurement protocol and keeps its failure.
+template <typename Protocol>
+void run_protocol(Protocol protocol)
+{
+    try {
+        protocol();
+    }
+    catch (...) {
+        protocol_failure = std::current_exception();
+    }
+}
+
+/// Leaves the swarm through shutdown_with_retries() and then rethrows the
+/// failure that run_protocol() kept. Throws as well when the runtime could not
+/// be torn down.
+inline void shut_down_and_rethrow()
+{
+    const bool torn_down = shutdown_with_retries();
+    if (protocol_failure) {
+        std::rethrow_exception(protocol_failure);
+    }
+    if (!torn_down) {
+        throw std::runtime_error("sintra::shutdown() did not complete");
+    }
 }
 
 
@@ -506,6 +543,19 @@ struct Process_report
     std::vector<sample_t>  intervals;   // other timed intervals, such as fences
 };
 
+template <typename Workload>
+bool has_role(const Process_report<Workload>& process, std::string_view role)
+{
+    return std::string_view(process.header.role) == role;
+}
+
+/// A process's CPU seconds over its measured interval.
+template <typename Workload>
+double process_cpu_s(const Process_report<Workload>& process)
+{
+    return process.header.cpu_end_s - process.header.cpu_begin_s;
+}
+
 /// Begin snapshot, common to every process and role: taken after the warm-up
 /// fence returns and before the begin rendezvous, so it precedes the first
 /// measured message or call. The eviction-log count restarts here.
@@ -643,6 +693,14 @@ std::vector<Process_report<Workload>> read_reports(const std::filesystem::path& 
     return reports;
 }
 
+/// Adds `reason` to the reasons why a sample is invalid, if the condition holds.
+inline void invalid_if(std::vector<std::string>& reasons, bool condition, const char* reason)
+{
+    if (condition) {
+        reasons.push_back(reason);
+    }
+}
+
 /// The reports of one run directory, checked against the cell that they
 /// describe: the result of read_report_set().
 template <typename Workload>
@@ -716,15 +774,10 @@ Report_set<Workload> read_report_set(
     const bool unexpected = processes.size() != (size_t)expected - set.missing.size();
     set.complete = set.missing.empty() && !unexpected;
 
-    const auto invalid_if = [&](bool condition, const char* reason) {
-        if (condition) {
-            set.reasons.push_back(reason);
-        }
-    };
-    invalid_if(!set.missing.empty(), "missing_files");
-    invalid_if(foreign != 0, "foreign_run_files");
-    invalid_if(inconsistent != 0, "inconsistent_reports");
-    invalid_if(unexpected, "unexpected_reports");
+    invalid_if(set.reasons, !set.missing.empty(), "missing_files");
+    invalid_if(set.reasons, foreign != 0, "foreign_run_files");
+    invalid_if(set.reasons, inconsistent != 0, "inconsistent_reports");
+    invalid_if(set.reasons, unexpected, "unexpected_reports");
     return set;
 }
 
@@ -802,6 +855,188 @@ inline void append_role_cpu(
         "us_per_delivery",
         deliveries ? std::optional<double>(cpu_us / (double)*deliveries) : std::nullopt);
     json.end_object();
+}
+
+/// Writes the `cpu` object of a record: one entry for each role of `roles` that
+/// has a process, in that order, and the total. `messages` divides every
+/// us_per_message. The role `receiving_role`, if there is one, also gets
+/// us_per_delivery over `deliveries`.
+template <typename Workload>
+void append_cpu(
+    Json_writer&                                  json,
+    const std::vector<Process_report<Workload>>&  processes,
+    std::initializer_list<std::string_view>       roles,
+    uint64_t                                      messages,
+    std::string_view                              receiving_role = {},
+    uint64_t                                      deliveries     = 0)
+{
+    json.begin_object("cpu");
+    Role_cpu total{"total"};
+    for (const std::string_view name : roles) {
+        Role_cpu role{std::string(name)};
+        for (const auto& process : processes) {
+            if (has_role(process, name)) {
+                add_process_cpu(role, process_cpu_s(process));
+                add_process_cpu(total, process_cpu_s(process));
+            }
+        }
+        if (role.processes != 0) {
+            append_role_cpu(
+                json, role, messages,
+                name == receiving_role ? std::optional<uint64_t>(deliveries) : std::nullopt);
+        }
+    }
+    append_role_cpu(json, total, messages);
+    json.end_object();
+}
+
+/// The CPU warnings of a record with one measured interval: cpu_low_confidence
+/// when the interval is under 2 s, and cpu_not_advancing when the CPU clock of
+/// some process did not move over it, which says nothing about a role's cost.
+template <typename Workload>
+void add_cpu_warnings(
+    std::vector<std::string>&                     warnings,
+    const std::vector<Process_report<Workload>>&  processes,
+    double                                        interval_s)
+{
+    if (interval_s < 2.0) {
+        warnings.push_back("cpu_low_confidence");
+    }
+    if (std::any_of(processes.begin(), processes.end(),
+            [](const auto& process) { return process_cpu_s(process) == 0; }))
+    {
+        warnings.push_back("cpu_not_advancing");
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Record
+// ---------------------------------------------------------------------------
+
+inline constexpr char k_record_schema[] = "sintra-bench/1";
+
+/// The reasons that a record starts from: why the build is not valid, then why
+/// the report set is not the expected one.
+template <typename Workload>
+std::vector<std::string> record_reasons(const Report_set<Workload>& set)
+{
+    auto reasons = build_invalid_reasons();
+    reasons.insert(reasons.end(), set.reasons.begin(), set.reasons.end());
+    return reasons;
+}
+
+/// Opens a record: the schema, the run ID and the build facts.
+inline void begin_record(Json_writer& json, std::string_view run_id)
+{
+    json.begin_object();
+    json.text("schema", k_record_schema);
+    json.text("run_id", run_id);
+    append_build_facts(json, "build");
+}
+
+/// Closes a record with its outcome object, and prints it.
+inline void end_record(
+    Json_writer&                     json,
+    const std::vector<std::string>&  missing_files,
+    const std::vector<std::string>&  reasons,
+    const std::vector<std::string>&  warnings)
+{
+    json.begin_object("outcome");
+    append_names(json, "missing_files", missing_files);
+    json.flag("valid", reasons.empty());
+    append_names(json, "reasons", reasons);
+    append_names(json, "warnings", warnings);
+    json.end_object();
+    json.end_object();
+    std::printf("%s\n", json.str().c_str());
+}
+
+/// The `cell` object of a record: the one definition of its keys (plan section
+/// 7; CELL_KEYS in run_benchmarks.py is its counterpart). An executable sets
+/// what applies to its cell, and every other key is written as null. A
+/// request/response cell has a route; every other cell has the key `origin`.
+struct record_cell_t
+{
+    std::string_view                 workload;
+    std::string_view                 mode;
+    std::optional<std::string_view>  origin;
+    std::optional<std::string_view>  route;
+    std::optional<uint64_t>          receivers;
+    std::optional<uint64_t>          payload_bytes;
+    std::optional<uint64_t>          framed_bytes;
+    std::optional<uint64_t>          gap_us;
+    std::optional<uint64_t>          window;
+    uint64_t                         n_leaves = 0;
+    std::optional<double>            offered_rate;
+    std::optional<uint64_t>          planned;
+    std::optional<uint64_t>          warmup;
+    std::optional<uint64_t>          burst;
+    std::optional<uint64_t>          handler_delay_us;
+    std::optional<uint64_t>          drain_timeout_s;
+    bool                             validation_only = false;
+};
+
+inline void append_cell(Json_writer& json, const record_cell_t& cell)
+{
+    json.begin_object("cell");
+    json.text("workload", cell.workload);
+    json.text("mode", cell.mode);
+    if (cell.route) {
+        json.text("route", *cell.route);
+    }
+    else
+    if (cell.origin) {
+        json.text("origin", *cell.origin);
+    }
+    else {
+        json.null("origin");
+    }
+    json.count("receivers", cell.receivers);
+    json.count("payload_bytes", cell.payload_bytes);
+    json.count("framed_bytes", cell.framed_bytes);
+    json.count("gap_us", cell.gap_us);
+    json.count("window", cell.window);
+    json.count("n_leaves", cell.n_leaves);
+    json.number("offered_rate", cell.offered_rate);
+    json.count("planned", cell.planned);
+    json.count("warmup", cell.warmup);
+    json.count("burst", cell.burst);
+    json.count("handler_delay_us", cell.handler_delay_us);
+    json.count("drain_timeout_s", cell.drain_timeout_s);
+    json.flag("validation_only", cell.validation_only);
+    json.end_object();
+}
+
+
+// ---------------------------------------------------------------------------
+// Main program
+// ---------------------------------------------------------------------------
+
+/// The main program of a benchmark executable. `--build-facts` prints the build
+/// facts, `--aggregate <directory>` prints the record of a run directory through
+/// `aggregate(directory)`, and every other command line runs one sample through
+/// `run(argc, argv)`. An exception ends the process with exit code 1 and its
+/// message, which `name` introduces.
+template <typename Aggregate, typename Run>
+int benchmark_main(int argc, char* argv[], const char* name, Aggregate aggregate, Run run)
+{
+    try {
+        if (has_option(argc, argv, "--build-facts")) {
+            Json_writer json;
+            append_build_facts(json);
+            std::printf("%s\n", json.str().c_str());
+            return 0;
+        }
+        if (has_option(argc, argv, "--aggregate")) {
+            return aggregate(option_value(argc, argv, "--aggregate"));
+        }
+        return run(argc, argv);
+    }
+    catch (const std::exception& error) {
+        std::fprintf(stderr, "%s: %s\n", name, error.what());
+        return 1;
+    }
 }
 
 } // namespace sintra::bench

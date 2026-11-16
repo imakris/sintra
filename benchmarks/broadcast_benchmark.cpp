@@ -18,9 +18,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
-#include <exception>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -35,8 +33,11 @@ namespace {
 
 namespace bench = sintra::bench;
 
+using bench::has_role;
+using bench::invalid_if;
 using bench::processing_barrier;
 using bench::rendezvous;
+using bench::run_protocol;
 
 constexpr uint64_t k_warmup_sequence   = UINT64_MAX;
 constexpr uint64_t k_sentinel_sequence = UINT64_MAX - 1;
@@ -108,10 +109,6 @@ using Report = bench::Process_report<broadcast_block_t>;
 Report                report;
 uint64_t              sampling_divisor = 1;
 std::filesystem::path run_directory;
-
-// A failure of this process's part of the protocol. It is kept until the
-// process has left the swarm through sintra::shutdown().
-std::exception_ptr failure;
 
 // A receiver's handler thread alone writes its counters and samples. It counts
 // only once `measuring` is set, so the counters start from zero at
@@ -189,18 +186,6 @@ void timed_fence(const char* name)
     const auto begin = bench::now_ns();
     processing_barrier(name);
     report.intervals.push_back({(uint64_t)report.intervals.size(), begin, bench::now_ns()});
-}
-
-// Runs this process's part of the measurement protocol.
-template <typename Protocol>
-void run_protocol(Protocol protocol)
-{
-    try {
-        protocol();
-    }
-    catch (...) {
-        failure = std::current_exception();
-    }
 }
 
 // Every process calls each burst fence once, whether or not it publishes.
@@ -543,13 +528,7 @@ int run(int argc, char* argv[])
             run_protocol([] { follow_sender(false); });
         }
     }
-    const bool torn_down = bench::shutdown_with_retries();
-    if (failure) {
-        std::rethrow_exception(failure);
-    }
-    if (!torn_down) {
-        throw std::runtime_error("sintra::shutdown() did not complete");
-    }
+    bench::shut_down_and_rethrow();
     return 0;
 }
 
@@ -557,11 +536,6 @@ int run(int argc, char* argv[])
 // ---------------------------------------------------------------------------
 // Aggregate mode
 // ---------------------------------------------------------------------------
-
-bool has_role(const Report& process, std::string_view role)
-{
-    return std::string_view(process.header.role) == role;
-}
 
 struct totals_t
 {
@@ -615,27 +589,24 @@ totals_t total_counts(const broadcast_cell_t& cell, const std::vector<Report>& p
 void append_cell(
     bench::Json_writer& json, const broadcast_cell_t& cell, std::optional<uint64_t> framed_bytes)
 {
-    const bool open_loop = cell.mode == Mode::OPEN_LOOP;
-    json.begin_object("cell");
-    json.text("workload", "broadcast");
-    json.text("mode", mode_name(cell.mode));
-    json.text("origin", origin_name(cell.origin));
-    json.count("receivers", cell.receivers);
-    json.count("payload_bytes", cell.payload_bytes);
-    json.count("framed_bytes", framed_bytes);
-    json.null("gap_us");
-    json.null("window");
-    json.count("n_leaves", leaf_count(cell));
-    json.number(
-        "offered_rate", open_loop ? std::optional<double>(cell.offered_rate) : std::nullopt);
-    json.count("planned", cell.planned);
-    json.count("warmup", cell.warmup);
-    json.count("burst", cell.burst_messages);
-    json.count("handler_delay_us", cell.handler_delay_us);
-    json.count(
-        "drain_timeout_s", open_loop ? std::optional<uint64_t>(k_drain_timeout_s) : std::nullopt);
-    json.flag("validation_only", is_validation_only(cell));
-    json.end_object();
+    bench::record_cell_t record;
+    record.workload         = "broadcast";
+    record.mode             = mode_name(cell.mode);
+    record.origin           = origin_name(cell.origin);
+    record.receivers        = cell.receivers;
+    record.payload_bytes    = cell.payload_bytes;
+    record.framed_bytes     = framed_bytes;
+    record.n_leaves         = leaf_count(cell);
+    record.planned          = cell.planned;
+    record.warmup           = cell.warmup;
+    record.burst            = cell.burst_messages;
+    record.handler_delay_us = cell.handler_delay_us;
+    record.validation_only  = is_validation_only(cell);
+    if (cell.mode == Mode::OPEN_LOOP) {
+        record.offered_rate    = cell.offered_rate;
+        record.drain_timeout_s = k_drain_timeout_s;
+    }
+    bench::append_cell(json, record);
 }
 
 void append_counts(bench::Json_writer& json, const Report& sender, const totals_t& totals)
@@ -809,39 +780,6 @@ void append_latencies(
     json.end_object();
 }
 
-double process_cpu_s(const Report& process)
-{
-    return process.header.cpu_end_s - process.header.cpu_begin_s;
-}
-
-void append_cpu(
-    bench::Json_writer&         json,
-    const std::vector<Report>&  processes,
-    uint64_t                    published,
-    uint64_t                    deliveries)
-{
-    json.begin_object("cpu");
-    bench::Role_cpu total{"total"};
-    for (const std::string_view name :
-         {"coordinator", "coordinator_sender", "sender", "receivers"})
-    {
-        bench::Role_cpu role{std::string(name)};
-        for (const auto& process : processes) {
-            if (has_role(process, name)) {
-                bench::add_process_cpu(role, process_cpu_s(process));
-                bench::add_process_cpu(total, process_cpu_s(process));
-            }
-        }
-        if (role.processes != 0) {
-            bench::append_role_cpu(
-                json, role, published,
-                name == "receivers" ? std::optional<uint64_t>(deliveries) : std::nullopt);
-        }
-    }
-    bench::append_role_cpu(json, total, published);
-    json.end_object();
-}
-
 int aggregate(const std::filesystem::path& directory)
 {
     const auto set = bench::read_report_set<broadcast_block_t>(
@@ -853,20 +791,11 @@ int aggregate(const std::filesystem::path& directory)
     const auto& processes = set.processes;
     const auto& cell      = set.cell;
 
-    auto                     reasons = bench::build_invalid_reasons();
+    auto                     reasons = bench::record_reasons(set);
     std::vector<std::string> warnings;
-    reasons.insert(reasons.end(), set.reasons.begin(), set.reasons.end());
-    const auto invalid_if = [&](bool condition, const char* reason) {
-        if (condition) {
-            reasons.push_back(reason);
-        }
-    };
 
     bench::Json_writer json;
-    json.begin_object();
-    json.text("schema", "sintra-bench/1");
-    json.text("run_id", set.run_id);
-    bench::append_build_facts(json, "build");
+    bench::begin_record(json, set.run_id);
     if (set.complete) {
         const auto& sender = *std::find_if(processes.begin(), processes.end(),
             [](const Report& process) {
@@ -875,24 +804,15 @@ int aggregate(const std::filesystem::path& directory)
         const auto totals   = total_counts(cell, processes);
         const auto measured = measured_seconds(sender, totals);
         const bool windowed = cell.mode == Mode::WINDOWED;
-        invalid_if(totals.order_errors != 0, "order_errors");
-        invalid_if(totals.size_errors != 0, "size_errors");
+        invalid_if(reasons, totals.order_errors != 0, "order_errors");
+        invalid_if(reasons, totals.size_errors != 0, "size_errors");
         // Loss invalidates a windowed sample. In open-loop mode it is a result.
-        invalid_if(windowed && totals.lost != 0, "loss");
-        invalid_if(windowed && totals.eviction_log_matches != 0, "eviction_log_matches");
-        invalid_if(!windowed && totals.sentinel_missed != 0, "sentinel_missed");
+        invalid_if(reasons, windowed && totals.lost != 0, "loss");
+        invalid_if(reasons, windowed && totals.eviction_log_matches != 0, "eviction_log_matches");
+        invalid_if(reasons, !windowed && totals.sentinel_missed != 0, "sentinel_missed");
 
         const double achieved_rate = (double)sender.workload.published / measured.publication;
-        if (measured.publication < 2.0) {
-            warnings.push_back("cpu_low_confidence");
-        }
-        // A process CPU clock that did not move over the interval says nothing
-        // about the role's cost.
-        if (std::any_of(processes.begin(), processes.end(),
-                [](const Report& process) { return process_cpu_s(process) == 0; }))
-        {
-            warnings.push_back("cpu_not_advancing");
-        }
+        bench::add_cpu_warnings(warnings, processes, measured.publication);
         if (!windowed && achieved_rate < 0.95 * cell.offered_rate) {
             warnings.push_back("rate_shortfall");
         }
@@ -903,7 +823,9 @@ int aggregate(const std::filesystem::path& directory)
         append_counts(json, sender, totals);
         append_throughput(json, sender, totals, measured);
         append_latencies(json, sender, processes);
-        append_cpu(json, processes, sender.workload.published, totals.deliveries);
+        bench::append_cpu(
+            json, processes, {"coordinator", "coordinator_sender", "sender", "receivers"},
+            sender.workload.published, "receivers", totals.deliveries);
     }
     else {
         append_cell(json, cell, std::nullopt);
@@ -913,14 +835,7 @@ int aggregate(const std::filesystem::path& directory)
         json.null("cpu");
     }
     json.null("lifecycle");
-    json.begin_object("outcome");
-    bench::append_names(json, "missing_files", set.missing);
-    json.flag("valid", reasons.empty());
-    bench::append_names(json, "reasons", reasons);
-    bench::append_names(json, "warnings", warnings);
-    json.end_object();
-    json.end_object();
-    std::printf("%s\n", json.str().c_str());
+    bench::end_record(json, set.missing, reasons, warnings);
     return 0;
 }
 
@@ -928,20 +843,5 @@ int aggregate(const std::filesystem::path& directory)
 
 int main(int argc, char* argv[])
 {
-    try {
-        if (bench::has_option(argc, argv, "--build-facts")) {
-            bench::Json_writer json;
-            bench::append_build_facts(json);
-            std::printf("%s\n", json.str().c_str());
-            return 0;
-        }
-        if (bench::has_option(argc, argv, "--aggregate")) {
-            return aggregate(bench::option_value(argc, argv, "--aggregate"));
-        }
-        return run(argc, argv);
-    }
-    catch (const std::exception& error) {
-        std::fprintf(stderr, "broadcast_benchmark: %s\n", error.what());
-        return 1;
-    }
+    return bench::benchmark_main(argc, argv, "broadcast_benchmark", aggregate, run);
 }
