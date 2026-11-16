@@ -192,6 +192,38 @@ inline uint64_t current_frame_bytes()
 
 
 // ---------------------------------------------------------------------------
+// Barriers
+// ---------------------------------------------------------------------------
+
+inline constexpr char k_all_processes[] = "_sintra_all_processes";
+
+/// Holds the barrier `name` over all processes of the swarm. Every step of a
+/// measurement protocol is such a barrier.
+///
+/// A barrier that returns no watermark was not held: the runtime treats it as
+/// satisfied while a process shuts down or drains. The steps that follow would
+/// then not mean what the protocol says, so the process fails the sample: this
+/// throws, and the process writes no report.
+template <typename Barrier_mode>
+void hold(const char* name)
+{
+    if (sintra::barrier<Barrier_mode>(name, k_all_processes) == sintra::invalid_sequence) {
+        throw std::runtime_error(std::string("the barrier ") + name + " was bypassed");
+    }
+}
+
+inline void processing_barrier(const char* name)
+{
+    hold<sintra::processing_fence_t>(name);
+}
+
+inline void rendezvous(const char* name)
+{
+    hold<sintra::rendezvous_t>(name);
+}
+
+
+// ---------------------------------------------------------------------------
 // JSON output
 // ---------------------------------------------------------------------------
 

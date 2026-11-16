@@ -35,7 +35,9 @@ namespace {
 
 namespace bench = sintra::bench;
 
-constexpr char     k_all_processes[]   = "_sintra_all_processes";
+using bench::processing_barrier;
+using bench::rendezvous;
+
 constexpr uint64_t k_warmup_sequence   = UINT64_MAX;
 constexpr uint64_t k_sentinel_sequence = UINT64_MAX - 1;
 
@@ -179,28 +181,6 @@ size_t expected_samples()
 // ---------------------------------------------------------------------------
 // Run mode
 // ---------------------------------------------------------------------------
-
-// A barrier that returns no watermark was not held: the runtime treats it as
-// satisfied while a process shuts down or drains. The steps that follow would
-// then not mean what the protocol says, so the process fails the sample: it
-// writes no report.
-template <typename Barrier_mode>
-void hold(const char* name)
-{
-    if (sintra::barrier<Barrier_mode>(name, k_all_processes) == sintra::invalid_sequence) {
-        throw std::runtime_error(std::string("the barrier ") + name + " was bypassed");
-    }
-}
-
-void processing_barrier(const char* name)
-{
-    hold<sintra::processing_fence_t>(name);
-}
-
-void rendezvous(const char* name)
-{
-    hold<sintra::rendezvous_t>(name);
-}
 
 // The sender times every processing fence of a windowed measurement. Its
 // intervals are the burst fences in order, followed by the final fence.

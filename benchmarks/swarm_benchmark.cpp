@@ -30,8 +30,7 @@ namespace {
 
 namespace bench = sintra::bench;
 
-constexpr char k_all_processes[] = "_sintra_all_processes";
-constexpr char k_formed[]        = "benchmark-formed";
+constexpr char k_formed[] = "benchmark-formed";
 
 // A coordinator takes the first automatic process index and hands the others
 // out to its branches.
@@ -167,16 +166,10 @@ int run(int argc, char* argv[], uint64_t main_entry_ns)
         throw std::runtime_error("--branch_index is not the library's index of this process");
     }
 
-    // Neither phase's CPU interval includes the rendezvous. A barrier that
-    // returns no watermark was not held: the runtime treats it as satisfied
-    // while a process shuts down or drains. The shutdown snapshots would then
-    // not follow a formed swarm, so the process fails the sample: it writes no
-    // report.
-    if (sintra::barrier<sintra::rendezvous_t>(k_formed, k_all_processes) ==
-        sintra::invalid_sequence)
-    {
-        throw std::runtime_error(std::string("the barrier ") + k_formed + " was bypassed");
-    }
+    // Neither phase's CPU interval includes the rendezvous. If it was bypassed,
+    // the shutdown snapshots would not follow a formed swarm, so the process
+    // fails the sample: this throws, and the process writes no report.
+    bench::rendezvous(k_formed);
 
     // A shutdown() that returns false has retained the runtime for a retry,
     // which resumes the teardown (docs/reference/shutdown.md). The shutdown

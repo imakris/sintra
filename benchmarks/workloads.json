@@ -34,6 +34,16 @@
     {"workload": "broadcast", "origin": "leaf", "receivers": 8, "payload_bytes": 261632, "messages": 4096, "open_loop_rates": null, "calibration": null},
     {"workload": "broadcast", "origin": "leaf", "receivers": 16, "payload_bytes": 64, "messages": 1000000, "open_loop_rates": null, "calibration": null},
     {"workload": "broadcast", "origin": "leaf", "receivers": 16, "payload_bytes": 4096, "messages": 100000, "open_loop_rates": null, "calibration": null},
-    {"workload": "broadcast", "origin": "leaf", "receivers": 16, "payload_bytes": 261632, "messages": 4096, "open_loop_rates": null, "calibration": null}
+    {"workload": "broadcast", "origin": "leaf", "receivers": 16, "payload_bytes": 261632, "messages": 4096, "open_loop_rates": null, "calibration": null},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "closed_loop", "gap_us": 0, "calls": 10000},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "closed_loop", "gap_us": 200, "calls": 5000},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "closed_loop", "gap_us": 20000, "calls": 500},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "closed_loop", "gap_us": 2000000, "calls": 60},
+    {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "windowed", "window": 32, "calls": 200000},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "closed_loop", "gap_us": 0, "calls": 10000},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "closed_loop", "gap_us": 200, "calls": 5000},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "closed_loop", "gap_us": 20000, "calls": 500},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "closed_loop", "gap_us": 2000000, "calls": 60},
+    {"workload": "rpc", "route": "leaf_to_leaf", "mode": "windowed", "window": 32, "calls": 40000}
   ]
 }

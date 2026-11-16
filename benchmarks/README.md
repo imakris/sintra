@@ -11,6 +11,7 @@ defines what is measured and how:
 |---|---|
 | Measurement boundaries and CPU per role | 4.4 |
 | The broadcast workload, its modes, sampling and the open-loop drain | 5, 5.1 |
+| The request/response workload, its routes, gaps and window | 5.2 |
 | The swarm workload: sizes, snapshots and CPU per phase | 5.3 |
 | Metric definitions: percentiles, throughput, CPU, loss | 6 |
 | Record schema | 7 |
@@ -22,6 +23,7 @@ defines what is measured and how:
 | File | Content |
 |---|---|
 | `broadcast_benchmark.cpp` | W1, broadcast: target `sintra_broadcast_benchmark` |
+| `rpc_benchmark.cpp` | W2, request/response: target `sintra_rpc_benchmark` |
 | `swarm_benchmark.cpp` | W3, swarm formation and shutdown: target `sintra_swarm_benchmark` |
 | `harness.h` | Clock, process CPU time, build facts, per-process report files, aggregation helpers |
 | `run_benchmarks.py` | Paired runner: A/B and A/A sessions, calibration, summary and axis tables |
@@ -34,7 +36,7 @@ directory. The targets link the header-only library with test hooks off.
 
 ```text
 cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_BENCHMARKS=ON
-cmake --build build-bench --config Release --target sintra_broadcast_benchmark sintra_swarm_benchmark
+cmake --build build-bench --config Release --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
 ```
 
 `--config Release` selects the configuration for a multi-configuration generator
@@ -70,9 +72,11 @@ python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build
   read them from the build. When the runner reads earlier records from
   `--output` or `--aa`, it skips a line that does not parse or that is not a
   record of this schema, and says how many lines it skipped.
-- **Selection.** Without `--select`, the default grid runs: every cell with
-  R in `default_receivers` (1, 4 and 16). `--select` takes a glob over cell IDs
-  and may be repeated; it reaches every defined cell, including R = 2 and 8.
+- **Selection.** Without `--select`, the default grid runs: every broadcast
+  cell with R in `default_receivers` (1, 4 and 16) and every request/response
+  cell. `--select` takes a glob over cell IDs and may be repeated; it reaches
+  every defined cell, including R = 2 and 8. The build directory must hold the
+  executable of every selected workload.
 - **Open-loop cells without a stored rate** are skipped. The runner lists them at
   the start and in the summary and writes no record for them.
 - **Swarm cells** are part of the default grid. The oversubscribed cell,
@@ -91,12 +95,15 @@ Cell IDs:
 ```text
 w1.windowed.<origin>.r<receivers>.b<payload bytes>
 w1.open_loop.<origin>.r<receivers>.b<payload bytes>.x<percent of the calibrated rate>
+w2.closed_loop.<route>.g<gap in µs>
+w2.windowed.<route>.w<window>
 w3.lifecycle.n<leaves>
 w3.lifecycle.n_over
 ```
 
 For example, `--select "w1.windowed.*.r[14].b64"` selects the windowed 64-byte
-cells of both origins at R = 1 and R = 4.
+cells of both origins at R = 1 and R = 4, and `--select "w2.*.leaf_to_leaf.*"`
+selects the five request/response cells of the leaf-to-leaf route.
 
 ### Each sample and its cleanup
 
@@ -106,8 +113,20 @@ participant, runs `--aggregate`, adds its own fields and appends the record. It
 deletes the run directory unless `--keep` is given.
 
 **Timeout.** A sample's timeout is 60 s plus three times its planned duration.
-A windowed cell without calibration metadata gets 60 s plus thirty times it,
-because its count is only an estimate for the host.
+A windowed broadcast cell without calibration metadata gets 60 s plus thirty
+times it, because its count is only an estimate for the host.
+
+| Cell | Planned duration |
+|---|---|
+| Broadcast, windowed | `target_interval_s` |
+| Broadcast, open-loop | `open_loop.duration_s` |
+| Request/response, closed-loop | calls × (gap + 5 ms) |
+| Request/response, windowed | calls × 250 µs |
+| Swarm | none: the timeout is 60 s |
+
+The request/response counts are fixed, so their planned duration does not come
+from a calibration. The 5 ms leave room for every hop of a round trip to wait
+for a reader's next poll.
 
 The runner owns the processes of a sample and leaves none behind:
 
@@ -159,9 +178,9 @@ for. It does not find or signal a process through them.
 For each cell, the runner prints the number of comparable pairs used, the
 number of invalid samples of each arm, and the sample support of the headline
 latencies: `n_obs` and `n_messages` of the least supported sample. For a
-windowed cell it also prints each arm's median fence time. For each headline
-metric it prints the median within-pair comparison with its minimum and maximum
-and, beside it, the A/A spread. Nothing is flagged automatically.
+windowed broadcast cell it also prints each arm's median fence time. For each
+headline metric it prints the median within-pair comparison with its minimum
+and maximum and, beside it, the A/A spread. Nothing is flagged automatically.
 
 - **A/A spread.** The largest deviation within a comparable A/A pair with the
   same effective parameters, taken from the output file and from `--aa`. In an
@@ -185,10 +204,10 @@ and, beside it, the A/A spread. Nothing is flagged automatically.
   the same cell, toolchain and configuration, host label and C. Library
   constants do not have to match. If the arms differ in one, the summary names
   it in a notice, as the start of the session does.
-- **Fence time.** A windowed sender waits in a processing fence after every
-  burst and once at the end. The measured interval includes those waits, so
-  windowed rates and CPU per message include fence time. `throughput.fence_s`
-  holds their sum.
+- **Fence time.** A windowed broadcast sender waits in a processing fence
+  after every burst and once at the end. The measured interval includes those
+  waits, so windowed rates and CPU per message include fence time.
+  `throughput.fence_s` holds their sum.
 - **Open-loop sender CPU.** An open-loop sender polls the clock for the last
   100 µs before each intended arrival, so its CPU is mostly the generator's
   own. Do not read it as the cost of publishing.
@@ -197,14 +216,22 @@ and, beside it, the A/A spread. Nothing is flagged automatically.
 |---|---|
 | Windowed | Publication and delivery rates; CPU µs per message, total and per role; `slowest_from_send` p50 and p99 |
 | Open-loop | `slowest_from_intended` p50 and p99; lost fraction; `lateness` p99 |
+| Request/response, windowed | Calls/s; CPU µs per call, total and per role; `issue_to_observation` p50 and p99 |
+| Request/response, closed-loop | `rtt` p50 and p99; calls/s for the back-to-back cells (gap 0); CPU µs per call per role |
 | Lifecycle | `time_to_ready_s`, `time_to_shutdown_s`; the coordinator's `shutdown()` calls, where a sample needed more than one; formation and shutdown CPU per role |
 
 After the summary, the runner prints the axis tables of plan section 10 for arm
 A, as the median over the usable samples of each cell: CPU µs per message by
 role against R, total CPU µs per application MB against payload, open-loop
 latency and loss against the offered rate, and each role's share of total CPU.
-The share table covers windowed cells only, because of the open-loop sender's
-polling. A sample with `cpu_not_advancing` contributes no CPU value to them.
+The share table covers windowed broadcast cells only, because of the open-loop
+sender's polling. A sample with `cpu_not_advancing` contributes no CPU value to
+them.
+
+Closed-loop request/response cells have one table per route: against the gap,
+the `actual_gap` p50, `rtt` p50 and p99, and each role's CPU µs per call. The
+slept gap stands beside `rtt` because the two are read together (see the
+request/response executable below).
 
 Swarm cells have their own tables: the two lifecycle times and each role's
 formation and shutdown CPU per leaf against N, with the coordinator's
@@ -218,7 +245,9 @@ python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> --output <c
     --calibrate <new-workloads.json> [--select <cell-id glob>]
 ```
 
-Calibration runs each selected windowed cell three times with the A binaries.
+Calibration runs each selected windowed broadcast cell three times with the A
+binaries. Request/response counts and swarm sizes are fixed, so a calibration
+leaves those cells out.
 For a cell whose three runs are all usable, it rescales the windowed count so
 that the measured interval is about `target_interval_s` (an integer of two
 significant digits), stores the open-loop rates as the `rate_fractions` of the
@@ -231,9 +260,11 @@ Anywhere else, calibrate into a temporary file and pass it with `--workloads`.
 
 ## Workloads file
 
-`workloads.json` holds the settings and one entry per origin, receiver count and
-payload. Each entry defines one windowed cell and one open-loop cell per rate
-fraction.
+`workloads.json` holds the settings and the cells of every workload. A
+broadcast entry of `cells` stands for one origin, receiver count and payload,
+and defines one windowed cell and one open-loop cell per rate fraction. A
+request/response entry of `cells` defines one cell; its keys follow the first
+table. The swarm cells come from the `swarm` key.
 
 | Key | Meaning |
 |---|---|
@@ -249,6 +280,15 @@ fraction.
 | `swarm.oversubscribed_least`, `swarm.oversubscribed_per_cpu` | The size of the oversubscribed cell: `min(125, max(least, per_cpu × C))`; 80 and 2 by default |
 | `swarm.fail_init`, `swarm.leaf_exit_delay_ms` | Optional validation-only options of every swarm cell, passed to the executable |
 
+| Key of a request/response entry (`"workload": "rpc"`) | Meaning |
+|---|---|
+| `route` | `leaf_to_coordinator` or `leaf_to_leaf` |
+| `mode` | `closed_loop` or `windowed` |
+| `gap_us` | Closed-loop only: the idle gap before each call, a non-negative integer of microseconds |
+| `window` | Windowed only: the number of calls kept outstanding, a positive integer |
+| `calls` | The measured calls: a positive integer. It is fixed, not calibrated |
+| `handler_delay_us`, `wrong_echo_every`, `throw_every` | Optional validation-only options, passed to the executable. `handler_delay_us` needs the `leaf_to_leaf` route |
+
 The plan's 3 s windowed interval and 3 s open-loop schedule are defaults: the
 shipped `workloads.json` sets `target_interval_s` and `open_loop.duration_s` to
 3, and another workloads file can set other values. An open-loop cell publishes
@@ -257,7 +297,9 @@ completion may take longer than the schedule.
 
 The runner rejects a file with a non-positive or fractional count, a rate that
 is not finite and positive, a rate list whose length differs from the fraction
-list, or two cells that expand to the same ID.
+list, or two cells that expand to the same ID. In a request/response entry it
+also rejects a `gap_us` on a windowed entry, a `window` on a closed-loop entry,
+and a `handler_delay_us` on the `leaf_to_coordinator` route.
 
 A file without `swarm` defines no swarm cells. With it, the runner rejects a
 size outside 1 to 125 and a repeated size.
@@ -317,6 +359,110 @@ returns, so a sender that finishes late cannot cause `sentinel_missed`. The
 runner's timeout remains the outer bound. A receiver that does miss the sentinel
 makes the sample invalid; its `lost` then holds only the gaps up to its last
 received message, and `counts.unresolved_tail` holds the tail it had not reached.
+
+## The request/response executable
+
+```text
+sintra_rpc_benchmark <cell options> --run-id <id>    one sample, as a swarm
+sintra_rpc_benchmark --aggregate <run directory>     the sample's record, as one JSON object
+sintra_rpc_benchmark --build-facts                   the build facts, as one JSON object
+```
+
+The run directory, the process reports, `--aggregate` and the barriers work as
+for the broadcast executable: a process whose barrier was bypassed writes no
+report. The callee is a transceiver whose `echo` is exported with
+`SINTRA_RPC_STRICT` and returns its argument. One caller thread in the last
+leaf resolves the callee's name once and passes the instance ID in every call.
+
+| Route | Callee | Caller | Roles |
+|---|---|---|---|
+| `leaf_to_coordinator` | A transceiver in the coordinator | Leaf 1 | `coordinator_callee`, `caller` |
+| `leaf_to_leaf` | Leaf 1; the coordinator relays | Leaf 2 | `coordinator`, `callee`, `caller` |
+
+| Cell option | Meaning | Default |
+|---|---|---|
+| `--mode closed_loop\|windowed` | Measurement mode | `closed_loop` |
+| `--route leaf_to_coordinator\|leaf_to_leaf` | Where the callee lives | `leaf_to_coordinator` |
+| `--calls n` | Measured calls, at least 1 | 10000 |
+| `--warmup n` | Back-to-back synchronous warm-up calls; the runner passes 1000 | 1000 |
+| `--gap-us g` | Closed-loop only: idle time before each call, in microseconds | 0 |
+| `--window w` | Windowed only: calls kept outstanding, at least 1 | 32 |
+| `--handler-delay-us d` | Busy time in the callee's handler of every measured call; `leaf_to_leaf` only | 0 |
+| `--wrong-echo-every k` | The callee answers every k-th measured call with a wrong value | 0 (never) |
+| `--throw-every k` | The callee throws in every k-th measured call | 0 (never) |
+
+**The reader's wait policy decides what the cells report.** A ring reader
+spins for 50 µs after its last message, then polls in 1 ms sleeps for up to
+1 s, then parks (`include/sintra/detail/config.h:45`, `:49`, `:53`;
+`include/sintra/detail/ipc/rings.h:3373-3402`, at commit `3666206f`). Once a
+reader is past its spin, a strictly periodic caller locks to the reader's poll.
+The cells then report the wait policy, not the call path. That is a property of
+the library, which the cells show and do not work around. The counts are fixed
+for that reason: a rate that was measured in one phase does not predict the
+next sample.
+
+**Closed-loop mode** makes one synchronous `rpc_echo` call at a time. The gap is
+a `sleep_for` before every call, the first one included; with a gap of 0 the
+calls run back to back without a sleep. `latency.rtt` is the time from the
+start of a call to its return, and `latency.actual_gap` is the measured idle
+time before each call: from the return of the call before it, or from the begin
+rendezvous for the first call. The end barrier is a rendezvous after the last
+call.
+
+- **The back-to-back cell (gap 0) sits at the edge of the spin window.** A call
+  that reaches a reader just after its spin waits for that reader's next poll,
+  up to one poll period per hop. On the hosts tried so far, the cell's `rtt`
+  distribution has two modes: tens of µs or less while every hop is caught
+  spinning, and a millisecond or more once hops fall into the sleep phase. p50
+  can move between the two from sample to sample. Read it together with
+  calls/s, which follows the mean, and with the A/A spread.
+- **Read `rtt` together with `actual_gap`.** In the sleep phase, `rtt` plus
+  `actual_gap` is a whole number of poll periods. A difference in `rtt` that is
+  smaller than a poll period is a phase effect: the call met the poll earlier
+  or later, and the call path did not change. This holds for the 200 µs and
+  20 ms cells and for the slow mode of gap 0. The axis table shows the
+  `actual_gap` p50 beside `rtt`.
+- **Closed-loop CPU per call follows the cycle time.** Most of it is the
+  readers' spinning and polling over one cycle, so a change of the call path
+  can stay inside its A/A spread.
+- **`actual_gap` is the gap that was actually slept.** `sleep_for` follows the
+  platform's timer: on Windows a 200 µs gap idles 1.0 to 1.5 ms. That is still
+  the wait regime the gap aims at, past the spin window and inside the
+  one-second sleep phase.
+- **A lost reply surfaces only as the runner's `timeout`.** The synchronous
+  call has no deadline, so closed-loop mode never counts a call as `lost`.
+
+**Windowed mode** keeps `--window` `rpc_async_echo` handles outstanding. When
+the window is full, the caller waits on the oldest handle with `get_until`, up
+to 10 s after that call's issue; a call that is still pending then counts as
+lost. `latency.issue_to_observation` runs from the start of the issue to the
+return of `get_until`. The end barrier is the final processing fence.
+
+- **In the sleep phase, windowed calls/s is window / (k × period),** for a
+  whole number k of poll periods per window. It does not follow the call path
+  then: a Debug build gave the same calls/s as a Release build on
+  `leaf_to_leaf`.
+- **Windowed CPU per call follows the call path.**
+
+Every call is recorded; there is no sampling. `throughput.interval_s` runs from
+the return of the caller's begin rendezvous to its end snapshot, and
+`throughput.calls_s` is the calls made over it. The record's counts read as
+follows, and its other counts are null:
+
+| Count | Meaning |
+|---|---|
+| `published`, `deliveries_expected` | The calls made |
+| `deliveries` | The calls that returned a value |
+| `lost` | Windowed mode: the calls that timed out |
+| `call_errors` | The calls that threw, plus those that returned another value than their argument |
+
+**Validation-only.** `--handler-delay-us`, `--wrong-echo-every` and
+`--throw-every` exist to check the detection of errors, loss and timeouts. A
+record is `validation_only` when one of them is not zero. They apply to
+measured calls only. The delay runs on the reader thread that dispatches the
+call. On the `leaf_to_coordinator` route that is a reader of the coordinator,
+which a validation run does not slow down, so the executable and the runner
+reject a delay on that route.
 
 ## The swarm executable
 
@@ -403,7 +549,9 @@ record has these fields:
 | `cell.handler_delay_us` | The handler delay of a validation run; otherwise 0 |
 | `throughput.fence_s` | Windowed: the sender's time in its burst fences and its final fence, which `interval_s` includes. Open-loop: null |
 
-`latency.fence` describes the burst fences only, not the final fence.
+`latency.fence` describes the burst fences only, not the final fence. In a
+request/response record `cell.burst` and `throughput.fence_s` are null, and
+`cell.handler_delay_us` is the callee's handler delay.
 
 These are the reasons and warnings that the executable and the runner write:
 
@@ -417,7 +565,8 @@ These are the reasons and warnings that the executable and the runner write:
 | `unexpected_reports`, `inconsistent_reports` | A report is a duplicate or of a branch the cell lacks, or carries other cell settings |
 | `aggregation_failed`, `run_id_mismatch` | `--aggregate` produced no record, or one of another run |
 | `order_errors`, `size_errors` | An order error, or a wrong payload size or final byte |
-| `loss`, `eviction_log_matches` | Windowed mode: any loss, or any eviction log match |
+| `call_errors` | Request/response: a call threw, or returned another value than its argument |
+| `loss`, `eviction_log_matches` | Windowed and closed-loop mode: any loss (a lost message, or a call that timed out), or any eviction log match |
 | `sentinel_missed` | Open-loop mode: a receiver did not see the sentinel within its drain allowance |
 | `init_failed` | Lifecycle mode: `init` threw in a process |
 | `shutdown_threw` | Lifecycle mode: a `shutdown()` call of a process threw |

@@ -25,11 +25,12 @@ import sys
 import time
 
 SCHEMA = "sintra-bench/1"
-EXECUTABLES = {"broadcast": "sintra_broadcast_benchmark", "swarm": "sintra_swarm_benchmark"}
-CELL_PREFIXES = {"broadcast": "w1", "swarm": "w3"}
+EXECUTABLES = {"broadcast": "sintra_broadcast_benchmark", "rpc": "sintra_rpc_benchmark",
+               "swarm": "sintra_swarm_benchmark"}
+CELL_PREFIXES = {"broadcast": "w1", "rpc": "w2", "swarm": "w3"}
 TIMEOUT_BASE_S = 60         # a sample's timeout is this plus a multiple of its planned duration:
-TIMEOUT_FACTOR = 3          # three times it, or, for a windowed cell that was never calibrated
-UNCALIBRATED_TIMEOUT_FACTOR = 30    # and whose count is only an estimate, thirty times it
+TIMEOUT_FACTOR = 3          # three times it, or, for a windowed broadcast cell that was never
+UNCALIBRATED_TIMEOUT_FACTOR = 30    # calibrated, whose count is only an estimate, thirty times it
 REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
 EXIT_WAIT_S = 10            # for the participants to exit, on their own or after a kill
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
@@ -82,6 +83,9 @@ def validate_workloads(workloads):
                 continue
             if entry["workload"] not in EXECUTABLES:
                 problems.append(f"{where}: unknown workload {entry['workload']!r}")
+            if entry["workload"] == "rpc":
+                problems += rpc_entry_problems(entry, where)
+                continue
             if entry["origin"] not in ("coordinator", "leaf"):
                 problems.append(f"{where}: origin must be coordinator or leaf")
             for key in ("receivers", "payload_bytes", "messages"):
@@ -109,10 +113,14 @@ def validate_workloads(workloads):
 
 
 def expand_cells(workloads):
-    """Every defined cell: per entry, a windowed cell and one open-loop cell per rate fraction."""
+    """Every defined cell: per broadcast entry, a windowed cell and one open-loop cell per
+    rate fraction; per request/response entry, one cell."""
     open_loop = workloads["open_loop"]
     cells = []
     for entry in workloads["cells"]:
+        if entry["workload"] == "rpc":
+            cells.append(expand_rpc_cell(entry))
+            continue
         base = {
             "workload": entry["workload"],
             "origin": entry["origin"],
@@ -162,6 +170,115 @@ def round_significant(value, digits=2):
     if exponent < 0:
         return round(value, -exponent)
     return round(value / 10 ** exponent) * 10 ** exponent
+
+
+# --- Request/response cells (W2) ------------------------------------------------
+
+RPC_WARMUP_CALLS = 1000
+RPC_ROUTE_ROLES = {
+    "leaf_to_coordinator": ["coordinator_callee", "caller"],
+    "leaf_to_leaf": ["coordinator", "callee", "caller"],
+}
+RPC_VALIDATION_KEYS = ("handler_delay_us", "wrong_echo_every", "throw_every")
+RPC_HEADLINE_LATENCIES = {
+    "closed_loop": ["rtt"],
+    "windowed": ["issue_to_observation"],
+}
+# What the timeout of a sample plans for one call. A closed-loop call is planned as its gap
+# plus a round trip in which every hop can wait for a reader's next poll. A windowed call
+# shares such a round trip with the rest of its window.
+RPC_PLANNED_ROUND_TRIP_US = 5000
+RPC_PLANNED_WINDOWED_CALL_US = 250
+
+
+def rpc_entry_problems(entry, where):
+    """The problems of one request/response entry of a workloads file."""
+    problems = []
+    if entry["route"] not in RPC_ROUTE_ROLES:
+        problems.append(f"{where}: route must be leaf_to_coordinator or leaf_to_leaf")
+    if entry["mode"] not in RPC_HEADLINE_LATENCIES:
+        problems.append(f"{where}: mode must be closed_loop or windowed")
+    if not is_count(entry["calls"]):
+        problems.append(f"{where}: calls must be a positive integer")
+    # The gap belongs to closed-loop mode and the window to windowed mode. The key of the
+    # other mode would have no effect, so it is an error and is not dropped.
+    if entry["mode"] == "closed_loop":
+        if not is_count(entry["gap_us"], least=0):
+            problems.append(f"{where}: gap_us must be a non-negative integer")
+        if entry.get("window") is not None:
+            problems.append(f"{where}: window belongs to windowed mode")
+    if entry["mode"] == "windowed":
+        if not is_count(entry["window"]):
+            problems.append(f"{where}: window must be a positive integer")
+        if entry.get("gap_us") is not None:
+            problems.append(f"{where}: gap_us belongs to closed_loop mode")
+    for key in RPC_VALIDATION_KEYS:
+        if entry.get(key) is not None and not is_count(entry[key], least=0):
+            problems.append(f"{where}: {key} must be a non-negative integer")
+    # The delay runs on the reader thread that dispatches the call, and a validation run does
+    # not slow down a reader of the coordinator.
+    if entry.get("handler_delay_us") and entry["route"] == "leaf_to_coordinator":
+        problems.append(f"{where}: handler_delay_us needs the leaf_to_leaf route")
+    return problems
+
+
+def rpc_planned_duration_s(entry):
+    """The planned duration of a request/response cell, which its timeout follows. The counts
+    are fixed, so it does not come from a calibration."""
+    if entry["mode"] == "closed_loop":
+        return entry["calls"] * (entry["gap_us"] + RPC_PLANNED_ROUND_TRIP_US) / 1.0e6
+    return entry["calls"] * RPC_PLANNED_WINDOWED_CALL_US / 1.0e6
+
+
+def expand_rpc_cell(entry):
+    """The one cell of a request/response entry."""
+    closed_loop = entry["mode"] == "closed_loop"
+    name = f"g{entry['gap_us']}" if closed_loop else f"w{entry['window']}"
+    cell = {
+        "workload": "rpc",
+        "id": f"{CELL_PREFIXES['rpc']}.{entry['mode']}.{entry['route']}.{name}",
+        "mode": entry["mode"],
+        "route": entry["route"],
+        "gap_us": entry["gap_us"] if closed_loop else None,
+        "window": None if closed_loop else entry["window"],
+        "calls": entry["calls"],
+        "duration_s": rpc_planned_duration_s(entry),
+        "calibration": None,
+        "default": True,
+    }
+    cell.update((key, entry.get(key)) for key in RPC_VALIDATION_KEYS)
+    return cell
+
+
+def rpc_command(executable, cell, run_id):
+    command = [
+        str(executable), "--mode", cell["mode"], "--route", cell["route"],
+        "--calls", str(cell["calls"]), "--warmup", str(RPC_WARMUP_CALLS),
+        "--run-id", run_id]
+    for flag, key in (("--gap-us", "gap_us"), ("--window", "window"),
+                      ("--handler-delay-us", "handler_delay_us"),
+                      ("--wrong-echo-every", "wrong_echo_every"),
+                      ("--throw-every", "throw_every")):
+        if cell[key] is not None:
+            command += [flag, str(cell[key])]
+    return command
+
+
+def rpc_unaggregated_record(cell, run_id, facts):
+    """As unaggregated_record, for a request/response cell."""
+    return {
+        "run_id": run_id,
+        "build": facts,
+        "cell": {
+            "workload": "rpc", "mode": cell["mode"], "route": cell["route"],
+            "gap_us": cell["gap_us"], "window": cell["window"],
+            "planned": cell["calls"], "warmup": RPC_WARMUP_CALLS,
+            "handler_delay_us": cell["handler_delay_us"] or 0,
+            "validation_only": any(cell[key] for key in RPC_VALIDATION_KEYS),
+        },
+        "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
+        "outcome": {"missing_files": None, "valid": False, "reasons": [], "warnings": []},
+    }
 
 
 # --- Swarm cells (W3) ---------------------------------------------------------
@@ -566,6 +683,8 @@ def is_validation_only(cell, facts):
 
 
 def cell_command(executable, cell, run_id):
+    if cell["workload"] == "rpc":
+        return rpc_command(executable, cell, run_id)
     if cell["workload"] == "swarm":
         return swarm_command(executable, cell, run_id)
     command = [
@@ -609,6 +728,8 @@ def cleanup_incomplete_message(run_id, run_dir, remaining):
 def unaggregated_record(cell, run_id, facts):
     """The record of a sample that left nothing to aggregate: it stalled or died before
     its processes wrote their reports."""
+    if cell["workload"] == "rpc":
+        return rpc_unaggregated_record(cell, run_id, facts)
     if cell["workload"] == "swarm":
         return swarm_unaggregated_record(cell, run_id, facts)
     return {
@@ -727,7 +848,9 @@ class Session:
         executable = self.executables[arm, cell["workload"]]
         facts = self.facts[arm, cell["workload"]]
         ring_entries = len(list(Path(facts["ring_parent_dir"]).glob("sintra-*")))
-        estimated = cell["mode"] == "windowed" and cell["calibration"] is None
+        # Only a broadcast count is an estimate until it is calibrated.
+        estimated = (cell["workload"] == "broadcast" and cell["mode"] == "windowed"
+                     and cell["calibration"] is None)
         timeout = TIMEOUT_BASE_S + cell["duration_s"] * (
             UNCALIBRATED_TIMEOUT_FACTOR if estimated else TIMEOUT_FACTOR)
         started = time.time()
@@ -936,12 +1059,21 @@ SWARM_PHASES = {"formation_cpu": "formation", "shutdown_cpu": "shutdown"}
 SHUTDOWN_CALLS = "shutdown calls"
 
 
+def headline_latencies(cell):
+    """The latency objects whose sample support the summary shows for the cell."""
+    if cell["workload"] == "rpc":
+        return RPC_HEADLINE_LATENCIES[cell["mode"]]
+    return HEADLINE_LATENCIES[cell["mode"]]
+
+
 def headline_metrics(record):
     """(label, always a difference, value) per headline metric of the record's mode.
 
     CPU and the lost fraction are routinely zero or unavailable, so they are always shown as
     per-arm values with their difference. A value is None when it is unavailable.
     """
+    if record["cell"]["workload"] == "rpc":
+        return rpc_headline_metrics(record)
     if record["cell"]["mode"] == "lifecycle":
         return swarm_headline_metrics(record)
     latency = record["latency"]
@@ -984,6 +1116,29 @@ def swarm_headline_metrics(record):
         metrics += [(f"{name} CPU s {role}", True, lifecycle_cpu(record, phase, role))
                     for role in lifecycle[phase]]
     return metrics
+
+
+def rpc_headline_metrics(record):
+    """As headline_metrics, for a request/response sample. Windowed: calls/s, CPU per call in
+    total and per role, issue_to_observation. Closed-loop: rtt, CPU per call per role.
+
+    The back-to-back cell also shows calls/s: its rtt distribution has two modes, so p50 can
+    move between them from sample to sample while the mean, which calls/s follows, moves less.
+    """
+    cell = record["cell"]
+    windowed = cell["mode"] == "windowed"
+    name = RPC_HEADLINE_LATENCIES[cell["mode"]][0]
+    latency = [
+        (f"{name} {quantile} us", False, record["latency"][name][f"{quantile}_us"])
+        for quantile in ("p50", "p99")]
+    cpu = [
+        (f"CPU us/call {role}", True,
+         cpu_value(record, lambda cpu, role=role: cpu[role]["us_per_message"]))
+        for role in record["cpu"] if windowed or role != "total"]
+    calls = [("calls/s", False, record["throughput"]["calls_s"])]
+    if windowed:
+        return calls + cpu + latency
+    return latency + (calls if cell["gap_us"] == 0 else []) + cpu
 
 
 def is_single_shutdown_call(label, value_pairs):
@@ -1070,13 +1225,14 @@ def print_summary(records, aa_records, skipped):
               f"invalid samples: A {invalid['A']}, B {invalid['B']}")
         if not pairs:
             continue
-        for name in HEADLINE_LATENCIES[pairs[0][0]["cell"]["mode"]]:
+        for name in headline_latencies(pairs[0][0]["cell"]):
             least = min((sample["latency"][name] for pair in pairs for sample in pair),
                         key=lambda latency: latency["n_messages"])
             print(f"  sample support of {name}: at least n_obs {least['n_obs']}, "
                   f"n_messages {least['n_messages']}")
-        if pairs[0][0]["cell"]["mode"] == "windowed":
-            # The windowed rates and the CPU per message include this time.
+        cell = pairs[0][0]["cell"]
+        if cell["workload"] == "broadcast" and cell["mode"] == "windowed":
+            # The windowed broadcast rates and the CPU per message include this time.
             print("  fence time, median: A " + fence_text([a for a, _ in pairs])
                   + "; B " + fence_text([b for _, b in pairs]))
         aa_values = metric_values(aa_pairs_by_key.get(comparison_key(pairs[0][0]), []))
@@ -1183,6 +1339,28 @@ def print_swarm_tables(ids, cells, samples_by_cell, median):
          for cell_id in ids])
 
 
+def print_rpc_tables(ids, cells, median, cpu_median):
+    """W2 against the gap, for each route: the gap that was slept, rtt, and each role's CPU
+    per call. In the reader's sleep phase rtt and the slept gap add up to a whole number of
+    the reader's poll periods, so the two are read together."""
+    for route, roles in RPC_ROUTE_ROLES.items():
+        of_route = sorted((cell_id for cell_id in ids if cells[cell_id]["route"] == route),
+                          key=lambda cell_id: cells[cell_id]["gap_us"])
+        if not of_route:
+            continue
+        latencies = [("actual_gap", "p50_us"), ("rtt", "p50_us"), ("rtt", "p99_us")]
+        rows = [[cells[cell_id]["gap_us"]]
+                + [median(cell_id, lambda s, name=name, key=key: s["latency"][name][key])
+                   for name, key in latencies]
+                + [cpu_median(cell_id, lambda cpu, role=role: cpu[role]["us_per_message"])
+                   for role in roles + ["total"]]
+                for cell_id in of_route]
+        print_table(
+            f"rtt and CPU us per call by role against the gap: route {route}",
+            ["gap us", "actual gap p50 us", "rtt p50 us", "rtt p99 us"] + roles + ["total"],
+            rows)
+
+
 def print_axis_tables(records):
     """Hotspot readings for arm A: the median over the usable samples of each cell.
 
@@ -1204,8 +1382,9 @@ def print_axis_tables(records):
     def cpu_median(cell_id, read):
         return median(cell_id, lambda sample: cpu_value(sample, read))
 
-    def cell_ids(mode, **parameters):
-        return [cell_id for cell_id, cell in cells.items() if cell["mode"] == mode
+    def cell_ids(mode, workload="broadcast", **parameters):
+        return [cell_id for cell_id, cell in cells.items()
+                if cell["workload"] == workload and cell["mode"] == mode
                 and all(cell[key] == value for key, value in parameters.items())]
 
     def axis(mode, *keys):
@@ -1267,8 +1446,13 @@ def print_axis_tables(records):
             [[cell_id] + [cpu_median(cell_id, share(role)) for role in ROLES]
              for cell_id in windowed])
 
+    # A closed-loop request/response sample is read against its gap, in its own tables.
+    rpc_ids = cell_ids("closed_loop", workload="rpc")
+    if rpc_ids:
+        print_rpc_tables(rpc_ids, cells, median, cpu_median)
+
     # A swarm sample has its CPU per phase, in its own tables.
-    swarm_ids = cell_ids("lifecycle")
+    swarm_ids = cell_ids("lifecycle", workload="swarm")
     if swarm_ids:
         print_swarm_tables(swarm_ids, cells, samples_by_cell, median)
 
@@ -1326,7 +1510,9 @@ def main():
     validate_swarm(workloads)
     cells = select_cells(expand_cells(workloads) + expand_swarm_cells(workloads), args.select)
     if args.calibrate:
-        cells = [cell for cell in cells if cell["mode"] == "windowed"]
+        # Calibration is for the windowed broadcast cells. Request/response counts are fixed.
+        cells = [cell for cell in cells
+                 if cell["workload"] == "broadcast" and cell["mode"] == "windowed"]
     # An open-loop cell has no message count until calibration has stored its rate.
     skipped = [cell for cell in cells if lacks_rate(cell)]
     cells = [cell for cell in cells if not lacks_rate(cell)]
