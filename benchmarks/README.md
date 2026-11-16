@@ -1,9 +1,9 @@
 # Sintra benchmarks
 
 The benchmarks measure latency, throughput, process CPU and loss through the
-public API. They run in GitHub CI on hosted runners, not on the owner's
-machines (see [Continuous integration](#continuous-integration)), and their
-results are JSONL records kept outside git.
+public API. Benchmark runs happen in GitHub CI on hosted runners (see
+[Continuous integration](#continuous-integration)); local runs only check
+function during development. Results are JSONL records kept outside git.
 
 This file is the usage guide. [docs/benchmark_plan.md](../docs/benchmark_plan.md)
 defines what is measured and how:
@@ -315,11 +315,14 @@ calibrate into a temporary file and pass it with `--workloads`.
 
 ## Continuous integration
 
-Owner decision (plan section 1.1): the benchmarks run in GitHub CI on hosted
-runners, not on the owner's machines. `.github/workflows/benchmarks.yml` is
-level 1: it runs on demand and on every push and pull request that changes the
-library, the build, `benchmarks/`, the runner's Windows helper
-(`tests/runner/platform/`) or the workflow itself. It has one job per platform:
+Owner decision (plan section 1.1): benchmark runs happen in GitHub CI on hosted
+runners; local runs only check function during development.
+`.github/workflows/benchmarks.yml` is level 1: it runs on demand and on every
+push and pull request that changes the library, the build, `benchmarks/`, the
+runner's Windows helper (`tests/runner/platform/`) or the workflow itself. Like
+the existing workflows, its branch filter `'*'` does not match branch names
+that contain `/`, so a push to such a branch does not trigger it. It has one
+job per platform:
 Linux with GCC and with Clang, macOS, Windows with MSVC and with MinGW, and
 FreeBSD in a VM. Each job:
 
@@ -337,7 +340,10 @@ Numbers and warnings (`cpu_low_confidence`, `cpu_not_advancing`,
 fixed counts: windowed broadcast from both origins at R = 1 and 2 with 64 and
 4096 bytes, each also open-loop at 500 messages/s for 1 s; closed-loop
 request/response at gaps 0 and 200 µs and windowed, on both routes; swarms of 1
-and 8 leaves. One pass took about a minute on the development machine.
+and 8 leaves. One pass took about a minute on the development machine. The
+open-loop cells use a fixed 500 messages/s, so the `x10` suffix of their IDs,
+which comes from the file's only rate fraction, is not a percentage of a
+calibrated rate there.
 
 Level 2, a paired comparison against the previous master on hosted runners that
 is reported and does not gate, is a later step and not designed yet.

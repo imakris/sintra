@@ -110,7 +110,7 @@ jobs:
       - name: Run the smoke pass
         shell: bash
         env:
-          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT: ${{ github.sha }}
         run: |
           smoke="$RUNNER_TEMP/benchmark-smoke"
           mkdir -p "$smoke"
@@ -185,7 +185,7 @@ jobs:
       - name: Run the smoke pass
         shell: bash
         env:
-          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT: ${{ github.sha }}
         run: |
           smoke="$RUNNER_TEMP/benchmark-smoke"
           mkdir -p "$smoke"
@@ -253,7 +253,7 @@ jobs:
       - name: Run the smoke pass
         shell: pwsh
         env:
-          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT: ${{ github.sha }}
         run: |
           $smoke = Join-Path $env:RUNNER_TEMP 'benchmark-smoke'
           # A private ring parent directory for the swarms of the pass.
@@ -317,7 +317,7 @@ jobs:
       - name: Run the smoke pass
         shell: pwsh
         env:
-          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT: ${{ github.sha }}
         run: |
           $smoke = Join-Path $env:RUNNER_TEMP 'benchmark-smoke'
           # A private ring parent directory for the swarms of the pass.
@@ -351,7 +351,7 @@ jobs:
       - name: Build and run the smoke pass (FreeBSD 15.0)
         uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
         env:
-          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT: ${{ github.sha }}
         with:
           release: "15.0"
           usesh: true
@@ -377,9 +377,11 @@ jobs:
               --note "CI smoke, freebsd" --require-valid < /dev/null 2>&1 | tee "$smoke/runner.log"
 
       # The VM action skips copyback when its run fails. Export the smoke output from the
-      # still-running VM, including after a failure.
+      # still-running VM, including after a failure. A failed copy cannot fail the job: the
+      # smoke pass fails it through the VM step.
       - name: Export the smoke output
         if: always()
+        continue-on-error: true
         run: |
           mkdir -p "$GITHUB_WORKSPACE/benchmark-smoke"
           rsync -a --no-owner --no-group --timeout=60 \

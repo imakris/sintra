@@ -26,9 +26,10 @@ As `AGENTS.md` requires, three things are kept apart:
   benchmarks.
 - Measure latency, throughput and scalability, not latency alone.
 - Where it runs. Owner decision, 2026-11-16: "my reference host is not relevant. i want
-  automation and things happening elsewhere, not on my hosts." The benchmarks run in GitHub CI on
-  hosted runners, never on the owner's machines. This replaces the earlier dedicated Linux
-  reference host ("system specs are not so important. we will have some reference system.").
+  automation and things happening elsewhere, not on my hosts." Benchmark runs happen in GitHub CI
+  on hosted runners; local runs only check function during development. This replaces the earlier
+  dedicated Linux reference host ("system specs are not so important. we will have some reference
+  system.").
 - "leave futex tests... only system independent stuff."
   - Working reading (an interpretation, not the owner's words): no scenario, metric or code path
     depends on futexes, syscall tracing, hardware or kernel counters, or another OS-specific API.
@@ -848,9 +849,10 @@ N_over swarm formed on the development machine at 80 leaves, and at 125 with `--
 
 **CI smoke pass (level 1).** On every CI platform, the workflow builds the three targets and runs
 one A/A pair of each cell of `benchmarks/workloads_smoke.json` except `w3.lifecycle.n_over`, with
-`--require-valid`. Its cells and counts are chosen to stay well clear of loss and timeouts on a
-loaded 3 to 4 core runner, and the pass aims at about 3 min of benchmark time per job; on the
-development machine one pass took 56 to 69 s.
+`--require-valid`. Its cells and counts are chosen so that they are expected to stay well clear
+of loss and timeouts on a loaded 3 to 4 core runner; that is an expectation until CI runs confirm
+it. The pass aims at about 3 min of benchmark time per job; on the development machine one pass
+took 56 to 69 s.
 
 **Estimated cost** (estimates, not measurements; about 2 s of fixed overhead per sample). One pass
 over the default cells takes about 6 min for W1 (72 cells), about 6 min for W2 (10 cells; the 2 s
