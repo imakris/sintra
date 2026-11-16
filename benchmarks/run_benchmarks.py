@@ -31,6 +31,7 @@ CELL_PREFIXES = {"broadcast": "w1", "rpc": "w2", "swarm": "w3"}
 TIMEOUT_BASE_S = 60         # a sample's timeout is this plus a multiple of its planned duration:
 TIMEOUT_FACTOR = 3          # three times it, or, for a windowed broadcast cell that was never
 UNCALIBRATED_TIMEOUT_FACTOR = 30    # calibrated, whose count is only an estimate, thirty times it
+CALIBRATION_TIMEOUT_S = 900 # under --calibrate: an estimate may be far off on a slow host
 REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
 EXIT_WAIT_S = 10            # for the participants to exit, on their own or after a kill
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
@@ -45,6 +46,13 @@ CONFIGURATION_FACTS = [
 LIBRARY_FACTS = [
     "slow_reader_eviction", "eviction_spin_budget_us", "eviction_spin_threshold",
     "eviction_lag_rings", "message_ring_size", "ring_abi_version"]
+
+# The keys of a record's cell that every workload writes (plan section 7), besides its
+# origin or route, and besides the ID and the calibration metadata that the runner adds.
+CELL_KEYS = [
+    "workload", "mode", "receivers", "payload_bytes", "framed_bytes", "gap_us", "window",
+    "n_leaves", "offered_rate", "planned", "warmup", "burst", "handler_delay_us",
+    "drain_timeout_s", "validation_only"]
 
 
 def fail(message):
@@ -266,19 +274,13 @@ def rpc_command(executable, cell, run_id):
 
 def rpc_unaggregated_record(cell, run_id, facts):
     """As unaggregated_record, for a request/response cell."""
-    return {
-        "run_id": run_id,
-        "build": facts,
-        "cell": {
-            "workload": "rpc", "mode": cell["mode"], "route": cell["route"],
-            "gap_us": cell["gap_us"], "window": cell["window"],
-            "planned": cell["calls"], "warmup": RPC_WARMUP_CALLS,
-            "handler_delay_us": cell["handler_delay_us"] or 0,
-            "validation_only": any(cell[key] for key in RPC_VALIDATION_KEYS),
-        },
-        "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
-        "outcome": {"missing_files": None, "valid": False, "reasons": [], "warnings": []},
-    }
+    return fallback_record(
+        run_id, facts, workload="rpc", mode=cell["mode"], route=cell["route"],
+        gap_us=cell["gap_us"], window=cell["window"],
+        n_leaves=2 if cell["route"] == "leaf_to_leaf" else 1,
+        planned=cell["calls"], warmup=RPC_WARMUP_CALLS,
+        handler_delay_us=cell["handler_delay_us"] or 0,
+        validation_only=any(cell[key] for key in RPC_VALIDATION_KEYS))
 
 
 # --- Swarm cells (W3) ---------------------------------------------------------
@@ -369,16 +371,10 @@ def swarm_command(executable, cell, run_id):
 
 def swarm_unaggregated_record(cell, run_id, facts):
     """As unaggregated_record, for a swarm cell."""
-    return {
-        "run_id": run_id,
-        "build": facts,
-        "cell": {
-            "workload": "swarm", "mode": "lifecycle", "n_leaves": cell["leaves"],
-            "validation_only": bool(cell["fail_init"] or cell["leaf_exit_delay_ms"]),
-        },
-        "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
-        "outcome": {"missing_files": None, "valid": False, "reasons": [], "warnings": []},
-    }
+    return fallback_record(
+        run_id, facts, workload="swarm", mode="lifecycle", origin=None,
+        n_leaves=cell["leaves"],
+        validation_only=bool(cell["fail_init"] or cell["leaf_exit_delay_ms"]))
 
 
 # --- Ownership of a sample's processes ----------------------------------------
@@ -387,7 +383,8 @@ interrupt_requested = False
 
 
 def request_interrupt(signum, frame):
-    """The handler of SIGINT, SIGTERM, SIGHUP and Ctrl+Break. It only records the request.
+    """The handler of SIGINT, SIGTERM, SIGHUP, SIGQUIT and Ctrl+Break. It only records the
+    request.
 
     Nothing is raised asynchronously. The runner acts on the request where it polls for it,
     and a cleanup that is under way runs to its end whatever signals arrive meanwhile.
@@ -424,7 +421,7 @@ def run_processes(run_id):
     else:
         listing = subprocess.run(
             ["ps", "-ww", "-A", "-o", "pid=", "-o", "command="],
-            capture_output=True, text=True, check=True)
+            capture_output=True, text=True, errors="replace", check=True)
         fields = [line.split() for line in listing.stdout.splitlines() if line.strip()]
         lines = {int(pid): arguments for pid, *arguments in fields}
     return {pid: " ".join(arguments).strip() for pid, arguments in lines.items()
@@ -641,7 +638,8 @@ def find_executable(build_dir, workload):
     name = EXECUTABLES[workload] + (".exe" if os.name == "nt" else "")
     for directory in (build_dir / "benchmarks", build_dir / "benchmarks" / "Release", build_dir):
         if (directory / name).is_file():
-            return directory / name
+            # An absolute path: a bare file name would be looked up on PATH.
+            return (directory / name).resolve()
     fail(f"{name} was not found under {build_dir}")
 
 
@@ -725,6 +723,19 @@ def cleanup_incomplete_message(run_id, run_dir, remaining):
             f"the run directory {run_dir} is kept.")
 
 
+def fallback_record(run_id, facts, **cell):
+    """A record without metrics, as the runner writes it for a sample that left nothing to
+    aggregate. Its cell has every key that the executable would have written; a key that
+    does not apply to the cell, or that only the executable knows, is null."""
+    return {
+        "run_id": run_id,
+        "build": facts,
+        "cell": {**dict.fromkeys(CELL_KEYS), **cell},
+        "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
+        "outcome": {"missing_files": None, "valid": False, "reasons": [], "warnings": []},
+    }
+
+
 def unaggregated_record(cell, run_id, facts):
     """The record of a sample that left nothing to aggregate: it stalled or died before
     its processes wrote their reports."""
@@ -732,21 +743,15 @@ def unaggregated_record(cell, run_id, facts):
         return rpc_unaggregated_record(cell, run_id, facts)
     if cell["workload"] == "swarm":
         return swarm_unaggregated_record(cell, run_id, facts)
-    return {
-        "run_id": run_id,
-        "build": facts,
-        "cell": {
-            "workload": cell["workload"], "mode": cell["mode"], "origin": cell["origin"],
-            "receivers": cell["receivers"], "payload_bytes": cell["payload_bytes"],
-            "offered_rate": cell["offered_rate"], "planned": cell["messages"],
-            "warmup": warmup_messages(cell),
-            "burst": default_burst(cell, facts) if cell["burst"] is None else cell["burst"],
-            "handler_delay_us": cell["handler_delay_us"] or 0,
-            "validation_only": is_validation_only(cell, facts),
-        },
-        "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
-        "outcome": {"missing_files": None, "valid": False, "reasons": [], "warnings": []},
-    }
+    return fallback_record(
+        run_id, facts, workload=cell["workload"], mode=cell["mode"], origin=cell["origin"],
+        receivers=cell["receivers"], payload_bytes=cell["payload_bytes"],
+        n_leaves=cell["receivers"] + (cell["origin"] == "leaf"),
+        offered_rate=cell["offered_rate"], planned=cell["messages"],
+        warmup=warmup_messages(cell),
+        burst=default_burst(cell, facts) if cell["burst"] is None else cell["burst"],
+        handler_delay_us=cell["handler_delay_us"] or 0,
+        validation_only=is_validation_only(cell, facts))
 
 
 class Session:
@@ -755,6 +760,7 @@ class Session:
     def __init__(self, args, cells):
         # Without --b, the A binaries run as both arms. A calibration is not an A/A session.
         self.aa = args.b is None and args.calibrate is None
+        self.calibrating = args.calibrate is not None
         self.note = args.note
         self.keep = args.keep
         self.commits = {"A": args.a_commit, "B": args.b_commit if args.b else args.a_commit}
@@ -848,11 +854,13 @@ class Session:
         executable = self.executables[arm, cell["workload"]]
         facts = self.facts[arm, cell["workload"]]
         ring_entries = len(list(Path(facts["ring_parent_dir"]).glob("sintra-*")))
-        # Only a broadcast count is an estimate until it is calibrated.
+        # Only a broadcast count is an estimate until it is calibrated. A calibration has
+        # to complete a sample at that estimate, however slow the host is.
         estimated = (cell["workload"] == "broadcast" and cell["mode"] == "windowed"
                      and cell["calibration"] is None)
-        timeout = TIMEOUT_BASE_S + cell["duration_s"] * (
-            UNCALIBRATED_TIMEOUT_FACTOR if estimated else TIMEOUT_FACTOR)
+        timeout = CALIBRATION_TIMEOUT_S if self.calibrating else (
+            TIMEOUT_BASE_S + cell["duration_s"] * (
+                UNCALIBRATED_TIMEOUT_FACTOR if estimated else TIMEOUT_FACTOR))
         started = time.time()
         begin = time.monotonic()
         exit_code, ending, stray, remaining = self.run_swarm(
@@ -1055,6 +1063,9 @@ HEADLINE_LATENCIES = {
     "open_loop": ["slowest_from_intended", "lateness"],
     "lifecycle": [],
 }
+# The roles whose CPU an open-loop broadcast cell shows: those that do not send. The
+# sender's CPU is mostly its generator's clock polling.
+OPEN_LOOP_CPU_ROLES = ["coordinator", "receivers"]
 SWARM_PHASES = {"formation_cpu": "formation", "shutdown_cpu": "shutdown"}
 SHUTDOWN_CALLS = "shutdown calls"
 
@@ -1086,14 +1097,19 @@ def headline_metrics(record):
             (f"CPU us/msg {role}", True,
              cpu_value(record, lambda cpu, role=role: cpu[role]["us_per_message"]))
             for role in record["cpu"]]
+        # The rates and the CPU per message include the fence time. The duration of the
+        # publish call does not, so it follows the publish path alone.
         return metrics + [
+            ("send_call p50 us", False, latency["send_call"]["p50_us"]),
             ("slowest_from_send p50 us", False, latency["slowest_from_send"]["p50_us"]),
             ("slowest_from_send p99 us", False, latency["slowest_from_send"]["p99_us"])]
     return [
         ("slowest_from_intended p50 us", False, latency["slowest_from_intended"]["p50_us"]),
         ("slowest_from_intended p99 us", False, latency["slowest_from_intended"]["p99_us"]),
         ("lost fraction", True, lost_fraction(record)),
-        ("lateness p99 us", False, latency["lateness"]["p99_us"])]
+        ("lateness p99 us", False, latency["lateness"]["p99_us"])] + [
+        (f"CPU s {role}", True, cpu_value(record, lambda cpu, role=role: cpu[role]["cpu_s"]))
+        for role in OPEN_LOOP_CPU_ROLES if role in record["cpu"]]
 
 
 def lifecycle_cpu(record, phase, role):
@@ -1296,6 +1312,13 @@ def cpu_us_per_megabyte(sample):
     return cpu_value(sample, lambda cpu: cpu["total"]["cpu_s"] * 1.0e6 / megabytes)
 
 
+def fence_percent(sample):
+    """The share of a windowed broadcast sample's interval that its sender spent in
+    processing fences, in percent. A record of an older executable has no fence time."""
+    fence = sample["throughput"].get("fence_s")
+    return None if fence is None else 100.0 * fence / sample["throughput"]["interval_s"]
+
+
 def print_swarm_tables(ids, cells, samples_by_cell, median):
     """W3 against N: the lifecycle times with each role's CPU per leaf, and each role's
     share of a phase's CPU. The coordinator's shutdown() calls are shown when a sample
@@ -1397,12 +1420,15 @@ def print_axis_tables(records):
         rows = [[cells[cell_id]["receivers"]]
                 + [cpu_median(cell_id, lambda cpu, role=role: cpu[role]["us_per_message"])
                    for role in roles]
-                + [cpu_median(cell_id, lambda cpu: cpu["receivers"]["us_per_delivery"])]
+                + [cpu_median(cell_id, lambda cpu: cpu["receivers"]["us_per_delivery"]),
+                   median(cell_id, fence_percent)]
                 for cell_id in sorted(ids, key=lambda cell_id: cells[cell_id]["receivers"])]
         print_table(
             f"CPU us per message by role against R: origin {origin}, payload {payload} B",
-            ["R"] + roles + ["receivers us/delivery"], rows)
+            ["R"] + roles + ["receivers us/delivery", "fence %"], rows)
 
+    # The CPU of a windowed sample includes the CPU of its fence time, so each value stands
+    # beside the share of the interval that the sender spent in fences.
     for (origin,) in axis("windowed", "origin"):
         receivers = [r for (r,) in axis("windowed", "receivers")]
         rows = []
@@ -1410,25 +1436,30 @@ def print_axis_tables(records):
             row = [payload]
             for count in receivers:
                 ids = cell_ids("windowed", origin=origin, payload_bytes=payload, receivers=count)
-                row.append(median(ids[0], cpu_us_per_megabyte) if ids else None)
+                row += [median(ids[0], read) if ids else None
+                        for read in (cpu_us_per_megabyte, fence_percent)]
             rows.append(row)
         print_table(
             f"Total CPU us per application MB against payload: origin {origin}",
-            ["payload B"] + [f"R={count}" for count in receivers], rows)
+            ["payload B"] + [title for count in receivers
+                             for title in (f"R={count}", f"R={count} fence %")], rows)
 
     for origin, count, payload in axis("open_loop", "origin", "receivers", "payload_bytes"):
         ids = cell_ids("open_loop", origin=origin, receivers=count, payload_bytes=payload)
+        roles = [role for role in OPEN_LOOP_CPU_ROLES if role in samples_by_cell[ids[0]][0]["cpu"]]
         rows = [[cells[cell_id]["offered_rate"],
                  median(cell_id, lambda s: s["latency"]["slowest_from_intended"]["p50_us"]),
                  median(cell_id, lambda s: s["latency"]["slowest_from_intended"]["p99_us"]),
                  median(cell_id, lost_fraction),
                  median(cell_id, lambda s: s["latency"]["lateness"]["p99_us"])]
+                + [cpu_median(cell_id, lambda cpu, role=role: cpu[role]["cpu_s"])
+                   for role in roles]
                 for cell_id in sorted(ids, key=lambda cell_id: cells[cell_id]["offered_rate"])]
         print_table(
             f"Open-loop latency and loss against offered rate: origin {origin}, R={count}, "
             f"payload {payload} B",
             ["offered msg/s", "slowest p50 us", "slowest p99 us", "lost fraction",
-             "lateness p99 us"], rows)
+             "lateness p99 us"] + [f"{role} CPU s" for role in roles], rows)
 
     def share(role):
         def read(cpu):
@@ -1499,7 +1530,7 @@ def lacks_rate(cell):
 def main():
     # A request to stop only sets a flag: see request_interrupt. A signal that the runner
     # was started to ignore, as under nohup, stays ignored.
-    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"):
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGBREAK"):
         number = getattr(signal, name, None)
         if number is not None and signal.getsignal(number) != signal.SIG_IGN:
             signal.signal(number, request_interrupt)

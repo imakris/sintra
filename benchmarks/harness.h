@@ -224,6 +224,26 @@ inline void rendezvous(const char* name)
 
 
 // ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
+/// Leaves the swarm: calls sintra::shutdown() until it returns true, at most 40
+/// times. A call that returns false has retained the runtime, because the
+/// bounded wait for the managed children ended first, and the next call resumes
+/// the teardown (docs/reference/shutdown.md). Returns whether the runtime was
+/// torn down; a process that gets false exits non-zero.
+inline bool shutdown_with_retries()
+{
+    for (int call = 0; call < 40; ++call) {
+        if (sintra::shutdown()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+// ---------------------------------------------------------------------------
 // JSON output
 // ---------------------------------------------------------------------------
 
@@ -344,6 +364,25 @@ inline void append_names(
 
 inline constexpr std::string_view k_build_config = SINTRA_BENCHMARK_CONFIG;
 
+/// Whether a configuration name is "Release" in any letter case: CMake accepts
+/// -DCMAKE_BUILD_TYPE=release as well.
+constexpr bool is_release(std::string_view config)
+{
+    constexpr std::string_view release = "release";
+    if (config.size() != release.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < release.size(); ++i) {
+        const char c = config[i];
+        if ((c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c) != release[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline constexpr bool k_build_release = is_release(k_build_config);
+
 #ifdef NDEBUG
 inline constexpr bool k_build_ndebug = true;
 #else
@@ -355,7 +394,7 @@ inline constexpr bool k_build_ndebug = false;
 #if defined(__OPTIMIZE__)
 inline constexpr bool k_build_optimized = true;
 #elif defined(_MSC_VER) && !defined(_DEBUG)
-inline constexpr bool k_build_optimized = k_build_config == "Release";
+inline constexpr bool k_build_optimized = k_build_release;
 #else
 inline constexpr bool k_build_optimized = false;
 #endif
@@ -390,7 +429,7 @@ inline std::string build_compiler()
 inline std::vector<std::string> build_invalid_reasons()
 {
     std::vector<std::string> reasons;
-    if (k_build_config != "Release") { reasons.push_back("build_not_release"); }
+    if (!k_build_release)            { reasons.push_back("build_not_release"); }
     if (!k_build_ndebug)             { reasons.push_back("build_without_ndebug"); }
     if (!k_build_optimized)          { reasons.push_back("build_not_optimized"); }
     if (k_build_test_hooks)          { reasons.push_back("build_with_test_hooks"); }

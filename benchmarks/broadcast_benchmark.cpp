@@ -543,9 +543,12 @@ int run(int argc, char* argv[])
             run_protocol([] { follow_sender(false); });
         }
     }
-    sintra::shutdown();
+    const bool torn_down = bench::shutdown_with_retries();
     if (failure) {
         std::rethrow_exception(failure);
+    }
+    if (!torn_down) {
+        throw std::runtime_error("sintra::shutdown() did not complete");
     }
     return 0;
 }

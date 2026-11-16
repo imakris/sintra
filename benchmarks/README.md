@@ -44,8 +44,9 @@ such as Visual Studio, where `CMAKE_BUILD_TYPE` does not; a single-configuration
 generator ignores it.
 
 A sample is valid only from a Release configuration with `NDEBUG` defined,
-optimization on and test hooks off. Other builds run, and their records say why
-they are invalid.
+optimization on and test hooks off. The configuration name counts in any letter
+case, as in `-DCMAKE_BUILD_TYPE=release`. Other builds run, and their records
+say why they are invalid.
 
 Build both arms of a comparison with the same toolchain and configuration. The
 runner refuses arms that differ in the compiler, the configuration, `NDEBUG`,
@@ -114,7 +115,9 @@ deletes the run directory unless `--keep` is given.
 
 **Timeout.** A sample's timeout is 60 s plus three times its planned duration.
 A windowed broadcast cell without calibration metadata gets 60 s plus thirty
-times it, because its count is only an estimate for the host.
+times it, because its count is only an estimate for the host. Under
+`--calibrate` every sample has a fixed timeout of 900 s instead: a calibration
+has to complete a sample at that estimate, however slow the host is.
 
 | Cell | Planned duration |
 |---|---|
@@ -135,9 +138,10 @@ The runner owns the processes of a sample and leaves none behind:
   because its processes may have written their reports before the stall.
 - **On an interrupt or an error of the runner,** it ends the swarm before it
   exits. The sample that was running has no record. An interrupt is Ctrl+C,
-  Ctrl+Break, SIGTERM or SIGHUP. It only sets a flag, which the runner polls
-  while a sample runs, so a further interrupt cannot cut a cleanup short. A
-  signal that the runner was started to ignore, as under `nohup`, stays ignored.
+  Ctrl+Break, SIGTERM, SIGHUP or SIGQUIT. It only sets a flag, which the
+  runner polls while a sample runs, so a further interrupt cannot cut a cleanup
+  short. A signal that the runner was started to ignore, as under `nohup`,
+  stays ignored.
 - **After a normal exit,** the record gets the warning `stray_participants` if
   processes of the run are still alive after 10 s. The cleanup follows.
 - **If the cleanup is not complete within 10 s,** the record gets the reason
@@ -207,15 +211,21 @@ and maximum and, beside it, the A/A spread. Nothing is flagged automatically.
 - **Fence time.** A windowed broadcast sender waits in a processing fence
   after every burst and once at the end. The measured interval includes those
   waits, so windowed rates and CPU per message include fence time.
-  `throughput.fence_s` holds their sum.
+  `throughput.fence_s` holds their sum. The duration of the publish call,
+  `send_call`, does not include it, so it follows the publish path alone.
 - **Open-loop sender CPU.** An open-loop sender polls the clock for the last
   100 µs before each intended arrival, so its CPU is mostly the generator's
-  own. Do not read it as the cost of publishing.
+  own. Do not read it as the cost of publishing. The summary shows the CPU
+  seconds of the other roles: the receivers, and the coordinator of a
+  leaf-origin cell.
+- **Open-loop rates.** The stored rates are fractions of the windowed
+  publication rate, which includes fence time. They are therefore light loads
+  relative to the rate at which the sender can publish without fences.
 
 | Mode | Headline metrics |
 |---|---|
-| Windowed | Publication and delivery rates; CPU µs per message, total and per role; `slowest_from_send` p50 and p99 |
-| Open-loop | `slowest_from_intended` p50 and p99; lost fraction; `lateness` p99 |
+| Windowed | Publication and delivery rates; CPU µs per message, total and per role; `send_call` p50; `slowest_from_send` p50 and p99 |
+| Open-loop | `slowest_from_intended` p50 and p99; lost fraction; `lateness` p99; CPU seconds of the roles that do not send |
 | Request/response, windowed | Calls/s; CPU µs per call, total and per role; `issue_to_observation` p50 and p99 |
 | Request/response, closed-loop | `rtt` p50 and p99; calls/s for the back-to-back cells (gap 0); CPU µs per call per role |
 | Lifecycle | `time_to_ready_s`, `time_to_shutdown_s`; the coordinator's `shutdown()` calls, where a sample needed more than one; formation and shutdown CPU per role |
@@ -224,9 +234,11 @@ After the summary, the runner prints the axis tables of plan section 10 for arm
 A, as the median over the usable samples of each cell: CPU µs per message by
 role against R, total CPU µs per application MB against payload, open-loop
 latency and loss against the offered rate, and each role's share of total CPU.
-The share table covers windowed broadcast cells only, because of the open-loop
-sender's polling. A sample with `cpu_not_advancing` contributes no CPU value to
-them.
+The two windowed tables show the fence share beside the CPU: `fence_s` as a
+percentage of `interval_s`. The open-loop table shows the CPU seconds of the
+roles that do not send. The share table covers windowed broadcast cells only,
+because of the open-loop sender's polling. A sample with `cpu_not_advancing`
+contributes no CPU value to them.
 
 Closed-loop request/response cells have one table per route: against the gap,
 the `actual_gap` p50, `rtt` p50 and p99, and each role's CPU µs per call. The
@@ -322,8 +334,14 @@ exits 0 whenever it can produce a record, valid or not.
 Every step of the measurement protocol is a Sintra barrier over all processes.
 Sintra treats a barrier as satisfied without holding it while a process shuts
 down or drains, and reports that in the barrier's result. A process that gets
-such a result stops its measurement and writes no report, so the sample is
-invalid with `missing_files`; the coordinator also exits non-zero.
+such a result stops its measurement, writes no report and exits non-zero, so
+the sample is invalid with `missing_files`. Only that process exits non-zero:
+the record has `exit_code_nonzero` as well only when it was the coordinator.
+
+Every process leaves the swarm through `sintra::shutdown()`. A call that
+returns false has retained the runtime for a retry
+(`docs/reference/shutdown.md`), so the process repeats the call, at most 40
+times, and exits non-zero if the runtime is still up after that.
 
 | Cell option | Meaning | Default |
 |---|---|---|
@@ -368,11 +386,12 @@ sintra_rpc_benchmark --aggregate <run directory>     the sample's record, as one
 sintra_rpc_benchmark --build-facts                   the build facts, as one JSON object
 ```
 
-The run directory, the process reports, `--aggregate` and the barriers work as
-for the broadcast executable: a process whose barrier was bypassed writes no
-report. The callee is a transceiver whose `echo` is exported with
-`SINTRA_RPC_STRICT` and returns its argument. One caller thread in the last
-leaf resolves the callee's name once and passes the instance ID in every call.
+The run directory, the process reports, `--aggregate`, the barriers and the
+shutdown work as for the broadcast executable: a process whose barrier was
+bypassed writes no report. The callee is a transceiver whose `echo` is exported
+with `SINTRA_RPC_STRICT` and returns its argument. One caller thread in the
+last leaf resolves the callee's name once and passes the instance ID in every
+call.
 
 | Route | Callee | Caller | Roles |
 |---|---|---|---|
@@ -540,8 +559,8 @@ through the lifeline like any other: a leaf watches the lifeline after its
 
 ## Record
 
-Plan section 7 defines the record and section 6 its metrics. Beyond them, a
-record has these fields:
+Plan section 7 defines the record and section 6 its metrics. Three of its
+fields in more detail:
 
 | Field | Content |
 |---|---|
@@ -586,8 +605,9 @@ A record with a missing or surplus process report is invalid and has null
 other cell settings, is set aside and makes the record invalid too. If the
 expected reports are complete without it, the metrics are computed from those;
 if it stands in for an expected report, that report is missing. A sample that
-left no report at all has null metrics, and carries only the cell parameters
-that the runner knows.
+left no report at all has null metrics. The runner writes its `cell` with every
+key of plan section 7; a key that only the executable knows, such as
+`framed_bytes` and `drain_timeout_s`, is null there.
 
 **Process CPU on Windows.** The Windows process CPU clock is coarse and can stay
 at zero for a whole sample, however long the interval: neither 2 s nor 3 s makes
