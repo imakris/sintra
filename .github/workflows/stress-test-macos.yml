@@ -56,17 +56,15 @@ jobs:
     runs-on: macos-15
     env:
       GITHUB_TOKEN: ${{ secrets.repository-token }}
+      # The context reaches scripts only through the environment: a pull request's branch name
+      # is chosen by its author and must not be interpolated into a script.
+      RUN_ID: ${{ inputs.build_run_id }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+      BASE_SHA: ${{ inputs.base_sha || '' }}
+      HEAD_BRANCH: ${{ inputs.branch || '' }}
+      PR_NUMBER: ${{ inputs.pr_number || '' }}
 
     steps:
-      - name: Set context env
-        shell: bash
-        run: |
-          echo "RUN_ID=${{ inputs.build_run_id }}" >> "$GITHUB_ENV"
-          echo "HEAD_SHA=${{ inputs.head_sha }}" >> "$GITHUB_ENV"
-          echo "BASE_SHA=${{ inputs.base_sha || '' }}" >> "$GITHUB_ENV"
-          echo "HEAD_BRANCH=${{ inputs.branch || '' }}" >> "$GITHUB_ENV"
-          echo "PR_NUMBER=${{ inputs.pr_number || '' }}" >> "$GITHUB_ENV"
-
       - name: Context
         if: always()
         shell: bash
@@ -98,13 +96,15 @@ jobs:
         run: |
           set -euo pipefail
           # A push passes its previous head, so the diff covers every commit of the push. That
-          # base is all zeros for a new branch and may be missing after a force push; the
-          # parent of the head is the fallback then.
+          # base is all zeros for a new branch and may be missing from the clone after a force
+          # push. Then nothing shows what the push changed, and the tests run (force).
+          force=false
           if [ -n "${BASE_SHA}" ] && [ -n "${BASE_SHA//0/}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
             base_commit="$BASE_SHA"
           else
             if [ -n "${BASE_SHA}" ]; then
-              echo "Diff base ${BASE_SHA} is not usable; using the parent of ${HEAD_SHA}."
+              echo "Diff base ${BASE_SHA} is not usable; the tests run whatever the changed paths."
+              force=true
             fi
             read -ra parents <<< "$(git rev-list --parents -n 1 "${HEAD_SHA}")"
             if [ "${#parents[@]}" -ge 3 ]; then
@@ -122,12 +122,16 @@ jobs:
             fi
           fi
           echo "base=$base_commit" >> "$GITHUB_OUTPUT"
+          echo "force=$force" >> "$GITHUB_OUTPUT"
 
+      # `ref` binds the comparison to the tested commit, not to the branch's current tip.
+      # A pull request ignores both inputs and asks the API for the PR's files.
       - name: Detect changed areas
         id: changed
         uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         with:
           base: ${{ steps.diff-base.outputs.base }}
+          ref: ${{ env.HEAD_SHA }}
           filters: |
             core:
               - 'src/**'
@@ -189,7 +193,7 @@ jobs:
 
       - name: Run stress tests with run_tests.py
         id: stress
-        if: inputs.full_run || inputs.force_tests || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        if: inputs.full_run || inputs.force_tests || steps.diff-base.outputs.force == 'true' || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
         shell: bash
         env:
           FULL_RUN: ${{ inputs.full_run }}
@@ -213,8 +217,23 @@ jobs:
           DIFF_BASE: ${{ steps.diff-base.outputs.base }}
         run: |
           import os, pathlib, re
+
+          def tail(lines, max_lines, max_bytes):
+              """The last lines within both limits, after a note of how many were left out."""
+              kept, size = [], 0
+              for line in reversed(lines[-max_lines:]):
+                  size += len(line.encode("utf-8")) + 1
+                  if size > max_bytes:
+                      break
+                  kept.append(line)
+              kept.reverse()
+              if len(kept) < len(lines):
+                  kept.insert(0, f"[{len(lines) - len(kept)} earlier lines left out]")
+              return kept
+
           log = pathlib.Path(os.environ["RUNNER_TEMP"], "stress-tests.log")
-          if os.environ["STRESS_OUTCOME"] == "skipped":
+          outcome = os.environ["STRESS_OUTCOME"]
+          if outcome == "skipped":
               if os.environ["JOB_STATUS"] == "success":
                   body = ["Skipped: no core, test or workflow change since "
                           f"{os.environ.get('DIFF_BASE', '')}."]
@@ -223,17 +242,24 @@ jobs:
           elif not log.is_file():
               body = ["No test log was written."]
           else:
+              lines = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in
+                       log.read_text(encoding="utf-8", errors="replace").splitlines()]
               block, keep = [], False
-              for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
-                  line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+              for line in lines:
                   if re.match(r"Configuration \d+/\d+: ", line):
                       keep = False
                   if line.startswith("Results for ") or line == "OVERALL SUMMARY":
                       keep = True
                   if keep:
                       block.append(line)
-              block = block[-3000:] or ["No final summary in the log."]
-              body = ["```text", *block, "```"]
+              # The step summary is capped well under GitHub's 1 MiB per step.
+              body = ["```text", *(tail(block, 3000, 200_000) or ["No suite results in the log."]),
+                      "```"]
+              if "OVERALL SUMMARY" not in lines:
+                  body = [f"**The run did not finish** (test step: {outcome}): the log has no "
+                          "OVERALL SUMMARY. The results so far, then the last lines of the log:",
+                          *body, "```text", *(tail(lines, 40, 40_000) or ["The log is empty."]),
+                          "```"]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("\n".join(["### Stress tests", *body]) + "\n")
 
@@ -247,9 +273,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # A skipped test step still reports success, which GitHub needs to merge, but says so.
+      # Skipped tests post a status only on a pull request, where a merge may wait for it; it
+      # says skipped. On a push a green status would read as a pass, so none is posted.
       - name: Mark status success
-        if: success()
+        if: success() && (steps.stress.outcome != 'skipped' || github.event_name == 'pull_request')
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           STRESS_OUTCOME: ${{ steps.stress.outcome }}
@@ -275,6 +302,8 @@ jobs:
       - name: Mark status failure
         if: failure()
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          STRESS_OUTCOME: ${{ steps.stress.outcome }}
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -282,17 +311,21 @@ jobs:
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
             const statusContext = 'Stress Test (macOS)';
+            const verdict = process.env.STRESS_OUTCOME === 'skipped'
+              ? 'Stress Test could not run: a setup step failed before the tests'
+              : 'Stress Test failed';
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
               state: 'failure',
               context: statusContext,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: `Stress Test failed${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`
+              description: `${verdict}${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`.slice(0, 140)
             });
 
-      # A skipped test step leaves the badge at the last real result; a cancelled run is grey.
+      # Only a test step that started writes the badge, so setup failures, skips and
+      # cancellations before the tests leave the last real result. A cancelled run is grey.
       - name: Update tests badge
-        if: always() && inputs.branch == 'master' && inputs.pr_number == '' && !(job.status == 'success' && steps.stress.outcome == 'skipped')
+        if: always() && inputs.branch == 'master' && inputs.pr_number == '' && (steps.stress.outcome == 'success' || steps.stress.outcome == 'failure' || steps.stress.outcome == 'cancelled')
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
         with:
           auth: ${{ secrets.gist-secret }}

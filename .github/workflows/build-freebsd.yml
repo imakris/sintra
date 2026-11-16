@@ -132,11 +132,19 @@ jobs:
           path: ${{ github.workspace }}/.ccache
           key: ${{ steps.restore_compiler_cache.outputs.cache-primary-key }}
 
-      # The test log, exported the same way. A failed copy cannot fail the job.
+      # The test log, exported the same way. A failed copy cannot fail the job. A VM without a
+      # log (`test -f` exits 1; ssh's own failure is 255) is no failed copy.
       - name: Export test log
+        id: export_log
         if: always()
         continue-on-error: true
         run: |
+          found=0
+          ssh -o BatchMode=yes -o ConnectTimeout=10 freebsd test -f "$GITHUB_WORKSPACE/stress-tests.log" || found=$?
+          if [ "$found" -eq 1 ]; then
+            echo "The VM has no test log."
+            exit 0
+          fi
           rsync -a --no-owner --no-group --timeout=60 \
             --rsync-path=/usr/local/bin/rsync \
             -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
@@ -149,25 +157,49 @@ jobs:
         shell: python3 {0}
         env:
           STRESS_OUTCOME: ${{ steps.vm.outcome }}
+          EXPORT_OUTCOME: ${{ steps.export_log.outcome }}
         run: |
           import os, pathlib, re
+
+          def tail(lines, max_lines, max_bytes):
+              """The last lines within both limits, after a note of how many were left out."""
+              kept, size = [], 0
+              for line in reversed(lines[-max_lines:]):
+                  size += len(line.encode("utf-8")) + 1
+                  if size > max_bytes:
+                      break
+                  kept.append(line)
+              kept.reverse()
+              if len(kept) < len(lines):
+                  kept.insert(0, f"[{len(lines) - len(kept)} earlier lines left out]")
+              return kept
+
           log = pathlib.Path(os.environ["RUNNER_TEMP"], "stress-tests.log")
-          if os.environ["STRESS_OUTCOME"] == "skipped":
+          outcome = os.environ["STRESS_OUTCOME"]
+          if outcome == "skipped":
               body = ["Not run: an earlier step failed or the job was cancelled."]
           elif not log.is_file():
-              body = ["No test log was written."]
+              body = ["The test log could not be copied from the VM."
+                      if os.environ.get("EXPORT_OUTCOME") == "failure" else "No test log was written."]
           else:
+              lines = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in
+                       log.read_text(encoding="utf-8", errors="replace").splitlines()]
               block, keep = [], False
-              for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
-                  line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+              for line in lines:
                   if re.match(r"Configuration \d+/\d+: ", line):
                       keep = False
                   if line.startswith("Results for ") or line == "OVERALL SUMMARY":
                       keep = True
                   if keep:
                       block.append(line)
-              block = block[-3000:] or ["No final summary in the log."]
-              body = ["```text", *block, "```"]
+              # The step summary is capped well under GitHub's 1 MiB per step.
+              body = ["```text", *(tail(block, 3000, 200_000) or ["No suite results in the log."]),
+                      "```"]
+              if "OVERALL SUMMARY" not in lines:
+                  body = [f"**The run did not finish** (build and test step: {outcome}): the log "
+                          "has no OVERALL SUMMARY. The results so far, then the last lines of the log:",
+                          *body, "```text", *(tail(lines, 40, 40_000) or ["The log is empty."]),
+                          "```"]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("\n".join(["### Stress tests", *body]) + "\n")
 
