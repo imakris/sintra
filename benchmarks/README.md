@@ -109,9 +109,11 @@ selects the five request/response cells of the leaf-to-leaf route.
 ### Each sample and its cleanup
 
 The runner creates a fresh run directory, names it in `SINTRA_BENCHMARK_DIR` and
-starts the coordinator. After the coordinator's normal exit it waits up to 10 s
-for the report of every participant. It runs `--aggregate`, adds its own fields
-and appends the record. It deletes the run directory unless `--keep` is given.
+starts the coordinator. When the coordinator exits by itself, with any exit
+code, before a timeout or an interrupt, the runner waits up to 10 s for the
+report of every participant. It runs `--aggregate`, adds its own fields and
+appends and flushes the record. Only then does it delete the run directory,
+unless `--keep` is given.
 
 **Timeout.** A sample's timeout is 60 s plus three times its planned duration.
 A windowed broadcast cell without calibration metadata gets 60 s plus thirty
@@ -145,19 +147,27 @@ and the session stops (see the POSIX paragraph below).
   exits. The sample that was running has no record. An interrupt is Ctrl+C,
   Ctrl+Break, SIGTERM, SIGHUP or SIGQUIT. It only sets a flag, which the
   runner polls while a sample runs, so a further interrupt cannot cut a cleanup
-  short. A signal that the runner was started to ignore, as under `nohup`,
-  stays ignored.
-- **After a normal exit,** the runner waits up to 10 s for the reports, then
+  short. The runner checks the flag once more immediately before it appends a
+  record: that append completes the sample. A signal that the runner was
+  started to ignore, as under `nohup`, stays ignored. If a record cannot be
+  written, the runner reports the error, keeps the run directory and, after an
+  incomplete cleanup, still lists what is left.
+- **When the coordinator exits by itself,** with any exit code, before a
+  timeout or an interrupt, the runner waits up to 10 s for the reports, then
   cleans up as in the other cases.
-- **If the cleanup is not complete within 10 s,** the record gets the reason
+- **If the cleanup is not complete,** the record gets the reason
   `cleanup_incomplete`, the run directory is kept, and the session stops with a
-  message that lists the PID and the command line of every process that is
-  left, so that nothing is measured beside a leftover process. The cleanup is
-  complete when the coordinator is reaped and two consecutive looks, both ending
-  before the deadline, find no other process of the run. A look that fails or
-  is inconclusive is not empty: `ps` fails, or the command line of one of the
-  runner's own processes cannot be read for another reason than that the
-  process has gone. The message names such a process as "could not be
+  message that lists every process that is left, so that nothing is measured
+  beside a leftover process: on POSIX each with its PID and command line, on
+  Windows each descendant by PID from the retained process tree. The cleanup is
+  complete when the coordinator is reaped and two consecutive looks find no
+  other process of the run, both of them ending within 10 s of the cleanup's
+  start. That is a deadline for the two looks, not a bound on the cleanup's
+  duration: a step under way at the deadline runs to its end, except `ps`,
+  which is cut off there. On POSIX, a look that fails or is inconclusive is not
+  empty: `ps` fails or does not finish by the deadline, or the command line of
+  one of the runner's own processes cannot be read for another reason than
+  that the process has gone. The message names such a process as "could not be
   inspected". That does not mean the process belongs to the run: an unrelated
   process of the runner's user whose command line cannot be read, such as a
   non-dumpable one under `hidepid`, stops the session too.

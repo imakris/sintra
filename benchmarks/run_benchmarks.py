@@ -33,7 +33,7 @@ TIMEOUT_FACTOR = 3          # three times it, or, for a windowed broadcast cell 
 UNCALIBRATED_TIMEOUT_FACTOR = 30    # calibrated, whose count is only an estimate, thirty times it
 CALIBRATION_TIMEOUT_S = 900 # under --calibrate: an estimate may be far off on a slow host
 REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
-EXIT_WAIT_S = 10            # in the cleanup, for the processes of the run to exit
+EXIT_WAIT_S = 10            # the cleanup's deadline: two consecutive empty looks must end by it
 AGGREGATE_TIMEOUT_S = 60    # for --aggregate, which only reads the reports of one sample
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
 CALIBRATION_RUNS = 3
@@ -414,7 +414,7 @@ def command_line(pid):
     return [argument.decode(errors="replace") for argument in raw.split(b"\0")]
 
 
-def run_processes(run_id):
+def run_processes(run_id, timeout):
     """{PID: command line} of every process whose command line names this run, and
     {PID: error} of each process whose command line could not be read.
 
@@ -425,7 +425,8 @@ def run_processes(run_id):
     With procfs, only the processes of the runner's user are read: every participant runs as
     that user, and procfs can deny the command line of another user's process (hidepid). The
     owner of /proc/<pid> is the process's effective user. A failure to read one process does
-    not end the scan. With `ps`, a failed `ps` raises.
+    not end the scan. With `ps`, a failed `ps` raises, and so does one that has not finished
+    within `timeout` seconds (subprocess.TimeoutExpired).
     """
     unread = {}
     if HAS_PROCFS:
@@ -445,7 +446,7 @@ def run_processes(run_id):
     else:
         listing = subprocess.run(
             ["ps", "-ww", "-A", "-o", "pid=", "-o", "command="],
-            capture_output=True, text=True, errors="replace", check=True)
+            capture_output=True, text=True, errors="replace", check=True, timeout=timeout)
         fields = [line.split() for line in listing.stdout.splitlines() if line.strip()]
         lines = {int(pid): arguments for pid, *arguments in fields}
     found = {pid: " ".join(arguments).strip() for pid, arguments in lines.items()
@@ -486,9 +487,10 @@ class Participants:
         """Terminates everything that is owned; returns a description of each failure."""
         raise NotImplementedError
 
-    def alive(self):
+    def alive(self, timeout):
         """Looks afresh and describes each process of the run that is alive, the coordinator
-        until it is reaped, and whatever keeps the look from being conclusive."""
+        until it is reaped, and whatever keeps the look from being conclusive. A `ps` call
+        that has not finished within `timeout` seconds raises."""
         raise NotImplementedError
 
     def close(self):
@@ -510,8 +512,12 @@ class Participants:
                     return "timeout"
 
     def clean_up(self):
-        """Terminates what is owned, reaps the coordinator and waits until no process of the
-        run is left, for at most EXIT_WAIT_S.
+        """Terminates what is owned, reaps the coordinator and looks until two consecutive
+        looks find no process of the run.
+
+        Both looks must end before the deadline, EXIT_WAIT_S after the cleanup starts. The
+        deadline does not bound the cleanup's own duration: a step under way at the deadline
+        runs to its end, except a `ps` call, which is cut off there (an inconclusive look).
 
         It does not raise, and a step that fails does not keep the others from running. It
         returns a description of whatever is left or could not be established; the cleanup
@@ -528,7 +534,7 @@ class Participants:
             except Exception as error:
                 remaining.append(f"the termination failed: {error!r}")
             try:
-                remaining += self.alive()
+                remaining += self.alive(max(0.0, deadline - time.monotonic()))
             except Exception as error:
                 remaining.append(f"the processes of the run could not be listed: {error!r}")
             # On POSIX a process is invisible to a look for a moment while it starts its
@@ -575,8 +581,8 @@ class Windows_participants(Participants):
             errors.append(f"pid {self.process.pid}, the coordinator: {error}")
         return errors
 
-    def alive(self):
-        alive = []
+    def alive(self, timeout):
+        alive = []      # the timeout is for `ps`; the retained process tree does not use it
         if self.process.poll() is None:
             alive.append(f"pid {self.process.pid}: the coordinator")
         if self.tree is None:
@@ -649,8 +655,8 @@ class Posix_participants(Participants):
             return [f"pid {self.process.pid}, the coordinator: {error}"]
         return []
 
-    def alive(self):
-        found, unread = run_processes(self.run_id)
+    def alive(self, timeout):
+        found, unread = run_processes(self.run_id, timeout)
         if self.process.poll() is None:
             found.setdefault(self.process.pid, "the coordinator")
         return ([f"pid {pid}: {command}" for pid, command in sorted(found.items())]
@@ -847,7 +853,12 @@ class Session:
             self.output.write("\n")     # the next record starts on a line of its own
 
     def close(self):
-        self.output.close()
+        # Reported, not raised: a write that failed in sample() fails here again, and this
+        # must not replace that report.
+        try:
+            self.output.close()
+        except OSError as error:
+            print(f"run_benchmarks: closing {self.output.name} failed: {error}", file=sys.stderr)
         if not self.keep and self.runs_root.is_dir() and not any(self.runs_root.iterdir()):
             self.runs_root.rmdir()
 
@@ -919,75 +930,86 @@ class Session:
         timed_out = ending == "timeout"
         self.stop_if_interrupted(run_id, run_dir, remaining)
 
-        # A swarm that stalled in shutdown has already written its reports, so a timed-out
-        # sample is aggregated too. One that stalled earlier has nothing to aggregate.
-        reasons = []
-        if timed_out:
-            reasons.append("timeout")
-        elif exit_code != 0:
-            reasons.append("exit_code_nonzero")
-        if remaining:
-            reasons.append("cleanup_incomplete")
         try:
-            aggregate = subprocess.run(
-                [str(executable), "--aggregate", str(run_dir)],
-                capture_output=True, text=True, check=False, timeout=AGGREGATE_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            aggregate = None    # subprocess.run() has killed its child and waited for it
-        self.stop_if_interrupted(run_id, run_dir, remaining)
-        if aggregate is not None and aggregate.returncode == 0:
-            record = json.loads(aggregate.stdout)
-            if record["run_id"] != run_id:
-                reasons.append("run_id_mismatch")
-        else:
-            # Also after a timeout: the record says that there is no aggregate, and which
-            # reports are absent.
-            record = unaggregated_record(cell, run_id, facts, run_dir)
-            reasons.append("aggregation_failed")
-            if aggregate is None:
-                print(f"--aggregate did not finish within {AGGREGATE_TIMEOUT_S} s",
-                      file=sys.stderr)
+            # A swarm that stalled in shutdown has already written its reports, so a timed-out
+            # sample is aggregated too. One that stalled earlier has nothing to aggregate.
+            reasons = []
+            if timed_out:
+                reasons.append("timeout")
+            elif exit_code != 0:
+                reasons.append("exit_code_nonzero")
+            if remaining:
+                reasons.append("cleanup_incomplete")
+            try:
+                aggregate = subprocess.run(
+                    [str(executable), "--aggregate", str(run_dir)],
+                    capture_output=True, text=True, check=False, timeout=AGGREGATE_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                aggregate = None    # subprocess.run() has killed its child and waited for it
+            if aggregate is not None and aggregate.returncode == 0:
+                record = json.loads(aggregate.stdout)
+                if record["run_id"] != run_id:
+                    reasons.append("run_id_mismatch")
             else:
-                sys.stderr.write(aggregate.stderr)
-        if reasons:
-            stderr = (run_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace")
-            sys.stderr.write(stderr[-2000:])
+                # Also after a timeout: the record says that there is no aggregate, and which
+                # reports are absent.
+                record = unaggregated_record(cell, run_id, facts, run_dir)
+                reasons.append("aggregation_failed")
+                if aggregate is None:
+                    print(f"--aggregate did not finish within {AGGREGATE_TIMEOUT_S} s",
+                          file=sys.stderr)
+                else:
+                    sys.stderr.write(aggregate.stderr)
+            if reasons:
+                stderr = (run_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace")
+                sys.stderr.write(stderr[-2000:])
+
+            outcome = record["outcome"]
+            outcome["reasons"] = reasons + outcome["reasons"]
+            outcome["valid"] = not outcome["reasons"]
+            if ring_entries:
+                outcome["warnings"].append("ring_dir_not_empty")
+            if cell.get("not_oversubscribed"):
+                outcome["warnings"].append("not_oversubscribed")
+            record = {
+                "schema": SCHEMA,
+                "run_id": run_id,
+                "pair_id": pair_id,
+                "arm": arm,
+                "order": order,
+                "aa": self.aa,
+                "commit": self.commits[arm],
+                "note": self.note,
+                "host": self.host,
+                "build": record["build"],
+                "cell": {"id": cell["id"], **record["cell"], "calibration": cell["calibration"]},
+                "counts": record["counts"],
+                "throughput": record["throughput"],
+                "latency": record["latency"],
+                "cpu": record["cpu"],
+                "lifecycle": record["lifecycle"],
+                "outcome": {"exit_code": exit_code, "timed_out": timed_out, **outcome},
+                "runner": {
+                    "started_unix": started, "wall_s": wall, "timeout_s": timeout,
+                    "ring_dir_sintra_entries": ring_entries,
+                },
+            }
+            # The append is the sample's completion boundary: an interrupt requested before it
+            # leaves the sample without a record.
+            self.stop_if_interrupted(run_id, run_dir, remaining)
+            self.output.write(json.dumps(record) + "\n")
+            self.output.flush()
+        except Exception:
+            # The run directory is kept, and a failure after an incomplete cleanup must not
+            # hide what is left.
+            print(f"run_benchmarks: the sample of run {run_id} has no record; the run directory "
+                  f"{run_dir} is kept.", file=sys.stderr)
+            if remaining:
+                print(cleanup_incomplete_message(run_id, run_dir, remaining), file=sys.stderr)
+            raise
         # The evidence stays while a process that could not be removed may still use it.
         if not self.keep and not remaining:
             remove_run_directory(run_dir)
-
-        outcome = record["outcome"]
-        outcome["reasons"] = reasons + outcome["reasons"]
-        outcome["valid"] = not outcome["reasons"]
-        if ring_entries:
-            outcome["warnings"].append("ring_dir_not_empty")
-        if cell.get("not_oversubscribed"):
-            outcome["warnings"].append("not_oversubscribed")
-        record = {
-            "schema": SCHEMA,
-            "run_id": run_id,
-            "pair_id": pair_id,
-            "arm": arm,
-            "order": order,
-            "aa": self.aa,
-            "commit": self.commits[arm],
-            "note": self.note,
-            "host": self.host,
-            "build": record["build"],
-            "cell": {"id": cell["id"], **record["cell"], "calibration": cell["calibration"]},
-            "counts": record["counts"],
-            "throughput": record["throughput"],
-            "latency": record["latency"],
-            "cpu": record["cpu"],
-            "lifecycle": record["lifecycle"],
-            "outcome": {"exit_code": exit_code, "timed_out": timed_out, **outcome},
-            "runner": {
-                "started_unix": started, "wall_s": wall, "timeout_s": timeout,
-                "ring_dir_sintra_entries": ring_entries,
-            },
-        }
-        self.output.write(json.dumps(record) + "\n")
-        self.output.flush()
         print(f"{cell['id']} arm={arm} run={run_id} valid={outcome['valid']} "
               f"reasons={outcome['reasons']} warnings={outcome['warnings']}", flush=True)
         if remaining:

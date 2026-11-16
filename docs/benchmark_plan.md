@@ -708,24 +708,31 @@ ends the swarm, and the runner never signals a process it does not hold by more 
    by PID with `cleanup_incomplete`, the session stops, and the operator handles the process.
 3. **Windows.** The runner keeps `tests/runner/platform/windows_process_tree.py`, which retains
    handles of the coordinator and each descendant, and refuses to start without it.
-4. **Leftovers.** A process-table scan for the adjacent arguments `--run-id <id>` (procfs, else
-   `ps`) only detects leftovers. With procfs it reads only the processes of the runner's user
+4. **Leftovers.** On POSIX, a process-table scan for the adjacent arguments `--run-id <id>`
+   (procfs, else `ps`) only detects leftovers; on Windows, the retained process tree lists the
+   live descendants by PID. With procfs the scan reads only the processes of the runner's user
    (the owner of `/proc/<pid>`), as every participant runs as that user. A process that has
    disappeared is gone. One of the user's processes whose command line cannot be read does not
-   end the scan, but leaves the look inconclusive; a failed `ps` fails the look. Cleanup is
-   complete only after two consecutive empty looks that both end before its 10 s deadline. A
-   leftover, an unreadable process, failing looks, or a deadline reached before two such looks
-   give `cleanup_incomplete`; the session stops and names the processes, an unreadable one as
-   "could not be inspected". The runner never signals a PID taken from a file or from the scan;
-   PID files only count the expected reports. The runner waits for the swarm before removing
-   evidence or starting the next sample.
+   end the scan, but leaves the look inconclusive; a failed `ps`, or one still running at the
+   deadline (its call is bounded by the time left), fails the look. Cleanup is complete only
+   after two consecutive empty looks that both end before its 10 s deadline; the deadline is
+   for those looks, not a bound on the cleanup's duration. A leftover, an unreadable process,
+   failing looks, or a deadline reached before two such looks give `cleanup_incomplete`; the
+   session stops and names the processes (on POSIX by PID and command line, an unreadable one as
+   "could not be inspected"; on Windows by descendant PID). The runner never signals a PID taken
+   from a file or from the scan; PID files only count the expected reports. The runner waits
+   for the swarm before removing evidence or starting the next sample.
 5. **Interrupts.** SIGINT, SIGTERM, SIGHUP, SIGQUIT (where they exist) and Ctrl+Break only set a
    flag; a signal the runner was started to ignore stays ignored. Cleanup cannot be aborted, and
-   an interrupted sample writes no record. Cleanup measures nothing (open decision 6).
-6. After a normal exit, wait up to 10 s for the expected reports, then clean up (step 4). Run
-   `--aggregate`, for at most 60 s; if it produces no record, the runner writes its own
-   (section 8). Add the runner fields and the cell's calibration metadata; append and flush the
-   line; delete the run directory unless `--keep`.
+   an interrupted sample writes no record. The runner checks the flag immediately before it
+   appends a record: that append is the sample's completion boundary. Cleanup measures nothing
+   (open decision 6).
+6. When the coordinator exits by itself (any exit code) before a timeout or an interrupt, wait
+   up to 10 s for the expected reports; then clean up (step 4). Run `--aggregate`, for at most
+   60 s; if it produces no record, the runner writes its own (section 8). Add the runner fields
+   and the cell's calibration metadata; append and flush the line; only then delete the run
+   directory, unless `--keep`. If the record cannot be written, the runner reports the error and
+   keeps the run directory; after an incomplete cleanup it still names what is left.
 
 **Summary**
 - Per cell: comparable pairs used, per-arm invalid-sample counts, and latency sample support
@@ -851,6 +858,9 @@ gap alone takes 2 min per route) and probably under 1 min for W3. A full A/B run
   temporary and run directories as narrow strings, and the runner decodes the executables'
   output with Python's default encoding, so such a path can make `--build-facts` or a report
   fail (not reproduced).
+- **Windows process-table errors can look like its end:** the shared helper
+  `tests/runner/platform/windows_process_tree.py` treats any failure of `Process32FirstW` or
+  `Process32NextW` as the end of the table, so that look misses a descendant after that point.
 - **Slowest-receiver latency conditions on delivery to every receiver**, so loss can remove the
   slowest observations; read it together with loss.
 - **A clock assumption.** Cross-process latency assumes that `std::chrono::steady_clock` on the
