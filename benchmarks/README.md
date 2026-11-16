@@ -142,8 +142,9 @@ The runner owns the processes of a sample and leaves none behind:
   runner polls while a sample runs, so a further interrupt cannot cut a cleanup
   short. A signal that the runner was started to ignore, as under `nohup`,
   stays ignored.
-- **After a normal exit,** the record gets the warning `stray_participants` if
-  processes of the run are still alive after 10 s. The cleanup follows.
+- **After a normal exit,** the runner waits up to 10 s for the reports and then
+  up to 10 s for the processes of the run to exit. The record gets the warning
+  `stray_participants` if one is still alive then. The cleanup follows.
 - **If the cleanup is not complete within 10 s,** the record gets the reason
   `cleanup_incomplete`, the run directory is kept, and the session stops with a
   message that lists the PID and the command line of every process that is
@@ -195,10 +196,10 @@ and maximum and, beside it, the A/A spread. Nothing is flagged automatically.
 - **Ratio or difference.** A metric is compared as the ratio B/A only when every
   observation of the cell and of its matching A/A pairs is available and not
   zero. Otherwise it is shown as the median of each arm with the difference
-  B-A, and its A/A spread uses differences too. CPU metrics and the lost
-  fraction are always shown that way. A slowest-receiver latency follows the
-  general rule: it is a ratio until one observation is unavailable or zero. A
-  zero observation is never dropped.
+  B-A, and its A/A spread uses differences too. CPU metrics, the lost fraction
+  and the coordinator's `shutdown()` calls are always shown that way. A
+  slowest-receiver latency follows the general rule: it is a ratio until one
+  observation is unavailable or zero. A zero observation is never dropped.
 - **Unavailable.** An observation without a value is counted as unavailable, on
   the comparison and on the A/A spread: a slowest-receiver latency when no
   sampled message reached every receiver, and every CPU metric of a sample with
@@ -355,7 +356,7 @@ times, and exits non-zero if the runtime is still up after that.
 | `--warmup n` | Warm-up messages; the runner passes `max(64, n/20)` | 1000 |
 | `--rate r` | Offered rate in messages per second; open-loop only, finite and positive | none |
 | `--burst n` | Messages per fenced burst of the measured part; 0 runs it unpaced | the burst formula |
-| `--handler-delay-us d` | Busy time in every receiver handler | 0 |
+| `--handler-delay-us d` | Busy time in a receiver's handler of every measured message | 0 |
 
 An option and its value are separate arguments. A number must be the whole
 argument: `9.5` or `9x` is rejected for a count, and `inf` for a rate.
@@ -585,7 +586,7 @@ These are the reasons and warnings that the executable and the runner write:
 | `cleanup_incomplete` | A process of the run is left, or the runner could not establish that none is; the session stops |
 | `missing_files`, `foreign_run_files` | A process report is missing, or belongs to another run |
 | `unexpected_reports`, `inconsistent_reports` | A report is a duplicate or of a branch the cell lacks, or carries other cell settings |
-| `aggregation_failed`, `run_id_mismatch` | `--aggregate` produced no record, or one of another run |
+| `aggregation_failed`, `run_id_mismatch` | `--aggregate` produced no record, also when it did not finish within 60 s and the runner ended it; or it produced one of another run |
 | `order_errors`, `size_errors` | An order error, or a wrong payload size or final byte |
 | `call_errors` | Request/response: a call threw, or returned another value than its argument |
 | `loss`, `eviction_log_matches` | Windowed and closed-loop mode: any loss (a lost message, or a call that timed out), or any eviction log match |
@@ -597,7 +598,7 @@ These are the reasons and warnings that the executable and the runner write:
 |---|---|
 | `cpu_low_confidence` | The measured interval is under 2 s |
 | `cpu_not_advancing` | The CPU delta of some process over the measured interval is exactly zero |
-| `stray_participants` | Processes of the run outlived the coordinator's normal exit by 10 s |
+| `stray_participants` | After the coordinator's normal exit, processes of the run were still alive 10 s after the wait for the reports |
 | `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
 | `ring_dir_not_empty` | `sintra-*` entries were already present in the ring parent directory |
 | `not_oversubscribed` | Lifecycle mode: the oversubscribed cell has `N_over + 1 <= C` |

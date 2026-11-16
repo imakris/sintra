@@ -34,6 +34,7 @@ UNCALIBRATED_TIMEOUT_FACTOR = 30    # calibrated, whose count is only an estimat
 CALIBRATION_TIMEOUT_S = 900 # under --calibrate: an estimate may be far off on a slow host
 REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
 EXIT_WAIT_S = 10            # for the participants to exit, on their own or after a kill
+AGGREGATE_TIMEOUT_S = 60    # for --aggregate, which only reads the reports of one sample
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
 CALIBRATION_RUNS = 3
 ROLES = ["coordinator", "coordinator_sender", "sender", "receivers"]
@@ -486,12 +487,19 @@ class Participants:
 
     def wait_for_exit(self):
         """After the coordinator's own exit: waits for the other processes of the run to exit
-        by themselves; returns those that did not."""
+        by themselves; returns those that a look found alive at the end.
+
+        A look that fails establishes nothing, so the wait goes on. A failure that lasts
+        reaches clean_up(), whose looks fail as well and leave the cleanup incomplete.
+        """
         deadline = time.monotonic() + EXIT_WAIT_S
         while True:
-            alive = self.alive()
-            if not alive or interrupt_requested or time.monotonic() >= deadline:
-                return alive
+            try:
+                alive = self.alive()
+            except Exception:
+                alive = None
+            if alive == [] or interrupt_requested or time.monotonic() >= deadline:
+                return alive or []
             time.sleep(0.05)
 
     def clean_up(self):
@@ -879,17 +887,26 @@ class Session:
             reasons.append("exit_code_nonzero")
         if remaining:
             reasons.append("cleanup_incomplete")
-        aggregate = subprocess.run(
-            [str(executable), "--aggregate", str(run_dir)],
-            capture_output=True, text=True, check=False)
+        try:
+            aggregate = subprocess.run(
+                [str(executable), "--aggregate", str(run_dir)],
+                capture_output=True, text=True, check=False, timeout=AGGREGATE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            aggregate = None    # subprocess.run() has killed its child and waited for it
         self.stop_if_interrupted(run_id, run_dir, remaining)
-        if aggregate.returncode == 0:
+        if aggregate is not None and aggregate.returncode == 0:
             record = json.loads(aggregate.stdout)
             if record["run_id"] != run_id:
                 reasons.append("run_id_mismatch")
         else:
             record = unaggregated_record(cell, run_id, facts)
-            if not timed_out:
+            # A sample that timed out may have left nothing to aggregate, but an aggregation
+            # that does not finish has failed whatever the sample did.
+            if aggregate is None:
+                reasons.append("aggregation_failed")
+                print(f"--aggregate did not finish within {AGGREGATE_TIMEOUT_S} s",
+                      file=sys.stderr)
+            elif not timed_out:
                 reasons.append("aggregation_failed")
                 sys.stderr.write(aggregate.stderr)
         if reasons:
