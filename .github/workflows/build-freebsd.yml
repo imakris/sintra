@@ -57,7 +57,8 @@ jobs:
             freebsd-15.0-x86_64-release-ccache-
 
       - name: Build and test (FreeBSD 15.0)
-        uses: vmactions/freebsd-vm@v1
+        id: vm
+        uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
         env:
           SINTRA_TEST_ITERATION_MULTIPLIER: "0.5"
           SINTRA_TEST_NAME: ${{ inputs.test_name }}
@@ -77,6 +78,8 @@ jobs:
             export CCACHE_MAXSIZE=1GiB
             ccache --zero-stats
             trap 'ccache --show-stats' EXIT
+            # run_tests.py's exit status must survive the tee into the test log.
+            set -o pipefail
 
             if [ -n "$SINTRA_TEST_NAME" ]; then
               case "$SINTRA_TEST_NAME" in
@@ -98,7 +101,8 @@ jobs:
                 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
               cmake --build build-focused --target "sintra_$SINTRA_TEST_NAME" --parallel 2
               cd tests
-              python3 run_tests.py --timeout 30 --build-dir ../build-focused --config Release --iteration-multiplier 1
+              python3 -u run_tests.py --timeout 30 --build-dir ../build-focused --config Release --iteration-multiplier 1 \
+                2>&1 | tee "$GITHUB_WORKSPACE/stress-tests.log"
               exit
             fi
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_TESTS=ON \
@@ -106,7 +110,8 @@ jobs:
             cmake --build build
             cd tests
             budget=$(( 7200 - $(date +%s) + $(cat /tmp/ci_start_time) ))
-            python3 run_tests.py --timeout 30 --build-dir ../build --config Release --time-budget $budget
+            python3 -u run_tests.py --timeout 30 --build-dir ../build --config Release --time-budget $budget \
+              2>&1 | tee "$GITHUB_WORKSPACE/stress-tests.log"
 
       # The VM action skips copyback when its run fails. Export only the compiler
       # cache from the still-running VM, including after a test failure.
@@ -126,3 +131,52 @@ jobs:
         with:
           path: ${{ github.workspace }}/.ccache
           key: ${{ steps.restore_compiler_cache.outputs.cache-primary-key }}
+
+      # The test log, exported the same way. A failed copy cannot fail the job.
+      - name: Export test log
+        if: always()
+        continue-on-error: true
+        run: |
+          rsync -a --no-owner --no-group --timeout=60 \
+            --rsync-path=/usr/local/bin/rsync \
+            -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
+            "freebsd:$GITHUB_WORKSPACE/stress-tests.log" "$RUNNER_TEMP/stress-tests.log"
+
+      # The tables and results that run_tests.py prints after each suite and at the end.
+      - name: Summarize stress tests
+        if: always()
+        continue-on-error: true
+        shell: python3 {0}
+        env:
+          STRESS_OUTCOME: ${{ steps.vm.outcome }}
+        run: |
+          import os, pathlib, re
+          log = pathlib.Path(os.environ["RUNNER_TEMP"], "stress-tests.log")
+          if os.environ["STRESS_OUTCOME"] == "skipped":
+              body = ["Not run: an earlier step failed or the job was cancelled."]
+          elif not log.is_file():
+              body = ["No test log was written."]
+          else:
+              block, keep = [], False
+              for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+                  line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+                  if re.match(r"Configuration \d+/\d+: ", line):
+                      keep = False
+                  if line.startswith("Results for ") or line == "OVERALL SUMMARY":
+                      keep = True
+                  if keep:
+                      block.append(line)
+              block = block[-3000:] or ["No final summary in the log."]
+              body = ["```text", *block, "```"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(["### Stress tests", *body]) + "\n")
+
+      - name: Upload test log
+        if: always() && steps.vm.outcome != 'skipped'
+        continue-on-error: true
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: freebsd-stress-tests-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stress-tests.log
+          if-no-files-found: warn
+          retention-days: 7
