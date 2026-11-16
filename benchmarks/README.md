@@ -11,6 +11,7 @@ defines what is measured and how:
 |---|---|
 | Measurement boundaries and CPU per role | 4.4 |
 | The broadcast workload, its modes, sampling and the open-loop drain | 5, 5.1 |
+| The swarm workload: sizes, snapshots and CPU per phase | 5.3 |
 | Metric definitions: percentiles, throughput, CPU, loss | 6 |
 | Record schema | 7 |
 | Validity, warnings, comparable pairs | 8 |
@@ -21,6 +22,7 @@ defines what is measured and how:
 | File | Content |
 |---|---|
 | `broadcast_benchmark.cpp` | W1, broadcast: target `sintra_broadcast_benchmark` |
+| `swarm_benchmark.cpp` | W3, swarm formation and shutdown: target `sintra_swarm_benchmark` |
 | `harness.h` | Clock, process CPU time, build facts, per-process report files, aggregation helpers |
 | `run_benchmarks.py` | Paired runner: A/B and A/A sessions, calibration, summary and axis tables |
 | `workloads.json` | Cells, windowed counts, stored open-loop rates and calibration metadata |
@@ -32,7 +34,7 @@ directory. The targets link the header-only library with test hooks off.
 
 ```text
 cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release -DSINTRA_BUILD_BENCHMARKS=ON
-cmake --build build-bench --config Release --target sintra_broadcast_benchmark
+cmake --build build-bench --config Release --target sintra_broadcast_benchmark sintra_swarm_benchmark
 ```
 
 `--config Release` selects the configuration for a multi-configuration generator
@@ -73,6 +75,12 @@ python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build
   and may be repeated; it reaches every defined cell, including R = 2 and 8.
 - **Open-loop cells without a stored rate** are skipped. The runner lists them at
   the start and in the summary and writes no record for them.
+- **Swarm cells** are part of the default grid. The oversubscribed cell,
+  `w3.lifecycle.n_over`, has `N_over = min(125, max(oversubscribed_least,
+  oversubscribed_per_cpu × C))` leaves, where C is `--cpus` or else
+  `hardware_concurrency()`. With C = 0 the runner skips that cell, lists it at
+  the start and in the summary, and writes no record for it. When `N_over + 1`
+  does not exceed C, its records carry the warning `not_oversubscribed`.
 - **`--pairs`** and **`--cpus`** take positive integers. `--cpus` records the
   effective CPU count C of the session and defaults to `hardware_concurrency()`.
 - **`--keep`** keeps each sample's run directory under `<output>.runs/`: the
@@ -83,6 +91,8 @@ Cell IDs:
 ```text
 w1.windowed.<origin>.r<receivers>.b<payload bytes>
 w1.open_loop.<origin>.r<receivers>.b<payload bytes>.x<percent of the calibrated rate>
+w3.lifecycle.n<leaves>
+w3.lifecycle.n_over
 ```
 
 For example, `--select "w1.windowed.*.r[14].b64"` selects the windowed 64-byte
@@ -187,6 +197,7 @@ and, beside it, the A/A spread. Nothing is flagged automatically.
 |---|---|
 | Windowed | Publication and delivery rates; CPU µs per message, total and per role; `slowest_from_send` p50 and p99 |
 | Open-loop | `slowest_from_intended` p50 and p99; lost fraction; `lateness` p99 |
+| Lifecycle | `time_to_ready_s`, `time_to_shutdown_s`; the coordinator's `shutdown()` calls, where a sample needed more than one; formation and shutdown CPU per role |
 
 After the summary, the runner prints the axis tables of plan section 10 for arm
 A, as the median over the usable samples of each cell: CPU µs per message by
@@ -194,6 +205,11 @@ role against R, total CPU µs per application MB against payload, open-loop
 latency and loss against the offered rate, and each role's share of total CPU.
 The share table covers windowed cells only, because of the open-loop sender's
 polling. A sample with `cpu_not_advancing` contributes no CPU value to them.
+
+Swarm cells have their own tables: the two lifecycle times and each role's
+formation and shutdown CPU per leaf against N, with the coordinator's
+`shutdown()` calls where a sample needed more than one, and each role's share
+of a phase's CPU.
 
 ### Calibration
 
@@ -229,6 +245,9 @@ fraction.
 | `cells[].open_loop_rates` | null before calibration; else one absolute rate (or null) per rate fraction |
 | `cells[].calibration` | `{host_label, commit, date}`, or null |
 | `cells[].handler_delay_us`, `cells[].burst` | Optional validation-only options, passed to the executable |
+| `swarm.leaves` | The swarm sizes N of W3: one lifecycle cell each, 1 to 125 leaves |
+| `swarm.oversubscribed_least`, `swarm.oversubscribed_per_cpu` | The size of the oversubscribed cell: `min(125, max(least, per_cpu × C))`; 80 and 2 by default |
+| `swarm.fail_init`, `swarm.leaf_exit_delay_ms` | Optional validation-only options of every swarm cell, passed to the executable |
 
 The plan's 3 s windowed interval and 3 s open-loop schedule are defaults: the
 shipped `workloads.json` sets `target_interval_s` and `open_loop.duration_s` to
@@ -239,6 +258,9 @@ completion may take longer than the schedule.
 The runner rejects a file with a non-positive or fractional count, a rate that
 is not finite and positive, a rate list whose length differs from the fraction
 list, or two cells that expand to the same ID.
+
+A file without `swarm` defines no swarm cells. With it, the runner rejects a
+size outside 1 to 125 and a repeated size.
 
 ## The broadcast executable
 
@@ -296,6 +318,80 @@ runner's timeout remains the outer bound. A receiver that does miss the sentinel
 makes the sample invalid; its `lost` then holds only the gaps up to its last
 received message, and `counts.unresolved_tail` holds the tail it had not reached.
 
+## The swarm executable
+
+```text
+sintra_swarm_benchmark <cell options> --run-id <id>    one sample, as a swarm
+sintra_swarm_benchmark --aggregate <run directory>     the sample's record, as one JSON object
+sintra_swarm_benchmark --build-facts                   the build facts, as one JSON object
+```
+
+A sample is a fresh coordinator with N leaf branches whose entry functions are
+empty. Every process takes its formation snapshot right after `sintra::init()`
+returns, meets the others in one rendezvous, and takes its shutdown snapshots
+before its first `sintra::shutdown()` call and after the call that returns
+true. It writes `<role>-<branch index>.bin` after that, because the sample
+measures shutdown. The run directory and `--aggregate` work as for the broadcast
+executable, and so does the rendezvous: a process whose rendezvous was bypassed
+writes no report. A swarm sample has no planned duration, so the runner gives
+it the 60 s base timeout.
+
+Keep `--output`, and with it the run directories, on a local filesystem. A leaf
+writes its PID file during its start-up and its report before it exits, and
+both are inside the measured phases of a swarm sample.
+
+| Cell option | Meaning | Default |
+|---|---|---|
+| `--leaves N` | Leaf branches, 1 to 125 | 1 |
+| `--cpus C` | The session's C, for the oversubscription ratio `(N+1)/C`; 0 when unknown | `hardware_concurrency()` |
+| `--fail-init` | Adds a branch whose binary does not exist, so that `init` throws | off |
+| `--leaf-exit-delay-ms d` | Every leaf stays alive for d ms after its `shutdown()` returned | 0 |
+
+**Lifecycle metrics**
+
+| Field | Meaning |
+|---|---|
+| `time_to_ready_s` | The duration of the coordinator's `init`: from just before the call to the coordinator's formation snapshot. A leaf's `init` returns shortly after it |
+| `time_to_shutdown_s` | The coordinator's shutdown phase: from its first `shutdown()` call to the return of the call that returned true |
+| `shutdown_calls`, `first_shutdown_call_s` | The `shutdown()` calls that the coordinator needed, and the duration of the first one |
+| `leaf_start_max_s` | The longest time of a leaf from the entry of `main` to its formation snapshot. An early leaf waits in the startup barrier for the later ones, so this follows `time_to_ready_s` |
+| `leaf_shutdown_max_s` | The longest shutdown phase of a leaf. A leaf's `shutdown()` returns true or throws, so it is one call |
+| `formation_cpu` | Each role's cumulative process CPU at the formation snapshot, start-up included |
+| `shutdown_cpu` | Each role's process CPU over the shutdown phase |
+| `oversubscription` | `(N+1)/C`; null when C is 0 |
+
+What a process does between its formation snapshot and its shutdown-begin
+snapshot is in neither CPU phase: the rendezvous and, in the coordinator, its
+part of the leaves' name publication, which each leaf issues at the end of its
+own `init`. A record has no `lifecycle` when a process report is missing or
+surplus, when `init` failed, or when a `shutdown()` threw.
+
+**Warnings.** `cpu_not_advancing` applies when the formation CPU or the
+shutdown CPU of some process is exactly zero. `cpu_low_confidence` is not used
+in lifecycle mode: the phases of a swarm sample are short at every size, so its
+per-sample CPU values are coarse.
+
+**A `shutdown()` that returns false.** The coordinator's `shutdown()` returns
+false when the bounded wait for its managed children, at the end of the call,
+ends while a leaf process is still alive, and a sequential retry resumes the
+teardown (`docs/reference/shutdown.md`). That is a result, not an invalidity:
+the process calls `shutdown()` again until it returns true, the shutdown phase
+runs until then, and the record carries the number of calls and the warning
+`shutdown_retried`. The retries have no bound of their own: a shutdown that
+never completes ends at the runner's timeout, and a direct run without the
+runner lasts until every leaf has exited.
+
+**Validation-only.** `--fail-init` and `--leaf-exit-delay-ms` exist to check
+the validity rules, and a record with either is `validation_only`. With
+`--fail-init`, the coordinator's `init` throws, the coordinator exits non-zero
+and the record has the reason `init_failed`. While a leaf outlives its
+`shutdown()`, the coordinator's `shutdown()` returns false: a delay of a few
+seconds gives a valid record with `shutdown_calls` above 1 and the warning
+`shutdown_retried`, and a delay beyond the runner's timeout gives a sample that
+the runner terminates, without a report of the coordinator. Its leaves exit
+through the lifeline like any other: a leaf watches the lifeline after its
+`shutdown()` as well.
+
 ## Record
 
 Plan section 7 defines the record and section 6 its metrics. Beyond them, a
@@ -323,6 +419,8 @@ These are the reasons and warnings that the executable and the runner write:
 | `order_errors`, `size_errors` | An order error, or a wrong payload size or final byte |
 | `loss`, `eviction_log_matches` | Windowed mode: any loss, or any eviction log match |
 | `sentinel_missed` | Open-loop mode: a receiver did not see the sentinel within its drain allowance |
+| `init_failed` | Lifecycle mode: `init` threw in a process |
+| `shutdown_threw` | Lifecycle mode: a `shutdown()` call of a process threw |
 
 | Warning | Condition |
 |---|---|
@@ -331,6 +429,8 @@ These are the reasons and warnings that the executable and the runner write:
 | `stray_participants` | Processes of the run outlived the coordinator's normal exit by 10 s |
 | `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
 | `ring_dir_not_empty` | `sintra-*` entries were already present in the ring parent directory |
+| `not_oversubscribed` | Lifecycle mode: the oversubscribed cell has `N_over + 1 <= C` |
+| `shutdown_retried` | Lifecycle mode: a process needed more than one `shutdown()` call |
 
 A record with a missing or surplus process report is invalid and has null
 `counts`, `throughput`, `latency` and `cpu`. A report of another run, or with

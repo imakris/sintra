@@ -181,8 +181,10 @@ inline void log_callback(sintra::log_level level, const char* message, void*)
     }
 }
 
-/// Size of the frame that the calling handler thread is dispatching. This is the
-/// benchmarks' one coupling to library internals.
+/// Size of the frame that the calling handler thread is dispatching. This is one
+/// of the benchmarks' two couplings to library internals. The other is the
+/// `--branch_index` argument of a spawned branch, which swarm_benchmark.cpp
+/// reads.
 inline uint64_t current_frame_bytes()
 {
     return sintra::s_tl_current_message->bytes_to_next_message;
@@ -291,6 +293,17 @@ private:
     std::string m_text;
     bool        m_needs_comma = false;
 };
+
+/// Writes an array of strings, such as the reasons or the warnings of a record.
+inline void append_names(
+    Json_writer& json, std::string_view key, const std::vector<std::string>& names)
+{
+    json.begin_array(key);
+    for (const auto& name : names) {
+        json.text({}, name);
+    }
+    json.end_array();
+}
 
 
 // ---------------------------------------------------------------------------
@@ -557,6 +570,91 @@ std::vector<Process_report<Workload>> read_reports(const std::filesystem::path& 
         reports.push_back(read_report<Workload>(file));
     }
     return reports;
+}
+
+/// The reports of one run directory, checked against the cell that they
+/// describe: the result of read_report_set().
+template <typename Workload>
+struct Report_set
+{
+    std::vector<Process_report<Workload>>  processes;   // those of the run and the cell
+    std::string                            run_id;
+    decltype(Workload::cell)               cell{};
+    std::vector<std::string>               missing;     // file names of the absent reports
+    std::vector<std::string>               reasons;     // why the set is not the expected one
+    bool                                   complete = false;
+};
+
+/// Reads the reports of a run directory and checks that they are the ones that
+/// their cell expects. Every benchmark executable aggregates from this.
+///
+/// The coordinator's report (branch index 0), or else the first report, names
+/// the run and the cell. A report of another run or of another cell is dropped,
+/// so the process it stands for counts as missing. The cell expects exactly one
+/// report per process, for the branch indexes from 0 on, each under the role
+/// of its branch. `complete` says that this holds, so that the sample's metrics
+/// can be computed. `reasons` holds what makes the sample invalid: any of
+/// missing_files, foreign_run_files, inconsistent_reports, unexpected_reports.
+///
+/// An executable supplies:
+/// - `Workload`, its block of a process report, whose member `cell` compares
+///   with ==;
+/// - `process_count(cell)`, the number of processes of the cell's swarm, the
+///   coordinator included, as an int;
+/// - `role_of(cell, branch_index)`, the role name that the process with that
+///   branch index writes into its report header.
+///
+/// Throws when the directory holds no report.
+template <typename Workload, typename Process_count, typename Role_of>
+Report_set<Workload> read_report_set(
+    const std::filesystem::path&  directory,
+    Process_count                 process_count,
+    Role_of                       role_of)
+{
+    Report_set<Workload> set;
+    auto&                processes = set.processes;
+    processes = read_reports<Workload>(directory);
+    if (processes.empty()) {
+        throw std::runtime_error("no process reports in " + directory.string());
+    }
+
+    const auto coordinator = std::find_if(processes.begin(), processes.end(),
+        [](const auto& process) { return process.header.branch_index == 0; });
+    const auto& reference = coordinator != processes.end() ? *coordinator : processes.front();
+    set.run_id = reference.header.run_id;
+    set.cell   = reference.workload.cell;
+    const auto foreign = std::erase_if(processes,
+        [&](const auto& process) { return process.header.run_id != set.run_id; });
+    const auto inconsistent = std::erase_if(processes,
+        [&](const auto& process) { return !(process.workload.cell == set.cell); });
+
+    // Whatever remains beyond the expected reports is a duplicate or belongs to
+    // a branch that the cell lacks.
+    const int expected = process_count(set.cell);
+    for (int branch_index = 0; branch_index < expected; ++branch_index) {
+        const std::string_view role  = role_of(set.cell, branch_index);
+        const bool             found = std::any_of(processes.begin(), processes.end(),
+            [&](const auto& process) {
+                return process.header.branch_index == branch_index &&
+                    role == process.header.role;
+            });
+        if (!found) {
+            set.missing.push_back(report_file_name(role, branch_index));
+        }
+    }
+    const bool unexpected = processes.size() != (size_t)expected - set.missing.size();
+    set.complete = set.missing.empty() && !unexpected;
+
+    const auto invalid_if = [&](bool condition, const char* reason) {
+        if (condition) {
+            set.reasons.push_back(reason);
+        }
+    };
+    invalid_if(!set.missing.empty(), "missing_files");
+    invalid_if(foreign != 0, "foreign_run_files");
+    invalid_if(inconsistent != 0, "inconsistent_reports");
+    invalid_if(unexpected, "unexpected_reports");
+    return set;
 }
 
 

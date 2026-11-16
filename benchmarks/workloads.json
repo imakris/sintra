@@ -3,6 +3,7 @@
   "target_interval_s": 3,
   "default_receivers": [1, 4, 16],
   "open_loop": {"duration_s": 3, "rate_fractions": [0.1, 0.5, 0.8]},
+  "swarm": {"leaves": [1, 8, 40], "oversubscribed_least": 80, "oversubscribed_per_cpu": 2},
   "cells": [
     {"workload": "broadcast", "origin": "coordinator", "receivers": 1, "payload_bytes": 64, "messages": 1000000, "open_loop_rates": null, "calibration": null},
     {"workload": "broadcast", "origin": "coordinator", "receivers": 1, "payload_bytes": 4096, "messages": 100000, "open_loop_rates": null, "calibration": null},

@@ -859,70 +859,32 @@ void append_cpu(
     json.end_object();
 }
 
-void append_names(
-    bench::Json_writer& json, std::string_view key, const std::vector<std::string>& names)
-{
-    json.begin_array(key);
-    for (const auto& name : names) {
-        json.text({}, name);
-    }
-    json.end_array();
-}
-
 int aggregate(const std::filesystem::path& directory)
 {
-    auto processes = bench::read_reports<broadcast_block_t>(directory);
-    if (processes.empty()) {
-        throw std::runtime_error("no process reports in " + directory.string());
-    }
-
-    // The coordinator's report names the run and the cell. A report of another
-    // run or of another cell is dropped, so the process it stands for counts
-    // as missing.
-    const auto coordinator = std::find_if(processes.begin(), processes.end(),
-        [](const Report& process) { return process.header.branch_index == 0; });
-    const auto& reference = coordinator != processes.end() ? *coordinator : processes.front();
-    const auto  run_id    = std::string(reference.header.run_id);
-    const auto  cell      = reference.workload.cell;
-    const auto  foreign   = std::erase_if(processes,
-        [&](const Report& process) { return process.header.run_id != run_id; });
-    const auto  inconsistent = std::erase_if(processes,
-        [&](const Report& process) { return !(process.workload.cell == cell); });
-
-    // The cell expects exactly one report per process. Whatever remains beyond
-    // the expected ones is a duplicate or belongs to a branch the cell lacks.
-    const int                expected = 1 + (int)leaf_count(cell);
-    std::vector<std::string> missing;
-    for (int branch_index = 0; branch_index < expected; ++branch_index) {
-        const std::string_view role  = role_name(cell.origin, branch_index);
-        const bool             found = std::any_of(processes.begin(), processes.end(),
-            [&](const Report& process) {
-                return process.header.branch_index == branch_index && has_role(process, role);
-            });
-        if (!found) {
-            missing.push_back(bench::report_file_name(role, branch_index));
-        }
-    }
-    const bool unexpected = processes.size() != (size_t)expected - missing.size();
+    const auto set = bench::read_report_set<broadcast_block_t>(
+        directory,
+        [](const broadcast_cell_t& cell) { return 1 + (int)leaf_count(cell); },
+        [](const broadcast_cell_t& cell, int branch_index) {
+            return role_name(cell.origin, branch_index);
+        });
+    const auto& processes = set.processes;
+    const auto& cell      = set.cell;
 
     auto                     reasons = bench::build_invalid_reasons();
     std::vector<std::string> warnings;
+    reasons.insert(reasons.end(), set.reasons.begin(), set.reasons.end());
     const auto invalid_if = [&](bool condition, const char* reason) {
         if (condition) {
             reasons.push_back(reason);
         }
     };
-    invalid_if(!missing.empty(), "missing_files");
-    invalid_if(foreign != 0, "foreign_run_files");
-    invalid_if(inconsistent != 0, "inconsistent_reports");
-    invalid_if(unexpected, "unexpected_reports");
 
     bench::Json_writer json;
     json.begin_object();
     json.text("schema", "sintra-bench/1");
-    json.text("run_id", run_id);
+    json.text("run_id", set.run_id);
     bench::append_build_facts(json, "build");
-    if (missing.empty() && !unexpected) {
+    if (set.complete) {
         const auto& sender = *std::find_if(processes.begin(), processes.end(),
             [](const Report& process) {
                 return has_role(process, "coordinator_sender") || has_role(process, "sender");
@@ -969,10 +931,10 @@ int aggregate(const std::filesystem::path& directory)
     }
     json.null("lifecycle");
     json.begin_object("outcome");
-    append_names(json, "missing_files", missing);
+    bench::append_names(json, "missing_files", set.missing);
     json.flag("valid", reasons.empty());
-    append_names(json, "reasons", reasons);
-    append_names(json, "warnings", warnings);
+    bench::append_names(json, "reasons", reasons);
+    bench::append_names(json, "warnings", warnings);
     json.end_object();
     json.end_object();
     std::printf("%s\n", json.str().c_str());

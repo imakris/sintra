@@ -25,8 +25,8 @@ import sys
 import time
 
 SCHEMA = "sintra-bench/1"
-EXECUTABLES = {"broadcast": "sintra_broadcast_benchmark"}
-CELL_PREFIXES = {"broadcast": "w1"}
+EXECUTABLES = {"broadcast": "sintra_broadcast_benchmark", "swarm": "sintra_swarm_benchmark"}
+CELL_PREFIXES = {"broadcast": "w1", "swarm": "w3"}
 TIMEOUT_BASE_S = 60         # a sample's timeout is this plus a multiple of its planned duration:
 TIMEOUT_FACTOR = 3          # three times it, or, for a windowed cell that was never calibrated
 UNCALIBRATED_TIMEOUT_FACTOR = 30    # and whose count is only an estimate, thirty times it
@@ -77,6 +77,9 @@ def validate_workloads(workloads):
             problems.append("default_receivers must be positive integers")
         for index, entry in enumerate(workloads["cells"]):
             where = f"cells[{index}]"
+            if entry["workload"] == "swarm":
+                problems.append(f"{where}: swarm cells come from the top-level swarm key")
+                continue
             if entry["workload"] not in EXECUTABLES:
                 problems.append(f"{where}: unknown workload {entry['workload']!r}")
             if entry["origin"] not in ("coordinator", "leaf"):
@@ -159,6 +162,106 @@ def round_significant(value, digits=2):
     if exponent < 0:
         return round(value, -exponent)
     return round(value / 10 ** exponent) * 10 ** exponent
+
+
+# --- Swarm cells (W3) ---------------------------------------------------------
+
+SWARM_MAX_LEAVES = 125      # the automatic process indexes that a coordinator can hand out
+
+
+def validate_swarm(workloads):
+    """Rejects swarm sizes that a coordinator cannot start, and malformed swarm options."""
+    swarm = workloads.get("swarm")
+    if swarm is None:
+        return
+    problems = []
+    try:
+        sizes = swarm["leaves"] + [swarm["oversubscribed_least"]]
+        if not all(is_count(size) and size <= SWARM_MAX_LEAVES for size in sizes):
+            problems.append("swarm.leaves and swarm.oversubscribed_least must be integers "
+                            f"from 1 to {SWARM_MAX_LEAVES}")
+        elif len(set(swarm["leaves"])) != len(swarm["leaves"]):
+            problems.append("swarm.leaves repeats a size")
+        if not is_count(swarm["oversubscribed_per_cpu"]):
+            problems.append("swarm.oversubscribed_per_cpu must be a positive integer")
+        if not isinstance(swarm.get("fail_init", False), bool):
+            problems.append("swarm.fail_init must be true or false")
+        if not is_count(swarm.get("leaf_exit_delay_ms", 0), least=0):
+            problems.append("swarm.leaf_exit_delay_ms must be a non-negative integer")
+    except (KeyError, TypeError) as error:
+        problems.append(f"malformed swarm entry or missing key: {error!r}")
+    if problems:
+        fail("invalid workloads file:\n  " + "\n  ".join(problems))
+
+
+def expand_swarm_cells(workloads):
+    """One lifecycle cell per swarm size, and the oversubscribed cell."""
+    swarm = workloads.get("swarm")
+    if swarm is None:
+        return []
+    # A swarm sample has no planned duration: its timeout is the base timeout.
+    base = {
+        "workload": "swarm", "mode": "lifecycle", "default": True, "calibration": None,
+        "duration_s": 0, "not_oversubscribed": False,
+        "fail_init": swarm.get("fail_init", False),
+        "leaf_exit_delay_ms": swarm.get("leaf_exit_delay_ms", 0),
+    }
+    prefix = CELL_PREFIXES["swarm"]
+    cells = [dict(base, id=f"{prefix}.lifecycle.n{leaves}", leaves=leaves)
+             for leaves in swarm["leaves"]]
+    # The size of the oversubscribed cell follows from C, which the session establishes.
+    return cells + [dict(base, id=f"{prefix}.lifecycle.n_over", leaves=None)]
+
+
+def size_swarm_cells(cells, swarm, cpus):
+    """Gives every swarm cell the session's C, and the oversubscribed cell its size
+    N_over = min(125, max(least, per_cpu * C)).
+
+    Returns the cells that can run and those that cannot: without C, the oversubscribed
+    cell has no size.
+    """
+    def is_unsized(cell):
+        return cell["workload"] == "swarm" and cell["leaves"] is None
+
+    for cell in cells:
+        if cell["workload"] == "swarm":
+            cell["cpus"] = cpus
+        if is_unsized(cell) and cpus != 0:
+            cell["leaves"] = min(SWARM_MAX_LEAVES, max(
+                swarm["oversubscribed_least"], swarm["oversubscribed_per_cpu"] * cpus))
+            cell["not_oversubscribed"] = cell["leaves"] + 1 <= cpus
+    return ([cell for cell in cells if not is_unsized(cell)],
+            [cell for cell in cells if is_unsized(cell)])
+
+
+def report_unsized(cells):
+    if cells:
+        print("skipped, C is unknown (hardware_concurrency() is 0 and --cpus is absent): "
+              + ", ".join(cell["id"] for cell in cells))
+
+
+def swarm_command(executable, cell, run_id):
+    command = [str(executable), "--leaves", str(cell["leaves"]), "--cpus", str(cell["cpus"]),
+               "--run-id", run_id]
+    if cell["fail_init"]:
+        command.append("--fail-init")
+    if cell["leaf_exit_delay_ms"]:
+        command += ["--leaf-exit-delay-ms", str(cell["leaf_exit_delay_ms"])]
+    return command
+
+
+def swarm_unaggregated_record(cell, run_id, facts):
+    """As unaggregated_record, for a swarm cell."""
+    return {
+        "run_id": run_id,
+        "build": facts,
+        "cell": {
+            "workload": "swarm", "mode": "lifecycle", "n_leaves": cell["leaves"],
+            "validation_only": bool(cell["fail_init"] or cell["leaf_exit_delay_ms"]),
+        },
+        "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
+        "outcome": {"missing_files": None, "valid": False, "reasons": [], "warnings": []},
+    }
 
 
 # --- Ownership of a sample's processes ----------------------------------------
@@ -463,6 +566,8 @@ def is_validation_only(cell, facts):
 
 
 def cell_command(executable, cell, run_id):
+    if cell["workload"] == "swarm":
+        return swarm_command(executable, cell, run_id)
     command = [
         str(executable), "--mode", cell["mode"], "--origin", cell["origin"],
         "--receivers", str(cell["receivers"]), "--bytes", str(cell["payload_bytes"]),
@@ -504,6 +609,8 @@ def cleanup_incomplete_message(run_id, run_dir, remaining):
 def unaggregated_record(cell, run_id, facts):
     """The record of a sample that left nothing to aggregate: it stalled or died before
     its processes wrote their reports."""
+    if cell["workload"] == "swarm":
+        return swarm_unaggregated_record(cell, run_id, facts)
     return {
         "run_id": run_id,
         "build": facts,
@@ -667,6 +774,8 @@ class Session:
             outcome["warnings"].append("stray_participants")
         if ring_entries:
             outcome["warnings"].append("ring_dir_not_empty")
+        if cell.get("not_oversubscribed"):
+            outcome["warnings"].append("not_oversubscribed")
         record = {
             "schema": SCHEMA,
             "run_id": run_id,
@@ -821,7 +930,10 @@ def comparable_pairs(records):
 HEADLINE_LATENCIES = {
     "windowed": ["slowest_from_send"],
     "open_loop": ["slowest_from_intended", "lateness"],
+    "lifecycle": [],
 }
+SWARM_PHASES = {"formation_cpu": "formation", "shutdown_cpu": "shutdown"}
+SHUTDOWN_CALLS = "shutdown calls"
 
 
 def headline_metrics(record):
@@ -830,6 +942,8 @@ def headline_metrics(record):
     CPU and the lost fraction are routinely zero or unavailable, so they are always shown as
     per-arm values with their difference. A value is None when it is unavailable.
     """
+    if record["cell"]["mode"] == "lifecycle":
+        return swarm_headline_metrics(record)
     latency = record["latency"]
     if record["cell"]["mode"] == "windowed":
         throughput = record["throughput"]
@@ -848,6 +962,33 @@ def headline_metrics(record):
         ("slowest_from_intended p99 us", False, latency["slowest_from_intended"]["p99_us"]),
         ("lost fraction", True, lost_fraction(record)),
         ("lateness p99 us", False, latency["lateness"]["p99_us"])]
+
+
+def lifecycle_cpu(record, phase, role):
+    """A role's CPU seconds over one phase of a swarm sample, or None when a process CPU
+    clock did not advance over a phase: the sample's CPU metrics are then unavailable."""
+    if "cpu_not_advancing" in record["outcome"]["warnings"]:
+        return None
+    return record["lifecycle"][phase][role]
+
+
+def swarm_headline_metrics(record):
+    """As headline_metrics, for a swarm sample: the two times, the coordinator's shutdown()
+    calls, and each phase's CPU per role."""
+    lifecycle = record["lifecycle"]
+    metrics = [
+        ("time_to_ready s", False, lifecycle["time_to_ready_s"]),
+        ("time_to_shutdown s", False, lifecycle["time_to_shutdown_s"]),
+        (SHUTDOWN_CALLS, True, lifecycle["shutdown_calls"])]
+    for phase, name in SWARM_PHASES.items():
+        metrics += [(f"{name} CPU s {role}", True, lifecycle_cpu(record, phase, role))
+                    for role in lifecycle[phase]]
+    return metrics
+
+
+def is_single_shutdown_call(label, value_pairs):
+    """Whether a summary line would only say that every shutdown() took one call."""
+    return label == SHUTDOWN_CALLS and all(value == 1 for pair in value_pairs for value in pair)
 
 
 def lost_fraction(record):
@@ -941,6 +1082,8 @@ def print_summary(records, aa_records, skipped):
         aa_values = metric_values(aa_pairs_by_key.get(comparison_key(pairs[0][0]), []))
         for label, (always_difference, value_pairs) in metric_values(pairs).items():
             aa_value_pairs = aa_values.get(label, (always_difference, []))[1]
+            if is_single_shutdown_call(label, value_pairs + aa_value_pairs):
+                continue
             # One representation serves the comparison and its A/A spread, and it is chosen
             # from both: an observation that is zero or unavailable in either rules the ratio
             # out. No observation is dropped; one without a value is counted as unavailable.
@@ -995,6 +1138,49 @@ def print_table(title, columns, rows):
 def cpu_us_per_megabyte(sample):
     megabytes = sample["counts"]["published"] * sample["cell"]["payload_bytes"] / 1.0e6
     return cpu_value(sample, lambda cpu: cpu["total"]["cpu_s"] * 1.0e6 / megabytes)
+
+
+def print_swarm_tables(ids, cells, samples_by_cell, median):
+    """W3 against N: the lifecycle times with each role's CPU per leaf, and each role's
+    share of a phase's CPU. The coordinator's shutdown() calls are shown when a sample
+    needed more than one."""
+    def cpu(phase, role, scale):
+        def read(sample):
+            value = lifecycle_cpu(sample, phase, role)
+            return None if value is None else scale(sample, value)
+        return read
+
+    def per_leaf_ms(sample, value):
+        return 1000.0 * value / sample["cell"]["n_leaves"]
+
+    def percent_of(phase):
+        return lambda sample, value: 100.0 * value / sample["lifecycle"][phase]["total"]
+
+    ids = sorted(ids, key=lambda cell_id: cells[cell_id]["n_leaves"])
+    lifecycle_columns = {
+        "oversubscription": "(N+1)/C", "time_to_ready_s": "ready s",
+        "time_to_shutdown_s": "shutdown s"}
+    if any("shutdown_retried" in sample["outcome"]["warnings"]
+           for cell_id in ids for sample in samples_by_cell[cell_id]):
+        lifecycle_columns["shutdown_calls"] = SHUTDOWN_CALLS
+    columns = [(phase, role) for phase in SWARM_PHASES
+               for role in ("coordinator", "leaves", "total")]
+    print_table(
+        "Swarm formation and shutdown against N; CPU in ms per leaf",
+        ["N"] + list(lifecycle_columns.values())
+        + [f"{SWARM_PHASES[phase]} {role}" for phase, role in columns],
+        [[cells[cell_id]["n_leaves"]]
+         + [median(cell_id, lambda sample, key=key: sample["lifecycle"][key])
+            for key in lifecycle_columns]
+         + [median(cell_id, cpu(phase, role, per_leaf_ms)) for phase, role in columns]
+         for cell_id in ids])
+    columns = [(phase, role) for phase in SWARM_PHASES for role in ("coordinator", "leaves")]
+    print_table(
+        "Share of a swarm phase's CPU by role, percent",
+        ["cell"] + [f"{SWARM_PHASES[phase]} {role}" for phase, role in columns],
+        [[cell_id] + [median(cell_id, cpu(phase, role, percent_of(phase)))
+                      for phase, role in columns]
+         for cell_id in ids])
 
 
 def print_axis_tables(records):
@@ -1081,6 +1267,11 @@ def print_axis_tables(records):
             [[cell_id] + [cpu_median(cell_id, share(role)) for role in ROLES]
              for cell_id in windowed])
 
+    # A swarm sample has its CPU per phase, in its own tables.
+    swarm_ids = cell_ids("lifecycle")
+    if swarm_ids:
+        print_swarm_tables(swarm_ids, cells, samples_by_cell, median)
+
 
 # --- Entry point ---------------------------------------------------------------
 
@@ -1117,6 +1308,10 @@ def parse_arguments():
     return args
 
 
+def lacks_rate(cell):
+    return cell["mode"] == "open_loop" and cell["messages"] is None
+
+
 def main():
     # A request to stop only sets a flag: see request_interrupt. A signal that the runner
     # was started to ignore, as under nohup, stays ignored.
@@ -1128,12 +1323,13 @@ def main():
     args = parse_arguments()
     workloads = json.loads(args.workloads.read_text(encoding="utf-8"))
     validate_workloads(workloads)
-    cells = select_cells(expand_cells(workloads), args.select)
+    validate_swarm(workloads)
+    cells = select_cells(expand_cells(workloads) + expand_swarm_cells(workloads), args.select)
     if args.calibrate:
         cells = [cell for cell in cells if cell["mode"] == "windowed"]
     # An open-loop cell has no message count until calibration has stored its rate.
-    skipped = [cell for cell in cells if cell["messages"] is None]
-    cells = [cell for cell in cells if cell["messages"] is not None]
+    skipped = [cell for cell in cells if lacks_rate(cell)]
+    cells = [cell for cell in cells if not lacks_rate(cell)]
     if skipped:
         print("skipped, no stored open-loop rate: " + ", ".join(cell["id"] for cell in skipped))
     if not cells:
@@ -1143,6 +1339,11 @@ def main():
                   if record.get("aa")]
     session = Session(args, cells)
     try:
+        cells, unsized = size_swarm_cells(
+            cells, workloads.get("swarm"), session.host["cpus_effective"])
+        report_unsized(unsized)
+        if not cells:
+            fail("no cell to run")
         if args.calibrate:
             calibrate(session, cells, workloads, args.calibrate)
             return
@@ -1151,6 +1352,7 @@ def main():
         session.close()
     # The A/A records of the output file include this session's own, if it is an A/A session.
     print_summary(records, earlier_aa + (records if session.aa else []), skipped)
+    report_unsized(unsized)
     print_axis_tables(records)
 
 
