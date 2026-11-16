@@ -230,13 +230,47 @@ jobs:
           python -u run_tests.py @runner_args 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'stress-tests.log')
           exit $LASTEXITCODE
 
-      # The tables and results that run_tests.py prints after each suite and at the end.
+      # Its output, one result line per check and any error that stops the checks are appended
+      # to the test log. The step fails exactly as before: at the first missing executable or
+      # non-zero exit.
+      - name: Check closed-handle process absence directly
+        id: absence
+        if: inputs.full_run || inputs.force_tests || steps.diff-base.outputs.force == 'true' || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'stress-tests.log'
+          Add-Content -LiteralPath $log -Value '', '== Closed-handle absence checks =='
+          try {
+            foreach ($config in @('Debug', 'Release')) {
+              foreach ($test in @('process_identity_test', 'copying_mark_lifecycle_test')) {
+                $binary = Join-Path $PWD "build/tests/$config/sintra_${test}.exe"
+                if (-not (Test-Path -LiteralPath $binary)) {
+                  Add-Content -LiteralPath $log -Value "[absence check] $test ${config}: failed, the executable is missing"
+                  throw "Expected absence test artifact was not downloaded: $binary"
+                }
+                & $binary --absence-only 2>&1 | Tee-Object -FilePath $log -Append
+                $code = $LASTEXITCODE
+                $result = if ($code -eq 0) { 'passed' } else { "failed with exit code $code" }
+                Add-Content -LiteralPath $log -Value "[absence check] $test ${config}: $result"
+                if ($code -ne 0) {
+                  throw "$test --absence-only failed in $config with exit code $code"
+                }
+              }
+            }
+          } catch {
+            Add-Content -LiteralPath $log -Value "[absence check] stopped: $_"
+            throw
+          }
+
+      # The tables and results that run_tests.py prints after each suite and at the end, then
+      # the outcome of the closed-handle absence checks.
       - name: Summarize stress tests
         if: always()
         continue-on-error: true
         shell: python
         env:
           STRESS_OUTCOME: ${{ steps.stress.outcome }}
+          ABSENCE_OUTCOME: ${{ steps.absence.outcome }}
           JOB_STATUS: ${{ job.status }}
           DIFF_BASE: ${{ steps.diff-base.outputs.base }}
         run: |
@@ -270,6 +304,8 @@ jobs:
                        log.read_text(encoding="utf-8", errors="replace").splitlines()]
               block, keep = [], False
               for line in lines:
+                  if line == "== Closed-handle absence checks ==":
+                      break
                   if re.match(r"Configuration \d+/\d+: ", line):
                       keep = False
                   if line.startswith("Results for ") or line == "OVERALL SUMMARY":
@@ -284,6 +320,20 @@ jobs:
                           "OVERALL SUMMARY. The results so far, then the last lines of the log:",
                           *body, "```text", *(tail(lines, 40, 40_000) or ["The log is empty."]),
                           "```"]
+              absence = os.environ.get("ABSENCE_OUTCOME", "")
+              results = [line[len("[absence check] "):] for line in lines
+                         if line.startswith("[absence check] ")]
+              checks = [result for result in results if not result.startswith("stopped: ")]
+              if absence == "skipped":
+                  body.append("Closed-handle absence checks: not run (they run only after "
+                              "run_tests.py passed).")
+              elif absence or results:
+                  failed = sum(1 for check in checks if not check.endswith(": passed"))
+                  verdict = (f"Closed-handle absence checks: {len(checks) - failed} passed, "
+                             f"{failed} failed (step: {absence or 'unknown'})")
+                  body += [verdict if absence == "success" else f"**{verdict}**", "```text",
+                           *(tail(results, 20, 20_000) or ["No check result was recorded."]),
+                           "```"]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("\n".join(["### Stress tests", *body]) + "\n")
 
@@ -296,23 +346,6 @@ jobs:
           path: ${{ runner.temp }}/stress-tests.log
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Check closed-handle process absence directly
-        if: inputs.full_run || inputs.force_tests || steps.diff-base.outputs.force == 'true' || steps.changed.outputs.tests == 'true' || steps.changed.outputs.core == 'true' || steps.changed.outputs.workflows == 'true'
-        shell: pwsh
-        run: |
-          foreach ($config in @('Debug', 'Release')) {
-            foreach ($test in @('process_identity_test', 'copying_mark_lifecycle_test')) {
-              $binary = Join-Path $PWD "build/tests/$config/sintra_${test}.exe"
-              if (-not (Test-Path -LiteralPath $binary)) {
-                throw "Expected absence test artifact was not downloaded: $binary"
-              }
-              & $binary --absence-only
-              if ($LASTEXITCODE -ne 0) {
-                throw "$test --absence-only failed in $config with exit code $LASTEXITCODE"
-              }
-            }
-          }
 
       - name: List preserved scratch (failure only)
         if: failure()
