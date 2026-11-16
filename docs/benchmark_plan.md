@@ -710,14 +710,18 @@ ends the swarm, and the runner never signals a process it does not hold by more 
 3. **Windows.** The runner keeps `tests/runner/platform/windows_process_tree.py`, which retains
    handles of the coordinator and each descendant, and refuses to start without it.
 4. **Leftovers.** A process-table scan for the adjacent arguments `--run-id <id>` (procfs, else
-   `ps`) only detects leftovers. A look fails when `ps` fails or a procfs entry cannot be read,
-   unless its process has disappeared; a failed look establishes nothing. Cleanup is complete
-   after two consecutive empty looks; a leftover, or looks that keep failing, give
-   `cleanup_incomplete`, and the session stops and names the processes. The runner never signals
-   a PID taken from a file or from the scan; PID files only count the expected reports. A process
-   that is still alive 10 s after the coordinator's normal exit gives `stray_participants`
-   (section 8). The runner waits for the swarm before removing evidence or starting the next
-   sample.
+   `ps`) only detects leftovers. With procfs it reads only the processes of the runner's user
+   (the owner of `/proc/<pid>`), as every participant runs as that user. A process that has
+   disappeared is gone. One of the user's processes whose command line cannot be read does not
+   end the scan, but leaves the look inconclusive; a failed `ps` fails the look. Cleanup is
+   complete only after two consecutive empty looks. A leftover, an unreadable process, failing
+   looks, or a deadline reached before the second empty look give `cleanup_incomplete`; the
+   session stops and names the processes, an unreadable one as "could not be inspected". The
+   runner never signals a PID taken from a file or from the scan; PID files only count the
+   expected reports. A process that is still alive 10 s after the coordinator's normal exit
+   gives `stray_participants` (section 8); when no look at that deadline is conclusive, so does
+   one that the cleanup then finds. The runner waits for the swarm before removing evidence or
+   starting the next sample.
 5. **Interrupts.** SIGINT, SIGTERM, SIGHUP, SIGQUIT (where they exist) and Ctrl+Break only set a
    flag; a signal the runner was started to ignore stays ignored. Cleanup cannot be aborted, and
    an interrupted sample writes no record. Cleanup measures nothing (open decision 6).
@@ -875,9 +879,11 @@ and Windows): functional evidence, not reference values. They decide how the res
      calls/s on WSL, and a Debug build gave the same value. Windowed `leaf_to_coordinator` did
      not look locked to the poll on WSL (`issue_to_observation` p50 110 to 240 µs), and its rate
      varied about 4× between sessions (46,000 to 182,000 calls/s).
-   - Closed-loop CPU per call follows the cycle time (mostly spin and poll CPU). Windowed CPU per
-     call is closer to the call path, but it is whole-process CPU: it includes waiting and harness
-     work and does not isolate the call path.
+   - Closed-loop CPU per call follows the cycle time. That most of it is the readers' spinning and
+     polling is a hypothesis consistent with these observations: the measurement is whole-process
+     CPU (`benchmarks/harness.h:62`), which does not separate those costs. Windowed CPU per call is
+     closer to the call path, but it is whole-process CPU too: it includes waiting and harness work
+     and does not isolate the call path.
    - Regimes reached: gap 0 reaches the spin regime only part of the time on
      `leaf_to_coordinator` (in one A/A pair, rtt p50 was 62 µs in one arm and 1121 µs in the
      other) and in no `leaf_to_leaf` sample; 200 µs and 20 ms reach the sleep phase; 2 s reaches
@@ -893,16 +899,17 @@ and Windows): functional evidence, not reference values. They decide how the res
    - The 64-byte cells are the least fence-bound (51 to 83 % on WSL): up to about half of their
      interval is publishing and delivery, so their windowed rate does follow the publish path.
    - Fence p50 in one WSL run of the default grid was 3.9 to 5.9 ms with one receiver and 10.8 to
-     13.9 ms with sixteen; over all WSL runs, 2.7 to 7.0 ms and 9.9 to 19.5 ms.
+     13.9 ms with sixteen; over all WSL runs, 2.6 to 7.0 ms and 9.9 to 19.5 ms.
    - So the windowed rate, the payload axis and CPU per MB describe the fence-paced cycle, not
      frame cost: at a 90 to 99 % fence share, a 2× change in publish cost moves the headline rate
      by 1 to 10 %. Windowed CPU includes the fences' CPU.
    - The windowed latency headline, `slowest_from_send`, also describes the burst/fence cycle and
-     the reader wait policy: a message queues behind the rest of its burst, and the readers wake
-     up after each fence. With sixteen receivers at 64 B its p50 was 2.1 to 2.5 ms in that WSL
-     run; with one coordinator-origin receiver at 64 B its p99 was about 1 ms, one poll period,
-     in most runs (0.55 to 2.3 ms over all WSL runs); and in one A/A pair of the cell with four
-     coordinator-origin receivers at 64 B, p50 was 20 µs in one arm and 177 µs in the other.
+     the reader wait policy: a message's latency can include the traffic of its burst published
+     before it, and the readers' scheduling and wait effects. With sixteen receivers at 64 B its
+     p50 was 2.1 to 2.5 ms in that WSL run; with one coordinator-origin receiver at 64 B its p99
+     was about 1 ms, one poll period, in most runs (0.55 to 2.3 ms over all WSL runs); and in one
+     A/A pair of the cell with four coordinator-origin receivers at 64 B, p50 was 20 µs in one arm
+     and 177 µs in the other.
    - `send_call` and the fence-free rate (section 6) are the closer readings of publish cost.
 4. **The open-loop rates are light loads.**
    - They are fractions of the fence-bound rate: about a quarter of the fence-free publish rate

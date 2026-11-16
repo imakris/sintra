@@ -406,7 +406,7 @@ def command_line(pid):
     """The arguments of the process that has this PID now, from procfs; empty when it is gone.
 
     Only a process that has disappeared counts as gone. Any other failure to read, such as a
-    missing permission, raises: the look then fails, as one with a failed `ps` does.
+    missing permission, raises.
     """
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
@@ -416,23 +416,42 @@ def command_line(pid):
 
 
 def run_processes(run_id):
-    """{PID: command line} of every process whose command line names this run.
+    """{PID: command line} of every process whose command line names this run, and
+    {PID: error} of each process whose command line could not be read.
 
     A child that the coordinator has forked, but that has not started the executable yet,
     still shows the coordinator's command line. A scan therefore finds the processes of a run
     without their cooperation; a file that a process writes once it runs does not.
+
+    With procfs, only the processes of the runner's user are read: every participant runs as
+    that user, and procfs can deny the command line of another user's process (hidepid). The
+    owner of /proc/<pid> is the process's effective user. A failure to read one process does
+    not end the scan. With `ps`, a failed `ps` raises.
     """
+    unread = {}
     if HAS_PROCFS:
-        pids = [int(entry) for entry in os.listdir("/proc") if entry.isdigit()]
-        lines = {pid: command_line(pid) for pid in pids}
+        lines = {}
+        user = os.geteuid()
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            try:
+                if os.stat(f"/proc/{pid}").st_uid == user:
+                    lines[pid] = command_line(pid)
+            except (FileNotFoundError, ProcessLookupError):
+                pass    # it has gone
+            except OSError as error:
+                unread[pid] = error
     else:
         listing = subprocess.run(
             ["ps", "-ww", "-A", "-o", "pid=", "-o", "command="],
             capture_output=True, text=True, errors="replace", check=True)
         fields = [line.split() for line in listing.stdout.splitlines() if line.strip()]
         lines = {int(pid): arguments for pid, *arguments in fields}
-    return {pid: " ".join(arguments).strip() for pid, arguments in lines.items()
-            if names_run(arguments, run_id)}
+    found = {pid: " ".join(arguments).strip() for pid, arguments in lines.items()
+             if names_run(arguments, run_id)}
+    return found, unread
 
 
 class Participants:
@@ -447,6 +466,7 @@ class Participants:
     def __init__(self, run_id):
         self.run_id = run_id
         self.process = None
+        self.found_by_cleanup = False   # whether a look of clean_up() found a process alive
 
     def launch(self, command, run_dir):
         """Starts the coordinator and takes ownership of its swarm."""
@@ -469,8 +489,9 @@ class Participants:
         raise NotImplementedError
 
     def alive(self):
-        """Looks afresh and describes each process of the run that is alive, the coordinator
-        until it is reaped, and whatever keeps the look from being conclusive."""
+        """Looks afresh. Returns two lists of descriptions: each process of the run that is
+        alive, the coordinator until it is reaped; and whatever keeps the look from being
+        conclusive."""
         raise NotImplementedError
 
     def close(self):
@@ -493,19 +514,23 @@ class Participants:
 
     def wait_for_exit(self, deadline):
         """After the coordinator's own exit: waits until the deadline for the other processes
-        of the run to exit by themselves; returns those that a look found alive at the end.
-        It looks at least once, also when the deadline has passed.
+        of the run to exit by themselves. It looks at least once, also when the deadline has
+        passed. Returns [] once a look finds none; otherwise, at the end, those that the last
+        look found alive, or None when that look found none but was not conclusive.
 
-        A look that fails establishes nothing, so the wait goes on. A failure that lasts
-        reaches clean_up(), whose looks fail as well and leave the cleanup incomplete.
+        A look that fails, or that is not conclusive, establishes nothing, so the wait goes
+        on. A failure that lasts reaches clean_up(), whose looks fail as well and leave the
+        cleanup incomplete.
         """
         while True:
             try:
-                alive = self.alive()
+                alive, unresolved = self.alive()
+                if not alive and not unresolved:
+                    return []
             except Exception:
-                alive = None
-            if alive == [] or interrupt_requested or time.monotonic() >= deadline:
-                return alive or []
+                alive = []
+            if interrupt_requested or time.monotonic() >= deadline:
+                return alive or None
             time.sleep(0.05)
 
     def clean_up(self):
@@ -514,12 +539,13 @@ class Participants:
 
         It does not raise, and a step that fails does not keep the others from running. It
         returns a description of whatever is left or could not be established; the cleanup
-        is complete when that is empty.
+        is complete when that is empty. It sets found_by_cleanup when a look finds a process
+        of the run alive.
         """
         if self.process is None:
             return []   # the launch failed, so there is nothing to clean up
         deadline = time.monotonic() + EXIT_WAIT_S
-        confirmed = False
+        empty_looks = 0
         while True:
             remaining = []
             try:
@@ -527,14 +553,19 @@ class Participants:
             except Exception as error:
                 remaining.append(f"the termination failed: {error!r}")
             try:
-                remaining += self.alive()
+                alive, unresolved = self.alive()
+                self.found_by_cleanup = self.found_by_cleanup or bool(alive)
+                remaining += alive + unresolved
             except Exception as error:
                 remaining.append(f"the processes of the run could not be listed: {error!r}")
             # On POSIX a process is invisible to a look for a moment while it starts its
-            # executable, so an empty look counts only when a second one confirms it.
-            if (not remaining and confirmed) or time.monotonic() >= deadline:
-                return remaining
-            confirmed = not remaining
+            # executable, so the cleanup is complete only after two consecutive empty looks.
+            empty_looks = 0 if remaining else empty_looks + 1
+            if empty_looks == 2:
+                return []
+            if time.monotonic() >= deadline:
+                return remaining or [
+                    "no second look confirmed the last empty one before the deadline"]
             time.sleep(0.05)
 
 
@@ -575,12 +606,12 @@ class Windows_participants(Participants):
         if self.process.poll() is None:
             alive.append(f"pid {self.process.pid}: the coordinator")
         if self.tree is None:
-            return alive + ["descendants unknown: their process tree could not be established"]
+            return alive, ["descendants unknown: their process tree could not be established"]
         alive += [f"pid {pid}" for pid in self.tree.live_descendants()]
         if self.tree.enumeration_error is not None:
-            alive.append("descendants unknown: the process table could not be read "
-                         f"({self.tree.enumeration_error})")
-        return alive
+            return alive, ["descendants unknown: the process table could not be read "
+                           f"({self.tree.enumeration_error})"]
+        return alive, []
 
     def close(self):
         if self.tree is not None:
@@ -642,10 +673,12 @@ class Posix_participants(Participants):
         return []
 
     def alive(self):
-        found = run_processes(self.run_id)
+        found, unread = run_processes(self.run_id)
         if self.process.poll() is None:
             found.setdefault(self.process.pid, "the coordinator")
-        return [f"pid {pid}: {command}" for pid, command in sorted(found.items())]
+        return ([f"pid {pid}: {command}" for pid, command in sorted(found.items())],
+                [f"pid {pid}: could not be inspected ({error})"
+                 for pid, error in sorted(unread.items())])
 
 
 # --- Samples -----------------------------------------------------------------
@@ -858,14 +891,17 @@ class Session:
             # and no signal raises (see request_interrupt), so nothing can separate them.
             participants.launch(cell_command(executable, cell, run_id), run_dir)
             ending = participants.wait_for_coordinator(timeout)
-            stray = False
+            left = []
             if ending == "exited":
                 # One deadline from the coordinator's exit: a process that is still alive at
                 # it is a stray, however long the wait for the reports took.
                 deadline = time.monotonic() + AFTER_EXIT_S
                 wait_for_reports(run_dir, deadline)
-                stray = bool(participants.wait_for_exit(deadline))
+                left = participants.wait_for_exit(deadline)
             remaining = participants.clean_up()
+            # When no look at the deadline was conclusive (None), a process of the run that
+            # the cleanup finds afterwards was alive past the deadline as well.
+            stray = bool(left) or (left is None and participants.found_by_cleanup)
             return participants.process.returncode, ending, stray, remaining
         except BaseException:
             # A failure of the runner itself must not leave the swarm running either.

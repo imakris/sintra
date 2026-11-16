@@ -150,15 +150,18 @@ and the session stops (see the POSIX paragraph below).
 - **After a normal exit,** the runner waits for the reports and for the other
   processes of the run to exit, both until 10 s after the coordinator's exit.
   The record gets the warning `stray_participants` if a process of the run is
-  still alive then. The cleanup follows.
+  still alive then, or, when no look then is conclusive, if the cleanup finds
+  one afterwards. The cleanup follows.
 - **If the cleanup is not complete within 10 s,** the record gets the reason
   `cleanup_incomplete`, the run directory is kept, and the session stops with a
   message that lists the PID and the command line of every process that is
   left, so that nothing is measured beside a stray process. The cleanup is
-  complete when the coordinator is reaped and two successive looks find no
-  other process of the run. A look that fails leaves it incomplete: `ps`
-  fails, or a process's procfs entry cannot be read for another reason than
-  that the process has gone.
+  complete when the coordinator is reaped and two consecutive looks find no
+  other process of the run; one empty look at the deadline is not enough. A
+  look that fails or is inconclusive is not empty: `ps` fails, or the command
+  line of one of the runner's own processes cannot be read for another reason
+  than that the process has gone. The message names such a process as "could
+  not be inspected".
 
 The runner never signals a process that it knows only by its PID, not even
 right after checking that PID: between the check and the signal, the PID can
@@ -172,7 +175,9 @@ pass to another process. This is what it signals, and how it finds the rest:
   ([docs/architecture.md](../docs/architecture.md), "Lifeline ownership"). The
   runner waits for that. It looks for processes of the run by scanning the
   process table for command lines that carry `--run-id` with this run's ID,
-  which also finds a child that has not started the executable yet. A leaf that
+  which also finds a child that has not started the executable yet. With procfs
+  it reads only its own user's processes, as every participant runs as that
+  user; procfs can deny another user's command line (`hidepid`). A leaf that
   cannot run, such as one stopped by `SIGSTOP` or held by a debugger, cannot
   exit this way, and the runner does not signal it: the record gets
   `cleanup_incomplete`, the session stops with a message that names the leaf's
@@ -464,9 +469,10 @@ the last call.
   the call path is unchanged, because phase locking can hide a regression
   smaller than one poll period. The axis table shows the `actual_gap` p50
   beside `rtt`.
-- **Closed-loop CPU per call follows the cycle time.** Most of it is the
-  readers' spinning and polling over one cycle, so a change of the call path
-  can stay inside its A/A spread.
+- **Closed-loop CPU per call follows the cycle time.** That most of it is the
+  readers' spinning and polling over one cycle is a hypothesis consistent with
+  the runs so far: the CPU is whole-process CPU, which does not separate those
+  costs. If so, a change of the call path can stay inside its A/A spread.
 - **`actual_gap` is the inter-call idle time, not the sleep alone.** It also
   holds the caller's bookkeeping of the previous result and its loop.
   `sleep_for` follows the platform's timer: on Windows a 200 µs gap idles 1.0
