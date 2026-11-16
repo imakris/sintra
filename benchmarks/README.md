@@ -109,9 +109,9 @@ selects the five request/response cells of the leaf-to-leaf route.
 ### Each sample and its cleanup
 
 The runner creates a fresh run directory, names it in `SINTRA_BENCHMARK_DIR` and
-starts the coordinator. It then waits up to 10 s for the report of every
-participant, runs `--aggregate`, adds its own fields and appends the record. It
-deletes the run directory unless `--keep` is given.
+starts the coordinator. After the coordinator's normal exit it waits up to 10 s
+for the report of every participant. It runs `--aggregate`, adds its own fields
+and appends the record. It deletes the run directory unless `--keep` is given.
 
 **Timeout.** A sample's timeout is 60 s plus three times its planned duration.
 A windowed broadcast cell without calibration metadata gets 60 s plus thirty
@@ -131,26 +131,34 @@ The request/response counts are fixed, so their planned duration does not come
 from a calibration. The 5 ms leave room for every hop of a round trip to wait
 for a reader's next poll.
 
-The runner owns the processes of a sample and leaves none behind:
+The runner owns the processes of a sample and ends them all, with one exception
+on POSIX: a leaf that cannot run, such as a stopped one, is reported instead,
+and the session stops (see the POSIX paragraph below).
 
 - **On timeout,** it ends the swarm in the way described below; the record has
   `timed_out: true` and the reason `timeout`. The sample is still aggregated,
-  because its processes may have written their reports before the stall.
+  because its processes may have written their reports before the stall. If
+  `--aggregate` produces no record, the runner's own record has the reason
+  `aggregation_failed` as well, and `missing_files` names the expected reports
+  that are absent.
 - **On an interrupt or an error of the runner,** it ends the swarm before it
   exits. The sample that was running has no record. An interrupt is Ctrl+C,
   Ctrl+Break, SIGTERM, SIGHUP or SIGQUIT. It only sets a flag, which the
   runner polls while a sample runs, so a further interrupt cannot cut a cleanup
   short. A signal that the runner was started to ignore, as under `nohup`,
   stays ignored.
-- **After a normal exit,** the runner waits up to 10 s for the reports and then
-  up to 10 s for the processes of the run to exit. The record gets the warning
-  `stray_participants` if one is still alive then. The cleanup follows.
+- **After a normal exit,** the runner waits for the reports and for the other
+  processes of the run to exit, both until 10 s after the coordinator's exit.
+  The record gets the warning `stray_participants` if a process of the run is
+  still alive then. The cleanup follows.
 - **If the cleanup is not complete within 10 s,** the record gets the reason
   `cleanup_incomplete`, the run directory is kept, and the session stops with a
   message that lists the PID and the command line of every process that is
   left, so that nothing is measured beside a stray process. The cleanup is
   complete when the coordinator is reaped and two successive looks find no
-  other process of the run. A look that fails leaves it incomplete.
+  other process of the run. A look that fails leaves it incomplete: `ps`
+  fails, or a process's procfs entry cannot be read for another reason than
+  that the process has gone.
 
 The runner never signals a process that it knows only by its PID, not even
 right after checking that PID: between the check and the signal, the PID can
@@ -165,7 +173,11 @@ pass to another process. This is what it signals, and how it finds the rest:
   runner waits for that. It looks for processes of the run by scanning the
   process table for command lines that carry `--run-id` with this run's ID,
   which also finds a child that has not started the executable yet. A leaf that
-  cannot exit by itself, such as a stopped one, is reported as left.
+  cannot run, such as one stopped by `SIGSTOP` or held by a debugger, cannot
+  exit this way, and the runner does not signal it: the record gets
+  `cleanup_incomplete`, the session stops with a message that names the leaf's
+  PID, and the operator ends it. This is the owner's decision (plan section
+  14).
 - **Windows.** The runner terminates the coordinator and its descendants
   through retained native handles. This reuses
   `tests/runner/platform/windows_process_tree.py`, which the runner loads by
@@ -206,16 +218,22 @@ and maximum and, beside it, the A/A spread. Nothing is flagged automatically.
   the warning `cpu_not_advancing`. "unavailable" alone means that no pair has a
   value, or that no matching A/A pair exists.
 - **Comparable pairs.** Two samples are compared when both are usable and have
-  the same cell, toolchain and configuration, host label and C. Library
-  constants do not have to match. If the arms differ in one, the summary names
-  it in a notice, as the start of the session does.
+  the same cell, toolchain and configuration, host label, operating system
+  (`host.os`) and C. The operating system matters for the A/A pairs of earlier
+  sessions: `host.os` is Python's `platform.platform()`, with the kernel release
+  or the Windows build, so A/A records from another OS or kernel do not supply
+  the spread. Library constants do not have to match. If the arms differ in
+  one, the summary names it in a notice, as the start of the session does.
 - **Fence time.** A windowed broadcast sender waits in a processing fence
   after every burst and once at the end. The measured interval includes those
   waits, so windowed rates and CPU per message include fence time.
-  `throughput.fence_s` holds their sum. The duration of the publish call,
-  `send_call`, does not include it, so it follows the publish path alone. On
-  Windows the clock ticks in steps of 100 ns, which quantises `send_call`: the
-  p50 of two arms is often exactly equal.
+  `throughput.fence_s` holds their sum. `send_call` does not include it: it
+  runs from just before the sender writes the payload's two header fields
+  (sequence and send time) to the return of the publish call, so it covers
+  those two writes, the publish call and the overhead of the timestamps. With
+  the MSVC build tested on Windows (development machine), `steady_clock` ticked
+  in steps of 100 ns, which quantises `send_call`: the p50 of two arms was
+  often exactly equal.
 - **Open-loop sender CPU.** An open-loop sender polls the clock for the last
   100 µs before each intended arrival, so its CPU is mostly the generator's
   own. Do not read it as the cost of publishing. The summary shows the CPU
@@ -245,8 +263,8 @@ contributes no CPU value to them.
 
 Closed-loop request/response cells have one table per route: against the gap,
 the `actual_gap` p50, `rtt` p50 and p99, and each role's CPU µs per call. The
-slept gap stands beside `rtt` because the two are read together (see the
-request/response executable below).
+idle time before each call stands beside `rtt` because the two are read
+together (see the request/response executable below).
 
 Swarm cells have their own tables: the two lifecycle times and each role's
 formation and shutdown CPU per leaf against N, with the coordinator's
@@ -417,19 +435,20 @@ call.
 spins for 50 µs after its last message, then polls in 1 ms sleeps for up to
 1 s, then parks (`include/sintra/detail/config.h:45`, `:49`, `:53`;
 `include/sintra/detail/ipc/rings.h:3373-3402`, at commit `3666206f`). Once a
-reader is past its spin, a strictly periodic caller locks to the reader's poll.
-The cells then report the wait policy, not the call path. That is a property of
-the library, which the cells show and do not work around. The counts are fixed
-for that reason: a rate that was measured in one phase does not predict the
-next sample.
+reader is past its spin, a strictly periodic caller can lock to the reader's
+poll, and the runs so far were consistent with that (plan section 12). The
+cells then mostly report the wait policy, not the call path. That is a property
+of the library, which the cells show and do not work around. The counts are
+fixed for that reason: a rate that was measured in one phase does not predict
+the next sample.
 
 **Closed-loop mode** makes one synchronous `rpc_echo` call at a time. The gap is
 a `sleep_for` before every call, the first one included; with a gap of 0 the
 calls run back to back without a sleep. `latency.rtt` is the time from the
-start of a call to its return, and `latency.actual_gap` is the measured idle
-time before each call: from the return of the call before it, or from the begin
-rendezvous for the first call. The end barrier is a rendezvous after the last
-call.
+start of a call to its return, and `latency.actual_gap` is the inter-call idle
+time: from the return of the call before it, or from the begin rendezvous for
+the first call, to the start of the call. The end barrier is a rendezvous after
+the last call.
 
 - **The back-to-back cell (gap 0) sits at the edge of the spin window.** A call
   that reaches a reader just after its spin waits for that reader's next poll,
@@ -438,19 +457,21 @@ call.
   spinning, and a millisecond or more once hops fall into the sleep phase. p50
   can move between the two from sample to sample. Read it together with
   calls/s, which follows the mean, and with the A/A spread.
-- **Read `rtt` together with `actual_gap`.** In the sleep phase, `rtt` plus
-  `actual_gap` is a whole number of poll periods. A difference in `rtt` that is
-  smaller than a poll period is a phase effect: the call met the poll earlier
-  or later, and the call path did not change. This holds for the 200 µs and
-  20 ms cells and for the slow mode of gap 0. The axis table shows the
-  `actual_gap` p50 beside `rtt`.
+- **Read `rtt` together with `actual_gap`.** In the 200 µs cells on WSL, `rtt`
+  p50 plus `actual_gap` p50 was close to a whole number of poll periods. A
+  difference in `rtt` that is smaller than a poll period is consistent with a
+  phase effect: the call met the poll earlier or later. It does not show that
+  the call path is unchanged, because phase locking can hide a regression
+  smaller than one poll period. The axis table shows the `actual_gap` p50
+  beside `rtt`.
 - **Closed-loop CPU per call follows the cycle time.** Most of it is the
   readers' spinning and polling over one cycle, so a change of the call path
   can stay inside its A/A spread.
-- **`actual_gap` is the gap that was actually slept.** `sleep_for` follows the
-  platform's timer: on Windows a 200 µs gap idles 1.0 to 1.5 ms. That is still
-  the wait regime the gap aims at, past the spin window and inside the
-  one-second sleep phase.
+- **`actual_gap` is the inter-call idle time, not the sleep alone.** It also
+  holds the caller's bookkeeping of the previous result and its loop.
+  `sleep_for` follows the platform's timer: on Windows a 200 µs gap idles 1.0
+  to 1.5 ms. That is still the wait regime the gap aims at, past the spin
+  window and inside the one-second sleep phase.
 - **A lost reply surfaces only as the runner's `timeout`.** The synchronous
   call has no deadline, so closed-loop mode never counts a call as `lost`.
 
@@ -460,11 +481,12 @@ to 10 s after that call's issue; a call that is still pending then counts as
 lost. `latency.issue_to_observation` runs from the start of the issue to the
 return of `get_until`. The end barrier is the final processing fence.
 
-- **In the sleep phase, windowed calls/s is window / (k × period),** for a
-  whole number k of poll periods per window. It does not follow the call path
-  then: a Debug build gave the same calls/s as a Release build on
-  `leaf_to_leaf`.
-- **Windowed CPU per call follows the call path.**
+- **In the sleep phase, windowed calls/s was consistent with window / (k ×
+  period),** for a whole number k of poll periods per window, on `leaf_to_leaf`
+  on WSL. It did not follow the call path then: a Debug build gave the same
+  calls/s as a Release build.
+- **Windowed CPU per call is closer to the call path,** but it is whole-process
+  CPU, which includes waiting and harness work.
 
 Every call is recorded; there is no sampling. `throughput.interval_s` runs from
 the return of the caller's begin rendezvous to its end snapshot, and
@@ -507,7 +529,9 @@ non-zero. A swarm sample has no planned duration, so the runner gives it the
 
 Keep `--output`, and with it the run directories, on a local filesystem. A leaf
 writes its PID file during its start-up and its report before it exits, and
-both are inside the measured phases of a swarm sample.
+both are inside the measured phases of a swarm sample. So is the launch
+description of the swarm, which every leaf builds as the coordinator does. These
+costs were not quantified.
 
 | Cell option | Meaning | Default |
 |---|---|---|
@@ -537,8 +561,9 @@ surplus, when `init` failed, or when a `shutdown()` threw.
 
 **Warnings.** `cpu_not_advancing` applies when the formation CPU or the
 shutdown CPU of some process is exactly zero. `cpu_low_confidence` is not used
-in lifecycle mode: the phases of a swarm sample are short at every size, so its
-per-sample CPU values are coarse.
+in lifecycle mode, at any size. The phases are short at small N, so per-sample
+CPU values are coarse there; on the development machine (WSL) formation took
+about 0.1 s at 1 leaf, 2 s at 80 and 3.8 s at 125 (plan section 5.3).
 
 **A `shutdown()` that returns false.** The coordinator's `shutdown()` returns
 false when the bounded wait for its managed children, at the end of the call,
@@ -586,7 +611,7 @@ These are the reasons and warnings that the executable and the runner write:
 | `cleanup_incomplete` | A process of the run is left, or the runner could not establish that none is; the session stops |
 | `missing_files`, `foreign_run_files` | A process report is missing, or belongs to another run |
 | `unexpected_reports`, `inconsistent_reports` | A report is a duplicate or of a branch the cell lacks, or carries other cell settings |
-| `aggregation_failed`, `run_id_mismatch` | `--aggregate` produced no record, also when it did not finish within 60 s and the runner ended it; or it produced one of another run |
+| `aggregation_failed`, `run_id_mismatch` | `--aggregate` produced no record, also after a timeout, and when it did not finish within 60 s and the runner ended it; or it produced one of another run |
 | `order_errors`, `size_errors` | An order error, or a wrong payload size or final byte |
 | `call_errors` | Request/response: a call threw, or returned another value than its argument |
 | `loss`, `eviction_log_matches` | Windowed and closed-loop mode: any loss (a lost message, or a call that timed out), or any eviction log match |
@@ -598,7 +623,7 @@ These are the reasons and warnings that the executable and the runner write:
 |---|---|
 | `cpu_low_confidence` | The measured interval is under 2 s |
 | `cpu_not_advancing` | The CPU delta of some process over the measured interval is exactly zero |
-| `stray_participants` | After the coordinator's normal exit, processes of the run were still alive 10 s after the wait for the reports |
+| `stray_participants` | A process of the run was still alive 10 s after the coordinator's normal exit |
 | `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
 | `ring_dir_not_empty` | `sintra-*` entries were already present in the ring parent directory |
 | `not_oversubscribed` | Lifecycle mode: the oversubscribed cell has `N_over + 1 <= C` |
@@ -608,10 +633,13 @@ A record with a missing or surplus process report is invalid and has null
 `counts`, `throughput`, `latency` and `cpu`. A report of another run, or with
 other cell settings, is set aside and makes the record invalid too. If the
 expected reports are complete without it, the metrics are computed from those;
-if it stands in for an expected report, that report is missing. A sample that
-left no report at all has null metrics. The runner writes its `cell` with every
-key of plan section 7; a key that only the executable knows, such as
-`framed_bytes` and `drain_timeout_s`, is null there.
+if it stands in for an expected report, that report is missing. When
+`--aggregate` produces no record, for example because the sample left no report
+at all, the runner writes its own record, with null metrics and the reason
+`aggregation_failed`. Its `missing_files` names the expected reports that are
+absent from the run directory, with the reason `missing_files` when there is
+one. Its `cell` has every key of plan section 7; a key that only the executable
+knows, such as `framed_bytes` and `drain_timeout_s`, is null there.
 
 **Process CPU on Windows.** The Windows process CPU clock is coarse and can stay
 at zero for a whole sample, however long the interval: neither 2 s nor 3 s makes

@@ -11,7 +11,8 @@ As `AGENTS.md` requires, three things are kept apart:
 - owner requirements and recorded decisions (section 1);
 - facts verified in the code (section 2);
 - the adopted design (sections 3 to 13), this plan's own work rather than owner requirements.
-  Section 14 lists choices implemented with the stated default that remain the owner's to change.
+  Section 14 lists choices implemented with the stated default that remain the owner's to change,
+  and records the owner's decision on the cleanup of a leaf that cannot run.
 
 ## 1. Owner requirements, agreed scope and recorded decisions
 
@@ -40,7 +41,10 @@ As `AGENTS.md` requires, three things are kept apart:
   the ring; only what was lost may fail.
 
 ### 1.2 Agreed scope (lean first iteration; not to be widened)
-- **Reported by every run:**
+- **Reported by every run**, as far as the workload has the item (sections 6 and 7): W1 reports
+  all of them; W2 reports calls/s in place of the message rates, and CPU µs per call in place of
+  per message; W3 reports its lifecycle times and the CPU of each phase in place of latency,
+  throughput, CPU per message and loss.
   - latency: p50 and p99, plus p99.9 and the maximum where the sample count supports them, with
     the sample count always shown;
   - throughput: publication and aggregate delivery rates in messages/s and MB/s, with
@@ -452,7 +456,8 @@ does not count.
   `--throw-every k`. A record is `validation_only` when one is not 0. A `gap_us` on a windowed
   entry or a `window` on a closed-loop entry is a workloads-file error.
 - **Reading the cells:** they mostly report the reader wait policy (section 12). Read `rtt`
-  together with `actual_gap`; differences below one poll period are phase effects.
+  together with `actual_gap`. A difference below one poll period is consistent with a phase
+  effect, but phase locking can also hide a real change of that size (section 12).
 
 **Routes:** `leaf_to_coordinator` (the callee is a user transceiver in the coordinator; leaf 1
 calls) and `leaf_to_leaf` (the callee is leaf 1; leaf 2 calls through the relay). Cell IDs are
@@ -460,10 +465,11 @@ calls) and `leaf_to_leaf` (the callee is leaf 1; leaf 2 calls through the relay)
 
 **Closed-loop cells (sync `rpc_echo`)**
 - The gap is a `sleep_for` before every call, the first one included, so every call meets the
-  regime of its gap. `actual_gap` records the idle time before each call, from the previous
-  return or, for the first call, from the begin rendezvous; it has one observation per call only
-  when no call failed. On Windows a 200 µs sleep idles 1.0 to 1.5 ms (development machine); that
-  is still the same wait regime.
+  regime of its gap. `actual_gap` records the inter-call idle time, from the previous return or,
+  for the first call, from the begin rendezvous, to the start of the call. It includes the
+  caller's bookkeeping of the previous result and the loop as well as the sleep, and it has one
+  observation per call only when no call failed. On Windows a 200 µs gap idles 1.0 to 1.5 ms
+  (development machine); that is still the same wait regime.
 - The end barrier `benchmark-complete` is a rendezvous here and a processing fence in windowed
   mode. A lost reply surfaces only as the runner's `timeout`: the synchronous call has no
   deadline.
@@ -529,10 +535,12 @@ executable takes `--leaves` and `--cpus`. A swarm sample has no planned duration
   `leaf_shutdown_max_s`).
 
 **CPU.** Per role, formation CPU is the cumulative CPU at the formation snapshot (including
-start-up); shutdown CPU is the change between the shutdown snapshots. Both phases are short (well
-under 2 s on the development machine), so per-sample CPU values are coarse and are read through
-the pairs; `cpu_low_confidence` is not emitted for W3. On Windows every sample has
-`cpu_not_advancing`, so W3 CPU there is unusable (section 12).
+start-up); shutdown CPU is the change between the shutdown snapshots. The phases are short at
+small N and longer at large N. On the development machine (WSL), formation took about 0.1 s at
+1 leaf, 1 s at 40, 2 s at 80 and 3.8 s at 125 (with `--cpus 126`); shutdown took at most about
+0.55 s up to 80 leaves and 1.4 to 1.5 s at 125. Per-sample CPU values are coarse, at small N
+especially, and are read through the pairs; `cpu_low_confidence` is not emitted for W3 at any
+size. On Windows every sample has `cpu_not_advancing`, so W3 CPU there is unusable (section 12).
 
 **Validation-only options:** `--fail-init` (a branch with a missing binary, so `init` throws) and
 `--leaf-exit-delay-ms` (a leaf outlives its `shutdown()`, so the coordinator's first call returns
@@ -553,12 +561,12 @@ false; a very large value makes the timeout fixture). Workloads keys `swarm.fail
 | `delivery_from_send` | receiver × sampled message | sampled messages with at least one delivery | receive − send start |
 | `slowest_from_send` | sampled messages delivered to every receiver | same | maximum over receivers |
 | `delivery_from_intended`, `slowest_from_intended` | as above | as above | as above, from the intended arrival (open-loop) |
-| `send_call` | sampled sends | same | send end − send start; includes serialization, reservation waits and API overhead (`benchmarks/README.md:34-36` at `3666206f`) |
+| `send_call` | sampled sends | same | send end − send start: the benchmark's two payload-header writes (sequence and send start), then the publish call with its serialization, reservation waits and API overhead (`benchmarks/README.md:34-36` at `3666206f`); includes the overhead of the timestamps |
 | `lateness` | sampled sends | same | send start − intended arrival (open-loop) |
 | `fence` | bursts | bursts | each burst fence (windowed); the final fence is stored as the sender's last interval and counts only in `throughput.fence_s` |
 | `rtt` | calls | calls | return − call start (W2 closed-loop) |
 | `issue_to_observation` | calls | calls | `get_until` returning the result − issue start (W2 windowed); a result may be complete before `get_until` observes it (`transceiver_impl.h:1071-1095`) |
-| `actual_gap` | calls | calls | measured idle time before each call: from the previous return, or from the begin rendezvous (W2 closed-loop) |
+| `actual_gap` | calls | calls | inter-call idle time: from the previous return, or from the begin rendezvous, to the call start; includes the sleep and the caller's bookkeeping (W2 closed-loop) |
 
 **Throughput**
 - Intervals: windowed, from the sender's begin rendezvous to its end snapshot; open-loop
@@ -601,13 +609,13 @@ MB (10^6 bytes). Values that do not apply, or that lack sample support, are null
 | `commit`, `note` | Operator-supplied commit for this arm; operator note |
 | `host` | `{label, os, hardware_concurrency, cpus_effective}`; `os` is Python's `platform.platform()` |
 | `build` | Facts of section 4.3, plus `ring_parent_dir` and `valid_build` |
-| `cell` | `{id, workload, mode, origin\|route, receivers, payload_bytes, framed_bytes, gap_us, window, n_leaves, offered_rate, planned, warmup, burst, handler_delay_us, drain_timeout_s, validation_only, calibration}`; every key is present, null where it does not apply (also in the runner's record of a sample that left no report); `burst` is null in W2 and W3, `handler_delay_us` in W3; `calibration` is the cell's `{host_label, commit, date}` or null (always null in W2 and W3) |
+| `cell` | `{id, workload, mode, origin\|route, receivers, payload_bytes, framed_bytes, gap_us, window, n_leaves, offered_rate, planned, warmup, burst, handler_delay_us, drain_timeout_s, validation_only, calibration}`; every key is present, null where it does not apply (also in the runner's own record of a sample that `--aggregate` produced no record for); `burst` is null in W2 and W3, `handler_delay_us` in W3; `calibration` is the cell's `{host_label, commit, date}` or null (always null in W2 and W3) |
 | `counts` | `{published, deliveries_expected, deliveries, lost, unresolved_tail, gap_intervals, order_errors, size_errors, call_errors, eviction_log_matches, sentinel_missed}`; `unresolved_tail` is nonzero only with `sentinel_missed` (section 6). In W2, `published` and `deliveries_expected` are the calls made, `deliveries` the calls that returned a value, `lost` the timed-out calls; counts that do not apply are null |
 | `throughput` | `{interval_s, delivery_interval_s, fence_s, publication_msg_s, publication_app_mb_s, publication_framed_mb_s, delivery_msg_s, delivery_app_mb_s, delivery_framed_mb_s, calls_s}` |
 | `latency.<name>` | `{n_obs, n_messages, p50_us, p99_us, p999_us, max_us}` for the names in section 6 |
 | `cpu.<role>` | `{processes, cpu_s, max_process_cpu_s, us_per_message, us_per_delivery}` |
 | `lifecycle` | `{time_to_ready_s, time_to_shutdown_s, shutdown_calls, first_shutdown_call_s, leaf_start_max_s, leaf_shutdown_max_s, formation_cpu, shutdown_cpu, oversubscription}`; the two CPU fields are `{coordinator, leaves, total}` in seconds; `oversubscription` is `(N+1)/C`, null when C = 0; `lifecycle` is null when a phase did not complete |
-| `outcome` | `{exit_code, timed_out, missing_files, valid, reasons[], warnings[]}` |
+| `outcome` | `{exit_code, timed_out, missing_files, valid, reasons[], warnings[]}`; `missing_files` names the absent reports (`<role>-<branch index>.bin`). In the runner's own record it names the expected reports that are absent from the run directory |
 | `runner` | `{started_unix, wall_s, timeout_s, ring_dir_sintra_entries}` |
 
 Roles: `coordinator`, `coordinator_sender`, `coordinator_callee`, `sender`, `receivers`, `caller`,
@@ -619,11 +627,13 @@ Roles: `coordinator`, `coordinator_sender`, `coordinator_callee`, `sender`, `rec
 but excluded from comparisons. A sample is invalid when any of these holds:
 - the build is not valid (section 4.3);
 - the run timed out (`timeout`), the coordinator exited non-zero (`exit_code_nonzero`),
-  aggregation failed (`aggregation_failed`, also for a damaged report: bad length or an
-  unterminated string; and for an aggregation that did not finish within 60 s, which the runner
-  then ends), or cleanup could not be completed (`cleanup_incomplete`: a process of the
-  run is left, or the runner could not establish that none is; the session stops and names the
-  processes);
+  `--aggregate` produced no record (`aggregation_failed`), or cleanup could not be completed
+  (`cleanup_incomplete`: a process of the run is left, or the runner could not establish that
+  none is; the session stops and names the processes). `aggregation_failed` applies also after
+  a timeout: for a damaged report (bad length or an unterminated string), when no report was
+  written, and when the aggregation did not finish within 60 s, which the runner then ends. The
+  runner then writes its own record; its `missing_files` names the expected reports that are
+  absent from the run directory, with the reason `missing_files` when there is one;
 - the report set is wrong, as the shared harness checks it for every workload: a process report
   is missing (`missing_files`, also after a bypassed barrier, section 4.4) or belongs to another
   run (`foreign_run_files`), a report is a duplicate or surplus for a role or branch
@@ -648,7 +658,7 @@ and summaries. It does not by itself make the record invalid; validity follows t
 |---|---|
 | `cpu_low_confidence` | W1 and W2: the measured interval is under 2 s. Not emitted for W3 (section 5.3) |
 | `cpu_not_advancing` | Some process's CPU delta over the measured interval (W3: over formation or shutdown) is exactly zero; the sample's CPU metrics are treated as unavailable in summaries |
-| `stray_participants` | A process of the run is still alive when the exit wait ends: after the coordinator's normal exit, the runner waits up to 10 s for the reports, then up to 10 s for the processes of the run to exit. On POSIX it is not terminated; if it is still there when cleanup ends, the record also gets `cleanup_incomplete` (section 9) |
+| `stray_participants` | A process of the run is still alive 10 s after the coordinator's normal exit; the wait for the reports ends at the same deadline. On POSIX it is not terminated; if it is still there when cleanup ends, the record also gets `cleanup_incomplete` (section 9) |
 | `shutdown_retried` | W3: some process needed more than one `shutdown()` call |
 | `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
 | `not_oversubscribed` | `N_over+1 <= C` |
@@ -658,8 +668,12 @@ and summaries. It does not by itself make the record invalid; validity follows t
 parameters are equal: the cell (ID, planned message or call counts and warm-up counts, never the
 observed `counts` object; offered rate; calibration metadata; framed size and burst excluded, as
 they follow from the library), the build configuration (compiler, configuration, `NDEBUG`,
-optimization, test hooks, separate compilation), host label and C. Library constants are
-recorded and compared only for a notice: an A/B of a library constant is a legitimate use.
+optimization, test hooks, separate compilation), host label, operating system (`host.os`) and C.
+The two arms of a session share their host, so the operating system matters for the stored A/A
+pairs that the summary takes from earlier sessions (section 9). `host.os` is Python's
+`platform.platform()`, which includes the kernel release or the Windows build, so an OS or kernel
+update starts a new set of A/A pairs. Library constants are recorded and compared only for a
+notice: an A/B of a library constant is a legitimate use.
 
 ## 9. Runner (adopted design)
 
@@ -690,30 +704,36 @@ ends the swarm, and the runner never signals a process it does not hold by more 
 2. **POSIX.** The runner signals only the process group of the coordinator it launched, and only
    while that child is still unreaped (`poll() is None`). Leaves start their own sessions and
    leave through Sintra's lifeline: once the coordinator is gone, each hard-exits after about
-   100 ms (section 2.2).
+   100 ms (section 2.2). The one exception (owner decision, section 14): a leaf that cannot run,
+   such as one stopped by `SIGSTOP` or a debugger, cannot leave that way. The runner reports it
+   by PID with `cleanup_incomplete`, the session stops, and the operator handles the process.
 3. **Windows.** The runner keeps `tests/runner/platform/windows_process_tree.py`, which retains
    handles of the coordinator and each descendant, and refuses to start without it.
 4. **Leftovers.** A process-table scan for the adjacent arguments `--run-id <id>` (procfs, else
-   `ps`) only detects leftovers. Cleanup is complete after two consecutive empty looks; a
-   leftover gives `cleanup_incomplete`, and the session stops and names the processes. The runner
-   never signals a PID taken from a file or from the scan; PID files only count the expected
-   reports. A process that is still alive 10 s after the wait for the reports (step 6), which
-   follows the coordinator's normal exit, gives `stray_participants` (section 8). The runner
-   waits for the swarm before removing evidence or starting the next sample.
+   `ps`) only detects leftovers. A look fails when `ps` fails or a procfs entry cannot be read,
+   unless its process has disappeared; a failed look establishes nothing. Cleanup is complete
+   after two consecutive empty looks; a leftover, or looks that keep failing, give
+   `cleanup_incomplete`, and the session stops and names the processes. The runner never signals
+   a PID taken from a file or from the scan; PID files only count the expected reports. A process
+   that is still alive 10 s after the coordinator's normal exit gives `stray_participants`
+   (section 8). The runner waits for the swarm before removing evidence or starting the next
+   sample.
 5. **Interrupts.** SIGINT, SIGTERM, SIGHUP, SIGQUIT (where they exist) and Ctrl+Break only set a
    flag; a signal the runner was started to ignore stays ignored. Cleanup cannot be aborted, and
    an interrupted sample writes no record. Cleanup measures nothing (open decision 6).
-6. Wait up to 10 s for the expected reports; run `--aggregate`, for at most 60 s; add the
-   runner fields and the cell's calibration metadata; append and flush the line; delete the run
-   directory unless `--keep`.
+6. After a normal exit, wait for the expected reports until 10 s after the coordinator's exit,
+   the deadline of step 4. Run `--aggregate`, for at most 60 s; if it produces no record, the
+   runner writes its own (section 8). Add the runner fields and the cell's calibration metadata;
+   append and flush the line; delete the run directory unless `--keep`.
 
 **Summary**
 - Per cell: comparable pairs used, per-arm invalid-sample counts, and latency sample support
   (`n_obs`, `n_messages`).
 - Per windowed W1 cell: the median fence time per arm and its median share of the interval.
 - Per headline metric: the median within-pair comparison with its minimum and maximum, and beside
-  it the A/A spread over comparable A/A pairs with equal effective parameters (same output file or
-  `--aa`), or "unavailable" when there are none. The spread is folded, because an A/A pair's arm
+  it the A/A spread over comparable A/A pairs with equal effective parameters (section 8: the
+  same host label, `host.os` and C among them), from the same output file or `--aa`, or
+  "unavailable" when there are none. The spread is folded, because an A/A pair's arm
   labels are arbitrary: max(r, 1/r) for ratios, absolute values for differences (for example
   "A/A spread up to x1.061 over 2 pairs").
 - Ratio or difference: CPU, the lost fraction and the shutdown calls (W3) are always shown as
@@ -821,9 +841,15 @@ gap alone takes 2 min per route) and probably under 1 min for W3. A full A/B run
   `cpu_not_advancing`), so Windows CPU values are not a reference. Linux `getrusage` is.
 - **Open-loop sender CPU is not a publishing cost:** it is mostly the generator polling the clock
   for its schedule.
-- **W3 has harness file I/O inside the measured phases:** each leaf creates its PID file during
-  start-up and writes its report before it exits, and the coordinator's custody join waits for
-  that exit. This is negligible on a local filesystem; the run directory must be on one.
+- **W3 has harness work inside the measured phases:** each leaf builds the swarm's launch
+  description (N process descriptors, each with a copy of its options), creates its PID file
+  during start-up and writes its report before it exits, and the coordinator's custody join waits
+  for that exit. These costs were not quantified. The run directory must be on a local
+  filesystem.
+- **Windows paths outside the active code page are not supported:** the harness handles the
+  temporary and run directories as narrow strings, and the runner decodes the executables'
+  output with Python's default encoding, so such a path can make `--build-facts` or a report
+  fail (not reproduced).
 - **Slowest-receiver latency conditions on delivery to every receiver**, so loss can remove the
   slowest observations; read it together with loss.
 - **A clock assumption.** Cross-process latency assumes that `std::chrono::steady_clock` on the
@@ -839,26 +865,31 @@ and Windows): functional evidence, not reference values. They decide how the res
    50 µs, then polls in 1 ms sleeps for up to 1 s, then parks (`config.h:45`, `:49`, `:53`;
    `ipc/rings.h:3373-3402`, `:3405-3533`). Once a reader is past the spin, a wake-up costs up to
    one sleep cycle per hop.
-2. **W2 mostly reports that policy.**
-   - A paced caller locks to the poll: rtt + `actual_gap` is a whole number k of poll periods
-     (about 1.07 ms on WSL). In the 200 µs cells, k = 1 on `leaf_to_coordinator` and usually 2 on
-     `leaf_to_leaf`.
-   - Windowed `leaf_to_leaf` locks to the poll as well: its calls/s is window / (k × period),
-     13,500 to 15,600 calls/s on WSL, and a Debug build gave the same value. Windowed
-     `leaf_to_coordinator` was not locked to the poll on WSL (`issue_to_observation` p50 110 to
-     240 µs), and its rate varied about 4× between sessions (46,000 to 182,000 calls/s).
-   - Closed-loop CPU per call follows the cycle time (mostly spin and poll CPU); windowed CPU per
-     call follows the call path.
+2. **W2 mostly reports that policy.** The regularities below were seen for the gaps and runs
+   named; they are consistent with polling-phase effects, not proof of them.
+   - Paced calls looked locked to the poll. In the 200 µs cells on WSL, rtt p50 + `actual_gap`
+     p50 was close to a whole number k of poll periods (about 1.07 ms): k = 1 on
+     `leaf_to_coordinator` and usually 2 on `leaf_to_leaf`. A 20 ms gap spans many periods; there
+     rtt p50 varied between runs (0.5 to 3.0 ms on WSL).
+   - Windowed `leaf_to_leaf` calls/s was consistent with window / (k × period): 13,500 to 15,600
+     calls/s on WSL, and a Debug build gave the same value. Windowed `leaf_to_coordinator` did
+     not look locked to the poll on WSL (`issue_to_observation` p50 110 to 240 µs), and its rate
+     varied about 4× between sessions (46,000 to 182,000 calls/s).
+   - Closed-loop CPU per call follows the cycle time (mostly spin and poll CPU). Windowed CPU per
+     call is closer to the call path, but it is whole-process CPU: it includes waiting and harness
+     work and does not isolate the call path.
    - Regimes reached: gap 0 reaches the spin regime only part of the time on
      `leaf_to_coordinator` (in one A/A pair, rtt p50 was 62 µs in one arm and 1121 µs in the
      other) and in no `leaf_to_leaf` sample; 200 µs and 20 ms reach the sleep phase; 2 s reaches
      the parked regime.
-   - Reading rule: read rtt together with `actual_gap`; differences below one poll period are
-     phase effects. A rate measured in one regime does not predict the next sample, which is why
-     the W2 counts are fixed.
+   - Reading rule: read rtt together with `actual_gap`. A difference below one poll period is
+     consistent with a phase effect, but phase locking can hide a real regression smaller than one
+     poll period, so such a difference neither shows nor excludes a change of the call path. A
+     rate measured in one regime does not predict the next sample, which is why the W2 counts are
+     fixed.
 3. **Windowed W1 is fence-bound.**
    - The measured interval is mostly processing-fence time, about 50 to 99 % across cells (51 to
-     99 % on WSL, 85 to 99 % on Windows).
+     99 % on WSL, 85 to 98 % on Windows).
    - The 64-byte cells are the least fence-bound (51 to 83 % on WSL): up to about half of their
      interval is publishing and delivery, so their windowed rate does follow the publish path.
    - Fence p50 in one WSL run of the default grid was 3.9 to 5.9 ms with one receiver and 10.8 to
@@ -899,9 +930,18 @@ Each entry gives the default that is implemented and the alternative.
 | 3 | The W2 cells mostly report the wait policy (section 12, finding 2). Keep them? | Keep the cells as they are and read them by the reading rule | Jitter the gap by up to one poll period; a larger window for a capacity-bound `leaf_to_leaf` cell |
 | 4 | Size of the default sweep, and whether open-loop waits for the reference host | Keep the open-loop cells defined: they run only once calibration has stored their rates, so they wait for the reference host anyway; every cell is selectable | A smaller default grid |
 | 5 | Fixed count for the W2 gap-0 cells | 10000 | Another fixed count |
-| 6 | Is the runner's operational cleanup acceptable under "only system independent stuff"? On POSIX it signals only the launched coordinator's process group, leaves exit through Sintra's lifeline, and a `--run-id` scan only detects leftovers; on Windows it terminates a retained-handle process tree. It measures nothing | Keep | Drop the per-OS parts and rely on the lifeline alone |
+| 6 | Is the runner's operational cleanup acceptable under "only system independent stuff"? On POSIX it signals only the launched coordinator's process group, leaves exit through Sintra's lifeline (a leaf that cannot run is reported; see the decision below), and a `--run-id` scan only detects leftovers; on Windows it terminates a retained-handle process tree. It measures nothing | Keep | Drop the per-OS parts and rely on the lifeline alone |
 | 7 | Oversubscribed point `N_over = min(125, max(80, 2C))` | Keep; revisit once C of the reference host is known | Another formula |
 | 8 | Maximum swarm size: 125, the automatic index budget, reached by N_over from C = 63 | 125 | A lower cap |
 | 9 | A/A cadence | An operator procedure: the runner runs no A/A pass by itself and reads A/A records from the output file or `--aa`. The operator runs an A/A session for the selected cells with every comparison session, until the stored A/A spreads prove stable | Once per host or toolchain change |
 | 10 | Where calibrated counts and rates live | In git (`benchmarks/workloads.json`), so both arms and later sessions use identical absolute rates | Beside the results |
 | 11 | The 2 s gap cells of W2 reach the parked regime, whose wake path on Linux is the library's futex (`ipc/semaphore.h:693-700`). The benchmark reaches it only through the public RPC API and contains no futex code. Keep these cells? | Keep the cells at 2 s | A gap of about 1.2 s also passes the park threshold (the 1 s sleep phase, `config.h:53`) and would shorten a W2 pass by about 30 % (development machine); or drop the parked regime, if "leave futex tests" excludes it |
+
+**Decided by the owner**
+
+- **Cleanup of a leaf that cannot run (POSIX); owner decision, 2026-11-16: accept and
+  document.** A leaf that is stopped, by `SIGSTOP` or a debugger, cannot run its lifeline
+  watcher, so ending the coordinator does not end it. The runner keeps signalling only its own
+  coordinator's process group. It reports such a leaf by PID with `cleanup_incomplete`, the
+  session stops, and the operator handles the process. The runner does not become a subreaper
+  and takes no other ownership of the leaves.

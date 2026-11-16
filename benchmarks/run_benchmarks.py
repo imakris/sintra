@@ -32,8 +32,9 @@ TIMEOUT_BASE_S = 60         # a sample's timeout is this plus a multiple of its 
 TIMEOUT_FACTOR = 3          # three times it, or, for a windowed broadcast cell that was never
 UNCALIBRATED_TIMEOUT_FACTOR = 30    # calibrated, whose count is only an estimate, thirty times it
 CALIBRATION_TIMEOUT_S = 900 # under --calibrate: an estimate may be far off on a slow host
-REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
-EXIT_WAIT_S = 10            # for the participants to exit, on their own or after a kill
+AFTER_EXIT_S = 10           # after the coordinator's normal exit, one deadline for the reports
+                            # of every participant and for the other processes to exit
+EXIT_WAIT_S = 10            # in the cleanup, for the processes of the run to exit
 AGGREGATE_TIMEOUT_S = 60    # for --aggregate, which only reads the reports of one sample
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
 CALIBRATION_RUNS = 3
@@ -184,6 +185,7 @@ def round_significant(value, digits=2):
 # --- Request/response cells (W2) ------------------------------------------------
 
 RPC_WARMUP_CALLS = 1000
+# The roles of a route's processes, by branch index (role_name in rpc_benchmark.cpp).
 RPC_ROUTE_ROLES = {
     "leaf_to_coordinator": ["coordinator_callee", "caller"],
     "leaf_to_leaf": ["coordinator", "callee", "caller"],
@@ -401,10 +403,14 @@ def names_run(arguments, run_id):
 
 
 def command_line(pid):
-    """The arguments of the process that has this PID now, from procfs; empty when it is gone."""
+    """The arguments of the process that has this PID now, from procfs; empty when it is gone.
+
+    Only a process that has disappeared counts as gone. Any other failure to read, such as a
+    missing permission, raises: the look then fails, as one with a failed `ps` does.
+    """
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
+    except (FileNotFoundError, ProcessLookupError):
         return []
     return [argument.decode(errors="replace") for argument in raw.split(b"\0")]
 
@@ -485,14 +491,14 @@ class Participants:
                 if time.monotonic() >= deadline:
                     return "timeout"
 
-    def wait_for_exit(self):
-        """After the coordinator's own exit: waits for the other processes of the run to exit
-        by themselves; returns those that a look found alive at the end.
+    def wait_for_exit(self, deadline):
+        """After the coordinator's own exit: waits until the deadline for the other processes
+        of the run to exit by themselves; returns those that a look found alive at the end.
+        It looks at least once, also when the deadline has passed.
 
         A look that fails establishes nothing, so the wait goes on. A failure that lasts
         reaches clean_up(), whose looks fail as well and leave the cleanup incomplete.
         """
-        deadline = time.monotonic() + EXIT_WAIT_S
         while True:
             try:
                 alive = self.alive()
@@ -616,7 +622,9 @@ class Posix_participants(Participants):
     does not signal it. Once the coordinator is gone, a leaf exits by itself: every spawned
     Sintra process holds a lifeline to the coordinator and hard-exits about 100 ms after it
     closes (docs/architecture.md, "Lifeline ownership"). The runner waits for that and looks
-    at the process table for processes that name this run.
+    at the process table for processes that name this run. A leaf that cannot run, such as a
+    stopped one, cannot exit that way: the cleanup reports it as left, and the operator ends
+    it (owner decision, plan section 14).
     """
 
     def kill_owned(self):
@@ -706,10 +714,9 @@ def cell_command(executable, cell, run_id):
     return command
 
 
-def wait_for_reports(run_dir):
-    """Waits for one report per participant that recorded its PID."""
+def wait_for_reports(run_dir, deadline):
+    """Waits until the deadline for one report per participant that recorded its PID."""
     expected = len(list(run_dir.glob("*.pid")))
-    deadline = time.monotonic() + REPORT_WAIT_S
     while (len(list(run_dir.glob("*.bin"))) < expected and time.monotonic() < deadline
            and not interrupt_requested):
         time.sleep(0.05)
@@ -733,34 +740,59 @@ def cleanup_incomplete_message(run_id, run_dir, remaining):
 
 
 def fallback_record(run_id, facts, **cell):
-    """A record without metrics, as the runner writes it for a sample that left nothing to
-    aggregate. Its cell has every key that the executable would have written; a key that
-    does not apply to the cell, or that only the executable knows, is null."""
+    """A record without metrics, as the runner writes it when `--aggregate` produced none.
+    Its cell has every key that the executable would have written; a key that does not apply
+    to the cell, or that only the executable knows, is null."""
     return {
         "run_id": run_id,
         "build": facts,
         "cell": {**dict.fromkeys(CELL_KEYS), **cell},
         "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
-        "outcome": {"missing_files": None, "valid": False, "reasons": [], "warnings": []},
+        "outcome": {"missing_files": [], "valid": False, "reasons": [], "warnings": []},
     }
 
 
-def unaggregated_record(cell, run_id, facts):
-    """The record of a sample that left nothing to aggregate: it stalled or died before
-    its processes wrote their reports."""
+def expected_reports(cell):
+    """The file names of the reports that `--aggregate` expects for the cell: one per process,
+    named after its role and branch index (report_file_name in harness.h)."""
     if cell["workload"] == "rpc":
-        return rpc_unaggregated_record(cell, run_id, facts)
-    if cell["workload"] == "swarm":
-        return swarm_unaggregated_record(cell, run_id, facts)
-    return fallback_record(
-        run_id, facts, workload=cell["workload"], mode=cell["mode"], origin=cell["origin"],
-        receivers=cell["receivers"], payload_bytes=cell["payload_bytes"],
-        n_leaves=cell["receivers"] + (cell["origin"] == "leaf"),
-        offered_rate=cell["offered_rate"], planned=cell["messages"],
-        warmup=warmup_messages(cell),
-        burst=default_burst(cell, facts) if cell["burst"] is None else cell["burst"],
-        handler_delay_us=cell["handler_delay_us"] or 0,
-        validation_only=is_validation_only(cell, facts))
+        roles = RPC_ROUTE_ROLES[cell["route"]]
+    elif cell["workload"] == "swarm":
+        roles = ["coordinator"] + ["leaves"] * cell["leaves"]
+    elif cell["origin"] == "leaf":
+        roles = ["coordinator", "sender"] + ["receivers"] * cell["receivers"]
+    else:
+        roles = ["coordinator_sender"] + ["receivers"] * cell["receivers"]
+    return [f"{role}-{index}.bin" for index, role in enumerate(roles)]
+
+
+def unaggregated_record(cell, run_id, facts, run_dir):
+    """The record of a sample for which `--aggregate` produced none: the sample stalled or
+    died before its processes wrote their reports, or a report could not be read.
+
+    Its `missing_files` are the expected reports that are absent from the run directory, with
+    the reason `missing_files` when there is one. A report that is present may still be one
+    that could not be read.
+    """
+    if cell["workload"] == "rpc":
+        record = rpc_unaggregated_record(cell, run_id, facts)
+    elif cell["workload"] == "swarm":
+        record = swarm_unaggregated_record(cell, run_id, facts)
+    else:
+        record = fallback_record(
+            run_id, facts, workload=cell["workload"], mode=cell["mode"], origin=cell["origin"],
+            receivers=cell["receivers"], payload_bytes=cell["payload_bytes"],
+            n_leaves=cell["receivers"] + (cell["origin"] == "leaf"),
+            offered_rate=cell["offered_rate"], planned=cell["messages"],
+            warmup=warmup_messages(cell),
+            burst=default_burst(cell, facts) if cell["burst"] is None else cell["burst"],
+            handler_delay_us=cell["handler_delay_us"] or 0,
+            validation_only=is_validation_only(cell, facts))
+    missing = [name for name in expected_reports(cell) if not (run_dir / name).is_file()]
+    record["outcome"]["missing_files"] = missing
+    if missing:
+        record["outcome"]["reasons"].append("missing_files")
+    return record
 
 
 class Session:
@@ -813,8 +845,9 @@ class Session:
         requested, and cleans up after it in every case, also when the runner itself fails.
 
         Returns the coordinator's exit code, how the wait for it ended ("exited", "timeout" or
-        "interrupted"), whether processes of the run outlived a normal exit, and a description
-        of whatever the cleanup left behind or could not establish.
+        "interrupted"), whether a process of the run was still alive AFTER_EXIT_S after a
+        normal exit, and a description of whatever the cleanup left behind or could not
+        establish.
         """
         if os.name == "nt":
             participants = Windows_participants(run_id, self.process_tree)
@@ -827,8 +860,11 @@ class Session:
             ending = participants.wait_for_coordinator(timeout)
             stray = False
             if ending == "exited":
-                wait_for_reports(run_dir)
-                stray = bool(participants.wait_for_exit())
+                # One deadline from the coordinator's exit: a process that is still alive at
+                # it is a stray, however long the wait for the reports took.
+                deadline = time.monotonic() + AFTER_EXIT_S
+                wait_for_reports(run_dir, deadline)
+                stray = bool(participants.wait_for_exit(deadline))
             remaining = participants.clean_up()
             return participants.process.returncode, ending, stray, remaining
         except BaseException:
@@ -899,15 +935,14 @@ class Session:
             if record["run_id"] != run_id:
                 reasons.append("run_id_mismatch")
         else:
-            record = unaggregated_record(cell, run_id, facts)
-            # A sample that timed out may have left nothing to aggregate, but an aggregation
-            # that does not finish has failed whatever the sample did.
+            # Also after a timeout: the record says that there is no aggregate, and which
+            # reports are absent.
+            record = unaggregated_record(cell, run_id, facts, run_dir)
+            reasons.append("aggregation_failed")
             if aggregate is None:
-                reasons.append("aggregation_failed")
                 print(f"--aggregate did not finish within {AGGREGATE_TIMEOUT_S} s",
                       file=sys.stderr)
-            elif not timed_out:
-                reasons.append("aggregation_failed")
+            else:
                 sys.stderr.write(aggregate.stderr)
         if reasons:
             stderr = (run_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace")
@@ -1047,7 +1082,7 @@ def cpu_value(record, read):
 def comparison_key(record):
     """The effective parameters of a sample: its cell (ID, planned message and warm-up counts,
     offered rate, calibration metadata), the toolchain and configuration of its build, host
-    label and C.
+    label, operating system (host.os) and C.
 
     The commit, the library constants of the build and the observed counts are not part of
     it. Neither are the framed size and the burst, which follow from the library: a usable
@@ -1057,7 +1092,8 @@ def comparison_key(record):
             if key not in ("framed_bytes", "burst")}
     host = record["host"]
     return json.dumps(
-        [cell, configuration(record["build"]), host["label"], host["cpus_effective"]],
+        [cell, configuration(record["build"]), host["label"], host["os"],
+         host["cpus_effective"]],
         sort_keys=True)
 
 
@@ -1115,8 +1151,8 @@ def headline_metrics(record):
             (f"CPU us/msg {role}", True,
              cpu_value(record, lambda cpu, role=role: cpu[role]["us_per_message"]))
             for role in record["cpu"]]
-        # The rates and the CPU per message include the fence time. The duration of the
-        # publish call does not, so it follows the publish path alone.
+        # The rates and the CPU per message include the fence time. send_call does not: it
+        # covers the two payload-header writes and the publish call.
         return metrics + [
             ("send_call p50 us", False, latency["send_call"]["p50_us"]),
             ("slowest_from_send p50 us", False, latency["slowest_from_send"]["p50_us"]),
@@ -1231,8 +1267,9 @@ def print_summary(records, aa_records, skipped):
     `aa_records` that have the same effective parameters. Nothing is flagged.
     """
     print("\n== Summary: median [min, max] of the within-pair comparisons ==")
-    print("B/A is a ratio. CPU, the lost fraction, and any metric that is zero or unavailable in")
-    print("an observation or an A/A observation are shown as per-arm medians with B-A instead.")
+    print("B/A is a ratio. CPU, the lost fraction, the shutdown calls, and any metric that is")
+    print("zero or unavailable in an observation or an A/A observation are shown as per-arm")
+    print("medians with B-A instead.")
     print("The A/A spread is the largest deviation within a matching A/A pair, whichever of its")
     print("arms was larger: a factor for a ratio, an absolute value for a difference.")
     builds = {record["arm"]: record["build"] for record in records}
@@ -1381,9 +1418,10 @@ def print_swarm_tables(ids, cells, samples_by_cell, median):
 
 
 def print_rpc_tables(ids, cells, median, cpu_median):
-    """W2 against the gap, for each route: the gap that was slept, rtt, and each role's CPU
-    per call. In the reader's sleep phase rtt and the slept gap add up to a whole number of
-    the reader's poll periods, so the two are read together."""
+    """W2 against the gap, for each route: the idle time before each call (actual_gap), rtt,
+    and each role's CPU per call. In the reader's sleep phase rtt and actual_gap were seen to
+    add up to about a whole number of the reader's poll periods, so the two are read
+    together."""
     for route, roles in RPC_ROUTE_ROLES.items():
         of_route = sorted((cell_id for cell_id in ids if cells[cell_id]["route"] == route),
                           key=lambda cell_id: cells[cell_id]["gap_us"])

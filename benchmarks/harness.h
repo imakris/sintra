@@ -184,9 +184,11 @@ inline void log_callback(sintra::log_level level, const char* message, void*)
 }
 
 /// Size of the frame that the calling handler thread is dispatching. This is one
-/// of the benchmarks' two couplings to library internals. The other is the
-/// `--branch_index` argument of a spawned branch, which swarm_benchmark.cpp
-/// reads.
+/// of the benchmarks' four uses of library internals. The others are
+/// `sintra::detail::message_frame_size_limit`, the payload bound that
+/// broadcast_benchmark.cpp checks; `sintra::detail::k_sintra_ring_abi_version`,
+/// a build fact; and the `--branch_index` argument of a spawned branch, which
+/// swarm_benchmark.cpp reads.
 inline uint64_t current_frame_bytes()
 {
     return sintra::s_tl_current_message->bytes_to_next_message;
