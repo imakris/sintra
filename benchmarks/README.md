@@ -41,8 +41,15 @@ generator ignores it.
 
 A sample is valid only from a Release configuration with `NDEBUG` defined,
 optimization on and test hooks off. Other builds run, and their records say why
-they are invalid. Build both arms of a comparison with the same toolchain and
-settings: the runner refuses to compare builds whose build facts differ.
+they are invalid.
+
+Build both arms of a comparison with the same toolchain and configuration. The
+runner refuses arms that differ in the compiler, the configuration, `NDEBUG`,
+optimization, test hooks or separate compilation. The arms may differ in a
+library constant, which is what a comparison of two library versions can be
+about: the eviction settings, `message_ring_size` and the ring ABI version.
+Each record carries the constants of its arm, and the runner names the ones
+that differ in a notice at the start of the session and in the summary.
 
 ## Runner
 
@@ -58,7 +65,9 @@ python benchmarks/run_benchmarks.py --a <build-dir> --a-commit <sha> [--b <build
   carry `aa: true`. Its within-pair spread is the observed noise of a cell.
 - **Output.** One JSON record per sample is appended to `--output` and flushed.
   The commits are the operator's labels for the two arms; the runner does not
-  read them from the build.
+  read them from the build. When the runner reads earlier records from
+  `--output` or `--aa`, it skips a line that does not parse or that is not a
+  record of this schema, and says how many lines it skipped.
 - **Selection.** Without `--select`, the default grid runs: every cell with
   R in `default_receivers` (1, 4 and 16). `--select` takes a glob over cell IDs
   and may be repeated; it reaches every defined cell, including R = 2 and 8.
@@ -82,61 +91,97 @@ cells of both origins at R = 1 and R = 4.
 ### Each sample and its cleanup
 
 The runner creates a fresh run directory, names it in `SINTRA_BENCHMARK_DIR` and
-starts the coordinator with a timeout of 60 s plus three times the planned
-duration. It then waits up to 10 s for the report of every participant, runs
-`--aggregate`, adds its own fields and appends the record. It deletes the run
-directory unless `--keep` is given.
+starts the coordinator. It then waits up to 10 s for the report of every
+participant, runs `--aggregate`, adds its own fields and appends the record. It
+deletes the run directory unless `--keep` is given.
+
+**Timeout.** A sample's timeout is 60 s plus three times its planned duration.
+A windowed cell without calibration metadata gets 60 s plus thirty times it,
+because its count is only an estimate for the host.
 
 The runner owns the processes of a sample and leaves none behind:
 
-- **On timeout,** it terminates the swarm; the record has `timed_out: true` and
-  the reason `timeout`. The sample is still aggregated, because its processes
-  may have written their reports before the stall.
-- **On Ctrl+C, a termination request, or an error of the runner,** it terminates
-  the swarm before it exits. The interrupted sample has no record.
-- **After a normal exit,** participants that are still alive after 10 s are
-  terminated, and the record gets the warning `stray_participants`.
-- **If a participant cannot be removed,** the record gets the reason
-  `cleanup_incomplete`, the run directory is kept, and the session stops, so that
-  nothing is measured beside a stray process.
+- **On timeout,** it ends the swarm in the way described below; the record has
+  `timed_out: true` and the reason `timeout`. The sample is still aggregated,
+  because its processes may have written their reports before the stall.
+- **On an interrupt or an error of the runner,** it ends the swarm before it
+  exits. The sample that was running has no record. An interrupt is Ctrl+C,
+  Ctrl+Break, SIGTERM or SIGHUP. It only sets a flag, which the runner polls
+  while a sample runs, so a further interrupt cannot cut a cleanup short. A
+  signal that the runner was started to ignore, as under `nohup`, stays ignored.
+- **After a normal exit,** the record gets the warning `stray_participants` if
+  processes of the run are still alive after 10 s. The cleanup follows.
+- **If the cleanup is not complete within 10 s,** the record gets the reason
+  `cleanup_incomplete`, the run directory is kept, and the session stops with a
+  message that lists the PID and the command line of every process that is
+  left, so that nothing is measured beside a stray process. The cleanup is
+  complete when the coordinator is reaped and two successive looks find no
+  other process of the run. A look that fails leaves it incomplete.
 
-The runner signals only what it can identify as its own:
+The runner never signals a process that it knows only by its PID, not even
+right after checking that PID: between the check and the signal, the PID can
+pass to another process. This is what it signals, and how it finds the rest:
 
-- **Windows.** It retains a native handle of the coordinator it started and of
-  each descendant, and terminates through those handles. Recorded PIDs are never
-  signalled. This reuses `tests/runner/platform/windows_process_tree.py`, which
-  the runner loads by its path relative to `run_benchmarks.py`; the test
-  framework is not imported. Without the `tests` directory, the runner stops at
-  start on Windows with a message that names the missing file.
-- **POSIX.** The coordinator is the runner's child. A leaf starts its own
-  session, so the runner finds it through the PID that it recorded in the run
-  directory, and signals that PID only while its command line names this
-  benchmark executable and this run's ID. On Linux a pidfd pins the identified
-  process, so the check and the signal refer to the same process. Elsewhere the
-  identity is established immediately before the signal. A recorded PID that
-  cannot be identified is not signalled.
+- **POSIX.** The runner signals only the coordinator, which is its own child:
+  it kills the coordinator's process group while the coordinator is unreaped.
+  That group holds the coordinator and those of its children that have not
+  started their own session yet. A leaf is never signalled. It exits by itself
+  through Sintra's lifeline about 100 ms after the coordinator is gone
+  ([docs/architecture.md](../docs/architecture.md), "Lifeline ownership"). The
+  runner waits for that. It looks for processes of the run by scanning the
+  process table for command lines that carry `--run-id` with this run's ID,
+  which also finds a child that has not started the executable yet. A leaf that
+  cannot exit by itself, such as a stopped one, is reported as left.
+- **Windows.** The runner terminates the coordinator and its descendants
+  through retained native handles. This reuses
+  `tests/runner/platform/windows_process_tree.py`, which the runner loads by
+  its path relative to `run_benchmarks.py`; the test framework is not imported.
+  Without the `tests` directory, the runner stops at start on Windows with a
+  message that names the missing file. If the process table cannot be read, the
+  runner still terminates through the handles that it holds, and the cleanup
+  stays incomplete until a later look succeeds.
+
+The PID files in the run directory tell the runner how many reports to wait
+for. It does not find or signal a process through them.
 
 ### Summary
 
 For each cell, the runner prints the number of comparable pairs used, the
 number of invalid samples of each arm, and the sample support of the headline
-latencies: `n_obs` and `n_messages` of the least supported sample. For each
-headline metric it prints the median within-pair comparison with its minimum
-and maximum and, beside it, the observed A/A range: the minimum and maximum of
-the same comparison over the comparable A/A pairs with the same effective
-parameters, taken from the output file and from `--aa`. In an A/A session, the
-session's own pairs are among them. Nothing is flagged automatically.
+latencies: `n_obs` and `n_messages` of the least supported sample. For a
+windowed cell it also prints each arm's median fence time. For each headline
+metric it prints the median within-pair comparison with its minimum and maximum
+and, beside it, the A/A spread. Nothing is flagged automatically.
 
+- **A/A spread.** The largest deviation within a comparable A/A pair with the
+  same effective parameters, taken from the output file and from `--aa`. In an
+  A/A session, the session's own pairs are among them. The arm labels of an A/A
+  pair are arbitrary, so the spread does not depend on them: a ratio r counts
+  as max(r, 1/r) and is printed as a factor, such as `up to x1.012 over 2
+  pairs`, and a difference counts as its absolute value.
 - **Ratio or difference.** A metric is compared as the ratio B/A only when every
-  observation of the cell and of its matching A/A pairs is positive. Otherwise
-  it is shown as the median of each arm with the difference B-A, and its A/A
-  range uses differences too. CPU metrics and the lost fraction are always shown
-  that way. A zero observation is never dropped.
+  observation of the cell and of its matching A/A pairs is available and not
+  zero. Otherwise it is shown as the median of each arm with the difference
+  B-A, and its A/A spread uses differences too. CPU metrics and the lost
+  fraction are always shown that way. A slowest-receiver latency follows the
+  general rule: it is a ratio until one observation is unavailable or zero. A
+  zero observation is never dropped.
 - **Unavailable.** An observation without a value is counted as unavailable, on
-  the comparison and on the A/A range: a slowest-receiver latency when no
+  the comparison and on the A/A spread: a slowest-receiver latency when no
   sampled message reached every receiver, and every CPU metric of a sample with
   the warning `cpu_not_advancing`. "unavailable" alone means that no pair has a
   value, or that no matching A/A pair exists.
+- **Comparable pairs.** Two samples are compared when both are usable and have
+  the same cell, toolchain and configuration, host label and C. Library
+  constants do not have to match. If the arms differ in one, the summary names
+  it in a notice, as the start of the session does.
+- **Fence time.** A windowed sender waits in a processing fence after every
+  burst and once at the end. The measured interval includes those waits, so
+  windowed rates and CPU per message include fence time. `throughput.fence_s`
+  holds their sum.
+- **Open-loop sender CPU.** An open-loop sender polls the clock for the last
+  100 µs before each intended arrival, so its CPU is mostly the generator's
+  own. Do not read it as the cost of publishing.
 
 | Mode | Headline metrics |
 |---|---|
@@ -147,7 +192,8 @@ After the summary, the runner prints the axis tables of plan section 10 for arm
 A, as the median over the usable samples of each cell: CPU µs per message by
 role against R, total CPU µs per application MB against payload, open-loop
 latency and loss against the offered rate, and each role's share of total CPU.
-A sample with `cpu_not_advancing` contributes no CPU value to them.
+The share table covers windowed cells only, because of the open-loop sender's
+polling. A sample with `cpu_not_advancing` contributes no CPU value to them.
 
 ### Calibration
 
@@ -184,7 +230,9 @@ fraction.
 | `cells[].calibration` | `{host_label, commit, date}`, or null |
 | `cells[].handler_delay_us`, `cells[].burst` | Optional validation-only options, passed to the executable |
 
-The 3 s of the plan are these defaults. An open-loop cell publishes
+The plan's 3 s windowed interval and 3 s open-loop schedule are defaults: the
+shipped `workloads.json` sets `target_interval_s` and `open_loop.duration_s` to
+3, and another workloads file can set other values. An open-loop cell publishes
 `ceil(rate × duration_s)` messages: all i with `i/rate` below the schedule. Its
 completion may take longer than the schedule.
 
@@ -207,6 +255,12 @@ protocol, before `sintra::shutdown()`. `--aggregate` requires exactly one report
 per process of the cell, all of one run and one cell, and prints the record. It
 exits 0 whenever it can produce a record, valid or not.
 
+Every step of the measurement protocol is a Sintra barrier over all processes.
+Sintra treats a barrier as satisfied without holding it while a process shuts
+down or drains, and reports that in the barrier's result. A process that gets
+such a result stops its measurement and writes no report, so the sample is
+invalid with `missing_files`; the coordinator also exits non-zero.
+
 | Cell option | Meaning | Default |
 |---|---|---|
 | `--mode windowed\|open_loop` | Measurement mode | `windowed` |
@@ -224,12 +278,13 @@ argument: `9.5` or `9x` is rejected for a count, and `inf` for a rate.
 
 **Validation-only.** `--handler-delay-us` and `--burst` exist to check loss
 detection. A record is `validation_only` when they change the effective
-workload: the delay is not zero, or the burst differs from the burst formula.
-Such a record stays out of comparisons, summaries and calibration; its validity
-follows the normal rules. The delay applies to receiver leaves only. Warm-up is
-always paced with the burst formula, also under `--burst 0`. An unpaced run
-that loses messages can also fail to complete, and the runner then reports the
-timeout.
+workload: the delay is not zero, or, in windowed mode, the burst differs from
+the burst formula. Open-loop publication has no bursts, so `--burst` does not
+change an open-loop cell. A validation-only record stays out of comparisons,
+summaries and calibration; its validity follows the normal rules. The delay
+applies to receiver leaves only. Warm-up is always paced with the burst
+formula, also under `--burst 0`. An unpaced run that loses messages can also
+fail to complete, and the runner then reports the timeout.
 
 **Open-loop drain.** After the last measured message the sender stays quiet for
 100 ms and then writes a sentinel. A control rendezvous, `published`, follows:
@@ -243,15 +298,25 @@ received message, and `counts.unresolved_tail` holds the tail it had not reached
 
 ## Record
 
-Plan section 7 defines the record and section 6 its metrics. These are the
-reasons and warnings that the executable and the runner write:
+Plan section 7 defines the record and section 6 its metrics. Beyond them, a
+record has these fields:
+
+| Field | Content |
+|---|---|
+| `cell.burst` | Messages per fenced burst of the measured part; 0 for an unpaced run. Open-loop publication does not use it |
+| `cell.handler_delay_us` | The handler delay of a validation run; otherwise 0 |
+| `throughput.fence_s` | Windowed: the sender's time in its burst fences and its final fence, which `interval_s` includes. Open-loop: null |
+
+`latency.fence` describes the burst fences only, not the final fence.
+
+These are the reasons and warnings that the executable and the runner write:
 
 | Reason | Condition |
 |---|---|
 | `build_not_release`, `build_without_ndebug`, `build_not_optimized`, `build_with_test_hooks` | The build is not valid |
 | `timeout` | The runner terminated the sample at its timeout |
 | `exit_code_nonzero` | The coordinator exited non-zero |
-| `cleanup_incomplete` | A participant could not be removed; the session stops |
+| `cleanup_incomplete` | A process of the run is left, or the runner could not establish that none is; the session stops |
 | `missing_files`, `foreign_run_files` | A process report is missing, or belongs to another run |
 | `unexpected_reports`, `inconsistent_reports` | A report is a duplicate or of a branch the cell lacks, or carries other cell settings |
 | `aggregation_failed`, `run_id_mismatch` | `--aggregate` produced no record, or one of another run |
@@ -263,15 +328,21 @@ reasons and warnings that the executable and the runner write:
 |---|---|
 | `cpu_low_confidence` | The measured interval is under 2 s |
 | `cpu_not_advancing` | The CPU delta of some process over the measured interval is exactly zero |
-| `stray_participants` | Participants outlived the coordinator's normal exit and were terminated |
+| `stray_participants` | Processes of the run outlived the coordinator's normal exit by 10 s |
 | `rate_shortfall` | The achieved publication rate is under 95% of the offered rate |
 | `ring_dir_not_empty` | `sintra-*` entries were already present in the ring parent directory |
 
-A record with missing, surplus or inconsistent process reports has null
-`counts`, `throughput`, `latency` and `cpu`. A sample that left no report at all
-has those too, and carries only the cell parameters that the runner knows.
+A record with a missing or surplus process report is invalid and has null
+`counts`, `throughput`, `latency` and `cpu`. A report of another run, or with
+other cell settings, is set aside and makes the record invalid too. If the
+expected reports are complete without it, the metrics are computed from those;
+if it stands in for an expected report, that report is missing. A sample that
+left no report at all has null metrics, and carries only the cell parameters
+that the runner knows.
 
 **Process CPU on Windows.** The Windows process CPU clock is coarse and can stay
 at zero for a whole sample, however long the interval: neither 2 s nor 3 s makes
-it usable. A sample with `cpu_not_advancing` has no usable CPU metric, and a
-sample without the warning can still be coarse. Read CPU from Linux runs.
+it usable. A sample with `cpu_not_advancing` has no usable CPU metric. A sample
+without the warning is not reliable either: its process CPU can be several
+times too low. CPU figures from a Windows host are not a reference. Read CPU
+from Linux runs.

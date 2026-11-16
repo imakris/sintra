@@ -17,7 +17,6 @@ import math
 import os
 from pathlib import Path
 import platform
-import select
 import shutil
 import signal
 import statistics
@@ -28,13 +27,23 @@ import time
 SCHEMA = "sintra-bench/1"
 EXECUTABLES = {"broadcast": "sintra_broadcast_benchmark"}
 CELL_PREFIXES = {"broadcast": "w1"}
-TIMEOUT_BASE_S = 60         # a sample's timeout is this plus three times its planned duration
+TIMEOUT_BASE_S = 60         # a sample's timeout is this plus a multiple of its planned duration:
+TIMEOUT_FACTOR = 3          # three times it, or, for a windowed cell that was never calibrated
+UNCALIBRATED_TIMEOUT_FACTOR = 30    # and whose count is only an estimate, thirty times it
 REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
 EXIT_WAIT_S = 10            # for the participants to exit, on their own or after a kill
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
 CALIBRATION_RUNS = 3
 ROLES = ["coordinator", "coordinator_sender", "sender", "receivers"]
 HAS_PROCFS = Path("/proc/self/cmdline").exists()
+
+# The build facts that both arms of a comparison must share, and the library constants in
+# which they may differ: a change of the library is what a comparison is there to measure.
+CONFIGURATION_FACTS = [
+    "compiler", "config", "ndebug", "optimized", "test_hooks", "separate_compilation"]
+LIBRARY_FACTS = [
+    "slow_reader_eviction", "eviction_spin_budget_us", "eviction_spin_threshold",
+    "eviction_lag_rings", "message_ring_size", "ring_abi_version"]
 
 
 def fail(message):
@@ -154,84 +163,197 @@ def round_significant(value, digits=2):
 
 # --- Ownership of a sample's processes ----------------------------------------
 
-class Participants:
-    """The processes of one sample that the runner owns: the coordinator it started, and that
-    coordinator's leaves. A subclass establishes the ownership for its platform; nothing is
-    ever signalled that is not identified as a participant of this sample."""
+interrupt_requested = False
 
-    def __init__(self, process):
-        self.process = process
+
+def request_interrupt(signum, frame):
+    """The handler of SIGINT, SIGTERM, SIGHUP and Ctrl+Break. It only records the request.
+
+    Nothing is raised asynchronously. The runner acts on the request where it polls for it,
+    and a cleanup that is under way runs to its end whatever signals arrive meanwhile.
+    """
+    global interrupt_requested
+    interrupt_requested = True
+
+
+def names_run(arguments, run_id):
+    """Whether a command line carries `--run-id <run ID>`, as the coordinator's and every
+    leaf's does."""
+    return ("--run-id", run_id) in zip(arguments, arguments[1:])
+
+
+def command_line(pid):
+    """The arguments of the process that has this PID now, from procfs; empty when it is gone."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [argument.decode(errors="replace") for argument in raw.split(b"\0")]
+
+
+def run_processes(run_id):
+    """{PID: command line} of every process whose command line names this run.
+
+    A child that the coordinator has forked, but that has not started the executable yet,
+    still shows the coordinator's command line. A scan therefore finds the processes of a run
+    without their cooperation; a file that a process writes once it runs does not.
+    """
+    if HAS_PROCFS:
+        pids = [int(entry) for entry in os.listdir("/proc") if entry.isdigit()]
+        lines = {pid: command_line(pid) for pid in pids}
+    else:
+        listing = subprocess.run(
+            ["ps", "-ww", "-A", "-o", "pid=", "-o", "command="],
+            capture_output=True, text=True, check=True)
+        fields = [line.split() for line in listing.stdout.splitlines() if line.strip()]
+        lines = {int(pid): arguments for pid, *arguments in fields}
+    return {pid: " ".join(arguments).strip() for pid, arguments in lines.items()
+            if names_run(arguments, run_id)}
+
+
+class Participants:
+    """The processes of one sample: the coordinator that the runner launches, and its leaves.
+
+    The runner signals only what it holds by more than a number: the coordinator, which is
+    its own child, and on Windows each descendant, through a retained handle. It never
+    signals a bare PID, not even one that it has just checked: between the check and the
+    signal, the PID can pass to another process. A subclass provides the platform's part.
+    """
+
+    def __init__(self, run_id):
+        self.run_id = run_id
+        self.process = None
+
+    def launch(self, command, run_dir):
+        """Starts the coordinator and takes ownership of its swarm."""
+        with open(run_dir / "stdout.txt", "wb") as out, open(run_dir / "stderr.txt", "wb") as err:
+            self.process = subprocess.Popen(
+                command, stdout=out, stderr=err,
+                env=dict(os.environ, SINTRA_BENCHMARK_DIR=str(run_dir)),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                start_new_session=os.name != "nt")
+        self.adopt()
+
+    def adopt(self):
+        """Takes whatever the platform needs to own the launched coordinator's swarm."""
 
     def observe(self):
-        """Retains the identity of the participants that are alive now."""
+        """Called repeatedly while the coordinator runs."""
 
-    def survivors(self):
-        """The PIDs of the owned participants that are still alive."""
+    def kill_owned(self):
+        """Terminates everything that is owned; returns a description of each failure."""
         raise NotImplementedError
 
-    def kill_survivors(self):
+    def alive(self):
+        """Looks afresh and describes each process of the run that is alive, the coordinator
+        until it is reaped, and whatever keeps the look from being conclusive."""
         raise NotImplementedError
 
     def close(self):
         pass
 
     def wait_for_coordinator(self, timeout):
-        """Whether the coordinator exited within the timeout."""
+        """Waits for the coordinator; returns "exited", "timeout" or "interrupted"."""
         deadline = time.monotonic() + timeout
         while True:
+            if interrupt_requested:
+                return "interrupted"
             self.observe()
             try:
                 self.process.wait(
                     timeout=max(0, min(OBSERVE_INTERVAL_S, deadline - time.monotonic())))
-                return True
+                return "exited"
             except subprocess.TimeoutExpired:
                 if time.monotonic() >= deadline:
-                    return False
+                    return "timeout"
 
     def wait_for_exit(self):
-        """Waits for the participants to exit on their own; returns those that did not."""
+        """After the coordinator's own exit: waits for the other processes of the run to exit
+        by themselves; returns those that did not."""
         deadline = time.monotonic() + EXIT_WAIT_S
         while True:
-            alive = self.survivors()
-            if not alive or time.monotonic() >= deadline:
+            alive = self.alive()
+            if not alive or interrupt_requested or time.monotonic() >= deadline:
                 return alive
             time.sleep(0.05)
 
-    def terminate(self):
-        """Kills the participants and waits for them; returns those it could not remove."""
+    def clean_up(self):
+        """Terminates what is owned, reaps the coordinator and waits until no process of the
+        run is left, for at most EXIT_WAIT_S.
+
+        It does not raise, and a step that fails does not keep the others from running. It
+        returns a description of whatever is left or could not be established; the cleanup
+        is complete when that is empty.
+        """
+        if self.process is None:
+            return []   # the launch failed, so there is nothing to clean up
         deadline = time.monotonic() + EXIT_WAIT_S
+        confirmed = False
         while True:
-            alive = self.survivors()
-            if not alive or time.monotonic() >= deadline:
-                return alive
-            self.kill_survivors()
+            remaining = []
+            try:
+                remaining += self.kill_owned()
+            except Exception as error:
+                remaining.append(f"the termination failed: {error!r}")
+            try:
+                remaining += self.alive()
+            except Exception as error:
+                remaining.append(f"the processes of the run could not be listed: {error!r}")
+            # On POSIX a process is invisible to a look for a moment while it starts its
+            # executable, so an empty look counts only when a second one confirms it.
+            if (not remaining and confirmed) or time.monotonic() >= deadline:
+                return remaining
+            confirmed = not remaining
             time.sleep(0.05)
 
 
 class Windows_participants(Participants):
     """Owns the coordinator's process tree through retained native handles.
 
-    The tree starts from the handle of the coordinator the runner started and adds the handle
-    of each descendant while it is alive. Termination addresses those handles: neither a
-    recorded PID nor a reused one is ever signalled.
+    The tree starts from the handle of the coordinator that the runner launched and adds the
+    handle of each descendant while it is alive. Termination addresses those handles, so no
+    PID is signalled.
     """
 
-    def __init__(self, process, process_tree):
-        super().__init__(process)
-        self.tree = process_tree(process)
+    def __init__(self, run_id, process_tree):
+        super().__init__(run_id)
+        self.process_tree = process_tree
+        self.tree = None
+
+    def adopt(self):
+        self.tree = self.process_tree(self.process)
 
     def observe(self):
         self.tree.refresh()
 
-    def survivors(self):
-        coordinator = [self.process.pid] if self.process.poll() is None else []
-        return coordinator + self.tree.live_descendants()
+    def kill_owned(self):
+        errors = []
+        if self.tree is not None:
+            try:
+                self.tree.terminate()
+            except OSError as error:
+                errors.append(f"process tree: {error}")
+        try:
+            self.process.kill()     # through the handle that Popen holds
+        except OSError as error:
+            errors.append(f"pid {self.process.pid}, the coordinator: {error}")
+        return errors
 
-    def kill_survivors(self):
-        self.tree.terminate()
+    def alive(self):
+        alive = []
+        if self.process.poll() is None:
+            alive.append(f"pid {self.process.pid}: the coordinator")
+        if self.tree is None:
+            return alive + ["descendants unknown: their process tree could not be established"]
+        alive += [f"pid {pid}" for pid in self.tree.live_descendants()]
+        if self.tree.enumeration_error is not None:
+            alive.append("descendants unknown: the process table could not be read "
+                         f"({self.tree.enumeration_error})")
+        return alive
 
     def close(self):
-        self.tree.close()
+        if self.tree is not None:
+            self.tree.close()
 
 
 def load_windows_process_tree():
@@ -244,106 +366,53 @@ def load_windows_process_tree():
     spec = importlib.util.spec_from_file_location("windows_process_tree", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.Windows_process_tree
 
+    class Retained_process_tree(module.Windows_process_tree):
+        """terminate() and live_descendants() begin with a refresh. A process table that
+        cannot be read must not keep them from the handles that are already retained, so the
+        failure is recorded here, and the caller reports it as unresolved ownership."""
 
-def command_line(pid):
-    """The arguments of the process that has this PID now; empty when there is none."""
-    if HAS_PROCFS:
-        try:
-            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-        except OSError:
-            return []
-        return [argument.decode(errors="replace") for argument in raw.split(b"\0")]
-    listing = subprocess.run(
-        ["ps", "-ww", "-o", "command=", "-p", str(pid)],
-        capture_output=True, text=True, check=False)
-    return listing.stdout.split()
+        enumeration_error = None
 
+        def refresh(self):
+            try:
+                super().refresh()
+                self.enumeration_error = None
+            except OSError as error:
+                self.enumeration_error = error
 
-def has_exited(pidfd):
-    return bool(select.select([pidfd], [], [], 0)[0])
+    return Retained_process_tree
 
 
 class Posix_participants(Participants):
-    """Owns the coordinator as the runner's child, and the leaves through their recorded PIDs.
+    """Owns the coordinator as the runner's child, and signals nothing else.
 
-    Leaves start their own sessions, so the coordinator's process group does not contain
-    them. A recorded PID is signalled only while the process that has it is identified as a
-    participant of this sample: its command line names this executable and this run ID. On
-    Linux a pidfd pins the identified process while it is alive, so that the check and the
-    signal refer to the same process whatever becomes of the PID. Elsewhere the identity is
-    established immediately before the signal.
+    A leaf starts its own session, and the runner knows it only by its PID, so the runner
+    does not signal it. Once the coordinator is gone, a leaf exits by itself: every spawned
+    Sintra process holds a lifeline to the coordinator and hard-exits about 100 ms after it
+    closes (docs/architecture.md, "Lifeline ownership"). The runner waits for that and looks
+    at the process table for processes that name this run.
     """
 
-    def __init__(self, process, run_dir, executable, run_id):
-        super().__init__(process)
-        self.run_dir = run_dir
-        self.executable = executable.name
-        self.run_id = run_id
-        self.pins = hasattr(os, "pidfd_open")
-        self.pinned = {}        # PID -> pidfd of a participant identified while it was alive
-        self.examined = set()   # the recorded PIDs that pinning has looked at
-
-    def recorded_pids(self):
-        return [int(path.stem) for path in self.run_dir.glob("*.pid") if path.stem.isdigit()]
-
-    def is_participant(self, pid):
-        """Whether the process that has this PID now belongs to this sample."""
-        arguments = command_line(pid)
-        return self.run_id in arguments and any(
-            Path(argument).name == self.executable for argument in arguments)
-
-    def observe(self):
-        for pid in self.recorded_pids() if self.pins else []:
-            if pid in self.examined:
-                continue
-            self.examined.add(pid)
-            try:
-                pidfd = os.pidfd_open(pid)
-            except ProcessLookupError:
-                continue
-            except OSError:
-                self.pins = False   # no pidfd on this kernel: identify before each signal
-                return
-            # The descriptor pins one process. If that process is still alive after its
-            # command line was read, the command line is its own.
-            if self.is_participant(pid) and not has_exited(pidfd):
-                self.pinned[pid] = pidfd
-            else:
-                os.close(pidfd)
-
-    def survivors(self):
-        self.observe()
-        if self.pins:
-            leaves = [pid for pid, pidfd in self.pinned.items() if not has_exited(pidfd)]
-        else:
-            leaves = [pid for pid in self.recorded_pids() if self.is_participant(pid)]
-        coordinator = [self.process.pid] if self.process.poll() is None else []
-        return sorted(set(coordinator + leaves))
-
-    def kill_survivors(self):
-        self.observe()
+    def kill_owned(self):
         try:
+            # The coordinator leads the process group that the runner started it in. While
+            # it is an unreaped child of the runner, neither its PID nor that group ID can
+            # pass to another process, and the group holds only the coordinator and those of
+            # its children that have not started their own session yet.
             if self.process.poll() is None:
-                # The coordinator leads the process group that the runner started it in, and
-                # that group ID cannot be reused while it is an unreaped child of the runner.
                 os.killpg(self.process.pid, signal.SIGKILL)
-            if self.pins:
-                for pidfd in self.pinned.values():
-                    if not has_exited(pidfd):
-                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
-            else:
-                for pid in self.recorded_pids():
-                    # The identity is established immediately before the signal.
-                    if self.is_participant(pid):
-                        os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
-            pass    # it exited meanwhile; the caller looks again
+            pass
+        except OSError as error:
+            return [f"pid {self.process.pid}, the coordinator: {error}"]
+        return []
 
-    def close(self):
-        for pidfd in self.pinned.values():
-            os.close(pidfd)
+    def alive(self):
+        found = run_processes(self.run_id)
+        if self.process.poll() is None:
+            found.setdefault(self.process.pid, "the coordinator")
+        return [f"pid {pid}: {command}" for pid, command in sorted(found.items())]
 
 
 # --- Samples -----------------------------------------------------------------
@@ -362,15 +431,35 @@ def read_build_facts(executable):
     return json.loads(result.stdout)
 
 
+def configuration(build):
+    """The toolchain and configuration of a build: what both arms must share."""
+    return {key: build[key] for key in CONFIGURATION_FACTS}
+
+
+def library_notice(build_a, build_b):
+    """Names the library constants in which the builds of the two arms differ; None when
+    there is none. Such arms are compared all the same."""
+    different = [f"  {key}: A {build_a.get(key)}, B {build_b.get(key)}"
+                 for key in LIBRARY_FACTS if build_a.get(key) != build_b.get(key)]
+    if not different:
+        return None
+    return "notice: the arms differ in library constants:\n" + "\n".join(different)
+
+
 def warmup_messages(cell):
     return max(64, cell["messages"] // 20)
 
 
+def default_burst(cell, facts):
+    return max(1, facts["message_ring_size"] // 4 // (cell["payload_bytes"] + 512))
+
+
 def is_validation_only(cell, facts):
-    """Whether the cell's options change the effective workload: a handler delay, or a burst
-    other than the default one. The executable marks its records by the same rule."""
-    default_burst = max(1, facts["message_ring_size"] // 4 // (cell["payload_bytes"] + 512))
-    return bool(cell["handler_delay_us"]) or cell["burst"] not in (None, default_burst)
+    """Whether the cell's options change the effective workload: a handler delay, or, in
+    windowed mode, a burst other than the default one. Open-loop publication has no bursts.
+    The executable marks its records by the same rule."""
+    return bool(cell["handler_delay_us"]) or (
+        cell["mode"] == "windowed" and cell["burst"] not in (None, default_burst(cell, facts)))
 
 
 def cell_command(executable, cell, run_id):
@@ -390,7 +479,8 @@ def wait_for_reports(run_dir):
     """Waits for one report per participant that recorded its PID."""
     expected = len(list(run_dir.glob("*.pid")))
     deadline = time.monotonic() + REPORT_WAIT_S
-    while len(list(run_dir.glob("*.bin"))) < expected and time.monotonic() < deadline:
+    while (len(list(run_dir.glob("*.bin"))) < expected and time.monotonic() < deadline
+           and not interrupt_requested):
         time.sleep(0.05)
 
 
@@ -404,6 +494,13 @@ def remove_run_directory(run_dir):
     print(f"warning: could not remove {run_dir}", file=sys.stderr)
 
 
+def cleanup_incomplete_message(run_id, run_dir, remaining):
+    return (f"cleanup incomplete. These processes of run {run_id} are still alive, or the "
+            "runner could not establish that none is:\n  " + "\n  ".join(remaining) + "\n"
+            "The session stops here, so that nothing is measured beside them; "
+            f"the run directory {run_dir} is kept.")
+
+
 def unaggregated_record(cell, run_id, facts):
     """The record of a sample that left nothing to aggregate: it stalled or died before
     its processes wrote their reports."""
@@ -415,6 +512,8 @@ def unaggregated_record(cell, run_id, facts):
             "receivers": cell["receivers"], "payload_bytes": cell["payload_bytes"],
             "offered_rate": cell["offered_rate"], "planned": cell["messages"],
             "warmup": warmup_messages(cell),
+            "burst": default_burst(cell, facts) if cell["burst"] is None else cell["burst"],
+            "handler_delay_us": cell["handler_delay_us"] or 0,
             "validation_only": is_validation_only(cell, facts),
         },
         "counts": None, "throughput": None, "latency": None, "cpu": None, "lifecycle": None,
@@ -438,11 +537,13 @@ class Session:
         for workload in sorted({cell["workload"] for cell in cells}):
             for arm, build_dir in build_dirs.items():
                 self.executables[arm, workload] = find_executable(build_dir, workload)
-            facts = {arm: read_build_facts(self.executables[arm, workload]) for arm in build_dirs}
-            if facts["A"] != facts["B"]:
-                fail("the build facts of the two arms differ:\n"
-                     f"A: {facts['A']}\nB: {facts['B']}")
-            self.facts[workload] = facts["A"]
+                self.facts[arm, workload] = read_build_facts(self.executables[arm, workload])
+            a, b = self.facts["A", workload], self.facts["B", workload]
+            if configuration(a) != configuration(b):
+                fail("the toolchain or the configuration of the two arms differs:\n"
+                     f"A: {configuration(a)}\nB: {configuration(b)}")
+            if library_notice(a, b):
+                print(library_notice(a, b), flush=True)
         concurrency = next(iter(self.facts.values()))["hardware_concurrency"]
         self.host = {
             "label": platform.node(),
@@ -454,7 +555,10 @@ class Session:
         self.samples = 0
         self.runs_root = args.output.parent / (args.output.name + ".runs")
         args.output.parent.mkdir(parents=True, exist_ok=True)
+        unfinished = ends_mid_line(args.output)
         self.output = args.output.open("a", encoding="utf-8", newline="\n")
+        if unfinished:
+            self.output.write("\n")     # the next record starts on a line of its own
 
     def close(self):
         self.output.close()
@@ -462,60 +566,70 @@ class Session:
             self.runs_root.rmdir()
 
     def run_swarm(self, executable, cell, run_id, run_dir, timeout):
-        """Runs one swarm to the coordinator's exit or to the timeout, and leaves no
-        participant of it running, whatever interrupts the runner meanwhile.
+        """Runs one swarm until the coordinator exits, the timeout expires or an interrupt is
+        requested, and cleans up after it in every case, also when the runner itself fails.
 
-        Returns the coordinator's exit code, whether the sample timed out, whether participants
-        outlived a normal exit, and the PIDs of the participants that could not be removed.
+        Returns the coordinator's exit code, how the wait for it ended ("exited", "timeout" or
+        "interrupted"), whether processes of the run outlived a normal exit, and a description
+        of whatever the cleanup left behind or could not establish.
         """
-        with open(run_dir / "stdout.txt", "wb") as out, open(run_dir / "stderr.txt", "wb") as err:
-            process = subprocess.Popen(
-                cell_command(executable, cell, run_id), stdout=out, stderr=err,
-                env=dict(os.environ, SINTRA_BENCHMARK_DIR=str(run_dir)),
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                start_new_session=os.name != "nt")
-        participants = None
+        if os.name == "nt":
+            participants = Windows_participants(run_id, self.process_tree)
+        else:
+            participants = Posix_participants(run_id)
         try:
-            if os.name == "nt":
-                participants = Windows_participants(process, self.process_tree)
-            else:
-                participants = Posix_participants(process, run_dir, executable, run_id)
-            timed_out = not participants.wait_for_coordinator(timeout)
+            # The launch and the registration of the ownership are inside the guarded scope,
+            # and no signal raises (see request_interrupt), so nothing can separate them.
+            participants.launch(cell_command(executable, cell, run_id), run_dir)
+            ending = participants.wait_for_coordinator(timeout)
             stray = False
-            if not timed_out:
+            if ending == "exited":
                 wait_for_reports(run_dir)
                 stray = bool(participants.wait_for_exit())
-            remaining = participants.terminate()
-            return process.returncode, timed_out, stray, remaining
+            remaining = participants.clean_up()
+            return participants.process.returncode, ending, stray, remaining
         except BaseException:
-            # An interrupt or a failure of the runner must not leave the swarm running.
-            if participants is None:
-                process.kill()
-            elif participants.terminate():
-                print(f"warning: participants of run {run_id} are still running; "
-                      f"{run_dir} is kept", file=sys.stderr)
+            # A failure of the runner itself must not leave the swarm running either.
+            remaining = participants.clean_up()
+            if remaining:
+                print(cleanup_incomplete_message(run_id, run_dir, remaining), file=sys.stderr)
             elif not self.keep:
                 remove_run_directory(run_dir)
             raise
         finally:
-            if participants is not None:
-                participants.close()
+            participants.close()
+
+    def stop_if_interrupted(self, run_id, run_dir, remaining):
+        """Ends the session on an interrupt request. The sample that it struck has no record."""
+        if not interrupt_requested:
+            return
+        if remaining:
+            fail("interrupted. " + cleanup_incomplete_message(run_id, run_dir, remaining))
+        if not self.keep:
+            remove_run_directory(run_dir)
+        fail("interrupted. The sample that was running has no record.")
 
     def sample(self, arm, cell, pair_id=None, order=0):
         """Runs one sample, appends its record to the output and returns it."""
+        if interrupt_requested:
+            fail("interrupted before the next sample.")
         self.samples += 1
         run_id = f"{self.id}-{self.samples:05d}"
         run_dir = self.runs_root / run_id
         run_dir.mkdir(parents=True)
         executable = self.executables[arm, cell["workload"]]
-        facts = self.facts[cell["workload"]]
+        facts = self.facts[arm, cell["workload"]]
         ring_entries = len(list(Path(facts["ring_parent_dir"]).glob("sintra-*")))
-        timeout = TIMEOUT_BASE_S + 3 * cell["duration_s"]
+        estimated = cell["mode"] == "windowed" and cell["calibration"] is None
+        timeout = TIMEOUT_BASE_S + cell["duration_s"] * (
+            UNCALIBRATED_TIMEOUT_FACTOR if estimated else TIMEOUT_FACTOR)
         started = time.time()
         begin = time.monotonic()
-        exit_code, timed_out, stray, remaining = self.run_swarm(
+        exit_code, ending, stray, remaining = self.run_swarm(
             executable, cell, run_id, run_dir, timeout)
         wall = time.monotonic() - begin
+        timed_out = ending == "timeout"
+        self.stop_if_interrupted(run_id, run_dir, remaining)
 
         # A swarm that stalled in shutdown has already written its reports, so a timed-out
         # sample is aggregated too. One that stalled earlier has nothing to aggregate.
@@ -529,6 +643,7 @@ class Session:
         aggregate = subprocess.run(
             [str(executable), "--aggregate", str(run_dir)],
             capture_output=True, text=True, check=False)
+        self.stop_if_interrupted(run_id, run_dir, remaining)
         if aggregate.returncode == 0:
             record = json.loads(aggregate.stdout)
             if record["run_id"] != run_id:
@@ -541,7 +656,7 @@ class Session:
         if reasons:
             stderr = (run_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace")
             sys.stderr.write(stderr[-2000:])
-        # The evidence stays while a participant that could not be removed may still use it.
+        # The evidence stays while a process that could not be removed may still use it.
         if not self.keep and not remaining:
             remove_run_directory(run_dir)
 
@@ -580,9 +695,7 @@ class Session:
         print(f"{cell['id']} arm={arm} run={run_id} valid={outcome['valid']} "
               f"reasons={outcome['reasons']} warnings={outcome['warnings']}", flush=True)
         if remaining:
-            fail(f"cleanup incomplete: participants {remaining} of run {run_id} are still "
-                 "running. The session stops here, so that nothing is measured beside them; "
-                 f"the run directory {run_dir} is kept.")
+            fail(cleanup_incomplete_message(run_id, run_dir, remaining))
         return record
 
 
@@ -627,11 +740,37 @@ def calibrate(session, cells, workloads, path):
 
 # --- Summary -----------------------------------------------------------------
 
+def ends_mid_line(path):
+    """Whether a results file ends in an unfinished line, as an interrupted write leaves it."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    with path.open("rb") as data:
+        data.seek(-1, os.SEEK_END)
+        return data.read(1) != b"\n"
+
+
 def load_records(path):
+    """The records of an earlier results file. A line that does not parse, or that is not a
+    record of this schema, is skipped, and the number of such lines is reported."""
     if path is None or not path.is_file():
         return []
-    with path.open(encoding="utf-8") as lines:
-        return [json.loads(line) for line in lines if line.strip()]
+    records = []
+    skipped = 0
+    with path.open(encoding="utf-8", errors="replace") as lines:
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                record = None
+            if isinstance(record, dict) and record.get("schema") == SCHEMA:
+                records.append(record)
+            else:
+                skipped += 1
+    if skipped:
+        print(f"{path}: skipped {skipped} lines that are not {SCHEMA} records", flush=True)
+    return records
 
 
 def is_usable(record):
@@ -649,14 +788,19 @@ def cpu_value(record, read):
 
 def comparison_key(record):
     """The effective parameters of a sample: its cell (ID, planned message and warm-up counts,
-    offered rate, calibration metadata), build facts, host label and C.
+    offered rate, calibration metadata), the toolchain and configuration of its build, host
+    label and C.
 
-    The commit and the observed counts are not part of it.
+    The commit, the library constants of the build and the observed counts are not part of
+    it. Neither are the framed size and the burst, which follow from the library: a usable
+    sample has the default burst, and that is derived from the ring size.
     """
-    cell = {key: value for key, value in record["cell"].items() if key != "framed_bytes"}
+    cell = {key: value for key, value in record["cell"].items()
+            if key not in ("framed_bytes", "burst")}
     host = record["host"]
     return json.dumps(
-        [cell, record["build"], host["label"], host["cpus_effective"]], sort_keys=True)
+        [cell, configuration(record["build"]), host["label"], host["cpus_effective"]],
+        sort_keys=True)
 
 
 def comparable_pairs(records):
@@ -738,15 +882,32 @@ def coverage(compared, unavailable):
     return f"{text}, {unavailable} unavailable" if unavailable else text
 
 
+def fence_text(samples):
+    """The median time that windowed samples spent in processing fences, and its median
+    share of the measured interval. A record of an older executable has no fence time."""
+    shares = [(sample["throughput"].get("fence_s"), sample["throughput"]["interval_s"])
+              for sample in samples]
+    if any(fence is None for fence, _ in shares):
+        return "unavailable"
+    return (f"{statistics.median(fence for fence, _ in shares):.4g} s, "
+            f"{100 * statistics.median(fence / interval for fence, interval in shares):.3g}% "
+            "of the interval")
+
+
 def print_summary(records, aa_records, skipped):
     """Prints the comparison of the session's pairs, cell by cell.
 
-    Beside each comparison stands the range observed over the comparable A/A pairs in
+    Beside each comparison stands the spread observed over the comparable A/A pairs in
     `aa_records` that have the same effective parameters. Nothing is flagged.
     """
     print("\n== Summary: median [min, max] of the within-pair comparisons ==")
-    print("B/A is a ratio. CPU, the lost fraction, and any metric with a zero among its")
-    print("observations or its A/A observations are shown as per-arm medians with B-A instead.")
+    print("B/A is a ratio. CPU, the lost fraction, and any metric that is zero or unavailable in")
+    print("an observation or an A/A observation are shown as per-arm medians with B-A instead.")
+    print("The A/A spread is the largest deviation within a matching A/A pair, whichever of its")
+    print("arms was larger: a factor for a ratio, an absolute value for a difference.")
+    builds = {record["arm"]: record["build"] for record in records}
+    if len(builds) == 2 and library_notice(builds["A"], builds["B"]):
+        print(library_notice(builds["A"], builds["B"]))
     pairs_by_cell = {}
     for a, b in comparable_pairs(records):
         pairs_by_cell.setdefault(a["cell"]["id"], []).append((a, b))
@@ -773,14 +934,18 @@ def print_summary(records, aa_records, skipped):
                         key=lambda latency: latency["n_messages"])
             print(f"  sample support of {name}: at least n_obs {least['n_obs']}, "
                   f"n_messages {least['n_messages']}")
+        if pairs[0][0]["cell"]["mode"] == "windowed":
+            # The windowed rates and the CPU per message include this time.
+            print("  fence time, median: A " + fence_text([a for a, _ in pairs])
+                  + "; B " + fence_text([b for _, b in pairs]))
         aa_values = metric_values(aa_pairs_by_key.get(comparison_key(pairs[0][0]), []))
         for label, (always_difference, value_pairs) in metric_values(pairs).items():
             aa_value_pairs = aa_values.get(label, (always_difference, []))[1]
-            # One representation serves the comparison and its A/A range, and it is chosen
-            # from both: a zero observation in either rules the ratio out. No observation is
-            # dropped; one without a value is counted as unavailable.
+            # One representation serves the comparison and its A/A spread, and it is chosen
+            # from both: an observation that is zero or unavailable in either rules the ratio
+            # out. No observation is dropped; one without a value is counted as unavailable.
             as_difference = always_difference or any(
-                value == 0 for pair in value_pairs + aa_value_pairs for value in pair)
+                not value for pair in value_pairs + aa_value_pairs for value in pair)
             present, compared, unavailable = compare(value_pairs, as_difference)
             if not compared:
                 text = f"unavailable in all {unavailable} pairs"
@@ -797,9 +962,14 @@ def print_summary(records, aa_records, skipped):
                 aa_text = "unavailable (no matching A/A pairs)"
             elif not aa_compared:
                 aa_text = f"unavailable in all {aa_unavailable} pairs"
+            elif as_difference:
+                # The arm labels of an A/A pair are arbitrary, so its comparison is folded.
+                aa_text = (f"up to {max(abs(difference) for difference in aa_compared):.4g} "
+                           + coverage(aa_compared, aa_unavailable))
             else:
-                aa_text = f"{value_range(aa_compared)} {coverage(aa_compared, aa_unavailable)}"
-            print(f"  {label:30} {text}; observed A/A range {aa_text}")
+                aa_text = (f"up to x{max(max(ratio, 1 / ratio) for ratio in aa_compared):.4g} "
+                           + coverage(aa_compared, aa_unavailable))
+            print(f"  {label:30} {text}; A/A spread {aa_text}")
     if skipped:
         print("skipped, no stored open-loop rate: " + ", ".join(cell["id"] for cell in skipped))
 
@@ -902,9 +1072,14 @@ def print_axis_tables(records):
             return 100.0 * cpu[role]["cpu_s"] / cpu["total"]["cpu_s"]
         return read
 
-    print_table(
-        "Share of total CPU by role, percent", ["cell"] + ROLES,
-        [[cell_id] + [cpu_median(cell_id, share(role)) for role in ROLES] for cell_id in cells])
+    # The sender CPU of an open-loop cell is mostly its generator's clock polling, so the
+    # shares are taken from the windowed cells only.
+    windowed = cell_ids("windowed")
+    if windowed:
+        print_table(
+            "Share of total CPU by role, percent: windowed cells", ["cell"] + ROLES,
+            [[cell_id] + [cpu_median(cell_id, share(role)) for role in ROLES]
+             for cell_id in windowed])
 
 
 # --- Entry point ---------------------------------------------------------------
@@ -932,7 +1107,7 @@ def parse_arguments():
     parser.add_argument("--cpus", type=positive_int,
                         help="effective CPU count C of this session")
     parser.add_argument("--aa", type=Path,
-                        help="JSONL file with more A/A records for the observed A/A range")
+                        help="JSONL file with more A/A records for the A/A spread")
     parser.add_argument("--calibrate", type=Path, metavar="NEW_WORKLOADS",
                         help="calibrate the selected windowed cells into this workloads file")
     parser.add_argument("--keep", action="store_true", help="keep the run directories")
@@ -942,15 +1117,13 @@ def parse_arguments():
     return args
 
 
-def interrupt(signum, frame):
-    raise KeyboardInterrupt
-
-
 def main():
-    # A termination request unwinds like Ctrl+C, so that the running sample is cleaned up.
-    for name in ("SIGTERM", "SIGBREAK"):
-        if hasattr(signal, name):
-            signal.signal(getattr(signal, name), interrupt)
+    # A request to stop only sets a flag: see request_interrupt. A signal that the runner
+    # was started to ignore, as under nohup, stays ignored.
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"):
+        number = getattr(signal, name, None)
+        if number is not None and signal.getsignal(number) != signal.SIG_IGN:
+            signal.signal(number, request_interrupt)
 
     args = parse_arguments()
     workloads = json.loads(args.workloads.read_text(encoding="utf-8"))
@@ -967,15 +1140,13 @@ def main():
         fail("no cell to run")
 
     earlier_aa = [record for record in load_records(args.output) + load_records(args.aa)
-                  if record["aa"]]
+                  if record.get("aa")]
     session = Session(args, cells)
     try:
         if args.calibrate:
             calibrate(session, cells, workloads, args.calibrate)
             return
         records = run_pairs(session, cells, args.pairs)
-    except KeyboardInterrupt:
-        fail("interrupted. The running sample was terminated and has no record.")
     finally:
         session.close()
     # The A/A records of the output file include this session's own, if it is an A/A session.

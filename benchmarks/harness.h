@@ -451,8 +451,8 @@ inline std::filesystem::path run_directory()
 }
 
 /// Records this process's PID in the run directory at start-up. The runner
-/// counts the participants by these files and, on POSIX, finds the leaves
-/// through them: Sintra processes start their own sessions.
+/// counts the participants by these files, so that it knows how many reports
+/// to wait for. It does not find or signal a process through them.
 inline void record_pid(const std::filesystem::path& directory)
 {
     const auto file = directory / (std::to_string(sintra::get_current_pid()) + ".pid");

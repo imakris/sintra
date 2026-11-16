@@ -107,6 +107,10 @@ Report                report;
 uint64_t              sampling_divisor = 1;
 std::filesystem::path run_directory;
 
+// A failure of this process's part of the protocol. It is kept until the
+// process has left the swarm through sintra::shutdown().
+std::exception_ptr failure;
+
 // A receiver's handler thread alone writes its counters and samples. It counts
 // only once `measuring` is set, so the counters start from zero at
 // measure-begin. The control thread reads them only after it has deactivated
@@ -150,11 +154,13 @@ uint64_t default_burst(uint64_t payload_bytes)
 }
 
 // A sample is validation-only when an option changed the effective workload:
-// a handler delay, or a measured burst other than the default (0 runs unpaced).
+// a handler delay, or, in windowed mode, a measured burst other than the
+// default (0 runs unpaced). Open-loop publication does not use the burst.
 bool is_validation_only(const broadcast_cell_t& cell)
 {
     return cell.handler_delay_us != 0 ||
-        cell.burst_messages != default_burst(cell.payload_bytes);
+        (cell.mode == Mode::WINDOWED &&
+         cell.burst_messages != default_burst(cell.payload_bytes));
 }
 
 uint64_t intended_ns(const broadcast_block_t& sender, uint64_t sequence)
@@ -174,14 +180,47 @@ size_t expected_samples()
 // Run mode
 // ---------------------------------------------------------------------------
 
+// A barrier that returns no watermark was not held: the runtime treats it as
+// satisfied while a process shuts down or drains. The steps that follow would
+// then not mean what the protocol says, so the process fails the sample: it
+// writes no report.
+template <typename Barrier_mode>
+void hold(const char* name)
+{
+    if (sintra::barrier<Barrier_mode>(name, k_all_processes) == sintra::invalid_sequence) {
+        throw std::runtime_error(std::string("the barrier ") + name + " was bypassed");
+    }
+}
+
 void processing_barrier(const char* name)
 {
-    sintra::barrier<sintra::processing_fence_t>(name, k_all_processes);
+    hold<sintra::processing_fence_t>(name);
 }
 
 void rendezvous(const char* name)
 {
-    sintra::barrier<sintra::rendezvous_t>(name, k_all_processes);
+    hold<sintra::rendezvous_t>(name);
+}
+
+// The sender times every processing fence of a windowed measurement. Its
+// intervals are the burst fences in order, followed by the final fence.
+void timed_fence(const char* name)
+{
+    const auto begin = bench::now_ns();
+    processing_barrier(name);
+    report.intervals.push_back({(uint64_t)report.intervals.size(), begin, bench::now_ns()});
+}
+
+// Runs this process's part of the measurement protocol.
+template <typename Protocol>
+void run_protocol(Protocol protocol)
+{
+    try {
+        protocol();
+    }
+    catch (...) {
+        failure = std::current_exception();
+    }
 }
 
 // Every process calls each burst fence once, whether or not it publishes.
@@ -236,14 +275,21 @@ uint64_t send(std::string& message, uint64_t sequence)
     return sent;
 }
 
-// The caller decides on sampling before the send, so that the send-end stamp
-// is taken as soon as the publish call returns.
-void send_measured(std::string& message, uint64_t sequence, bool sampled)
+// The caller decides before the send whether the send end is stamped: for a
+// sampled message, and for the last one, whose publish return ends the
+// publication interval. The stamp is taken as soon as the publish call returns,
+// before any bookkeeping.
+void send_measured(std::string& message, uint64_t sequence, bool sampled, bool last)
 {
     const auto sent = send(message, sequence);
-    if (sampled) {
+    if (sampled || last) {
         const auto returned = bench::now_ns();
-        report.samples.push_back({sequence, sent, returned});
+        if (last) {
+            report.workload.last_send_end_ns = returned;
+        }
+        if (sampled) {
+            report.samples.push_back({sequence, sent, returned});
+        }
     }
 }
 
@@ -251,15 +297,12 @@ void publish_windowed(std::string& message)
 {
     const auto& cell = report.workload.cell;
     for (uint64_t i = 0; i < cell.planned; ++i) {
-        send_measured(message, i, bench::is_sampled(i, sampling_divisor));
+        send_measured(message, i, bench::is_sampled(i, sampling_divisor), i + 1 == cell.planned);
         if (cell.burst_messages != 0 && (i + 1) % cell.burst_messages == 0) {
-            const auto fence_begin = bench::now_ns();
-            processing_barrier("benchmark-burst");
-            report.intervals.push_back(
-                {(uint64_t)report.intervals.size(), fence_begin, bench::now_ns()});
+            timed_fence("benchmark-burst");
         }
     }
-    processing_barrier("benchmark-complete");
+    timed_fence("benchmark-complete");
 }
 
 // A late generator returns at once: it never skips a message, so backlog shows
@@ -286,10 +329,10 @@ void publish_open_loop(std::string& message)
     sender.t0_ns = sender.publish_begin_ns + k_open_loop_lead_ns;
     for (uint64_t i = 0; i < cell.planned; ++i) {
         const bool sampled = bench::is_sampled(i, sampling_divisor);
+        const bool last    = i + 1 == cell.planned;
         wait_for_intended_arrival(intended_ns(sender, i));
-        send_measured(message, i, sampled);
+        send_measured(message, i, sampled, last);
     }
-    sender.last_send_end_ns = bench::now_ns();
 
     // A receiver that fell behind or was evicted resynchronises during the
     // quiet period, before the sentinel is written. The other processes wait in
@@ -307,8 +350,9 @@ void run_sender()
     const auto& cell   = sender.cell;
     std::string message(cell.payload_bytes, 'x');
     report.samples.reserve(expected_samples());
-    if (cell.mode == Mode::WINDOWED && cell.burst_messages != 0) {
-        report.intervals.reserve((size_t)(cell.planned / cell.burst_messages));
+    if (cell.mode == Mode::WINDOWED) {
+        const auto bursts = cell.burst_messages != 0 ? cell.planned / cell.burst_messages : 0;
+        report.intervals.reserve((size_t)bursts + 1);
     }
 
     // Warm-up is always paced with the default burst, also in an unpaced run.
@@ -425,13 +469,13 @@ int receiver()
     report.samples.reserve(expected_samples());
     deactivate_slot =
         sintra::activate_slot([](const std::string& message) { on_message(message); });
-    follow_sender(true);
+    run_protocol([] { follow_sender(true); });
     return 0;
 }
 
 int sender_leaf()
 {
-    run_sender();
+    run_protocol(run_sender);
     return 0;
 }
 
@@ -511,18 +555,12 @@ int run(int argc, char* argv[])
     // In a branch, init runs the branch's entry function before it returns.
     // Every process writes its report at the end of its measurement protocol.
     sintra::init(argc, argv, processes);
-    std::exception_ptr failure;
     if (sintra::process_index() == 0) {
-        try {
-            if (cell.origin == Origin::COORDINATOR) {
-                run_sender();
-            }
-            else {
-                follow_sender(false);
-            }
+        if (cell.origin == Origin::COORDINATOR) {
+            run_protocol(run_sender);
         }
-        catch (...) {
-            failure = std::current_exception();
+        else {
+            run_protocol([] { follow_sender(false); });
         }
     }
     sintra::shutdown();
@@ -609,6 +647,8 @@ void append_cell(
         "offered_rate", open_loop ? std::optional<double>(cell.offered_rate) : std::nullopt);
     json.count("planned", cell.planned);
     json.count("warmup", cell.warmup);
+    json.count("burst", cell.burst_messages);
+    json.count("handler_delay_us", cell.handler_delay_us);
     json.count(
         "drain_timeout_s", open_loop ? std::optional<uint64_t>(k_drain_timeout_s) : std::nullopt);
     json.flag("validation_only", is_validation_only(cell));
@@ -669,6 +709,18 @@ void append_throughput(
     const measured_seconds_t&  measured)
 {
     const auto payload_bytes = sender.workload.cell.payload_bytes;
+
+    // Windowed: the interval, and so the rates and the CPU per message, include
+    // the sender's time in its burst fences and in the final fence.
+    std::optional<double> fence_seconds;
+    if (sender.workload.cell.mode == Mode::WINDOWED) {
+        uint64_t fence_ns = 0;
+        for (const auto& fence : sender.intervals) {
+            fence_ns += fence.end_ns - fence.begin_ns;
+        }
+        fence_seconds = (double)fence_ns / 1.0e9;
+    }
+
     const auto rates = [&](const std::string& name, uint64_t messages, double seconds) {
         const double per_second = (double)messages / seconds;
         json.number(name + "_msg_s", per_second);
@@ -682,6 +734,7 @@ void append_throughput(
     json.begin_object("throughput");
     json.number("interval_s", measured.publication);
     json.number("delivery_interval_s", measured.delivery);
+    json.number("fence_s", fence_seconds);
     rates("publication", sender.workload.published, measured.publication);
     rates("delivery", totals.deliveries, measured.delivery);
     json.null("calls_s");
@@ -739,8 +792,9 @@ void append_latencies(
             lateness.push_back(sample.begin_ns - intended_ns(sender.workload, sample.key));
         }
     }
-    for (const auto& interval : sender.intervals) {
-        fence.push_back(interval.end_ns - interval.begin_ns);
+    // The sender's last interval is the final fence, which is not a burst fence.
+    for (size_t i = 0; i + 1 < sender.intervals.size(); ++i) {
+        fence.push_back(sender.intervals[i].end_ns - sender.intervals[i].begin_ns);
     }
 
     // Pooled deliveries have more observations than distinct messages; every
