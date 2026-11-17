@@ -134,15 +134,18 @@ jobs:
             timeout: 75
             exe: ''
             cmake_options: ''
+    # The job's own variables carry the prefix BENCH_: the MSVC developer environment sets
+    # PLATFORM, INCLUDE, LIB, LIBPATH and others, Windows ignores the case of variable names,
+    # and a variable that a step adds to GITHUB_ENV replaces the job's.
     env:
       SCCACHE_GHA_ENABLED: "true"
-      PLATFORM: ${{ matrix.platform }}
-      BASE: ${{ needs.setup.outputs.base }}
-      HEAD: ${{ needs.setup.outputs.head }}
-      CONTEXT: ${{ needs.setup.outputs.context }}
-      CMAKE_OPTIONS: ${{ matrix.cmake_options }}
-      EXE: ${{ matrix.exe }}
-      JOB_TIMEOUT_MIN: ${{ matrix.timeout }}
+      BENCH_PLATFORM: ${{ matrix.platform }}
+      BENCH_BASE: ${{ needs.setup.outputs.base }}
+      BENCH_HEAD: ${{ needs.setup.outputs.head }}
+      BENCH_CONTEXT: ${{ needs.setup.outputs.context }}
+      BENCH_CMAKE_OPTIONS: ${{ matrix.cmake_options }}
+      BENCH_EXE: ${{ matrix.exe }}
+      BENCH_JOB_TIMEOUT_MIN: ${{ matrix.timeout }}
     defaults:
       run:
         shell: bash
@@ -150,9 +153,9 @@ jobs:
     steps:
       - name: Record the job's start and context
         run: |
-          echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+          echo "BENCH_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/compare"
-          printf '%s' "$CONTEXT" > "$RUNNER_TEMP/compare/context.json"
+          printf '%s' "$BENCH_CONTEXT" > "$RUNNER_TEMP/compare/context.json"
 
       - name: Checkout the pushed commit
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -160,7 +163,7 @@ jobs:
           ref: ${{ needs.setup.outputs.head }}
 
       - name: Fetch the base commit
-        run: git fetch --quiet --depth=1 origin "$BASE"
+        run: git fetch --quiet --depth=1 origin "$BENCH_BASE"
 
       - name: Set up MSVC environment
         if: matrix.platform == 'windows'
@@ -197,13 +200,13 @@ jobs:
         id: build_a
         continue-on-error: true
         run: |
-          git checkout --quiet --detach "$BASE"
+          git checkout --quiet --detach "$BENCH_BASE"
           # The overlay also removes the files that the pushed commit deleted from benchmarks/.
-          git restore --source="$HEAD" --staged --worktree -- benchmarks
-          git diff --quiet "$HEAD" -- benchmarks
+          git restore --source="$BENCH_HEAD" --staged --worktree -- benchmarks
+          git diff --quiet "$BENCH_HEAD" -- benchmarks
           rm -rf build
           sccache --zero-stats > /dev/null
-          read -ra options <<< "$CMAKE_OPTIONS"
+          read -ra options <<< "$BENCH_CMAKE_OPTIONS"
           {
             cmake -G "Ninja Multi-Config" -B build -S . "${options[@]}" -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
               -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
@@ -213,17 +216,17 @@ jobs:
           sccache --show-stats --stats-format=json > "$RUNNER_TEMP/compare/cache-a.json"
           mkdir -p "$RUNNER_TEMP/arms/arm-a/benchmarks"
           for name in broadcast rpc swarm; do
-            cp "build/benchmarks/Release/sintra_${name}_benchmark$EXE" "$RUNNER_TEMP/arms/arm-a/benchmarks/"
+            cp "build/benchmarks/Release/sintra_${name}_benchmark$BENCH_EXE" "$RUNNER_TEMP/arms/arm-a/benchmarks/"
           done
 
       - name: Build arm B (the pushed commit)
         id: build_b
         run: |
-          git checkout --quiet --detach "$HEAD"
-          git diff --quiet "$HEAD"
+          git checkout --quiet --detach "$BENCH_HEAD"
+          git diff --quiet "$BENCH_HEAD"
           rm -rf build
           sccache --zero-stats > /dev/null
-          read -ra options <<< "$CMAKE_OPTIONS"
+          read -ra options <<< "$BENCH_CMAKE_OPTIONS"
           {
             cmake -G "Ninja Multi-Config" -B build -S . "${options[@]}" -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
               -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
@@ -233,28 +236,32 @@ jobs:
           sccache --show-stats --stats-format=json > "$RUNNER_TEMP/compare/cache-b.json"
           mkdir -p "$RUNNER_TEMP/arms/arm-b/benchmarks"
           for name in broadcast rpc swarm; do
-            cp "build/benchmarks/Release/sintra_${name}_benchmark$EXE" "$RUNNER_TEMP/arms/arm-b/benchmarks/"
+            cp "build/benchmarks/Release/sintra_${name}_benchmark$BENCH_EXE" "$RUNNER_TEMP/arms/arm-b/benchmarks/"
           done
 
-      # The driver prices its calls against the job's start plus its timeout minus 8 min for the
-      # report and the upload. The step timeout, the backstop for a call that overruns, falls
-      # 4 min before the job's timeout.
+      # The driver prices its cells against the job's start plus its timeout minus 8 min for the
+      # report and the upload. At its hard stop, a minute before the step's timeout, it
+      # interrupts a call that overruns, records the stop and exits 0. The step timeout, 4 min
+      # before the job's timeout, stays as the backstop.
       - name: Set the deadline
         id: deadline
         if: success() && steps.build_a.outcome == 'success'
         run: |
           now=$(date +%s)
-          minutes=$(( (JOB_START + (JOB_TIMEOUT_MIN - 4) * 60 - now) / 60 ))
-          echo "deadline=$(( JOB_START + (JOB_TIMEOUT_MIN - 8) * 60 ))" >> "$GITHUB_OUTPUT"
-          echo "minutes=$(( minutes > 1 ? minutes : 1 ))" >> "$GITHUB_OUTPUT"
+          minutes=$(( (BENCH_JOB_START + (BENCH_JOB_TIMEOUT_MIN - 4) * 60 - now) / 60 ))
+          if [ "$minutes" -lt 2 ]; then minutes=2; fi
+          echo "deadline=$(( BENCH_JOB_START + (BENCH_JOB_TIMEOUT_MIN - 8) * 60 ))" >> "$GITHUB_OUTPUT"
+          echo "minutes=$minutes" >> "$GITHUB_OUTPUT"
+          echo "hard_stop=$(( now + (minutes - 1) * 60 ))" >> "$GITHUB_OUTPUT"
 
       # On Windows the runner owns each swarm through tests/runner/platform/windows_process_tree.py.
       - name: Compare the arms
         if: success() && steps.build_a.outcome == 'success'
         continue-on-error: true
-        timeout-minutes: ${{ fromJSON(steps.deadline.outputs.minutes || '1') }}
+        timeout-minutes: ${{ fromJSON(steps.deadline.outputs.minutes || '2') }}
         env:
-          DEADLINE: ${{ steps.deadline.outputs.deadline }}
+          BENCH_DEADLINE: ${{ steps.deadline.outputs.deadline }}
+          BENCH_HARD_STOP: ${{ steps.deadline.outputs.hard_stop }}
         run: |
           # A private ring parent directory for the swarms of the comparison.
           tmp="$RUNNER_TEMP/benchmark-tmp"
@@ -264,21 +271,21 @@ jobs:
           else
             export TMPDIR="$tmp"
           fi
-          python -u benchmarks/ci_compare.py run --platform "$PLATFORM" \
+          python -u benchmarks/ci_compare.py run --platform "$BENCH_PLATFORM" \
             --context "$RUNNER_TEMP/compare/context.json" --arms "$RUNNER_TEMP/arms" \
-            --deadline "$DEADLINE" --output "$RUNNER_TEMP/compare"
+            --deadline "$BENCH_DEADLINE" --hard-stop "$BENCH_HARD_STOP" --output "$RUNNER_TEMP/compare"
 
       - name: Report
         id: report
         if: always()
         env:
-          ARM_A: ${{ steps.build_a.outcome }}
-          ARM_B: ${{ steps.build_b.outcome }}
-          ATTEMPT: ${{ github.run_attempt }}
+          BENCH_ARM_A: ${{ steps.build_a.outcome }}
+          BENCH_ARM_B: ${{ steps.build_b.outcome }}
+          BENCH_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          python -u benchmarks/ci_compare.py report --platform "$PLATFORM" \
+          python -u benchmarks/ci_compare.py report --platform "$BENCH_PLATFORM" \
             --context "$RUNNER_TEMP/compare/context.json" --output "$RUNNER_TEMP/compare" \
-            --arm-a "$ARM_A" --arm-b "$ARM_B" --attempt "$ATTEMPT" --image "$ImageOS $ImageVersion" \
+            --arm-a "$BENCH_ARM_A" --arm-b "$BENCH_ARM_B" --attempt "$BENCH_ATTEMPT" --image "$ImageOS $ImageVersion" \
             --github-output "$GITHUB_OUTPUT"
           cat "$RUNNER_TEMP/compare/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
@@ -294,14 +301,14 @@ jobs:
       - name: Level 2 status
         if: always()
         env:
-          REPORT: ${{ steps.report.outcome }}
-          FAULT: ${{ steps.report.outputs.level2_fault }}
+          BENCH_REPORT: ${{ steps.report.outcome }}
+          BENCH_FAULT: ${{ steps.report.outputs.level2_fault }}
         run: |
-          if [ "$REPORT" != success ]; then
-            echo "::error::The report step did not succeed ($REPORT)."
+          if [ "$BENCH_REPORT" != success ]; then
+            echo "::error::The report step did not succeed ($BENCH_REPORT)."
             exit 1
           fi
-          if [ "$FAULT" = true ]; then
+          if [ "$BENCH_FAULT" = true ]; then
             echo "::error::Level 2 could not build the pushed commit or produce its report; see the job summary."
             exit 1
           fi
@@ -313,9 +320,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
-      BASE: ${{ needs.setup.outputs.base }}
-      HEAD: ${{ needs.setup.outputs.head }}
-      CONTEXT: ${{ needs.setup.outputs.context }}
+      BENCH_BASE: ${{ needs.setup.outputs.base }}
+      BENCH_HEAD: ${{ needs.setup.outputs.head }}
+      BENCH_CONTEXT: ${{ needs.setup.outputs.context }}
 
     steps:
       - name: Checkout the pushed commit
@@ -325,9 +332,9 @@ jobs:
 
       - name: Fetch the base commit and record the context
         run: |
-          git fetch --quiet --depth=1 origin "$BASE"
+          git fetch --quiet --depth=1 origin "$BENCH_BASE"
           mkdir -p ci-compare
-          printf '%s' "$CONTEXT" > ci-compare/context.json
+          printf '%s' "$BENCH_CONTEXT" > ci-compare/context.json
 
       - name: Restore compiler cache
         id: restore_compiler_cache
@@ -349,7 +356,7 @@ jobs:
           release: "15.0"
           usesh: true
           copyback: false
-          envs: 'BASE HEAD'
+          envs: 'BENCH_BASE BENCH_HEAD'
           prepare: |
             date +%s > /tmp/ci_start_time
             pkg install -y cmake ninja python ccache git
@@ -372,9 +379,9 @@ jobs:
             # build in this directory and in `build`, deleted before each arm.
             (
               set -e
-              git checkout --quiet --detach "$BASE"
-              git restore --source="$HEAD" --staged --worktree -- benchmarks
-              git diff --quiet "$HEAD" -- benchmarks
+              git checkout --quiet --detach "$BENCH_BASE"
+              git restore --source="$BENCH_HEAD" --staged --worktree -- benchmarks
+              git diff --quiet "$BENCH_HEAD" -- benchmarks
               rm -rf build
               ccache --zero-stats > /dev/null
               cmake -S . -B build -G Ninja $options
@@ -389,8 +396,8 @@ jobs:
             if [ "$status" -eq 0 ]; then echo success; else echo failure; fi > "$out/build-a.outcome"
             (
               set -e
-              git checkout --quiet --detach "$HEAD"
-              git diff --quiet "$HEAD"
+              git checkout --quiet --detach "$BENCH_HEAD"
+              git diff --quiet "$BENCH_HEAD"
               rm -rf build
               ccache --zero-stats > /dev/null
               cmake -S . -B build -G Ninja $options
@@ -406,22 +413,26 @@ jobs:
 
             if [ "$(cat "$out/build-a.outcome")" = success ] && [ "$(cat "$out/build-b.outcome")" = success ]; then
               # The VM step's timeout falls after vm_end when the VM booted within 5 min. The
-              # driver's deadline leaves 8 min before vm_end, as on the other platforms, and
-              # timeout(1) ends an overrunning driver 1 min before it; the step timeout stays as
-              # the backstop.
+              # driver's deadline leaves 8 min before vm_end, as on the other platforms. At its
+              # hard stop, 2 min before vm_end, it interrupts a call that overruns, records the
+              # stop and exits 0. timeout(1), 1 min before vm_end, and the step timeout stay as
+              # backstops.
               vm_end=$(( $(cat /tmp/ci_start_time) + (38 - 5) * 60 ))
-              limit=$(( vm_end - 60 - $(date +%s) ))
-              if [ "$limit" -lt 60 ]; then limit=60; fi
+              now=$(date +%s)
+              limit=$(( vm_end - 60 - now ))
+              if [ "$limit" -lt 120 ]; then limit=120; fi
               # A private ring parent directory for the swarms of the comparison.
               TMPDIR="$(mktemp -d /tmp/benchmark-tmp.XXXXXX)" timeout "$limit" \
                 python3 -u benchmarks/ci_compare.py run --platform freebsd --context "$out/context.json" \
-                --arms "$arms" --deadline $(( vm_end - 8 * 60 )) --output "$out" < /dev/null
+                --arms "$arms" --deadline $(( vm_end - 8 * 60 )) --hard-stop $(( now + limit - 60 )) \
+                --output "$out" < /dev/null
               echo "$?" > "$out/driver.exit"
             fi
             exit 0
 
-      # The VM action skips copyback. Export the comparison and the compiler cache from the
-      # still-running VM, also after a failure.
+      # The VM action skips copyback. Export the comparison from the still-running VM, also
+      # after a failure, and report and upload it before the compiler cache is exported and
+      # saved, so that the cache cannot delay or keep back the report.
       - name: Export the comparison
         if: always()
         continue-on-error: true
@@ -430,6 +441,29 @@ jobs:
             --rsync-path=/usr/local/bin/rsync \
             -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
             "freebsd:$GITHUB_WORKSPACE/ci-compare/" "$GITHUB_WORKSPACE/ci-compare/"
+
+      - name: Report
+        id: report
+        if: always()
+        env:
+          BENCH_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          out="$GITHUB_WORKSPACE/ci-compare"
+          outcome() { cat "$out/build-$1.outcome" 2>/dev/null || echo missing; }
+          python3 -u benchmarks/ci_compare.py report --platform freebsd --context "$out/context.json" \
+            --output "$out" --arm-a "$(outcome a)" --arm-b "$(outcome b)" --attempt "$BENCH_ATTEMPT" \
+            --image "FreeBSD 15.0 VM (vmactions/freebsd-vm v1.6.0) on $ImageOS $ImageVersion" \
+            --github-output "$GITHUB_OUTPUT"
+          cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the comparison
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-compare-freebsd-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-compare/
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Export compiler cache
         id: export_compiler_cache
@@ -448,40 +482,17 @@ jobs:
           path: ${{ github.workspace }}/.ccache
           key: ${{ steps.restore_compiler_cache.outputs.cache-primary-key }}
 
-      - name: Report
-        id: report
-        if: always()
-        env:
-          ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          out="$GITHUB_WORKSPACE/ci-compare"
-          outcome() { cat "$out/build-$1.outcome" 2>/dev/null || echo missing; }
-          python3 -u benchmarks/ci_compare.py report --platform freebsd --context "$out/context.json" \
-            --output "$out" --arm-a "$(outcome a)" --arm-b "$(outcome b)" --attempt "$ATTEMPT" \
-            --image "FreeBSD 15.0 VM (vmactions/freebsd-vm v1.6.0) on $ImageOS $ImageVersion" \
-            --github-output "$GITHUB_OUTPUT"
-          cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload the comparison
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: benchmark-compare-freebsd-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ci-compare/
-          if-no-files-found: warn
-          retention-days: 90
-
       - name: Level 2 status
         if: always()
         env:
-          REPORT: ${{ steps.report.outcome }}
-          FAULT: ${{ steps.report.outputs.level2_fault }}
+          BENCH_REPORT: ${{ steps.report.outcome }}
+          BENCH_FAULT: ${{ steps.report.outputs.level2_fault }}
         run: |
-          if [ "$REPORT" != success ]; then
-            echo "::error::The report step did not succeed ($REPORT)."
+          if [ "$BENCH_REPORT" != success ]; then
+            echo "::error::The report step did not succeed ($BENCH_REPORT)."
             exit 1
           fi
-          if [ "$FAULT" = true ]; then
+          if [ "$BENCH_FAULT" = true ]; then
             echo "::error::Level 2 could not build the pushed commit or produce its report; see the job summary."
             exit 1
           fi

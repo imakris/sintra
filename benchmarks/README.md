@@ -394,7 +394,8 @@ because of a number.
   fixed counts and no calibration (format below). Per cell, `ci_compare.py run`
   makes six runner calls into one output file: A/A with 1 pair, A/B 2, A/A 2,
   A/B 2, A/A 2, A/B 1, so 5 A/A and 5 A/B pairs. Each call runs fresh copies of
-  the executables, in directories of equal name length: `a1` to `a6` for the
+  the executables in new directories, under a copy root of the cell's own
+  (`copies/01` to `copies/08`), with names of one length: `a1` to `a6` for the
   A/A calls, `a7` to `a9` and `b1` to `b3` for the A/B calls. An A/A call passes
   the second copy of arm A as `--b`, so its records carry `aa: false`; a
   record's kind and call are in its note, `ci-compare <platform> <aa|ab> call
@@ -403,9 +404,17 @@ because of a number.
   samples times the cell's expected time per sample on the platform, plus 50 %.
   The first cell that would end after the deadline (the job's start plus its
   timeout minus 8 minutes) is left out with every later one (`not_run:
-  budget`), so that a shortfall always drops the same cells. A call can overrun
-  the deadline; the driver step's timeout ends it (on FreeBSD, `timeout(1)` in
-  the VM) and the report keeps the results so far (`stopped: deadline`).
+  budget`), so that a shortfall always drops the same cells; the index shows
+  the shortfall, and the primary metrics of those cells count as `no verdict`.
+- **Hard stop.** A call can overrun the deadline. A minute before its step's
+  timeout (on FreeBSD, a minute before `timeout(1)`'s limit in the VM), the
+  driver interrupts the runner as the runner expects it (SIGINT; Ctrl+Break on
+  Windows, where the driver starts the runner in a process group of its own),
+  gives it 30 s to end its swarm, kills it after that, records `stop:
+  deadline` and exits 0, so that its step ends before the step's timeout. The
+  report shows `stopped: deadline` with the results so far. The step's timeout
+  and FreeBSD's `timeout(1)` stay as backstops. A closed or broken output of
+  the driver is not an error: the runner log keeps everything.
 - **Verdicts.** Per primary metric (plan section 15.6) the spread is the
   largest deviation among the cell's 5 A/A pairs: `|ln(B/A)|` for a ratio,
   `|B-A|` for a difference, in the representation that the runner's summary
@@ -416,8 +425,9 @@ because of a number.
   (CPU on Windows, `send_call` on Windows and macOS). Cross-process latencies
   are shown without a verdict. A push that leaves the library unchanged runs as
   a null test, and so does a cell whose two arms' executables are
-  byte-identical (GCC and Clang; MSVC executables never are): any verdict there
-  is a false call.
+  byte-identical (GCC and Clang; MSVC executables never are, and in the hosted
+  trial the macOS executables were not either, so the check fires on Linux and
+  FreeBSD): any verdict there is a false call.
 - **Report.** The job summary has a header (push range, change flags, image,
   compiler, CPU model, C, compiler cache, status), the reading notes, one row
   per cell with its pairs, invalid samples, state, fence share (W1) and each
@@ -425,17 +435,23 @@ because of a number.
   collapsed list of every headline metric. The artifact
   `benchmark-compare-<platform>-<run ID>-<attempt>` (90 days) holds the
   records, the runner and build logs, `job.json`, `summary.json` and
-  `summary.md`. The collect job adds a combined summary per run.
+  `summary.md`. The collect job adds a combined summary per run. The platform
+  jobs' own variables carry the prefix `BENCH_`, since the MSVC developer
+  environment sets `PLATFORM`, `INCLUDE`, `LIB` and many more, and Windows
+  ignores the case of variable names.
 - **Red** only when level 2 cannot build the pushed commit, or cannot produce
   or publish its report: a failed arm B build, a driver that fails, leaves no
   `job.json` or ends before its deadline without its completion mark, a failed
   report or upload, a failed archive, and job timeouts. A failed arm A build
-  (`not_compared: base_build_failed`), invalid samples, a runner that stops,
-  a deadline stop and a budget shortfall are reported, not red.
+  (`not_compared: base_build_failed`), invalid samples, a runner that stops
+  (`not_compared` when no A/B call recorded anything, as for
+  `configuration_differs`), a deadline stop and a budget shortfall are
+  reported, not red.
 - **History.** The archive job adds every push run of `master` to the orphan
   branch `benchmark-history`: `index.md` (one line per run, the observed
   false-call rate of the null tests, the size), `runs/<run ID>/run.json` and one
-  file per platform with the primary metrics' per-pair values and verdicts. A
+  file per platform with the primary metrics' per-pair values, at full
+  precision so that the rule re-applied to them gives the stored verdicts. A
   re-run replaces its run's files; the null-test counts stay those of the first
   attempt that reported. The branch may grow to 8 MB; the archive job warns from
   80 % and stops archiving beyond, without a force push. The branch's
@@ -449,7 +465,8 @@ and the library tree IDs):
 
 ```text
 python benchmarks/ci_compare.py run --platform <linux|windows|macos|freebsd> --context <context.json>
-    --arms <arms> --deadline <Unix time> --output <dir> [--workloads <CI workloads file>]
+    --arms <arms> --deadline <Unix time> --hard-stop <Unix time> --output <dir>
+    [--workloads <CI workloads file>]
 python benchmarks/ci_compare.py report --platform <platform> --context <context.json> --output <dir>
     --arm-a success --arm-b success --attempt 1 --image <text>
 ```

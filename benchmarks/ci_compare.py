@@ -21,10 +21,12 @@ from pathlib import Path
 import random
 import re
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -55,10 +57,16 @@ PAIRS = {kind: sum(pairs for each, pairs, _, _ in SCHEDULE if each == kind)
          for kind in ("aa", "ab")}
 SAMPLES_PER_CELL = 2 * sum(PAIRS.values())
 PRICE_FACTOR = 1.5          # a cell is priced at its samples times their expected time, plus 50 %
+STOP_GRACE_S = 30           # after the hard stop's interrupt, for the runner to end its swarm
 RULE = "same-direction-beyond-aa-spread/1"
 WRAP_NS = 2 ** 62           # a cross-process latency at or above this is an unsigned wrap
 CLOCK_TICK = {"windows": "0.1 µs", "macos": "1/24 µs"}
 CROSS_PROCESS = ("slowest_from_send",)
+# A build step's outcome other than success and failure, as the report states it. `missing`:
+# the FreeBSD VM script wrote no outcome file.
+ARM_OUTCOMES = {"skipped": "did not run (an earlier step failed)",
+                "cancelled": "was cancelled",
+                "missing": "left no build outcome (the VM script did not get to it)"}
 
 HISTORY_BRANCH = "benchmark-history"
 HISTORY_BUDGET_BYTES = 8_000_000
@@ -98,6 +106,31 @@ def executable_name(workload):
 def workload_of(cell_id):
     return {prefix: workload for workload, prefix in runner.CELL_PREFIXES.items()}[
         cell_id.split(".")[0]]
+
+
+def primary_metrics(cell_id):
+    """(label, higher is better) of the cell's primary metrics (plan section 15.6). All of
+    them are measured within one process."""
+    workload, mode = workload_of(cell_id), cell_id.split(".")[1]
+    if workload == "broadcast":
+        return [("send_call p50 us", False), ("publication msg/s", True),
+                ("CPU us/msg total", False)]
+    if workload == "rpc" and mode == "closed_loop":
+        return [("calls/s", True), ("CPU us/call total", False)]
+    if workload == "rpc":
+        return [("issue_to_observation p50 us", False), ("CPU us/call total", False)]
+    return [("time_to_ready s", False), ("time_to_shutdown s", False),
+            ("formation CPU s total", False)]
+
+
+def verdict_exclusion(label, platform):
+    """Why a primary metric gets no verdict on the platform whatever its values; None when it
+    can get one."""
+    if label.startswith("send_call") and platform in CLOCK_TICK:
+        return f"the clock ticks in steps of {CLOCK_TICK[platform]} here"
+    if "CPU" in label and platform == "windows":
+        return "process CPU often does not advance on Windows"
+    return None
 
 
 # --- run ---------------------------------------------------------------------------
@@ -160,12 +193,17 @@ def resolve_workloads(ci, platform):
     return workloads, ci["cells"]
 
 
-def protocol_version(workloads, cells):
+def protocol_version(workloads, cells, platform):
     """What a platform's verdicts rest on: its cells and counts, the schedule with its A/A
-    arms, and the verdict rule. The history keeps the null-test accounting per version."""
+    arms, the primary metrics with the platform's exclusions, and the verdict rule. The
+    history keeps the null-test accounting per version."""
+    primary = {cell["id"]: [(label, higher_is_better, verdict_exclusion(label, platform))
+                            for label, higher_is_better in primary_metrics(cell["id"])]
+               for cell in cells}
     text = json.dumps(
         {"ids": [cell["id"] for cell in cells], "cells": workloads["cells"],
-         "leaves": workloads["swarm"]["leaves"], "schedule": SCHEDULE, "rule": RULE},
+         "leaves": workloads["swarm"]["leaves"], "schedule": SCHEDULE, "primary": primary,
+         "rule": RULE},
         sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
@@ -202,34 +240,73 @@ def cpu_model():
                           check=True).stdout.strip()
 
 
-def fresh_copy(arms, workload, name):
-    """A new copy of one arm's executable, in a directory of its own, for one runner call."""
-    directory = arms / "copies" / name
-    # An executable that has just exited can stay busy for a moment on Windows.
-    runner.remove_run_directory(directory)
-    (directory / "benchmarks").mkdir(parents=True)
-    shutil.copy2(arms / f"arm-{name[0]}" / "benchmarks" / executable_name(workload),
-                 directory / "benchmarks")
-    return directory
+def fresh_copy(root, arms, workload, name):
+    """A new copy of one arm's executable for one runner call, in a new directory: every cell
+    has a copy root of its own, so nothing is removed or reused."""
+    directory = root / name / "benchmarks"
+    directory.mkdir(parents=True)
+    shutil.copy2(arms / f"arm-{name[0]}" / "benchmarks" / executable_name(workload), directory)
+    return directory.parent
 
 
-def run_logged(command, log):
-    """Runs a command, copying its output to this process's output and to the log. Returns its
-    exit code and its output lines."""
+def echo(text):
+    """Writes to this process's output. An output that is closed or broken, as when the step
+    is being cancelled, is not an error: from then on the output goes to the null device, and
+    the runner log keeps everything."""
+    if sys.stdout is None:
+        return
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+
+
+def interrupt(process):
+    """Asks the runner to stop as it expects it: SIGINT on POSIX, Ctrl+Break to the runner's
+    own process group on Windows. The runner then ends its sample's swarm and exits."""
+    process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
+
+
+def run_logged(command, log, hard_stop):
+    """Runs a runner call, copying its output to this process's output and to the log. At the
+    hard stop it interrupts the runner, and kills it if it has not ended STOP_GRACE_S later.
+
+    Returns the exit code, the output lines and, when the hard stop came, what it did.
+    """
     lines = []
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, errors="replace") as process:
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
+
+    def pump():
         for line in process.stdout:
-            sys.stdout.write(line)
+            echo(line)
             log.write(line)
             lines.append(line.rstrip("\n"))
-    sys.stdout.flush()
+
+    reader = threading.Thread(target=pump)
+    reader.start()
+    stopped = None
+    try:
+        process.wait(timeout=max(0.0, hard_stop - time.time()))
+    except subprocess.TimeoutExpired:
+        try:
+            interrupt(process)
+            process.wait(timeout=STOP_GRACE_S)
+            stopped = "the hard stop interrupted the runner, which ended its swarm and exited"
+        except (OSError, subprocess.TimeoutExpired) as error:
+            process.kill()
+            process.wait()
+            stopped = (f"the hard stop interrupted the runner, which had not exited after "
+                       f"{STOP_GRACE_S} s ({error!r}), so it was killed")
+    reader.join()
     log.flush()
-    return process.returncode, lines
+    return process.returncode, lines, stopped
 
 
 def stop_reason(lines):
-    """Why a runner call that exited non-zero ended the platform, from its output."""
+    """Why a runner call that exited non-zero ended the platform, from all of its output."""
     text = "\n".join(lines)
     if "cleanup incomplete" in text:
         return "cleanup_incomplete"
@@ -238,11 +315,11 @@ def stop_reason(lines):
     return "runner_failed"
 
 
-def run_call(args, context, cell, number, kind, pairs, copies, workloads_path, log):
+def run_call(args, context, cell, root, number, kind, pairs, copies, workloads_path, log):
     """One runner call of a cell, appending to the cell's output file. Returns its entry for
-    job.json."""
+    job.json, with the reason when it ends the platform."""
     records_path = args.output / "records" / f"{cell['id']}.jsonl"
-    a, b = (fresh_copy(args.arms, workload_of(cell["id"]), name) for name in copies)
+    a, b = (fresh_copy(root, args.arms, workload_of(cell["id"]), name) for name in copies)
     note = f"ci-compare {args.platform} {kind} call {number}, benchmarks {context['head']}"
     command = [
         sys.executable, "-u", str(RUNNER),
@@ -254,21 +331,35 @@ def run_call(args, context, cell, number, kind, pairs, copies, workloads_path, l
               f"{copies[0]}/{copies[1]})\n")
     before = len(runner.load_records(records_path))
     started = time.time()
-    exit_code, lines = run_logged(command, log)
+    exit_code, lines, stopped = run_logged(command, log, args.hard_stop)
     records = runner.load_records(records_path)[before:]
+    ended = stopped is not None or exit_code != 0
     return {
         "number": number, "kind": kind, "pairs": pairs, "copies": list(copies), "note": note,
         "exit_code": exit_code, "seconds": round(time.time() - started, 2),
         "records": len(records),
         "invalid": sum(1 for record in records if not record["outcome"]["valid"]),
-        "output_tail": lines[-20:] if exit_code else None,
+        "stop_reason": ("deadline" if stopped else stop_reason(lines)) if ended else None,
+        "hard_stop": stopped,
+        "output_tail": lines[-20:] if ended else None,
     }
+
+
+def stop_platform(job, index, reason, message):
+    """Ends the platform in cell `index`: that cell is stopped, every later one not run."""
+    job["stop"] = {"reason": reason, "message": message}
+    job["cells"][index]["state"] = (
+        "stopped: deadline" if reason == "deadline" else "stopped: runner failed")
+    for later in job["cells"][index + 1:]:
+        later["state"] = ("not_run: deadline" if reason == "deadline"
+                          else "not_run: platform stopped")
 
 
 def run_cells(args, job, cells, workloads_path):
     """Runs the cells in priority order. A cell starts only if its six calls, priced together,
     end before the deadline; otherwise it and every later cell are left out, so that a
-    shortfall always drops the same cells."""
+    shortfall always drops the same cells. The hard stop ends a call that overruns: the driver
+    then records the stop and returns, so that its step ends before the step's timeout."""
     (args.output / "records").mkdir(exist_ok=True)
     with (args.output / "runner.log").open("a", encoding="utf-8", newline="\n") as log:
         for index, (cell, entry) in enumerate(zip(cells, job["cells"])):
@@ -279,17 +370,20 @@ def run_cells(args, job, cells, workloads_path):
                     later["state"] = "not_run: budget"
                 return
             entry["state"] = "running"
+            write_json(args.output / "job.json", job)
+            root = args.arms / "copies" / f"{index + 1:02d}"
             for number, (kind, pairs, *copies) in enumerate(SCHEDULE, 1):
-                call = run_call(args, job["context"], cell, number, kind, pairs, copies,
+                if time.time() >= args.hard_stop:
+                    stop_platform(job, index, "deadline",
+                                  f"the hard stop came before call {number}")
+                    return
+                call = run_call(args, job["context"], cell, root, number, kind, pairs, copies,
                                 workloads_path, log)
                 entry["calls"].append(call)
                 write_json(args.output / "job.json", job)
-                if call["exit_code"] != 0:
-                    job["stop"] = {"reason": stop_reason(call["output_tail"]),
-                                   "message": "\n".join(call["output_tail"])}
-                    entry["state"] = "stopped: runner failed"
-                    for later in job["cells"][index + 1:]:
-                        later["state"] = "not_run: platform stopped"
+                if call["stop_reason"]:
+                    stop_platform(job, index, call["stop_reason"],
+                                  call["hard_stop"] or "\n".join(call["output_tail"]))
                     return
                 if call["invalid"]:
                     # A verdict needs every pair, so the cell ends here.
@@ -304,16 +398,16 @@ def command_run(args):
     args.output.mkdir(parents=True, exist_ok=True)
     job = {
         "format": JOB_FORMAT, "platform": args.platform, "context": load_json(args.context),
-        "deadline": args.deadline, "started": time.time(), "cpu_model": cpu_model(),
-        "state": "running", "error": None, "traceback": None, "protocol": None,
-        "identical_executables": None, "cells": [], "stop": None,
+        "deadline": args.deadline, "hard_stop": args.hard_stop, "started": time.time(),
+        "cpu_model": cpu_model(), "state": "running", "error": None, "traceback": None,
+        "protocol": None, "identical_executables": None, "cells": [], "stop": None,
     }
     # Written before the first call and atomically after each: the report reads what a
     # driver that its step timeout ended had finished.
     write_json(args.output / "job.json", job)
     try:
         workloads, cells = resolve_workloads(load_json(args.workloads), args.platform)
-        job["protocol"] = protocol_version(workloads, cells)
+        job["protocol"] = protocol_version(workloads, cells, args.platform)
         job["identical_executables"] = identical_executables(args.arms, args.platform)
         job["cells"] = [{"id": cell["id"], "state": "pending", "calls": []} for cell in cells]
         workloads_path = args.output / "workloads.json"
@@ -332,30 +426,6 @@ def command_run(args):
 
 
 # --- report ------------------------------------------------------------------------
-
-def primary_metrics(cell):
-    """(label, higher is better) of the cell's primary metrics (plan section 15.6). All of
-    them are measured within one process."""
-    if cell["workload"] == "broadcast":
-        return [("send_call p50 us", False), ("publication msg/s", True),
-                ("CPU us/msg total", False)]
-    if cell["workload"] == "rpc" and cell["mode"] == "closed_loop":
-        return [("calls/s", True), ("CPU us/call total", False)]
-    if cell["workload"] == "rpc":
-        return [("issue_to_observation p50 us", False), ("CPU us/call total", False)]
-    return [("time_to_ready s", False), ("time_to_shutdown s", False),
-            ("formation CPU s total", False)]
-
-
-def verdict_exclusion(label, platform):
-    """Why a primary metric gets no verdict on the platform whatever its values; None when it
-    can get one."""
-    if label.startswith("send_call") and platform in CLOCK_TICK:
-        return f"the clock ticks in steps of {CLOCK_TICK[platform]} here"
-    if "CPU" in label and platform == "windows":
-        return "process CPU often does not advance on Windows"
-    return None
-
 
 def metric_table(pairs):
     """runner.metric_values, plus the closed-loop total CPU per call, which the runner's
@@ -425,6 +495,18 @@ def wrapped(metric):
                if value is not None and value * 1000 >= WRAP_NS)
 
 
+def call_kind(note):
+    """aa or ab, from a record's note: "ci-compare <platform> <aa|ab> call <n>, benchmarks
+    <head>"."""
+    return note.split()[2]
+
+
+def library_arm(record):
+    """The library arm of a record: B only for the B sample of an A/B call. Both samples of an
+    A/A call run arm A, whatever arm label the runner gives them."""
+    return "B" if call_kind(record["note"]) == "ab" and record["arm"] == "B" else "A"
+
+
 def median_fence_percent(samples):
     values = [value for value in map(runner.fence_percent, samples) if value is not None]
     return statistics.median(values) if values else None
@@ -439,32 +521,32 @@ def report_cell(entry, records_path, platform, null):
     for record in records:
         by_call.setdefault(record["note"], []).append(record)
     for note, call_records in by_call.items():
-        # The note reads "ci-compare <platform> <aa|ab> call <n>, benchmarks <head>".
-        pairs[note.split()[2]] += runner.comparable_pairs(call_records)
+        pairs[call_kind(note)] += runner.comparable_pairs(call_records)
     report = {
         "id": entry["id"], "state": entry["state"], "null": null,
         "pairs": {kind: len(pairs[kind]) for kind in pairs},
-        "invalid": {arm: sum(1 for record in records if record["arm"] == arm
+        "invalid": {arm: sum(1 for record in records if library_arm(record) == arm
                              and not record["outcome"]["valid"]) for arm in "AB"},
         "fence_percent": None, "primary": [], "other": [],
     }
-    if not records:
-        return report
-    cell = records[0]["cell"]
-    if cell["workload"] == "broadcast" and pairs["ab"]:
+    if entry["id"].startswith("w1.") and pairs["ab"]:
         report["fence_percent"] = {
             arm: median_fence_percent([pair[index] for pair in pairs["ab"]])
             for index, arm in enumerate("AB")}
     tables = {kind: metric_table(pairs[kind]) for kind in pairs}
     always_difference = {label: flag for table in tables.values()
                          for label, (flag, _) in table.items()}
-    primary = primary_metrics(cell)
+    # Every scheduled primary metric gets an entry: a cell that was not run, or that recorded
+    # nothing, counts its primary metrics as `no verdict`.
+    primary = primary_metrics(entry["id"])
     for label, higher_is_better in primary:
         metric = evaluate(label, always_difference.get(label, True),
                           tables["aa"].get(label, (True, []))[1],
                           tables["ab"].get(label, (True, []))[1])
         metric["higher_is_better"] = higher_is_better
         give_verdict(metric, higher_is_better, verdict_exclusion(label, platform))
+        if not records:
+            metric["reason"] = entry["state"]
         report["primary"].append(metric)
     for label, flag in always_difference.items():
         if label in dict(primary):
@@ -505,10 +587,12 @@ def classify(args, job, context):
     """(status, reason, level-2 fault) of the platform (plan section 15.9). Red means that
     level 2 could not build the pushed commit, or could not produce its report; never a
     number."""
+    if args.arm_b == "failure":
+        return ("fault", "arm B, the pushed commit, did not build: the commit is broken, "
+                "incompatible with level 2's toolchain, or level 2's build invocation failed",
+                True)
     if args.arm_b != "success":
-        return ("fault", f"arm B, the pushed commit, did not build (step outcome {args.arm_b}): "
-                "the commit is broken, incompatible with level 2's toolchain, or level 2's "
-                "build invocation failed", True)
+        return "fault", f"arm B, the pushed commit, {ARM_OUTCOMES[args.arm_b]}", True
     if args.arm_a != "success":
         unchanged = not (context["benchmarks_changed"] or context["build_definition_changed"])
         return ("not_compared", "base_build_failed" + (
@@ -524,7 +608,10 @@ def classify(args, job, context):
         return "fault", "the driver ended before its deadline without its completion mark", True
     if job["stop"] is not None:
         reason = job["stop"]["reason"]
-        if not any(call["records"] for cell in job["cells"] for call in cell["calls"]):
+        # Without an A/B record nothing was compared, whatever the A/A calls recorded.
+        if reason != "deadline" and not any(
+                call["records"] for cell in job["cells"] for call in cell["calls"]
+                if call["kind"] == "ab"):
             return ("not_compared",
                     "configuration_differs" if reason == "configuration_differs" else
                     "no_records", False)
@@ -676,7 +763,8 @@ def summary_markdown(summary):
                      + " |")
     lines += [f"| Protocol | {summary['protocol'] or 'unknown'} |", ""]
     if summary["stop_message"]:
-        lines += ["The runner's last output:", "", "```text", summary["stop_message"], "```", ""]
+        lines += ["Why the platform stopped (the hard stop, or the runner's last output):", "",
+                  "```text", summary["stop_message"], "```", ""]
     notes = [
         "Sintra is header-only, so a library change recompiles the executables, and inlining "
         "and code placement can move timings without a change of the measured path. A verdict "
@@ -712,10 +800,13 @@ def summary_markdown(summary):
                 name += "<br>fence share " + ", ".join(shares)
             if cell["id"].startswith("w2."):
                 name += "<br>W2 reading rule"
-            metrics = "<br>".join(
-                f"**{metric['verdict']}** {metric['label']}: {comparison_text(metric)}"
-                + (f" ({metric['reason']})" if metric["reason"] else "")
-                for metric in cell["primary"])
+            if any(metric["comparison"] for metric in cell["primary"]):
+                metrics = "<br>".join(
+                    f"**{metric['verdict']}** {metric['label']}: {comparison_text(metric)}"
+                    + (f" ({metric['reason']})" if metric["reason"] else "")
+                    for metric in cell["primary"])
+            else:
+                metrics = f"**no verdict** for its {len(cell['primary'])} primary metrics"
             lines.append(
                 f"| {index} | {name} | {cell['pairs']['ab']}, {cell['pairs']['aa']} | "
                 f"{cell['invalid']['A']}, {cell['invalid']['B']} | {cell['state']} | "
@@ -747,27 +838,17 @@ def checked_summary(path, platform):
     return summary
 
 
-def significant(value):
-    """The value with every number rounded to six significant digits."""
-    if isinstance(value, float):
-        return float(f"{value:.6g}")
-    if isinstance(value, list):
-        return [significant(each) for each in value]
-    if isinstance(value, dict):
-        return {key: significant(each) for key, each in value.items()}
-    return value
-
-
 def history_record(summary):
     """What the history keeps of a platform's summary: per cell the primary metrics with
-    their per-pair values and verdicts, the missing-data reasons and the provenance, with six
-    significant digits. The other metrics, the fence shares and the cache statistics stay in
-    the artifacts; the context is the run's, in run.json."""
+    their per-pair values (at full precision, so that the rule re-applied to them gives the
+    reported verdict) and verdicts, the missing-data reasons and the provenance. The other
+    metrics, the fence shares and the cache statistics stay in the artifacts; the context is
+    the run's, in run.json."""
     record = {key: value for key, value in summary.items() if key not in ("cache", "context")}
     record["format"] = HISTORY_FORMAT
     record["cells"] = [{key: value for key, value in cell.items()
                         if key not in ("other", "fence_percent")} for cell in summary["cells"]]
-    return significant(record)
+    return record
 
 
 def command_collect(args):
@@ -809,7 +890,7 @@ def command_collect(args):
         write_json(args.output / f"{platform}.json", history_record(summary))
     run = {"format": HISTORY_FORMAT, "collect_attempt": args.attempt,
            **{key: context[key] for key in (
-               "run_id", "run_number", "event", "base", "head", "fallback_base",
+               "run_id", "run_number", "event", "base", "head", "fallback_base", "reason",
                "library_changed", "build_definition_changed", "benchmarks_changed", "trees")},
            "platforms": platforms}
     write_json(args.output / "run.json", run)
@@ -821,7 +902,7 @@ def command_collect(args):
 def combined_markdown(run, args):
     lines = [f"### Benchmark comparison, run #{run['run_number']}", "", WORDING, ""]
     if run["base"] is None:
-        lines += [f"Not compared: {run['platforms']['linux']['reason']}.", ""]
+        lines += [f"Not compared: {run['reason']}.", ""]
     else:
         lines += [f"Push range {push_range(run)}; library changed: "
                   f"{'yes' if run['library_changed'] else 'no'}; build definition changed: "
@@ -850,22 +931,26 @@ def git(work, *arguments, environment=None, data=None):
                           capture_output=True, env=environment)
 
 
-def checked_git(work, *arguments, environment=None):
-    result = git(work, *arguments, environment=environment)
+def checked_git(work, *arguments, environment=None, data=None):
+    """The output of a git command, as bytes; a failure raises."""
+    result = git(work, *arguments, environment=environment, data=data)
     if result.returncode != 0:
         raise RuntimeError(f"git {arguments[0]} failed: "
                            + result.stderr.decode(errors="replace").strip())
-    return result.stdout.decode(errors="replace")
+    return result.stdout
 
 
 def remote_environment():
-    """The environment of the commands that reach the remote. With HISTORY_TOKEN, git reads an
-    authorization header from it, so the token is neither stored in a configuration file nor
-    visible in a command line."""
+    """The environment of the git commands that reach the remote (ls-remote, fetch, push), and
+    of no other command. HISTORY_TOKEN leaves this process's environment here. With it, git
+    reads an authorization header from the environment, so the token is neither stored in a
+    configuration file nor visible in a command line, and the log masks the derived
+    credential."""
+    token = os.environ.pop("HISTORY_TOKEN", None)
     environment = dict(os.environ)
-    token = os.environ.get("HISTORY_TOKEN")
     if token:
         credential = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        print(f"::add-mask::{credential}", flush=True)
         environment.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.extraheader",
                            GIT_CONFIG_VALUE_0=f"AUTHORIZATION: basic {credential}")
     return environment
@@ -893,9 +978,10 @@ def check_history_format(work):
 
 
 def pack_size(work):
-    """The size of a pack of exactly the objects reachable from HEAD."""
-    objects = git(work, "rev-list", "--objects", "HEAD").stdout
-    return len(git(work, "pack-objects", "--stdout", "-q", data=objects).stdout)
+    """The size of a pack of exactly the objects reachable from HEAD. A failure of either
+    command raises, so that a partial pack is never taken for the history's size."""
+    objects = checked_git(work, "rev-list", "--objects", "HEAD")
+    return len(checked_git(work, "pack-objects", "--stdout", "-q", data=objects))
 
 
 def history_readme(budget):
@@ -924,8 +1010,8 @@ history-write failure, a branch whose format is newer than it understands.
 ## Budget
 
 The history may grow to {budget / 1e6:g} MB, measured as the size of a pack of exactly the
-objects reachable from the proposed tip. A run adds roughly 15 KB, so the budget holds about
-500 runs. The index warns from {HISTORY_WARNING_SHARE:.0%} of it. A run that would pass the
+objects reachable from the proposed tip. A run adds roughly 20 KB, so the budget holds about
+400 runs. The index warns from {HISTORY_WARNING_SHARE:.0%} of it. A run that would pass the
 budget is not archived: the archive job fails, the job summaries and artifacts are unaffected,
 and the owner decides. The remedies, none of them a force push:
 
@@ -1004,7 +1090,8 @@ def history_index(runs, size, budget, repository):
                and run["trees"]["base"] != previous_head)
         previous_head = run["trees"]["head"]
         if run["base"] is None:
-            span = f"[{run['head'][:12]}]({url}/commit/{run['head']}), no base"
+            span = (f"[{run['head'][:12]}]({url}/commit/{run['head']}), "
+                    f"not compared: {run['reason']}")
         else:
             span = (f"[{run['base'][:12]}..{run['head'][:12]}]"
                     f"({url}/compare/{run['base']}...{run['head']})")
@@ -1019,9 +1106,12 @@ def history_index(runs, size, budget, repository):
             counts = entry["counts"]
             text = " / ".join(str(counts[key]) for key in
                               ("regressed", "improved", "inconclusive", "no verdict"))
-            if entry["status"] != "compared":
-                text = status_text(entry) if entry["status"] != "stopped" else (
-                    f"{text}, stopped: {entry['reason']}")
+            if entry["status"] == "stopped":
+                text += f", stopped: {entry['reason']}"
+            elif entry["status"] != "compared":
+                text = status_text(entry)
+            if entry["not_run_budget"]:
+                text += f", {entry['not_run_budget']} cells not_run: budget"
             if entry["attempt"] > 1:
                 text += f" (attempt {entry['attempt']})"
             cells.append(text)
@@ -1135,7 +1225,9 @@ def parse_arguments():
     run.add_argument("--arms", required=True, type=Path,
                      help="directory with arm-a/benchmarks and arm-b/benchmarks")
     run.add_argument("--deadline", required=True, type=float,
-                     help="Unix time by which every priced call must end")
+                     help="Unix time by which every priced cell must end")
+    run.add_argument("--hard-stop", required=True, type=float,
+                     help="Unix time at which the driver interrupts a call and stops")
     run.add_argument("--output", required=True, type=Path)
     run.add_argument("--workloads", type=Path,
                      default=Path(__file__).with_name("workloads_ci.json"))

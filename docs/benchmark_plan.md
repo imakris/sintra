@@ -1115,6 +1115,28 @@ from its job timings in the GitHub API, which the artifacts do not contain.
 - The smoke cells have R = 1 and 2 and N = 1 and 8, so timings below for R = 4 and N = 40 are
   extrapolated.
 
+**Level 2's hosted trial (run 44036755523, the push of `65056d84` to the work branch)**
+
+From its artifacts and the Windows job's log:
+- Linux, macOS and FreeBSD compared all 8 cells, as a null test (the library did not change;
+  the base was the fallback base `ed0d640e`). Images: Linux `ubuntu26` 20261111.82.6, macOS
+  `macos15` 20261104.0514.1, the FreeBSD VM on `ubuntu26` 20261111.196.1; compilers GCC 15.2.0,
+  Apple LLVM 17.0.0, FreeBSD Clang 19.1.7.
+- Compiler caches: Linux and macOS 3 of 3 hits in both arms; FreeBSD arm A 0 of 3 (the first
+  run, an empty cache), arm B 3 of 3.
+- The two arms' executables were byte-identical on Linux and FreeBSD, and not on macOS, although
+  sources, paths and the compiler cache's objects were the same in both arms.
+- The first hosted null-test evidence: 60 verdict-eligible primary metrics on three platforms
+  (Linux 21, macOS 18, FreeBSD 21) and 1 false call, FreeBSD's `improved` publication msg/s of
+  `w1.windowed.coordinator.r4.b4096` (B/A 1.027 [1.021, 1.041], A/A spread x1.021).
+- The benchmark time, the sum of the runner calls: Linux 222 s, FreeBSD 386 s, macOS 2236 s
+  (`w2.closed_loop.leaf_to_leaf.g0` alone 874 s).
+- Windows built both arms in Git Bash with MSVC, Ninja and sccache (0.16.0: 3 hits), then
+  failed: the MSVC developer environment sets `PLATFORM=x64`, which replaced the workflow's own
+  variable `PLATFORM` ("argument --platform: invalid choice: 'x64'"). It also sets `INCLUDE`,
+  `LIB`, `LIBPATH`, `VSINSTALLDIR` and `VSCMD_*` variables, among others, and Windows ignores
+  the case of variable names.
+
 **Repository**
 - Public (GitHub API). The local object pack is 9.7 MiB. In the 30 days before 2026-11-17, 26
   first-parent commits on `master` touched level 1's paths other than its workflow file
@@ -1175,15 +1197,18 @@ repositories; a Free account runs at most 5 macOS jobs at once.
   `tests/runner/platform/` that the runner loads (`:604`). A change in `benchmarks/` thus
   affects both arms alike and cannot appear as a library change.
 - **Executable copies.** Each of the six runner calls of a cell (15.5) runs fresh copies of the
-  cell's executable, which the driver makes just before the call, in directories whose names
-  have one length: `a1`/`a2`, `a3`/`a4` and `a5`/`a6` for the A/A calls, `a7`/`b1`, `a8`/`b2`
-  and `a9`/`b3` for the A/B calls. An effect of an executable's file then shows in the A/A
-  spread as well.
+  cell's executable, which the driver makes just before the call, in new directories whose
+  paths have one length: under the cell's own copy root (`copies/01` to `copies/08`), `a1`/`a2`,
+  `a3`/`a4` and `a5`/`a6` for the A/A calls, `a7`/`b1`, `a8`/`b2` and `a9`/`b3` for the A/B
+  calls. Nothing is removed or reused during a run. An effect of an executable's file then
+  shows in the A/A spread as well.
 - **Identical executables.** On GCC and Clang (Linux, macOS, FreeBSD) the driver hashes the two
   arms' executables. A workload whose executables are byte-identical compares identical
   binaries, so its cells are null tests (15.3), whatever the library diff says. MSVC executables
   differ in their link time stamp and debug identifiers even then, so the Windows job does not
-  look.
+  look. On macOS the trial's executables differed although sources, paths and the cached
+  objects were the same (15.2), so the check does not fire there; a cause in the linker, such
+  as object time stamps in the debug map, is a guess that no run has tested.
 - **Compiler cache.** Linux, macOS and Windows use level 1's sccache arrangement. FreeBSD uses
   `build-freebsd.yml`'s ccache restore, export and save around the VM, under its own key prefix
   `freebsd-15.0-x86_64-release-bench-ccache-`, so that the test builds and level 2 do not
@@ -1283,12 +1308,22 @@ repositories; a Free account runs at most 5 macOS jobs at once.
   timeout. On FreeBSD the VM's prepare script records the in-VM start, as
   `build-freebsd.yml:72` does. The VM's work ends by that start plus the VM step's timeout minus
   a 5 min boot margin, which falls before the step timeout; the deadline is 8 min before that
-  end, and the driver runs under `timeout(1)` with a limit 1 min before it. The deadline is
-  soft, since a call can overrun it: the driver step's timeout (on FreeBSD, `timeout(1)`, with
-  the VM step's timeout as the backstop) ends the driver, and the atomic `job.json` (15.9) keeps
-  the results so far, so the report and upload steps still run. Estimated benchmark time, a
-  provisional projection until hosted timings of these cells exist: Linux 4.5 min, FreeBSD 6,
-  Windows 9, macOS 31. `timeout-minutes` is 45 (macOS 75); the FreeBSD VM step has 38.
+  end, and the driver runs under `timeout(1)` with a limit 1 min before it.
+- **Hard stop.** The deadline is soft, since a call can overrun it. The driver therefore has a
+  hard stop of its own, a minute before its step's timeout (on FreeBSD a minute before
+  `timeout(1)`'s limit). When a call reaches it, the driver interrupts the runner as the runner
+  expects it (SIGINT on POSIX; Ctrl+Break to the runner's own process group on Windows, where
+  the driver starts the runner in a new process group), waits up to 30 s for the runner to end
+  its swarm and exit, kills it after that, records `stop: deadline` in `job.json`, marks the
+  cell `stopped: deadline` and every later cell `not_run: deadline`, and exits 0, so that its
+  step ends before the step's timeout. The step's timeout and FreeBSD's `timeout(1)` stay as
+  backstops; a driver that one of them ends leaves the state `running`, which the report
+  classifies by its time (15.9). The atomic `job.json` keeps the results so far, so the report
+  and upload steps still run. A closed or broken output of the driver, as when its step is
+  being cancelled, is not an error: the runner log keeps everything.
+- **Times.** Estimated benchmark time, a provisional projection from level 1's smoke records:
+  Linux 4.5 min, FreeBSD 6, Windows 9, macOS 31. The trial measured Linux 3.7 min, FreeBSD 6.4
+  and macOS 37 (15.2). `timeout-minutes` is 45 (macOS 75); the FreeBSD VM step has 38.
 
 ### 15.6 Verdict
 - **Primary metrics** get verdicts; every other headline metric is shown without one.
@@ -1374,7 +1409,10 @@ runs/<run ID>/<platform>.json   that platform's summary.json, reduced (below)
 - **Index.** One line per push run, keyed by `github.run_id` and ordered and labelled by
   `github.run_number`, both of which re-runs keep: push range (`fallback base` marked), library
   and build-definition changes, per platform the numbers of `regressed`, `improved`,
-  `inconclusive` and `no verdict` or its status, the attempt used, and links. A line is marked
+  `inconclusive` and `no verdict` or its status, any cells `not_run: budget`, the attempt used,
+  and links. Every scheduled primary metric is counted: those of a cell that was not run or
+  recorded nothing count as `no verdict`, so a shortfall cannot shrink the counts unseen. A
+  run without a parent states its reason. A line is marked
   `gap` only when the library trees of the previous indexed head and of this run's base differ: a
   range of master that no history entry covers, such as a `[skip ci]` push. A failed or
   incomplete comparison is shown by its platform statuses, not by a gap mark.
@@ -1387,8 +1425,9 @@ runs/<run ID>/<platform>.json   that platform's summary.json, reduced (below)
   column shows the null evidence of the image and compiler of the platform's latest run, taken
   from the recorded provenance. Until null runs accumulate, the header says that the hosted rate
   is unknown. Also the history's size, with a warning from 80 % of the budget.
-- **Stored per platform:** only the primary metrics, with their per-pair values (six significant
-  digits), so that the rule can be re-applied, their representations and verdicts, the
+- **Stored per platform:** only the primary metrics, with their per-pair values at full
+  precision, so that the rule re-applied to them gives the reported verdict (the summaries round
+  only what they display), their representations and verdicts, the
   missing-data reasons (states, stops, why a metric has no verdict) and the provenance (image,
   compiler, CPU model, C, `host.os`, protocol version). The other metrics, the fence shares, the
   cache statistics and the raw records stay in the 90-day artifacts; the run's context is in
@@ -1412,16 +1451,19 @@ runs/<run ID>/<platform>.json   that platform's summary.json, reduced (below)
   files (a re-run thus replaces its summaries, while `run.json` keeps the first reporting
   attempt's null-test counts), regenerate `README.md` and `index.md`, commit, measure, write the
   size into the index, amend that local commit, measure again, and push with the explicit
-  refspec `HEAD:refs/heads/benchmark-history`. The token reaches only the commands that talk to
-  the remote, through their environment, never a configuration file or a command line. Nothing
-  in this design force-pushes. When the push is rejected because another run pushed first,
+  refspec `HEAD:refs/heads/benchmark-history`. The token leaves the archive process's
+  environment at once and reaches only the git commands that talk to the remote (`ls-remote`,
+  `fetch`, `push`), through their environment, never a configuration file or a command line;
+  the log masks the credential derived from it. A size measurement whose `rev-list` or
+  `pack-objects` fails refuses publication, so a partial pack is never taken for the size.
+  Nothing in this design force-pushes. When the push is rejected because another run pushed first,
   fetch, rebuild and measure again, up to 5 attempts with random waits of 5 to 30 s; then a
   history-write failure.
 - **Size budget: 8 MB**, the size of a pack of exactly the objects reachable from the proposed
   tip, new commit included (`git rev-list --objects <tip> | git pack-objects --stdout | wc -c`).
-  A run adds roughly 15 KB (four platform files of about 3.6 KB each, compressed, and the
-  index change; one platform file of a local run measured 20.6 KB raw and 3.6 KB compressed),
-  so the budget holds about 500 runs: about a year and a half at the observed cadence, a
+  A run adds roughly 20 KB: four platform files of about 4.7 KB each, compressed (the trial's
+  three measured 22.6 to 22.8 KB raw and 4.6 to 4.8 KB compressed), `run.json` and the index
+  change. The budget thus holds about 400 runs: about 15 months at the observed cadence, a
   projection. Full clones and the eight `fetch-depth: 0` checkouts of each library push (15.2)
   fetch every branch, so at the budget each downloads up to 8 MB more: 64 MB per library push
   across those checkouts, and a full clone of about 18 MB instead of today's 9.7 MiB. When a run
@@ -1439,29 +1481,38 @@ runs/<run ID>/<platform>.json   that platform's summary.json, reduced (below)
     and upload); archiving, including the budget stop. Infrastructure failures, job timeouts
     included. A failed build of arm B, the pushed commit as it is: the commit is broken, it is
     incompatible with level 2's toolchain (level 2's runner labels and compilers differ from
-    level 1's, 15.5), or level 2's build invocation is. A driver that failed, that left no
-    `job.json`, or one without its completion mark although its step ended before the deadline.
+    level 1's, 15.5), or level 2's build invocation is. An arm B build that did not run (an
+    earlier step failed), was cancelled, or (FreeBSD) left no outcome. A driver that failed,
+    that left no `job.json`, or one without its completion mark although its step ended before
+    the deadline.
   - Reported, not red: any number; invalid samples; every failed build of arm A
     (`not_compared: base_build_failed`, with "overlay left base unchanged" when `benchmarks/` and
     the build definition are the same in base and head); a runner that exits non-zero after the
-    validation, recorded as a stop with its message (`not_compared: no_records` when nothing was
-    recorded, otherwise partial results), including `not_compared: configuration_differs`; a
-    driver ended by its step timeout (`stopped: deadline`, with its partial results); a stopped
-    cell or platform; calls not run for the budget.
+    validation, recorded as a stop with its message (`not_compared: no_records` when no A/B call
+    recorded anything, otherwise partial results), including `not_compared:
+    configuration_differs`, which the first A/B call meets after the first A/A call has recorded
+    its pair; a driver that its hard stop or its step's timeout ended (`stopped: deadline`, with
+    its partial results); a stopped cell or platform; cells not run for the budget.
 - **Mechanism.** The arm A build and the driver run with `continue-on-error: true`; the build
   outcomes reach the report step through the environment. The driver writes `job.json` before
-  its first call and rewrites it atomically (a temporary file, then a rename) after every call,
-  with each call's exit code and, after a failure, the runner's last output; at its end it
-  writes the state `finished`, or `error` with the exception that ended it. A driver that an
-  interrupt or a timeout ends leaves the state `running`: the report classifies that as
-  `stopped: deadline` when it runs after the deadline, and as red otherwise. The report, the
+  its first call, when a cell starts, and atomically (a temporary file, then a rename) after
+  every call, with each call's exit code, its stop reason (judged from the call's whole output)
+  and, after a stop, the runner's last output or the hard stop's account; at its end it writes
+  the state `finished`, or `error` with the exception that ended it. A hard stop finishes the
+  driver with `stop: deadline` (15.5). A driver that an interrupt or a backstop timeout ends
+  leaves the state `running`: the report classifies that as `stopped: deadline` when it runs
+  after the deadline, and as red otherwise. The report, the
   upload and a last status step run `if: always()`. The report step classifies, writes the
   summary and sets `level2_fault`; the status step fails the job when the report step did not
   succeed or set `level2_fault` (as `coverage.yml:179-182` carries a result). On FreeBSD the VM
   step's script writes the build outcomes and the driver's files into the output directory,
-  which is exported with rsync and reported on the host; the script fails only when the VM does
-  not come up, and a command of its own that fails leaves an outcome missing, which the report
-  classifies as red.
+  which is exported with rsync, reported and uploaded on the host before the compiler cache is
+  exported and saved; the script fails only when the VM does not come up, and a command of its
+  own that fails leaves an outcome missing, which the report classifies as red.
+- **Workflow variables.** The platform jobs' own variables carry the prefix `BENCH_`: the MSVC
+  developer environment sets `PLATFORM`, `INCLUDE`, `LIB` and many more, Windows ignores the
+  case of variable names, and a variable that a step adds to `GITHUB_ENV` replaces the job's
+  (the trial's Windows failure, 15.2).
 - **Level 1** stays as it is and keeps gating breakage. Level 2 is a separate workflow on the same
   pushes and does not wait for level 1. It posts no status of its own; its jobs still appear as
   checks.
@@ -1504,18 +1555,21 @@ and runner concurrency shared with the other workflows of each push.
    `compare`, a matrix of `linux`, `windows` and `macos`, and `freebsd` (the overlay and the two
    fresh sequential builds of 15.4 in one source and one build directory, with the compiler
    cache and its statistics, the staged executables `arm-a` and `arm-b`, `TMPDIR` or `TEMP` set
-   to a private directory as in level 1, `ci_compare.py run` with a step timeout, `report`, step
-   summary, artifact, the final status step; FreeBSD builds and measures in the VM, with its
-   start recorded in prepare, `git` installed there and the workspace marked `safe.directory`,
-   and reports on the host); `collect` and `archive` (15.8). Actions pinned by commit and context
-   passed through the environment, as in the other workflows.
+   to a private directory as in level 1, `ci_compare.py run` with its deadline, its hard stop
+   and a step timeout, `report`, step summary, artifact, the final status step; FreeBSD builds
+   and measures in the VM, with its start recorded in prepare, `git` installed there and the
+   workspace marked `safe.directory`, and reports and uploads on the host before the compiler
+   cache is exported and saved); `collect` and `archive` (15.8). Actions pinned by commit, and
+   context passed through the environment as in the other workflows, in variables prefixed
+   `BENCH_` in the platform jobs (15.9).
 2. `benchmarks/workloads_ci.json` (new): the cells of 15.5 in priority order, each with its
    runner entry and count, an expected time per sample and platform, and optional per-platform
    counts; `target_interval_s` per platform.
 3. `benchmarks/ci_compare.py` (new): `run` (workloads validation, the per-platform file, the
    identical-executable check, six runner calls per cell on fresh copies with their kind and
-   number in `--note`, stopping, pricing each cell against the deadline, atomic `job.json` with
-   its completion mark); `report` (the classification of 15.9, the verdicts of 15.6 through the
+   number in `--note`, stopping, pricing each cell against the deadline, the hard stop, atomic
+   `job.json` with its completion mark); `report` (the classification of 15.9, the verdicts of
+   15.6 through the
    runner's `comparable_pairs`, `metric_values`, `compare` and the shared ratio-or-difference
    choice, the closed-loop total CPU read from the record, the wrap check, the fence shares,
    cache statistics and the in-job cache check, `summary.json`, `summary.md`); `collect` (attempt
@@ -1536,4 +1590,7 @@ and runner concurrency shared with the other workflows of each push.
   `master`. The hosted trial includes a deliberate re-run of failed jobs: cancel the run while a
   platform job is still measuring, then "Re-run failed jobs"; the collect job of attempt 2 must
   take the re-run platform's summary from attempt 2 and the others from attempt 1. The temporary
-  trigger is removed before landing.
+  trigger is removed before landing. The first trial (run 44036755523, 15.2) compared Linux,
+  macOS and FreeBSD and failed on Windows on the `PLATFORM` collision; the fixes of its review
+  round (the variable prefix, the hard stop, the budget shortfall in the index, full-precision
+  history values, the checked size measurement, among others) await a second trial.
