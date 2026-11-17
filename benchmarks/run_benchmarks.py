@@ -35,6 +35,7 @@ CALIBRATION_TIMEOUT_S = 900 # under --calibrate: an estimate may be far off on a
 REPORT_WAIT_S = 10          # for the reports of every participant, after the coordinator's exit
 EXIT_WAIT_S = 10            # the cleanup's deadline: two consecutive empty looks must end by it
 AGGREGATE_TIMEOUT_S = 60    # for --aggregate, which only reads the reports of one sample
+BUILD_FACTS_TIMEOUT_S = 60  # for --build-facts, which only prints constants
 OBSERVE_INTERVAL_S = 0.25   # between looks at the participants while the coordinator runs
 CALIBRATION_RUNS = 3
 ROLES = ["coordinator", "coordinator_sender", "sender", "receivers"]
@@ -677,7 +678,8 @@ def find_executable(build_dir, workload):
 
 def read_build_facts(executable):
     result = subprocess.run(
-        [str(executable), "--build-facts"], capture_output=True, text=True, check=True)
+        [str(executable), "--build-facts"], capture_output=True, text=True, check=True,
+        timeout=BUILD_FACTS_TIMEOUT_S)
     return json.loads(result.stdout)
 
 
@@ -1256,6 +1258,14 @@ def metric_values(pairs):
     return values
 
 
+def compared_as_difference(always_difference, value_pairs):
+    """Whether a metric is compared as the difference B-A instead of the ratio B/A: always
+    for CPU, the lost fraction and the shutdown calls, and for any metric with an observation
+    that is zero or unavailable. The caller passes every pair that the comparison and its A/A
+    spread use, so that one representation serves both."""
+    return always_difference or any(not value for pair in value_pairs for value in pair)
+
+
 def compare(value_pairs, as_difference):
     """The within-pair comparisons, B-A or B/A, of the pairs that have a value in both arms,
     and the number of pairs that lack one."""
@@ -1336,11 +1346,9 @@ def print_summary(records, aa_records, skipped):
             aa_value_pairs = aa_values.get(label, (always_difference, []))[1]
             if is_single_shutdown_call(label, value_pairs + aa_value_pairs):
                 continue
-            # One representation serves the comparison and its A/A spread, and it is chosen
-            # from both: an observation that is zero or unavailable in either rules the ratio
-            # out. No observation is dropped; one without a value is counted as unavailable.
-            as_difference = always_difference or any(
-                not value for pair in value_pairs + aa_value_pairs for value in pair)
+            # No observation is dropped; one without a value is counted as unavailable.
+            as_difference = compared_as_difference(
+                always_difference, value_pairs + aa_value_pairs)
             present, compared, unavailable = compare(value_pairs, as_difference)
             if not compared:
                 text = f"unavailable in all {unavailable} pairs"

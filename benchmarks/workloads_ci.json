@@ -1,0 +1,14 @@
+{
+  "schema": "sintra-bench-ci-workloads/1",
+  "target_interval_s": {"linux": 2, "windows": 3, "macos": 10, "freebsd": 2},
+  "cells": [
+    {"id": "w1.windowed.coordinator.r1.b64", "entry": {"workload": "broadcast", "origin": "coordinator", "receivers": 1, "payload_bytes": 64, "messages": 300000}, "sample_s": {"linux": 2.0, "windows": 3.6, "macos": 12.5, "freebsd": 1.8}},
+    {"id": "w2.closed_loop.leaf_to_leaf.g0", "entry": {"workload": "rpc", "route": "leaf_to_leaf", "mode": "closed_loop", "gap_us": 0, "calls": 1000}, "sample_s": {"linux": 4.0, "windows": 8.0, "macos": 25.0, "freebsd": 4.4}},
+    {"id": "w3.lifecycle.n8", "entry": {"workload": "swarm", "leaves": 8}, "sample_s": {"linux": 0.5, "windows": 0.6, "macos": 1.0, "freebsd": 0.5}},
+    {"id": "w1.windowed.leaf.r4.b64", "entry": {"workload": "broadcast", "origin": "leaf", "receivers": 4, "payload_bytes": 64, "messages": 200000}, "sample_s": {"linux": 2.0, "windows": 2.8, "macos": 10.5, "freebsd": 2.0}},
+    {"id": "w2.closed_loop.leaf_to_coordinator.g0", "entry": {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "closed_loop", "gap_us": 0, "calls": 2000}, "sample_s": {"linux": 0.6, "windows": 3.8, "macos": 20.0, "freebsd": 4.2}},
+    {"id": "w2.windowed.leaf_to_coordinator.w32", "entry": {"workload": "rpc", "route": "leaf_to_coordinator", "mode": "windowed", "window": 32, "calls": 50000}, "sample_s": {"linux": 1.9, "windows": 3.6, "macos": 15.5, "freebsd": 3.0}},
+    {"id": "w1.windowed.coordinator.r4.b4096", "entry": {"workload": "broadcast", "origin": "coordinator", "receivers": 4, "payload_bytes": 4096, "messages": 20000}, "sample_s": {"linux": 1.5, "windows": 2.0, "macos": 7.0, "freebsd": 1.2}},
+    {"id": "w3.lifecycle.n40", "entry": {"workload": "swarm", "leaves": 40}, "sample_s": {"linux": 1.0, "windows": 2.5, "macos": 4.0, "freebsd": 1.5}}
+  ]
+}

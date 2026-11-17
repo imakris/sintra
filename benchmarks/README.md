@@ -30,6 +30,8 @@ defines what is measured and how:
 | `run_benchmarks.py` | Paired runner: A/B and A/A sessions, calibration, summary and axis tables |
 | `workloads.json` | Cells, windowed counts, stored open-loop rates and calibration metadata |
 | `workloads_smoke.json` | The CI smoke cells: tiny fixed counts and a low explicit open-loop rate |
+| `ci_compare.py` | Level 2 of the CI: the comparison driver, its report, the run's collection and the history |
+| `workloads_ci.json` | The level-2 cells: fixed counts and expected sample times per platform |
 
 ## Build
 
@@ -309,9 +311,9 @@ significant digits), stores the open-loop rates as the `rate_fractions` of the
 median windowed **publication** rate (two significant digits), and records the
 host label, commit and date. Cells that were not calibrated keep their values.
 
-How calibration applies to hosted runners belongs to the comparison
-methodology of level 2 (see below), which is not designed yet. Until then,
-calibrate into a temporary file and pass it with `--workloads`.
+Level 2 of the CI does not calibrate: its cells have fixed counts in
+`workloads_ci.json` (see below). Calibrate into a temporary file and pass it
+with `--workloads`.
 
 ## Continuous integration
 
@@ -345,8 +347,8 @@ open-loop cells use a fixed 500 messages/s, so the `x10` suffix of their IDs,
 which comes from the file's only rate fraction, is not a percentage of a
 calibrated rate there.
 
-Level 2, a paired comparison against the previous master on hosted runners that
-is reported and does not gate, is a later step and not designed yet.
+Level 2, a paired comparison with the previous master that reports and never
+gates, is described below.
 
 To run the smoke pass locally, from the repository root, against a Release
 build directory:
@@ -361,6 +363,105 @@ Give each pass a new output file: the runner appends to it, and an earlier
 session's A/A records join the summary. To keep other `sintra-*` entries out of
 the ring parent directory (`ring_dir_not_empty`), point `TMPDIR` (POSIX) or
 `TEMP` and `TMP` (Windows) at an empty directory.
+
+### Level 2: comparison with the previous master
+
+`.github/workflows/benchmark-compare.yml` is level 2 (plan section 15). It
+runs on each push to `master` that changes level 1's paths, except Markdown
+files under `benchmarks/` and with its own workflow file in place of level 1's,
+and on demand. It shows performance changes on hosted runners and never fails
+because of a number.
+
+- **Base and head.** A push compares the branch's previous head
+  (`github.event.before`) with the pushed commit, so it covers every commit of
+  the push. When the previous head is all zeros or cannot be fetched, the base
+  is the pushed commit's first parent, labelled "fallback base". A dispatch
+  compares the dispatched commit with its first parent and writes no history.
+- **Platforms.** One job each: Linux (`ubuntu-26.04`, GCC), Windows
+  (`windows-2025`, MSVC), macOS (`macos-15`, Apple Clang) and FreeBSD 15.0 (a VM
+  on `ubuntu-26.04`, the base system's Clang). Every comparison stays within one
+  job: hosted jobs run on different machines.
+- **Arms.** A job builds arm A, the base library with the pushed `benchmarks/`
+  overlaid, and then arm B, the pushed commit as it is, in the same source
+  directory and the same build directory, which it deletes before each arm.
+  Both arms have the same compiled-in paths, and a change in `benchmarks/`
+  affects both alike. The compiler cache (sccache; ccache on FreeBSD) serves
+  what did not change. The job summary shows each arm's cache hits and misses;
+  when the library and the build definition are unchanged, every compile of arm
+  B must hit, and a miss is reported as a cache defect. The driver, the runner
+  and `workloads_ci.json` run from the pushed commit.
+- **Cells.** `workloads_ci.json` lists eight cells in priority order, with
+  fixed counts and no calibration (format below). Per cell, `ci_compare.py run`
+  makes six runner calls into one output file: A/A with 1 pair, A/B 2, A/A 2,
+  A/B 2, A/A 2, A/B 1, so 5 A/A and 5 A/B pairs. Each call runs fresh copies of
+  the executables, in directories of equal name length: `a1` to `a6` for the
+  A/A calls, `a7` to `a9` and `b1` to `b3` for the A/B calls. An A/A call passes
+  the second copy of arm A as `--b`, so its records carry `aa: false`; a
+  record's kind and call are in its note, `ci-compare <platform> <aa|ab> call
+  <n>, benchmarks <head>`, and its `commit` is the library commit of its arm.
+- **Budget.** Before each cell, the driver prices its six calls at their
+  samples times the cell's expected time per sample on the platform, plus 50 %.
+  The first cell that would end after the deadline (the job's start plus its
+  timeout minus 8 minutes) is left out with every later one (`not_run:
+  budget`), so that a shortfall always drops the same cells. A call can overrun
+  the deadline; the driver step's timeout ends it (on FreeBSD, `timeout(1)` in
+  the VM) and the report keeps the results so far (`stopped: deadline`).
+- **Verdicts.** Per primary metric (plan section 15.6) the spread is the
+  largest deviation among the cell's 5 A/A pairs: `|ln(B/A)|` for a ratio,
+  `|B-A|` for a difference, in the representation that the runner's summary
+  would choose over all 10 pairs. `regressed` or `improved` means that all 10
+  pairs have a value, the 5 A/B pairs moved the same way, and each by more than
+  the spread; `inconclusive` that all 10 have a value otherwise; `no verdict`
+  that a pair lacks a value, or that the metric is excluded on the platform
+  (CPU on Windows, `send_call` on Windows and macOS). Cross-process latencies
+  are shown without a verdict. A push that leaves the library unchanged runs as
+  a null test, and so does a cell whose two arms' executables are
+  byte-identical (GCC and Clang; MSVC executables never are): any verdict there
+  is a false call.
+- **Report.** The job summary has a header (push range, change flags, image,
+  compiler, CPU model, C, compiler cache, status), the reading notes, one row
+  per cell with its pairs, invalid samples, state, fence share (W1) and each
+  primary metric's verdict, median and range with the A/A spread, and a
+  collapsed list of every headline metric. The artifact
+  `benchmark-compare-<platform>-<run ID>-<attempt>` (90 days) holds the
+  records, the runner and build logs, `job.json`, `summary.json` and
+  `summary.md`. The collect job adds a combined summary per run.
+- **Red** only when level 2 cannot build the pushed commit, or cannot produce
+  or publish its report: a failed arm B build, a driver that fails, leaves no
+  `job.json` or ends before its deadline without its completion mark, a failed
+  report or upload, a failed archive, and job timeouts. A failed arm A build
+  (`not_compared: base_build_failed`), invalid samples, a runner that stops,
+  a deadline stop and a budget shortfall are reported, not red.
+- **History.** The archive job adds every push run of `master` to the orphan
+  branch `benchmark-history`: `index.md` (one line per run, the observed
+  false-call rate of the null tests, the size), `runs/<run ID>/run.json` and one
+  file per platform with the primary metrics' per-pair values and verdicts. A
+  re-run replaces its run's files; the null-test counts stay those of the first
+  attempt that reported. The branch may grow to 8 MB; the archive job warns from
+  80 % and stops archiving beyond, without a force push. The branch's
+  `README.md` names the remedies.
+
+To run a comparison locally, build two arms as above and copy their three
+executables to `<arms>/arm-a/benchmarks/` and `<arms>/arm-b/benchmarks/`. The
+context file is the JSON that the workflow's setup job writes (`base`, `head`,
+`event`, `run_id`, `run_number`, `fallback_base`, `reason`, the change flags
+and the library tree IDs):
+
+```text
+python benchmarks/ci_compare.py run --platform <linux|windows|macos|freebsd> --context <context.json>
+    --arms <arms> --deadline <Unix time> --output <dir> [--workloads <CI workloads file>]
+python benchmarks/ci_compare.py report --platform <platform> --context <context.json> --output <dir>
+    --arm-a success --arm-b success --attempt 1 --image <text>
+```
+
+| Key of `workloads_ci.json` | Meaning |
+|---|---|
+| `schema` | `sintra-bench-ci-workloads/1` |
+| `target_interval_s` | Per platform; sets the runner's timeout of the uncalibrated W1 cells |
+| `cells[].id` | The runner's cell ID; the driver checks that it is the ID of the entry |
+| `cells[].entry` | A runner workloads entry with its count, or `{"workload": "swarm", "leaves": N}` |
+| `cells[].sample_s` | Per platform: the expected seconds per sample, for the budget |
+| `cells[].counts` | Optional, per platform: a count that replaces the entry's |
 
 ## Workloads file
 

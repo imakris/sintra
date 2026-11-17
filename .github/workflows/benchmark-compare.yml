@@ -1,0 +1,569 @@
+name: Benchmark comparison
+
+# Level 2 of the benchmark CI (docs/benchmark_plan.md, section 15; benchmarks/README.md). On each
+# push to master that changes the library, the build or the benchmarks, every platform job builds
+# arm A, the previous master's library with the pushed benchmarks, and arm B, the pushed commit,
+# one after the other in the same paths, and compares them with A/A and A/B pairs. It reports and
+# never gates: a job is red only when level 2 cannot build the pushed commit or cannot produce or
+# publish its report, never because of a number. The archive job adds every push run of master to
+# the benchmark-history branch. No concurrency group: each run measures its own base and head.
+
+on:
+  workflow_dispatch:
+  push:
+    # TEMPORARY: 'work/**' runs the pre-landing trial on hosted runners. The archive job stays
+    # guarded to master, so the trial writes no history. Remove it before landing.
+    branches: [ master, 'work/**' ]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'third_party/**'
+      - 'benchmarks/**'
+      - '!benchmarks/**/*.md'
+      - 'tests/runner/platform/**'
+      - '.github/workflows/benchmark-compare.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Setup
+    if: ${{ !github.event.repository.fork }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      compare: ${{ steps.base.outputs.compare }}
+      base: ${{ steps.base.outputs.base }}
+      head: ${{ steps.base.outputs.head }}
+      context: ${{ steps.base.outputs.context }}
+
+    steps:
+      - name: Checkout the pushed commit and its parents
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 2
+
+      # A push compares its whole range, from the branch's previous head. That head is all zeros
+      # for a new branch and can be missing after a force push: the base is then the head's first
+      # parent, labelled "fallback base". A dispatch compares its commit with the first parent.
+      - name: Determine base and head
+        id: base
+        shell: python3 {0}
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          import json, os, subprocess
+
+          LIBRARY = ["src", "include", "cmake", "CMakeLists.txt", "CMakePresets.json", "third_party"]
+          BUILD_DEFINITION = ["CMakeLists.txt", "cmake", "CMakePresets.json"]
+
+          def git(*arguments):
+              return subprocess.run(["git", *arguments], capture_output=True, text=True)
+
+          def changed(*paths):
+              code = git("diff", "--quiet", base, head, "--", *paths).returncode
+              if code not in (0, 1):
+                  raise SystemExit(f"git diff failed with exit code {code}")
+              return code == 1
+
+          def trees(commit):
+              return {path: git("rev-parse", "--verify", "--quiet", f"{commit}:{path}").stdout.strip()
+                      or None for path in LIBRARY}
+
+          event, head, before = os.environ["EVENT"], os.environ["HEAD_SHA"], os.environ["BEFORE"]
+          base, fallback, reason = None, False, None
+          if (event == "push" and before.strip("0")
+                  and git("fetch", "--quiet", "--depth=1", "origin", before).returncode == 0):
+              base = before
+          else:
+              fallback = event == "push"
+              parent = git("rev-parse", "--verify", "--quiet", f"{head}^1")
+              if parent.returncode == 0:
+                  base = parent.stdout.strip()
+              else:
+                  reason = "the head has no parent"
+          context = {
+              "event": event, "run_id": int(os.environ["RUN_ID"]),
+              "run_number": int(os.environ["RUN_NUMBER"]), "head": head, "base": base,
+              "fallback_base": fallback, "reason": reason,
+              "library_changed": base is not None and changed(*LIBRARY),
+              "build_definition_changed": base is not None and changed(*BUILD_DEFINITION),
+              "benchmarks_changed": base is not None and changed("benchmarks"),
+              "trees": {"base": base and trees(base), "head": trees(head)},
+          }
+          print(json.dumps(context, indent=1))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"compare={'true' if base else 'false'}\nbase={base or ''}\nhead={head}\n"
+                           f"context={json.dumps(context)}\n")
+
+  compare:
+    name: ${{ matrix.name }}
+    needs: setup
+    if: needs.setup.outputs.compare == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            name: Linux (GCC)
+            runner: ubuntu-26.04
+            timeout: 45
+            exe: ''
+            cmake_options: -DCMAKE_CXX_COMPILER=g++
+          - platform: windows
+            name: Windows (MSVC)
+            runner: windows-2025
+            timeout: 45
+            exe: .exe
+            cmake_options: >-
+              -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
+              -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+          - platform: macos
+            name: macOS
+            runner: macos-15
+            timeout: 75
+            exe: ''
+            cmake_options: ''
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      PLATFORM: ${{ matrix.platform }}
+      BASE: ${{ needs.setup.outputs.base }}
+      HEAD: ${{ needs.setup.outputs.head }}
+      CONTEXT: ${{ needs.setup.outputs.context }}
+      CMAKE_OPTIONS: ${{ matrix.cmake_options }}
+      EXE: ${{ matrix.exe }}
+      JOB_TIMEOUT_MIN: ${{ matrix.timeout }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Record the job's start and context
+        run: |
+          echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/compare"
+          printf '%s' "$CONTEXT" > "$RUNNER_TEMP/compare/context.json"
+
+      - name: Checkout the pushed commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ needs.setup.outputs.head }}
+
+      - name: Fetch the base commit
+        run: git fetch --quiet --depth=1 origin "$BASE"
+
+      - name: Set up MSVC environment
+        if: matrix.platform == 'windows'
+        uses: TheMrMilchmann/setup-msvc-dev@79dac248aac9d0059f86eae9d8b5bfab4e95e97c # v4.0.0
+        with:
+          arch: x64
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.x'
+
+      - name: Ensure Ninja
+        if: matrix.platform != 'windows'
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = macOS ]; then
+              brew install ninja
+            else
+              sudo apt-get update
+              sudo apt-get install -y ninja-build
+            fi
+          fi
+
+      # Both arms build in this source directory and in the build directory `build`, deleted
+      # before each arm, so that they have the same compiled-in paths and arm B is a fresh build.
+      # The compiler cache serves what did not change.
+      - name: Build arm A (the base library with the pushed benchmarks)
+        id: build_a
+        continue-on-error: true
+        run: |
+          git checkout --quiet --detach "$BASE"
+          # The overlay also removes the files that the pushed commit deleted from benchmarks/.
+          git restore --source="$HEAD" --staged --worktree -- benchmarks
+          git diff --quiet "$HEAD" -- benchmarks
+          rm -rf build
+          sccache --zero-stats > /dev/null
+          read -ra options <<< "$CMAKE_OPTIONS"
+          {
+            cmake -G "Ninja Multi-Config" -B build -S . "${options[@]}" -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
+            cmake --build build --config Release --parallel 3 \
+              --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
+          } 2>&1 | tee "$RUNNER_TEMP/compare/build-a.log"
+          sccache --show-stats --stats-format=json > "$RUNNER_TEMP/compare/cache-a.json"
+          mkdir -p "$RUNNER_TEMP/arms/arm-a/benchmarks"
+          for name in broadcast rpc swarm; do
+            cp "build/benchmarks/Release/sintra_${name}_benchmark$EXE" "$RUNNER_TEMP/arms/arm-a/benchmarks/"
+          done
+
+      - name: Build arm B (the pushed commit)
+        id: build_b
+        run: |
+          git checkout --quiet --detach "$HEAD"
+          git diff --quiet "$HEAD"
+          rm -rf build
+          sccache --zero-stats > /dev/null
+          read -ra options <<< "$CMAKE_OPTIONS"
+          {
+            cmake -G "Ninja Multi-Config" -B build -S . "${options[@]}" -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF
+            cmake --build build --config Release --parallel 3 \
+              --target sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark
+          } 2>&1 | tee "$RUNNER_TEMP/compare/build-b.log"
+          sccache --show-stats --stats-format=json > "$RUNNER_TEMP/compare/cache-b.json"
+          mkdir -p "$RUNNER_TEMP/arms/arm-b/benchmarks"
+          for name in broadcast rpc swarm; do
+            cp "build/benchmarks/Release/sintra_${name}_benchmark$EXE" "$RUNNER_TEMP/arms/arm-b/benchmarks/"
+          done
+
+      # The driver prices its calls against the job's start plus its timeout minus 8 min for the
+      # report and the upload. The step timeout, the backstop for a call that overruns, falls
+      # 4 min before the job's timeout.
+      - name: Set the deadline
+        id: deadline
+        if: success() && steps.build_a.outcome == 'success'
+        run: |
+          now=$(date +%s)
+          minutes=$(( (JOB_START + (JOB_TIMEOUT_MIN - 4) * 60 - now) / 60 ))
+          echo "deadline=$(( JOB_START + (JOB_TIMEOUT_MIN - 8) * 60 ))" >> "$GITHUB_OUTPUT"
+          echo "minutes=$(( minutes > 1 ? minutes : 1 ))" >> "$GITHUB_OUTPUT"
+
+      # On Windows the runner owns each swarm through tests/runner/platform/windows_process_tree.py.
+      - name: Compare the arms
+        if: success() && steps.build_a.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(steps.deadline.outputs.minutes || '1') }}
+        env:
+          DEADLINE: ${{ steps.deadline.outputs.deadline }}
+        run: |
+          # A private ring parent directory for the swarms of the comparison.
+          tmp="$RUNNER_TEMP/benchmark-tmp"
+          mkdir -p "$tmp"
+          if [ "$RUNNER_OS" = Windows ]; then
+            export TEMP="$tmp" TMP="$tmp"
+          else
+            export TMPDIR="$tmp"
+          fi
+          python -u benchmarks/ci_compare.py run --platform "$PLATFORM" \
+            --context "$RUNNER_TEMP/compare/context.json" --arms "$RUNNER_TEMP/arms" \
+            --deadline "$DEADLINE" --output "$RUNNER_TEMP/compare"
+
+      - name: Report
+        id: report
+        if: always()
+        env:
+          ARM_A: ${{ steps.build_a.outcome }}
+          ARM_B: ${{ steps.build_b.outcome }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python -u benchmarks/ci_compare.py report --platform "$PLATFORM" \
+            --context "$RUNNER_TEMP/compare/context.json" --output "$RUNNER_TEMP/compare" \
+            --arm-a "$ARM_A" --arm-b "$ARM_B" --attempt "$ATTEMPT" --image "$ImageOS $ImageVersion" \
+            --github-output "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/compare/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the comparison
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-compare-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compare/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Level 2 status
+        if: always()
+        env:
+          REPORT: ${{ steps.report.outcome }}
+          FAULT: ${{ steps.report.outputs.level2_fault }}
+        run: |
+          if [ "$REPORT" != success ]; then
+            echo "::error::The report step did not succeed ($REPORT)."
+            exit 1
+          fi
+          if [ "$FAULT" = true ]; then
+            echo "::error::Level 2 could not build the pushed commit or produce its report; see the job summary."
+            exit 1
+          fi
+
+  freebsd:
+    name: FreeBSD
+    needs: setup
+    if: needs.setup.outputs.compare == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BASE: ${{ needs.setup.outputs.base }}
+      HEAD: ${{ needs.setup.outputs.head }}
+      CONTEXT: ${{ needs.setup.outputs.context }}
+
+    steps:
+      - name: Checkout the pushed commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ needs.setup.outputs.head }}
+
+      - name: Fetch the base commit and record the context
+        run: |
+          git fetch --quiet --depth=1 origin "$BASE"
+          mkdir -p ci-compare
+          printf '%s' "$CONTEXT" > ci-compare/context.json
+
+      - name: Restore compiler cache
+        id: restore_compiler_cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: freebsd-15.0-x86_64-release-bench-ccache-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            freebsd-15.0-x86_64-release-bench-ccache-
+
+      # The script writes the build outcomes and the driver's files into ci-compare/, which the
+      # host exports and reports. It fails only when the VM does not come up; a step of its own
+      # that fails leaves an outcome missing, which the report classifies as red.
+      - name: Build and compare in the VM (FreeBSD 15.0)
+        id: vm
+        timeout-minutes: 38
+        uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
+        with:
+          release: "15.0"
+          usesh: true
+          copyback: false
+          envs: 'BASE HEAD'
+          prepare: |
+            date +%s > /tmp/ci_start_time
+            pkg install -y cmake ninja python ccache git
+          run: |
+            set -u
+            set -o pipefail
+            out="$GITHUB_WORKSPACE/ci-compare"
+            arms=/tmp/benchmark-arms
+            # The workspace was copied into the VM with the runner's owner.
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+            export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+            export CCACHE_COMPILERCHECK=content
+            export CCACHE_MAXSIZE=1GiB
+            options="-DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+              -DSINTRA_BUILD_BENCHMARKS=ON -DSINTRA_BUILD_TESTS=OFF -DSINTRA_BUILD_EXAMPLES=OFF"
+            targets="sintra_broadcast_benchmark sintra_rpc_benchmark sintra_swarm_benchmark"
+
+            # Arm A: the base library with the pushed benchmarks; arm B: the pushed commit. Both
+            # build in this directory and in `build`, deleted before each arm.
+            (
+              set -e
+              git checkout --quiet --detach "$BASE"
+              git restore --source="$HEAD" --staged --worktree -- benchmarks
+              git diff --quiet "$HEAD" -- benchmarks
+              rm -rf build
+              ccache --zero-stats > /dev/null
+              cmake -S . -B build -G Ninja $options
+              cmake --build build --parallel 3 --target $targets
+              mkdir -p "$arms/arm-a/benchmarks"
+              for name in broadcast rpc swarm; do
+                cp "build/benchmarks/sintra_${name}_benchmark" "$arms/arm-a/benchmarks/"
+              done
+            ) 2>&1 | tee "$out/build-a.log"
+            status=$?
+            ccache --show-stats > "$out/cache-a.txt"
+            if [ "$status" -eq 0 ]; then echo success; else echo failure; fi > "$out/build-a.outcome"
+            (
+              set -e
+              git checkout --quiet --detach "$HEAD"
+              git diff --quiet "$HEAD"
+              rm -rf build
+              ccache --zero-stats > /dev/null
+              cmake -S . -B build -G Ninja $options
+              cmake --build build --parallel 3 --target $targets
+              mkdir -p "$arms/arm-b/benchmarks"
+              for name in broadcast rpc swarm; do
+                cp "build/benchmarks/sintra_${name}_benchmark" "$arms/arm-b/benchmarks/"
+              done
+            ) 2>&1 | tee "$out/build-b.log"
+            status=$?
+            ccache --show-stats > "$out/cache-b.txt"
+            if [ "$status" -eq 0 ]; then echo success; else echo failure; fi > "$out/build-b.outcome"
+
+            if [ "$(cat "$out/build-a.outcome")" = success ] && [ "$(cat "$out/build-b.outcome")" = success ]; then
+              # The VM step's timeout falls after vm_end when the VM booted within 5 min. The
+              # driver's deadline leaves 8 min before vm_end, as on the other platforms, and
+              # timeout(1) ends an overrunning driver 1 min before it; the step timeout stays as
+              # the backstop.
+              vm_end=$(( $(cat /tmp/ci_start_time) + (38 - 5) * 60 ))
+              limit=$(( vm_end - 60 - $(date +%s) ))
+              if [ "$limit" -lt 60 ]; then limit=60; fi
+              # A private ring parent directory for the swarms of the comparison.
+              TMPDIR="$(mktemp -d /tmp/benchmark-tmp.XXXXXX)" timeout "$limit" \
+                python3 -u benchmarks/ci_compare.py run --platform freebsd --context "$out/context.json" \
+                --arms "$arms" --deadline $(( vm_end - 8 * 60 )) --output "$out" < /dev/null
+              echo "$?" > "$out/driver.exit"
+            fi
+            exit 0
+
+      # The VM action skips copyback. Export the comparison and the compiler cache from the
+      # still-running VM, also after a failure.
+      - name: Export the comparison
+        if: always()
+        continue-on-error: true
+        run: |
+          rsync -a --no-owner --no-group --timeout=60 \
+            --rsync-path=/usr/local/bin/rsync \
+            -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
+            "freebsd:$GITHUB_WORKSPACE/ci-compare/" "$GITHUB_WORKSPACE/ci-compare/"
+
+      - name: Export compiler cache
+        id: export_compiler_cache
+        if: always() && steps.restore_compiler_cache.outcome == 'success'
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.ccache"
+          rsync -a --delete --no-owner --no-group --timeout=60 \
+            --rsync-path=/usr/local/bin/rsync \
+            -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
+            "freebsd:$GITHUB_WORKSPACE/.ccache/" "$GITHUB_WORKSPACE/.ccache/"
+
+      - name: Save compiler cache
+        if: always() && steps.export_compiler_cache.outcome == 'success'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ steps.restore_compiler_cache.outputs.cache-primary-key }}
+
+      - name: Report
+        id: report
+        if: always()
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          out="$GITHUB_WORKSPACE/ci-compare"
+          outcome() { cat "$out/build-$1.outcome" 2>/dev/null || echo missing; }
+          python3 -u benchmarks/ci_compare.py report --platform freebsd --context "$out/context.json" \
+            --output "$out" --arm-a "$(outcome a)" --arm-b "$(outcome b)" --attempt "$ATTEMPT" \
+            --image "FreeBSD 15.0 VM (vmactions/freebsd-vm v1.6.0) on $ImageOS $ImageVersion" \
+            --github-output "$GITHUB_OUTPUT"
+          cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the comparison
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-compare-freebsd-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-compare/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Level 2 status
+        if: always()
+        env:
+          REPORT: ${{ steps.report.outcome }}
+          FAULT: ${{ steps.report.outputs.level2_fault }}
+        run: |
+          if [ "$REPORT" != success ]; then
+            echo "::error::The report step did not succeed ($REPORT)."
+            exit 1
+          fi
+          if [ "$FAULT" = true ]; then
+            echo "::error::Level 2 could not build the pushed commit or produce its report; see the job summary."
+            exit 1
+          fi
+
+  # Reads the platform artifacts as data: JSON, checked against its schema, nothing executed.
+  collect:
+    name: Collect
+    needs: [setup, compare, freebsd]
+    if: ${{ !cancelled() && needs.setup.result == 'success' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      CONTEXT: ${{ needs.setup.outputs.context }}
+
+    steps:
+      - name: Checkout the workflow's commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: benchmarks
+
+      # Every attempt's artifacts: the summaries come from the highest attempt per platform, the
+      # null-test counts from the first one that reported.
+      - name: Download the platform comparisons
+        if: needs.setup.outputs.compare == 'true'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: benchmark-compare-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Collect the run
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          printf '%s' "$CONTEXT" > "$RUNNER_TEMP/context.json"
+          python3 -u benchmarks/ci_compare.py collect --context "$RUNNER_TEMP/context.json" \
+            --artifacts "$RUNNER_TEMP/artifacts" --attempt "$ATTEMPT" --output "$RUNNER_TEMP/run" \
+            --repository "$REPOSITORY" --server-url "$SERVER_URL"
+          cat "$RUNNER_TEMP/run/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the run's files
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: benchmark-compare-run-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/run/
+          if-no-files-found: error
+          retention-days: 90
+
+  # The only writer of benchmark-history. The guard is evaluated before the job starts, so a
+  # dispatch, another branch or a fork never runs it and never gets the write token.
+  archive:
+    name: Archive
+    needs: collect
+    if: ${{ !cancelled() && needs.collect.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/master' && !github.event.repository.fork }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout the workflow's commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: benchmarks
+
+      - name: Download the run's files
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: benchmark-compare-run-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/run-artifacts
+
+      # The token reaches only the git commands that talk to the remote, through their
+      # environment; nothing stores it.
+      - name: Archive the run
+        env:
+          HISTORY_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          python3 -u benchmarks/ci_compare.py archive --run-artifacts "$RUNNER_TEMP/run-artifacts" \
+            --run-id "$RUN_ID" --remote "$SERVER_URL/$REPOSITORY.git" --repository "$REPOSITORY"
