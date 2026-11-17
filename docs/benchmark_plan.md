@@ -6,10 +6,10 @@ shutdown (W3). They were exercised on the development machine with WSL Ubuntu-24
 and Windows (MSVC). The benchmarks run in GitHub CI on hosted runners (owner decision, section
 1.1). Level 1 is implemented: every CI platform builds them and runs a smoke pass that fails only
 on breakage or an invalid record (section 1.3). Level 2, a comparison of each master push with the
-previous master on hosted runners, is a proposed design (section 15), not reviewed and not
-implemented. It measures its noise and checks the cross-process clock inside each CI job instead
-of keeping a stored A/A reference, and uses fixed counts without calibration (sections 15.6 and
-15.11). Library facts were verified at commit `3666206f`; the benchmarks change no library code.
+previous master on hosted runners, is a proposed design (section 15), revised after review, not
+yet adopted and not implemented. It measures its noise inside each CI job instead of keeping a
+stored A/A reference, and uses fixed counts without calibration (sections 15.5 and 15.11).
+Library facts were verified at commit `3666206f`; the benchmarks change no library code.
 
 As `AGENTS.md` requires, three things are kept apart:
 - owner requirements and recorded decisions (section 1);
@@ -842,11 +842,12 @@ calibration; the broadcast port for both origins, windowed and open-loop; and de
       loss must be invalid (`loss`); a timeout is recorded as `timeout`. A loss-free completion
       means the fixture did not induce overload, and the check does not count as exercised.
 4. **Comparison on hosted runners (level 2, section 15, proposed).** Level 2 compares two builds
-   within one CI job and keeps no absolute reference. It checks the cross-process `steady_clock`
-   assumption (section 12) in each job and gives one-way latency no verdict until that check
-   passes (section 15.6). Calibration and a stored A/A reference over the default broadcast cells
-   are not part of level 2's first version (section 15.11). Until then, results are development
-   and CI evidence, not a reference.
+   within one CI job and keeps no absolute reference; its verdicts do not rest on the
+   cross-process `steady_clock` assumption (section 15.6). That assumption must still be
+   established for a toolchain before any absolute one-way latency reference from it is accepted
+   (section 12). Calibration and a stored A/A reference over the default broadcast cells are not
+   part of level 2's first version (section 15.11). Until then, results are development and CI
+   evidence, not a reference.
 
 **Phase 2** (`rpc_benchmark`): W2 with fixed counts; level 2 would measure its A/A spread inside
 each CI job (section 15.5).
@@ -998,8 +999,8 @@ Each entry gives the default that is implemented and the alternative.
 
 ## 15. CI level 2: comparison with the previous master (proposed design)
 
-**Status:** proposed and revised after two independent reviews; not implemented. Sections 15.1
-and 15.2 hold the owner's requirements and verified facts; sections 15.3 to 15.13 are this
+**Status:** proposed, revised after two review rounds; not adopted and not implemented. Sections
+15.1 and 15.2 hold the owner's requirements and verified facts; sections 15.3 to 15.13 are this
 design's own choices.
 
 ### 15.1 Owner requirements and decisions
@@ -1024,9 +1025,8 @@ run 43888169852 (the push of `2fdc3b02` on 2026-11-16), downloaded from its arti
   (`.github/workflows/benchmarks.yml:7-32`), with a read-only token (`:34-35`).
 - Its labels are `ubuntu-latest` (`:40`, and the FreeBSD VM's host, `:344`), `macos-15` (`:136`)
   and `windows-latest` (`:211`, `:280`). FreeBSD 15.0 runs in `vmactions/freebsd-vm`, pinned by
-  commit, without a compiler cache (`:342-377`); after a failure the VM skips copyback, and the
-  job exports the output with rsync (`:379-390`). `build-freebsd.yml` restores, exports and saves
-  a ccache around the VM (`:50-57`, `:118-133`) and budgets its time from a recorded start
+  commit (`:352-356`); after a failure the VM skips copyback, and the job exports the output with
+  rsync (`:379-390`). `build-freebsd.yml` passes a start time into the VM and budgets from it
   (`:72`, `:112`).
 - `ubuntu-latest` is Ubuntu 26.04 with GCC 15 (`.github/workflows/coverage.yml:14-16`, which pins
   `ubuntu-24.04` for an lcov problem).
@@ -1035,35 +1035,42 @@ run 43888169852 (the push of `2fdc3b02` on 2026-11-16), downloaded from its arti
   `github.event.before` (`build-linux.yml:202`), replaced by the head's parent when it is all
   zeros or missing from the clone (`stress-test-linux.yml:98-123`); a last step carries a
   recorded result into the job's conclusion (`coverage.yml:179-182`).
-- Seven checkouts run with `fetch-depth: 0` on a library push (`build-linux.yml:41`,
+- Eight checkouts run with `fetch-depth: 0` on a library push: `build-linux.yml:41`,
   `build-macos.yml:41`, `build-windows.yml:41`, `build-windows-mingw.yml:41`,
-  `stress-test-linux.yml:91`, `stress-test-macos.yml:91`, `stress-test-windows.yml:101`).
+  `stress-test-linux.yml:91`, `stress-test-macos.yml:91`, and `stress-test-windows.yml:101`
+  twice, called from `build-windows.yml:129` and `build-windows-mingw.yml:110`.
 
 **Runner**
 - `run_pairs` runs a session's pairs of one cell back to back and puts A first in even pairs
-  (`benchmarks/run_benchmarks.py:1020-1028`), so a one-pair session always runs A first. Without
-  `--b` the session is A/A (`:820`). `--build-facts` runs without a timeout (`:678-681`).
-- A/A records come from the output file and `--aa` (`:1649-1650`) and serve a comparison only with
-  an equal comparison key: cell, configuration, host label (`platform.node()`), `host.os` and C
-  (`:840-845`, `:1107-1122`). The configuration is the compiler, configuration name and Boolean
-  facts, not the effective flags (`:45-46`, `:684-687`).
+  (`benchmarks/run_benchmarks.py:1020-1028`). Without `--b` the session is A/A (`:820`).
+  `--build-facts` runs without a timeout (`:678-681`).
+- After a sample's timeout, the runner waits up to 10 s for reports, 60 s for aggregation, and
+  gives its cleanup's two looks a 10 s deadline (`:35-37`), which does not bound the cleanup's
+  duration (section 9).
+- A/A records serve a comparison only with an equal comparison key: cell, configuration, host
+  label, `host.os` and C (`:1107-1122`). The configuration is the compiler, configuration name
+  and Boolean facts, not the effective flags (`:45-46`, `:684-687`).
 - Per headline metric, the summary prints the median, minimum and maximum of the within-pair
-  comparisons and the folded A/A spread (`:1288-1367`). It takes the difference B-A instead of
-  the ratio for CPU, the lost fraction and the shutdown calls, and for any metric with a zero or
-  missing observation (`:1342-1343`); `cpu_not_advancing` makes CPU values unavailable
-  (`:1099-1104`). Closed-loop rows show CPU per role without the total (`:1229-1232`).
-- Arms with different configurations abort the session; different library constants only give a
-  notice (`:833-838`). An incomplete cleanup ends the session (`:1015-1016`). Every W2 sample
-  first makes 1000 synchronous warm-up calls (`:186`).
+  comparisons and the folded A/A spread (`:1288-1367`), as a ratio B/A or, for CPU and any metric
+  with a zero or missing observation, as a difference B-A (`:1342-1343`). `cpu_not_advancing`
+  makes CPU unavailable (`:1099-1104`); closed-loop rows omit the CPU total (`:1229-1232`).
+- Arms with different configurations abort the session (`:833-836`). An incomplete cleanup ends
+  the session (`:1015-1016`).
 
-**Benchmark build and latency**
+**Benchmark build and clock**
 - The targets link `sintra` and `sintra_dev_flags` (`benchmarks/CMakeLists.txt:1-14`), and
   `SINTRA_BUILD_BENCHMARKS` adds them (`CMakeLists.txt:152-156`). `sintra_dev_flags` holds
   options of the repository's own targets, kept out of the public target (`CMakeLists.txt:118-140`).
 - The harness uses library internals (`benchmarks/harness.h:186-196`, `:497`, `:594`), so head's
   benchmarks need not compile against an older library.
-- One-way latency subtracts a send stamp of one process from a receive stamp of another
-  (`benchmarks/broadcast_benchmark.cpp:718-730`).
+- The harness clock is `std::chrono::steady_clock` (`harness.h:46`). One-way latency subtracts a
+  send stamp of one process from a receive stamp of another as unsigned 64-bit values
+  (`harness.h:515-516`; `benchmarks/broadcast_benchmark.cpp:718-734`).
+- MSVC STL: `steady_clock` wraps `QueryPerformanceCounter` (`__msvc_chrono.hpp:672-681`, toolset
+  14.51.36231 on the development machine). libstdc++ is configured with
+  `_GLIBCXX_USE_CLOCK_MONOTONIC` (`bits/c++config.h:1826`, GCC 13 in WSL), but `now()` is compiled
+  into the library (`bits/chrono.h:1276-1277`), whose source is not here. Unverified: GCC 15 on
+  the runner, and libc++ on macOS and FreeBSD, whose sources are not here either.
 
 **Hosted runners (run 43888169852)**
 - Jobs run on different machines: Linux GCC on `ip-10-0-134-12` with `Linux-7.0.0-1016-aws`,
@@ -1080,8 +1087,8 @@ run 43888169852 (the push of `2fdc3b02` on 2026-11-16), downloaded from its arti
   on macOS.
 - `cpu_not_advancing` appeared in 21 (MSVC) and 29 (MinGW) of the 48 records of each Windows job,
   and in none elsewhere.
-- A record is about 3.1 KB; gzip compresses the JSONL about 13-fold. The smoke cells have R = 1
-  and 2 and N = 1 and 8, so timings below for R = 4 and N = 40 are extrapolated.
+- The smoke cells have R = 1 and 2 and N = 1 and 8, so timings below for R = 4 and N = 40 are
+  extrapolated.
 
 **Repository**
 - Public (GitHub API). The local object pack is 9.7 MiB. In the 30 days before 2026-11-17, 26
@@ -1092,22 +1099,24 @@ run 43888169852 (the push of `2fdc3b02` on 2026-11-16), downloaded from its arti
 uses the diff from `before`; events caused by `GITHUB_TOKEN` start no workflow run; a concurrency
 group keeps one pending run and cancels the earlier pending one; the image behind a versioned
 label is updated about weekly and names itself in `ImageOS` and `ImageVersion`; `fetch-depth: 0`
-fetches every branch; a run's `created_at` (REST API) stays the same on re-runs; artifacts are
-kept at most 90 days; standard hosted runners are free for public repositories.
+fetches every branch; `github.run_number` stays the same on re-runs; a job's `if` is evaluated
+before the job starts; artifacts are kept at most 90 days; standard hosted runners are free for
+public repositories.
 
 ### 15.3 Trigger, base and concurrency
-- **Events.** Pushes to `master` whose diff matches level 1's paths, with this workflow's file in
-  place of level 1's; and `workflow_dispatch` without inputs. No pull requests; in a fork every
-  job is skipped (`github.event.repository.fork`).
+- **Events.** Pushes to `master` whose diff matches level 1's paths, except `benchmarks/**/*.md`
+  and with this workflow's file in place of level 1's; and `workflow_dispatch` without inputs. No
+  pull requests; in a fork every job is skipped (`github.event.repository.fork`).
 - **Push.** The base is `github.event.before` and the head the pushed commit: a push-range
-  comparison that covers every commit of the push. When `before` is all zeros or not a commit of
-  the clone, the base is the head's first parent, labelled `fallback base` in the report header
+  comparison that covers every commit of the push. When `before` is all zeros or cannot be
+  fetched, the base is the head's first parent, labelled `fallback base` in the report header
   and the index. A re-run of a push run repeats its comparison.
-- **Dispatch.** It compares the dispatched commit (from `master`, the current master) with its
-  first parent and writes no history: a test of the workflow.
-- **Setup job** (full clone): resolves base and head, and records `library_changed` (a diff over
-  `src include cmake CMakeLists.txt CMakePresets.json third_party`), `build_definition_changed`
-  (over `CMakeLists.txt cmake CMakePresets.json`) and whether `benchmarks/` differs. A head
+- **Dispatch.** It compares the dispatched commit with its first parent, as a test of the
+  workflow, with read-only permissions, and writes no history (15.8).
+- **Setup job.** It fetches head (depth 2, for its parent) and base (depth 1), and records
+  `library_changed` (a diff over `src include cmake CMakeLists.txt CMakePresets.json
+  third_party`), `build_definition_changed` (over `CMakeLists.txt cmake CMakePresets.json`),
+  whether `benchmarks/` differs, and the tree IDs of those library paths in base and head. A head
   without a parent, or without `benchmarks/workloads_ci.json` (older than level 2), is
   `not_compared`.
 - **Unchanged library.** A push that changes only `benchmarks/` or the workflow compares two
@@ -1116,24 +1125,24 @@ kept at most 90 days; standard hosted runners are free for public repositories.
 - **Concurrency.** No concurrency group and no cancellation. Each run measures its own base and
   head inside its own jobs, so overlapping runs share no machine and no result. A group would
   cancel the pending run of the middle one of three close pushes and leave that push unmeasured.
-  The only shared state is the data branch, which the collector updates with retries (15.8).
+  The only shared state is the data branch, which the archive job updates with retries (15.8).
   Overlapping runs compete for runners; macOS queues longest.
 
 ### 15.4 What is compared
 - **Arms.** A is the base library with head's `benchmarks/`; B is the head library with head's
-  `benchmarks/`. The same job builds both with one toolchain and level 1's options
-  (`benchmarks.yml:104-108`): Release, benchmarks only.
-- **Overlay.** The job checks out base and head side by side, replaces the base tree's
-  `benchmarks/` with head's and configures arm A from the base tree. The runner, the CI cells and
-  `ci_compare.py` come from head, so both arms run under one runner with the same cells, and a
-  change in `benchmarks/` cannot appear as a library change.
+  `benchmarks/`, the pushed commit as it is. The same job builds both with one toolchain and
+  level 1's options (`benchmarks.yml:104-108`): Release, benchmarks only, without a compiler
+  cache.
+- **Overlay.** The job checks out base and head side by side in `base/` and `head/`, replaces
+  `base/benchmarks/` with head's and builds into `base-build/` and `head-build/`. The equal name
+  lengths keep compiled-in paths (`__FILE__`, `source_location`) the same length, so a null run
+  builds two binaries of the same layout. The runner, the CI cells and `ci_compare.py` come from
+  head, so both arms run under one runner with the same cells, and a change in `benchmarks/`
+  cannot appear as a library change.
 - **Build definition.** The overlay keeps each tree's top-level build definition, which also sets
-  the benchmark targets' private options (`sintra_dev_flags`). Besides `build_definition_changed`,
-  each arm's configure answers a CMake File API query, and the job records the benchmark
-  targets' effective compile and link flags from it (fragments, definitions, include directories,
-  language standard; paths relative to the source and build trees). When these differ between
-  the arms, `job.json` has `benchmark_flags_differ`, and the job's verdicts are qualified as
-  "library or build flags", not reported as a library change.
+  the benchmark targets' private options (`sintra_dev_flags`). When `build_definition_changed`,
+  the job's verdicts are qualified as "library or build definition", not reported as a library
+  change.
 - **Fallback.** When head's benchmarks do not build against the base library, the platform
   reports `not_compared: base_build_failed` with the build log, and the next push compares from
   this head. Building the base with its own `benchmarks/` was rejected: that result cannot
@@ -1141,10 +1150,9 @@ kept at most 90 days; standard hosted runners are free for public repositories.
 - **Labels.** Each record's `commit` is its arm's library commit (`--a-commit <base>`,
   `--b-commit <head>`); its `note` is `ci-compare <platform>, benchmarks <head>`. The job record
   `job.json`, with its own schema `sintra-bench-ci/1`, carries base, head, `fallback_base`,
-  `benchmark_sources` (head), `library_changed`, `build_definition_changed`, both arms' flags and
-  `benchmark_flags_differ`, the clock check, the event, run ID and attempt, runner label,
-  `ImageOS`, `ImageVersion`, CPU model, and the platform's status with its reason. The record
-  schema `sintra-bench/1` does not change.
+  `benchmark_sources` (head), the change flags and library tree IDs, the event, run number and
+  attempt, runner label, `ImageOS`, `ImageVersion`, CPU model, and the platform's status with its
+  reason. The record schema `sintra-bench/1` does not change.
 
 ### 15.5 Platforms, cells, schedule and budget
 
@@ -1180,32 +1188,28 @@ kept at most 90 days; standard hosted runners are free for public repositories.
   Scaled from the smoke records, the measured interval is mostly 1.5 to 2.5 s on Linux and
   FreeBSD, 2 to 4 s on Windows and 8 to 13 s on macOS; the R = 4 and N = 40 cells are
   extrapolated. On Linux the two `leaf_to_coordinator` cells are shorter and keep
-  `cpu_low_confidence`. The counts are owner-tunable.
+  `cpu_low_confidence`. A cell may give a count per platform, since every comparison stays
+  within one job; `ci_compare.py` writes the resolved file for its platform and passes it to the
+  runner. The counts are provisional and owner-tunable; macOS is the first candidate for lower
+  ones.
 - **Schedule.** Per cell, six runner calls into one output file, with these numbers of pairs:
-  A/A 2, A/B 2, A/A 2, A/B 2, A/A 1, A/B 1. That is 5 A/A and 5 A/B pairs, 20 samples, and the
-  A/B pairs run A first three times and B first twice. Interleaving spreads slowly changing noise
-  over both sets.
+  A/A 1, A/B 2, A/A 2, A/B 2, A/A 2, A/B 1. That is 5 A/A and 5 A/B pairs, 20 samples, at mean
+  positions 5.4 (A/A) and 5.6 (A/B) of 10, so slowly changing noise falls on both sets alike; the
+  A/B pairs run A first three times and B first twice.
 - **Stopping.** The driver ends a cell after the call in which one of its samples was invalid,
   since a verdict needs every pair; that call can still run up to three samples. It ends the
   platform after `cleanup_incomplete`, which also ends the runner's session (`:1015-1016`).
-- **Budget.** The workflow records the job's start; the driver's deadline is the start plus the
-  job timeout minus 8 min for report and upload. Before each runner call, the driver adds up the
-  call's worst case (each sample's runner timeout plus 20 s of cleanup, and its `--build-facts`
-  probes at 60 s each) and starts the call only if that ends before the deadline; the calls left
-  are `not_run: budget`. Estimated benchmark time, provisional until hosted timings of these
-  cells exist: Linux 4.5 min, FreeBSD 6, Windows 9, macOS 31. `timeout-minutes` is 45 (macOS 75).
+- **Budget.** The workflow records the job's start (on FreeBSD the host's, passed into the VM).
+  The driver's deadline is that start plus the job timeout minus 8 min for report and upload.
+  Before each runner call it adds up the call's worst case, each sample's runner timeout plus
+  80 s (report wait, aggregation, cleanup) and the `--build-facts` probes at 60 s each, and starts
+  the call only if that ends before the deadline; the calls left are `not_run: budget`. The
+  deadline is soft, because a cleanup has no hard bound, so the driver step (on FreeBSD, the VM
+  step) also has a step timeout at the deadline, and the report and upload steps still run.
+  Estimated benchmark time, a provisional projection until hosted timings of these cells exist:
+  Linux 4.5 min, FreeBSD 6, Windows 9, macOS 31. `timeout-minutes` is 45 (macOS 75).
 
-### 15.6 Clock check and verdict
-- **Clock check.** Before the cells, the driver starts 20 short processes one after the other,
-  alternating arm A's and arm B's `sintra_broadcast_benchmark --clock-stamp` (a new harness mode
-  that prints `steady_clock::now()` in ns; 30 s limit each). It checks that each stamp is greater
-  than the previous one and that each step is at most the driver's own monotonic time from the
-  earlier process's launch to the later one's exit. Passing means that in this job the processes
-  of both arms read one clock that advances with the driver's: a per-process epoch or a per-arm
-  clock source fails it. It cannot exclude a constant offset smaller than one step (a few ms);
-  a system-wide clock has none. This is the clock assumption of section 12, checked per job.
-  Until it passes in the job, one-way latency gets no verdict; same-process measurements
-  (`send_call`, `rtt`, `issue_to_observation`, lifecycle times, CPU, rates) are unaffected.
+### 15.6 Verdict
 - **Primary metrics** get verdicts; every other headline metric is shown without one.
 
 | Cell | Primary metrics |
@@ -1222,9 +1226,17 @@ kept at most 90 days; standard hosted runners are free for public repositories.
   - `regressed` or `improved`: all 10 pairs have a value, the 5 A/B pairs have the same
     direction, and each A/B deviation exceeds s.
   - `inconclusive`: all 10 pairs have a value, and the condition does not hold.
-  - `no verdict`: a pair lacks a value (an invalid sample, `cpu_not_advancing`, a stopped cell);
-    CPU on Windows, where process CPU often does not advance (section 12); one-way latency
-    without a passed clock check. The values are shown all the same.
+  - `no verdict`: a pair lacks a value (an invalid sample, `cpu_not_advancing`, a stopped cell),
+    and CPU on Windows, where process CPU often does not advance (section 12). The values are
+    shown all the same.
+- **One-way latency.** Both arms run the same harness on the same machine and OS within one job.
+  A constant offset between the processes' clocks shifts both arms alike; a per-process random
+  offset only adds noise, which makes the result inconclusive. Neither can make five alternating
+  A/B pairs move together while five interleaved A/A pairs stay smaller, so one-way latency keeps
+  its verdict. Absolute one-way values still assume that `steady_clock` reads one machine-wide
+  clock (section 12); 15.2 lists what is verified for each toolchain. A receive stamp below its
+  send stamp wraps the unsigned difference into a huge value: an outlier, which lands in the
+  noise of the pairs in which it occurs.
 - **False calls: an estimate under assumptions, not a guarantee.** Assume no library change, 10
   pair deviations that are independent and identically distributed (interleaving aims at that),
   and each sign a fair coin independent of its size. A false call then needs the 5 A/A
@@ -1232,12 +1244,10 @@ kept at most 90 days; standard hosted runners are free for public repositories.
   per primary metric. A push has at most 76 primary metrics (21 per platform; 13 on Windows,
   without CPU), so about 0.02 expected false calls per push. Noise correlated over several
   pairs, or different between the arms, breaks the assumptions; the index therefore reports the
-  verdicts observed in library-unchanged runs as the running empirical false-call rate (15.8).
+  observed rate in library-unchanged runs (15.8).
 - **Code layout.** Sintra is header-only: any library change recompiles the benchmark
   executables, and inlining and code placement can move timings without a change of the measured
   path. A verdict says that head's binaries were faster or slower on that platform, not why.
-  Layout effects differ between toolchains, so the combined summary marks a primary metric
-  called in the same direction on two or more platforms as a stronger lead.
 - **Rejected simpler rules.** A fixed threshold: the noise differs by orders of magnitude between
   cells (in one W2 A/A pair, `rtt` p50 was 62 µs in one arm and 1121 µs in the other, section
   12). Earlier runs as the noise estimate: each job gets another machine (15.2).
@@ -1248,97 +1258,102 @@ kept at most 90 days; standard hosted runners are free for public repositories.
 
 ### 15.7 Report
 - **Job summary** per platform: a header line (push range or `fallback base`, `library_changed`,
-  `build_definition_changed`, `benchmark_flags_differ`, clock check, image, compiler, CPU model,
-  C, status), the wording above, then one row per cell: comparable A/B and A/A pairs, invalid
-  samples, any stop, and each primary metric's verdict with median, [min, max] and A/A spread.
-  A collapsed block lists every headline metric.
-- **Artifact** `benchmark-compare-<platform>-<run ID>-<attempt>`, kept 90 days: the records, the
-  runner log, the build logs, `job.json`, `summary.json` (every number of the summary, with the
-  per-pair values) and `summary.md`.
-- **Combined summary** in the collector job: one row per platform with its status and its
-  `regressed` and `improved` metrics, stronger leads marked; then links to the run and the index.
+  `build_definition_changed`, image, compiler, CPU model, C, status), the wording above, then one
+  row per cell: comparable A/B and A/A pairs, invalid samples, any stop, and each primary
+  metric's verdict with median, [min, max] and A/A spread. A collapsed block lists every
+  headline metric.
+- **Artifact** `benchmark-compare-<platform>-<run number>-<attempt>`, kept 90 days: the records,
+  the runner log, the build logs, `job.json`, `summary.json` (every number of the summary, with
+  the per-pair values) and `summary.md`.
+- **Combined summary** in the collect job: one row per platform with its status and its
+  `regressed` and `improved` metrics; then links to the run and the index.
 
 ### 15.8 History
-- **Branch** `benchmark-history`: an orphan branch that only the collector writes. It holds no
+- **Branch** `benchmark-history`: an orphan branch that only the archive job writes. It holds no
   workflow files, and its pushes, made with `GITHUB_TOKEN`, start no workflow run (15.2).
 
 ```text
-README.md                             generated: how to read the files
-index.md                              regenerated: one line per run, newest first
-runs/<year>/<run ID>/run.json         commits, base kind, changes, creation time, platform results
-runs/<year>/<run ID>/<platform>.json  that platform's summary.json
+README.md                          generated: how to read the files; the budget and its remedies
+index.md                           regenerated: one line per run
+runs/<run number>/run.json         commits, base kind, change flags, tree IDs, platform results
+runs/<run number>/<platform>.json  that platform's summary.json
 ```
 
-- **Index.** One line per push run, ordered by the run's creation time (`created_at`, which
-  re-runs keep): date, push range (`fallback base` marked), library and build-definition changes,
-  per platform the numbers of `regressed`, `improved`, `inconclusive` and `no verdict` or its
-  status, and links to the run files and the workflow run. Its first line gives the running
-  empirical false-call rate: the verdicts in library-unchanged runs, over their primary metrics
-  that had a value.
+- **Index.** One line per push run, ordered by `github.run_number`, which re-runs keep: push
+  range (`fallback base` marked), library and build-definition changes, per platform the numbers
+  of `regressed`, `improved`, `inconclusive` and `no verdict` or its status, the attempt used,
+  and links. A line is marked `gap` when the previous indexed head's library trees differ from
+  this run's base library trees: library commits went unmeasured, for example `[skip ci]`
+  pushes or failed comparisons that were not re-run.
+- **Index header.** The observed false-call rate: verdicts over verdict-eligible primary metrics
+  (all 10 pairs present, not Windows CPU), as numerator and denominator, taken per platform from
+  the first attempt that reported in each library-unchanged run, per protocol version
+  (`summary.json` carries one; it changes with the cells, counts, schedule or rule). Also the
+  history's size, with a warning from 80 % of the budget.
 - **Stored per platform:** the summary with per-pair values, representations, verdicts,
   provenance and missing-data reasons, so that the rule can be re-applied. Raw records stay in
   the 90-day artifacts.
-- **Collector job.** It needs setup and the four platform jobs and runs `if: always()`. Only
-  this job has `contents: write` (and `actions: read`, for `created_at`); the workflow's default
-  is `contents: read`. It writes the combined summary on every run and the history on push runs
-  only. It runs `ci_compare.py` from the workflow's own commit, checks out with
-  `persist-credentials: false`, fetches nothing but that commit and the history branch, and
-  treats artifacts as data: JSON read with a schema check, nothing from them executed or copied
-  unparsed.
-- **Writing.** Fetch the whole branch (at most the budget), add the run's directory (a re-run
-  replaces it), regenerate `index.md`, commit, and push with the explicit refspec
+- **Collect job** (`if: ${{ !cancelled() }}`, `contents: read`). It reads the platform artifacts
+  as data (JSON with a schema check, nothing executed or copied unparsed), takes per platform the
+  artifact of the highest attempt present and records which, writes the combined summary, and
+  passes the run's files on as an artifact. A deliberately cancelled run writes nothing.
+- **Archive job**, the only writer: `contents: write`, with the guard `!cancelled() &&
+  github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+  !github.event.repository.fork`. The guard is evaluated before the job starts, so a dispatch, a
+  branch or a fork never runs it and never gets a write token. It runs `ci_compare.py` from the
+  workflow's own commit, checks out with `persist-credentials: false` and fetches nothing but that
+  commit and the history branch.
+- **Writing.** Fetch the whole branch, add the run's directory (a re-run replaces its summaries;
+  `run.json` keeps the first reporting attempt's counts of a library-unchanged run), regenerate
+  `index.md`, commit, measure, and push with the explicit refspec
   `HEAD:refs/heads/benchmark-history`, the token given to that command only. Nothing in this
-  design force-pushes. When the push is rejected because another collector pushed first, fetch
-  and redo, up to 5 attempts with random waits of 5 to 30 s; then report a history-write failure.
-- **Cancelled or failed platform jobs.** `run.json` records each job's result (success, failure,
-  cancelled, skipped) and, when its artifact exists, its status. The index shows the status; the
-  other platforms are written as usual.
-- **Size budget: 20 MB of packed branch history** (`git count-objects -v` after the fetch and the
-  new commit). A run adds roughly 30 KB (four summaries of about 20 KB before compression, and
-  the index change), so the budget holds about 600 runs: about two years at the observed cadence,
-  a projection. Full clones and the seven `fetch-depth: 0` checkouts of each library push (15.2)
-  fetch every branch, so at the budget each downloads up to 20 MB more, about three times
-  today's repository. When a run would pass the budget, the collector does not push: archiving
-  stops, the collector reports a history-write failure, the job summaries and artifacts are
-  unaffected, and the owner decides how to continue.
+  design force-pushes. When the push is rejected because another run pushed first, fetch, rebuild
+  and measure again, up to 5 attempts with random waits of 5 to 30 s; then a history-write
+  failure.
+- **Size budget: 20 MB**, the size of a pack of exactly the objects reachable from the proposed
+  tip, new commit included (`git rev-list --objects <tip> | git pack-objects --stdout | wc -c`).
+  A run adds roughly 30 KB (four summaries of about 20 KB before compression, and the index
+  change), so the budget holds about 600 runs: about two years at the observed cadence, a
+  projection. Full clones and the eight `fetch-depth: 0` checkouts of each library push (15.2)
+  fetch every branch, so at the budget each downloads up to 20 MB more, about three times today's
+  repository. When a run would pass the budget, the archive job does not push: archiving stops,
+  the job reports a history-write failure, the job summaries and artifacts are unaffected, and
+  the owner decides. The branch's README names the owner's remedies, none of them a force push:
+  archive under a new branch name, or delete the branch.
 
 ### 15.9 Failures and level 1
-- **Red means that level 2 could not produce its report**, by its own fault or the
-  infrastructure's; never a number.
-  - Red: a step of level 2's own fails (checkout, toolchain setup, an error of the driver or the
-    report, the upload); arm A fails to build while `benchmarks/` and the build definition are
-    the same in base and head, so that arm A is exactly the base tree that master built before;
-    the runner rejects its arguments or the CI workloads file; a job times out or the
-    infrastructure fails (no runner, the VM does not start); a platform delivers no report; the
-    history cannot be written (rejections, budget).
-  - Reported, not red: any number; invalid samples; arm A failing with head's `benchmarks/` or
-    another build definition (`not_compared: base_build_failed`); a failed head build
-    (`not_compared: head_build_failed`; level 1 builds the same commit); no records after
-    successful builds without an established level-2 fault (`not_compared: no_records`, with the
-    runner's message, for example a crashed `--build-facts` probe); a stopped cell or platform;
-    calls not run for the budget.
-- **Mechanism.** The builds and the driver run with `continue-on-error: true`, and their outcomes
-  reach the report step through the environment; the driver records each runner call's exit code
-  and message in `job.json`. The report step classifies, writes the summary and sets
-  `level2_fault`; the upload runs `if: always()`; a last step, `if: always()`, fails the job when
-  the report step did not succeed or set `level2_fault` (as `coverage.yml:179-182` does). On
+- **Red means that level 2 could not produce or publish its report**; never a number.
+  - Red: a step of level 2's own fails: setup; the driver's validation of the CI workloads, which
+    `ci_compare.py` does itself before the first runner call; the report; publication (summary
+    and upload); archiving, including the budget stop. Infrastructure failures, job timeouts
+    included. A failed build of arm B: the pushed commit as it is, so either the commit is broken
+    (level 1 is red too) or level 2's build invocation is.
+  - Reported, not red: any number; invalid samples; every failed build of arm A
+    (`not_compared: base_build_failed`, with "overlay left base unchanged" when `benchmarks/` and
+    the build definition are the same in base and head); a runner that exits non-zero after the
+    validation, recorded as a stop with its message (`not_compared: no_records` when nothing was
+    recorded, otherwise partial results), including `not_compared: configuration_differs`; a
+    stopped cell or platform; calls not run for the budget.
+- **Mechanism.** The arm A build and the driver run with `continue-on-error: true`; the build
+  outcomes reach the report step through the environment, and the driver records each runner
+  call's exit code and message in `job.json`. The report, the upload and a last status step run
+  `if: always()`. The report step classifies, writes the summary and sets `level2_fault`; the
+  status step fails the job when the report step did not succeed or set `level2_fault` (as
+  `coverage.yml:179-182` carries a result). On
   FreeBSD the VM step's script writes the build outcomes and the driver's status to files and
   exits non-zero only when its own commands fail or the VM does not come up; the files are
-  exported with rsync and reported on the host. The collector fails after writing what it can
-  when a platform delivered no report or the history could not be written.
+  exported with rsync and reported on the host.
 - **Level 1** stays as it is and keeps gating breakage. Level 2 is a separate workflow on the same
-  pushes and does not wait for level 1. It posts no commit status and no badge.
+  pushes and does not wait for level 1. It posts no status of its own; its jobs still appear as
+  checks.
 
 ### 15.10 Cost
-Per job: two builds (65 to 100 s each in level 1, with level 1's sccache; FreeBSD reuses the
-ccache arrangement of `build-freebsd.yml`; whether a cache serves arm A from the previous run's
-head build, built in another checkout directory, is unverified), the clock check (under a
-minute), the benchmark time of 15.5 and the report. Estimated: Linux about 10 min, Windows and
-FreeBSD about 14 min each, macOS about 37 min, setup and collector about 2 min: about 75
-runner-minutes per push, and about 33 hours a month as a projection at the observed cadence.
-Standard hosted runners are free for this public repository. The real costs are the wait for a
-report (macOS queued 21 min in level 1) and runner concurrency shared with the other workflows of
-each push.
+Per job: two builds without a compiler cache (65 to 100 s each in level 1), the benchmark time of
+15.5 and the report. Estimated: Linux about 10 min, Windows and FreeBSD about 14 min each, macOS
+about 37 min, setup, collect and archive about 3 min: about 75 runner-minutes per push, and about
+33 hours a month at the observed cadence. All are provisional projections. Standard hosted
+runners are free for this public repository. The real costs are the wait for a report (macOS
+queued 21 min in level 1) and runner concurrency shared with the other workflows of each push.
 
 ### 15.11 Left out of the first version
 - Open-loop cells and calibration: rates would need a calibration per runner, and fixed light
@@ -1348,11 +1363,11 @@ each push.
 - Comparisons with Linux Clang and MinGW, on pull requests, or of chosen commits.
 - Gating, commit statuses, badges, issues and notifications.
 - A stored A/A reference across jobs: each hosted job runs on another machine (15.2).
-- Trend tables: the index links the per-run summaries instead.
+- A runtime clock check, effective-flag comparison, trend tables and cross-platform marks.
 - Statistics beyond the rule of 15.6.
 
 ### 15.12 Defaults the owner can change
-- Red only when level 2 cannot produce its report (15.9).
+- Red only when level 2 cannot produce or publish its report (15.9).
 - Pushes that leave the library unchanged run as null tests (15.3).
 - Summaries only in the branch, with per-pair values (15.8).
 - GCC on Linux (15.5).
@@ -1360,23 +1375,24 @@ each push.
 
 ### 15.13 Implementation changes
 1. `.github/workflows/benchmark-compare.yml` (new). Triggers as in 15.3; `permissions: contents:
-   read`. Jobs: `setup` (full clone: base, head, the change flags); `linux`, `windows`, `macos`,
-   `freebsd` (head and base in two directories, the overlay, two builds with a CMake File API
-   query, the compiler cache, `TMPDIR` or `TEMP` set to a private directory as in level 1,
-   `ci_compare.py run` and `report`, step summary, artifact, the final status step; FreeBSD
-   builds and measures in the VM and reports on the host); `collect` (15.8). Actions pinned by
-   commit and context passed through the environment, as in the other workflows.
+   read`. Jobs: `setup` (shallow fetches; base, head, change flags, tree IDs); `linux`,
+   `windows`, `macos`, `freebsd` (the two trees and build directories of 15.4, two builds,
+   `TMPDIR` or `TEMP` set to a private directory as in level 1, `ci_compare.py run` with a step
+   timeout, `report`, step summary, artifact, the final status step; FreeBSD builds and measures
+   in the VM with the host's start time and reports on the host); `collect` and `archive`
+   (15.8). Actions pinned by commit and context passed through the environment, as in the other
+   workflows.
 2. `benchmarks/workloads_ci.json` (new): the cells of 15.5.
-3. `benchmarks/ci_compare.py` (new): `run` (clock check, six runner calls per cell, stopping,
-   deadline, `job.json`); `report` (flag comparison, the classification of 15.9, the verdicts of
-   15.6 through the runner's `comparable_pairs`, `metric_values` and `compare`, `summary.json`,
-   `summary.md`); `collect` (combined summary, `run.json`, `index.md`, size check, push).
+3. `benchmarks/ci_compare.py` (new): `run` (workloads validation, the per-platform file, six
+   runner calls per cell, stopping, deadline, `job.json`); `report` (the classification of 15.9,
+   the verdicts of 15.6 through the runner's `comparable_pairs`, `metric_values` and `compare`,
+   `summary.json`, `summary.md`); `collect` (attempt choice, combined summary, run files);
+   `archive` (index, gap marks, null-run accounting, size measurement, push).
 4. `benchmarks/run_benchmarks.py`: the ratio-or-difference choice (`:1342-1343`) becomes a
    function that the summary and `ci_compare.py` share, and `--build-facts` gets a 60 s timeout.
    No new option.
-5. `benchmarks/harness.h`: the `--clock-stamp` mode. Nothing measured or recorded changes.
-6. `benchmarks/README.md`: the level 2 paragraph of "Continuous integration" (lines 348-349) and
+5. `benchmarks/README.md`: the level 2 paragraph of "Continuous integration" (lines 348-349) and
    the calibration note (lines 312-314). This plan: status lines once implemented.
-- Unchanged: the record schema and level 1. No larger or self-hosted runners. Repository
-  settings: none, unless a branch rule covers `benchmark-history`; then the Actions token must be
-  allowed to push to it.
+- Unchanged: the executables, the record schema and level 1. No larger or self-hosted runners.
+  Repository settings: none, unless a branch rule covers `benchmark-history`; then the Actions
+  token must be allowed to push to it.
