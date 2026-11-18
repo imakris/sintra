@@ -378,10 +378,13 @@ jobs:
 
       # Skipped tests post a status only on a pull request, where a merge may wait for it; it
       # says skipped. On a push a green status would read as a pass, so none is posted.
-      - name: Mark status success
-        if: inputs.report_status && success() && (steps.stress.outcome != 'skipped' || github.event_name == 'pull_request')
+      - name: Publish test status
+        if: >-
+          inputs.report_status && !cancelled() &&
+          (failure() || steps.stress.outcome != 'skipped' || github.event_name == 'pull_request')
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          TEST_STATUS: ${{ job.status }}
           STRESS_OUTCOME: ${{ steps.stress.outcome }}
           DIFF_BASE: ${{ steps.diff-base.outputs.base }}
         with:
@@ -391,35 +394,16 @@ jobs:
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
             const statusContext = 'Stress Test (Windows)';
-            const verdict = process.env.STRESS_OUTCOME === 'skipped'
-              ? `Stress Test skipped: no core, test or workflow change since ${process.env.DIFF_BASE.slice(0, 8)}`
-              : 'Stress Test passed';
+            const state = process.env.TEST_STATUS;
+            let verdict = state === 'success' ? 'Stress Test passed' : 'Stress Test failed';
+            if (process.env.STRESS_OUTCOME === 'skipped') {
+              verdict = state === 'success'
+                ? `Stress Test skipped: no core, test or workflow change since ${process.env.DIFF_BASE.slice(0, 8)}`
+                : 'Stress Test could not run: a setup step failed before the tests';
+            }
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
-              state: 'success',
-              context: statusContext,
-              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: `${verdict}${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`.slice(0, 140)
-            });
-
-      - name: Mark status failure
-        if: inputs.report_status && failure()
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        env:
-          STRESS_OUTCOME: ${{ steps.stress.outcome }}
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const sha = process.env.HEAD_SHA;
-            const branch = process.env.HEAD_BRANCH;
-            const prNumber = process.env.PR_NUMBER;
-            const statusContext = 'Stress Test (Windows)';
-            const verdict = process.env.STRESS_OUTCOME === 'skipped'
-              ? 'Stress Test could not run: a setup step failed before the tests'
-              : 'Stress Test failed';
-            await github.rest.repos.createCommitStatus({
-              owner, repo, sha,
-              state: 'failure',
+              state,
               context: statusContext,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
               description: `${verdict}${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`.slice(0, 140)
@@ -430,10 +414,14 @@ jobs:
       - name: Update tests badge
         if: inputs.report_status && always() && inputs.branch == 'master' && inputs.pr_number == '' && (steps.stress.outcome == 'success' || steps.stress.outcome == 'failure' || steps.stress.outcome == 'cancelled')
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910 # v1.9.0
+        env:
+          TEST_OUTCOME: >-
+            ${{ steps.stress.outcome != 'success' && steps.stress.outcome ||
+                steps.absence.outcome == 'skipped' && 'cancelled' || steps.absence.outcome }}
         with:
           auth: ${{ secrets.gist-secret }}
           gistID: 38c12e638eddbbfad6962730f6b10d20
           filename: sintra-windows-tests.json
           label: Tests
-          message: ${{ job.status }}
-          color: ${{ job.status == 'success' && 'green' || job.status == 'cancelled' && 'lightgrey' || 'red' }}
+          message: ${{ env.TEST_OUTCOME }}
+          color: ${{ env.TEST_OUTCOME == 'success' && 'green' || env.TEST_OUTCOME == 'cancelled' && 'lightgrey' || 'red' }}

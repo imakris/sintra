@@ -275,10 +275,13 @@ jobs:
 
       # Skipped tests post a status only on a pull request, where a merge may wait for it; it
       # says skipped. On a push a green status would read as a pass, so none is posted.
-      - name: Mark status success
-        if: success() && (steps.stress.outcome != 'skipped' || github.event_name == 'pull_request')
+      - name: Publish test status
+        if: >-
+          !cancelled() &&
+          (failure() || steps.stress.outcome != 'skipped' || github.event_name == 'pull_request')
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          TEST_STATUS: ${{ job.status }}
           STRESS_OUTCOME: ${{ steps.stress.outcome }}
           DIFF_BASE: ${{ steps.diff-base.outputs.base }}
         with:
@@ -288,35 +291,16 @@ jobs:
             const branch = process.env.HEAD_BRANCH;
             const prNumber = process.env.PR_NUMBER;
             const statusContext = 'Stress Test (macOS)';
-            const verdict = process.env.STRESS_OUTCOME === 'skipped'
-              ? `Stress Test skipped: no core, test or workflow change since ${process.env.DIFF_BASE.slice(0, 8)}`
-              : 'Stress Test passed';
+            const state = process.env.TEST_STATUS;
+            let verdict = state === 'success' ? 'Stress Test passed' : 'Stress Test failed';
+            if (process.env.STRESS_OUTCOME === 'skipped') {
+              verdict = state === 'success'
+                ? `Stress Test skipped: no core, test or workflow change since ${process.env.DIFF_BASE.slice(0, 8)}`
+                : 'Stress Test could not run: a setup step failed before the tests';
+            }
             await github.rest.repos.createCommitStatus({
               owner, repo, sha,
-              state: 'success',
-              context: statusContext,
-              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-              description: `${verdict}${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`.slice(0, 140)
-            });
-
-      - name: Mark status failure
-        if: failure()
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        env:
-          STRESS_OUTCOME: ${{ steps.stress.outcome }}
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const sha = process.env.HEAD_SHA;
-            const branch = process.env.HEAD_BRANCH;
-            const prNumber = process.env.PR_NUMBER;
-            const statusContext = 'Stress Test (macOS)';
-            const verdict = process.env.STRESS_OUTCOME === 'skipped'
-              ? 'Stress Test could not run: a setup step failed before the tests'
-              : 'Stress Test failed';
-            await github.rest.repos.createCommitStatus({
-              owner, repo, sha,
-              state: 'failure',
+              state,
               context: statusContext,
               target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
               description: `${verdict}${branch ? ` on ${branch}` : ''}${prNumber ? ` (PR #${prNumber})` : ''}`.slice(0, 140)
@@ -332,5 +316,5 @@ jobs:
           gistID: 38c12e638eddbbfad6962730f6b10d20
           filename: sintra-macos-tests.json
           label: Tests
-          message: ${{ job.status }}
-          color: ${{ job.status == 'success' && 'green' || job.status == 'cancelled' && 'lightgrey' || 'red' }}
+          message: ${{ steps.stress.outcome }}
+          color: ${{ steps.stress.outcome == 'success' && 'green' || steps.stress.outcome == 'cancelled' && 'lightgrey' || 'red' }}
