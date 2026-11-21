@@ -29,8 +29,7 @@ elseif(sintra_version_minor GREATER 0)
     set(sintra_adjacent_version
         "${sintra_version_major}.${sintra_adjacent_minor}.0")
 else()
-    message(FATAL_ERROR
-        "The package-version oracle needs a prior same-major version")
+    set(sintra_adjacent_version "${sintra_version_major}.0.1")
 endif()
 
 set(sintra_abbreviated_current_version

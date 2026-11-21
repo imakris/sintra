@@ -1,64 +1,86 @@
 # Release Notes
 
-## Unreleased
+## v2.0.0
 
 ### Highlights
 
-- Added exact managed-child exit observation with immutable occurrence
-  identity, late exactly-once delivery, quiescent cancellation, normalized and
-  native status, and lifecycle-thread exception containment.
-- Scoped recovery authority and retained launch recipes to managed-child
-  custody, preventing opt-in or delayed runners from crossing process-id reuse.
-- Hardened managed and external publication retirement with exact reader
-  generation checks and ordered publication notifications.
-- Reported hardware faults on Sintra-owned Windows threads. A fault on a ring
-  reader thread, where application message handlers run, reaches no CRT signal
-  path; it now runs the abnormal-termination dispatch instead of passing unseen,
-  so a faulted peer is retired and barriers stop waiting for a participant that
-  no longer exists.
-- Preserved crash provenance on Windows. A faulted process now exits with the OS
-  exception code and names the cause on stderr, instead of exiting with a generic
-  `1`, and the host's crash reporter and Windows Error Reporting still run.
-- Gave the host the final say on both Windows fault paths. Sintra consults
-  `UnhandledExceptionFilter` before declaring a death, so a fault the host repairs
-  no longer broadcasts `terminated_abnormally` or stops the ring readers, and a
-  crash watchdog still guarantees that a faulted peer cannot linger.
-- Stopped shared ring spinlock convoys when many processes join a swarm at
-  once. Every `sintra::spinlock` waiter, shared or process-local, now sleeps
-  between attempts after a brief spin, so a preempted lock holder can run even
-  when waiters outnumber the processors. Process-local busy waits, such as
-  threads queued for a ring's writer slot, also sleep after a brief spin. The
-  live-stall diagnostic counts spinlock sleeps, capped per sleep, as waiter
-  effort: a stall by a same-process owner now aborts after about two seconds
-  of waiting, however contended the processors are. Where the toolchain
-  provides `std::source_location`, spinlock diagnostics name the waiting call
-  site.
+- Added managed-child custody with bounded readiness and teardown operations
+  and exact exit observation. Exit notifications identify the child occurrence
+  and report normalized and available native status, including for late
+  subscribers. Recovery opt-in and launch settings stay with that custody
+  across restarts and PID reuse. Each fresh custody starts at occurrence `0`
+  and its first recovery is `1`.
+  [Managed-child API](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/spawn_swarm_process.md)
+- Fixed a coordinator deadlock during process unpublication. Sintra now
+  retires only the matching reader generation and cancels pending transported
+  RPCs when their reply route closes.
+- Ring spinlock waiters now briefly spin and then sleep, allowing a preempted
+  holder to run when many processes join at once. The live-stall diagnostic
+  accounts for backoff sleep and includes the waiting call site when
+  `std::source_location` is available.
+- Added `receive_owned<T>()` to retain the full frame of a generated message
+  and bounded async RPC result retrieval with `get_until(deadline)`.
+- Added optional separate compilation. Set `SINTRA_BUILD_COMPILED=ON` and
+  link `sintra::sintra_compiled` to compile the core once. The header-only
+  target remains the default.
+  [CMake integration](https://github.com/imakris/sintra/blob/v2.0.0/docs/guide.md#cmake-integration)
 
-### Compatibility
+### Upgrading from v1.2.0
 
-- Restored custody-relative recovery numbering: every fresh managed-child
-  custody, including process-id reuse and mid-flight joins, starts at occurrence
-  `0`; its first recovery is `1`.
-- Exact managed-child exit identities now include an opaque runtime-scoped
-  custody identity so separate custodies remain distinct without redefining
-  recovery occurrence semantics.
-- Bumped the ring ABI to version 12 for custody-qualified managed transport
-  rings. All processes in a swarm must use binaries built against the same
-  Sintra ring ABI.
-- Windows fatal-signal exit statuses changed. A hardware fault now exits with the
-  OS exception code, for example `0xC0000005`, instead of `1`. When Sintra's
-  handler ends the process, `SIGABRT` exits with `0xC0000409`, the status a
-  default release UCRT `abort()` ends with, and `SIGTRAP` exits with `3`.
-  `SIGINT` and `SIGTERM` still exit with `1`. Code that compared a managed
-  child's Windows exit status against `1` must test for a non-zero status
-  instead; the exact code is not a contract.
-- `SINTRA_HAS_SEH` selects the Windows per-thread fault guard. It defaults to `1`
-  for MSVC and clang-cl and `0` elsewhere; clang targeting `*-w64-windows-gnu`
-  must opt in with `-DSINTRA_HAS_SEH=1 -fms-extensions`, and MinGW GCC builds keep
-  the previous behaviour because GCC does not implement `__try`/`__except`. Define
-  it identically for every translation unit that includes Sintra.
-- `SINTRA_CRASH_WATCHDOG_GRACE_MS` (default 5000) bounds how long a host crash
-  reporter may run on a faulted Windows process before Sintra ends it.
+- The shared-memory ring ABI moved from `1` to `12`. Please rebuild and upgrade
+  all participants in a swarm together. Run managed swarm participants under
+  the same OS account so they can access the private IPC resources.
+- Call `spawn_swarm_process()` from the coordinator and make one call per
+  child in place of `Spawn_options::count`. Each call returns
+  `Managed_child_custody`. Replace `wait_for_instance_name`
+  and `wait_timeout` with `readiness_instance_name` and an explicit
+  `wait_for_readiness_until(deadline)` on the returned custody. If final
+  custody settlement leaves `shutdown()` incomplete, settle the custody and
+  retry `shutdown()` sequentially.
+  [Spawn and readiness](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/spawn_swarm_process.md)
+  [Shutdown](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/shutdown.md)
+- To launch a peer manually, call `create_external_process_invitation()` on
+  the coordinator and pass the returned `sintra_args()` to the new process.
+  [External process admission](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/external_process_invitation.md)
+- `Rpc_handle` removed public `wait()`, `wait_until()`, `ready()`, `state()`,
+  and `abandon()`, along with the public wait and completion enums. Retrieve
+  results with `get()` or `get_until(deadline)`. Where stop tokens are
+  available, `get(stop)` lets the caller stop waiting. Destroy or replace a
+  pending handle to drop the result. A `sintra::rpc_timeout` from `get_until()`
+  means the result was abandoned locally. Remote execution can continue.
+  [Async RPC results](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/rpc_handle.md)
+- Replace `barrier_completed(seq)` with `seq != sintra::invalid_sequence`.
+  Use `receive_owned<T>()` for generated messages with variable fields. By-value
+  `receive<T>()` now rejects those types at compile time.
+  [Barriers](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/barrier.md)
+  [Receive API](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/receive.md)
+- Installed CMake packages now require a full matching version for versioned
+  requests. Use `find_package(sintra 2.0.0 CONFIG REQUIRED)` or a versionless
+  request.
+
+### Windows crash handling
+
+- The per-thread fault guard also reports hardware faults on Sintra-owned
+  threads, including ring readers that run application handlers. Sintra
+  consults `UnhandledExceptionFilter` on its two fault paths to let the host
+  crash reporter and Windows Error Reporting run. Stack overflow is handled
+  directly. If the host repairs the fault, execution resumes without
+  dispatching abnormal termination or stopping the readers. The crash
+  watchdog bounds the host filter's run time to
+  `SINTRA_CRASH_WATCHDOG_GRACE_MS` (default `5000`).
+  [Host crash reporting](https://github.com/imakris/sintra/blob/v2.0.0/docs/reference/announce_fatal_windows_exception.md)
+- When Sintra ends the process for a hardware fault, it reports the cause on
+  stderr and exits with the native exception code, such as `0xC0000005`, when
+  an exception record is available. Sintra uses `0xC0000409` when it handles
+  `SIGABRT`. `SIGTRAP` uses `3`, and
+  `SIGINT` and `SIGTERM` still use `1`. Check for a non-zero failure status
+  when you do not need the native cause.
+- Define `SINTRA_HAS_SEH` consistently across translation units. It defaults
+  to `1` on MSVC and clang-cl and `0` elsewhere. Clang for `*-w64-windows-gnu`
+  can opt in with `-DSINTRA_HAS_SEH=1 -fms-extensions`. MinGW GCC lacks the
+  per-thread guard.
+
+Thank you to everyone who reported issues and tested the fixes.
 
 ## v1.2.0 (2026-04-28)
 

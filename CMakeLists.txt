@@ -28,7 +28,7 @@ if(CMAKE_HOST_WIN32)
 endif()
 
 project(sintra
-    VERSION 1.2.0
+    VERSION 2.0.0
     LANGUAGES CXX
 )
 
